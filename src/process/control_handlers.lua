@@ -214,6 +214,23 @@ function control_handlers.control_artifacts(ctx, op)
             end
 
             if #created_artifacts > 0 then
+                -- ⚠️ DO NOT REVERT unless you know exactly what you are doing. ⚠️
+                -- Chat front-ends render a standalone artifact card from a message
+                -- with type='artifact' + metadata.artifact_id. Without the line
+                -- below, standalone artifacts (instructions=false) never render in
+                -- the chat thread — only the SYSTEM/artifact_created message was
+                -- emitted, which front-ends do not render.
+                --
+                -- Gate to STANDALONE only: inline artifacts (instructions=true) are
+                -- rendered via the <artifact id="…"/> tag the agent embeds in its
+                -- reply (see the instructions block above). Emitting an artifact
+                -- message here for the inline case too would render it TWICE.
+                if artifact_data.instructions == false then
+                    ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT, artifact_data.title, {
+                        artifact_id = artifact_id
+                    })
+                end
+
                 ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
                     system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
                     artifact_id = artifact_id
