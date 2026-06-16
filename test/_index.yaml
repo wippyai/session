@@ -20,8 +20,8 @@ entries:
   - name: db
     kind: db.sql.sqlite
     meta:
-      comment: Test SQLite database for session tests
-    file: ":memory:"
+      comment: File-backed SQLite for tests, recreated each run via make test. An in-memory DB drops its schema under parallel test connections.
+    file: ./.wippy/test.db
 
   - name: env_storage
     kind: env.storage.file
@@ -47,6 +47,13 @@ entries:
     addr: :19087
     lifecycle:
       auto_start: false
+
+  - name: api
+    kind: http.router
+    meta:
+      comment: Test API router for session endpoints (meta.router app:api)
+      server: gateway
+    prefix: /api
 
   - name: api.public
     kind: http.router

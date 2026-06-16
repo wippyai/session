@@ -1,0 +1,23 @@
+# Session module — test and lint helpers.
+#
+# Tests run from the test/ harness. app:db is file-backed rather than :memory:
+# because a plain in-memory DB gives each pooled connection its own empty
+# database, so the schema can vanish under parallel test connections.
+# `make test` recreates the DB each run for a clean slate.
+
+TEST_DIR := test
+TEST_DB  := .wippy/test.db
+
+.PHONY: test lint install clean
+
+test: clean
+	cd $(TEST_DIR) && wippy run test
+
+lint:
+	cd $(TEST_DIR) && wippy lint
+
+install:
+	cd $(TEST_DIR) && wippy install
+
+clean:
+	cd $(TEST_DIR) && rm -f $(TEST_DB) $(TEST_DB)-wal $(TEST_DB)-shm

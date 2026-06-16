@@ -48,6 +48,16 @@ local function run(args)
     }
     local agent_ctx = agent_context.new(agent_opts)
 
+    -- Re-apply persisted declarative trait/tool overlays so they survive a process
+    -- restart. A list overlay replaces the agent's own set; `false` is the cleared
+    -- marker written on an agent switch (config can't drop a key) and is skipped.
+    if type(session_data.config.active_traits) == "table" then
+        agent_ctx:set_active_traits(session_data.config.active_traits)
+    end
+    if type(session_data.config.active_tools) == "table" then
+        agent_ctx:set_active_tools(session_data.config.active_tools)
+    end
+
     -- Configure delegation if enabled
     if session_data.config.delegation_func_id then
         local delegation_schema = nil

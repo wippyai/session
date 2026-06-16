@@ -416,6 +416,11 @@ function control_handlers.control_config(ctx, op)
 
     if op.config_changes.agent then
         current_config.agent_id = op.config_changes.agent
+        -- An agent switch resets the trait/tool overlays (they are agent-specific). Clear
+        -- the persisted ones too so a restart does not re-apply a prior agent's overlay;
+        -- a traits/tools change in the same directive is applied afterwards and overrides.
+        current_config.active_traits = false
+        current_config.active_tools = false
         config_changed = true
         agent_changed = true
     end
@@ -426,7 +431,9 @@ function control_handlers.control_config(ctx, op)
         model_changed = true
     end
 
-    if config_changed then
+    -- Perform agent/model switches before applying overlays: switch_to_agent resets the
+    -- in-memory overlays, so a declarative overlay must land on the new agent afterwards.
+    if agent_changed or model_changed then
         ctx.reader:reset()
 
         if agent_changed and not model_changed then
@@ -470,7 +477,23 @@ function control_handlers.control_config(ctx, op)
 
             ctx.upstream:update_session({ model = current_config.model })
         end
+    end
 
+    -- Declarative active trait/tool overlays, applied after any agent switch so they land
+    -- on the new agent, and persisted to session config so they survive a restart. They
+    -- replace the agent's own set; an empty list clears, nil leaves unchanged.
+    if op.config_changes.traits ~= nil then
+        ctx.agent_ctx:set_active_traits(op.config_changes.traits)
+        current_config.active_traits = op.config_changes.traits
+        config_changed = true
+    end
+    if op.config_changes.tools ~= nil then
+        ctx.agent_ctx:set_active_tools(op.config_changes.tools)
+        current_config.active_tools = op.config_changes.tools
+        config_changed = true
+    end
+
+    if config_changed then
         local success, err = ctx.writer:update_meta({ config = current_config })
         if not success then
             return nil, "Failed to update session config: " .. err
