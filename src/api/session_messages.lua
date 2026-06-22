@@ -4,6 +4,7 @@ local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local time = require("time")
 local json = require("json")
+local api_error = require("api_error")
 
 type SessionMessagesResponse = {
     success: boolean,
@@ -54,11 +55,7 @@ local function handler()
     -- Verify session belongs to the authenticated user
     local session, err = session_repo.get(session_id, user_id)
     if err then
-        res:set_status(http.STATUS.NOT_FOUND)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, http.STATUS.NOT_FOUND, "Session not found", err)
         return
     end
 
@@ -86,11 +83,7 @@ local function handler()
     -- Get messages for this session with cursor-based pagination
     local result, err = message_repo.list_by_session(session_id, limit, cursor, direction)
     if err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to retrieve messages", err)
         return
     end
 

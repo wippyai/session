@@ -2,6 +2,7 @@ local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
+local api_error = require("api_error")
 
 type GetSessionResponse = {
     success: boolean,
@@ -43,11 +44,7 @@ local function handler()
 
     local session, err = session_repo.get(session_id, user_id)
     if err then
-        res:set_status(http.STATUS.NOT_FOUND)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, http.STATUS.NOT_FOUND, "Session not found", err)
         return
     end
 

@@ -1,6 +1,7 @@
 local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
+local api_error = require("api_error")
 
 type ListSessionsResponse = {
     success: boolean,
@@ -40,21 +41,13 @@ local function handler()
 
     local total_count, err = session_repo.count_by_user(user_id)
     if err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to count sessions", err)
         return
     end
 
     local sessions, err = session_repo.list_by_user(user_id, limit, offset)
     if err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to list sessions", err)
         return
     end
 

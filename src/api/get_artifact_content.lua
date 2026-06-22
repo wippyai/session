@@ -4,6 +4,7 @@ local artifact_repo = require("artifact_repo")
 local session_repo = require("session_repo")
 local security = require("security")
 local renderer = require("renderer")
+local api_error = require("api_error")
 
 local function handler()
     -- Get response object
@@ -31,12 +32,8 @@ local function handler()
     -- Get artifact ID from URL path
     local artifact_id, err = req:param("id")
     if err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
         res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Error getting path parameter: " .. err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Error getting path parameter", err)
         return
     end
 
@@ -65,12 +62,8 @@ local function handler()
         end
 
         -- Handle other errors
-        res:set_status(http.STATUS.INTERNAL_ERROR)
         res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Failed to retrieve artifact metadata: " .. err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to retrieve artifact metadata", err)
         return
     end
 
@@ -78,12 +71,8 @@ local function handler()
     if artifact.session_id and artifact.session_id ~= "" then
         local session, session_err = session_repo.get(artifact.session_id)
         if session_err then
-            res:set_status(http.STATUS.INTERNAL_ERROR)
             res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Failed to verify artifact ownership: " .. session_err
-            })
+            api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to verify artifact ownership", session_err)
             return
         end
 
@@ -126,12 +115,8 @@ local function handler()
         -- Get the content (which contains our JSON parameters)
         local content_json, content_err = artifact_repo.get_content(artifact_id)
         if content_err then
-            res:set_status(http.STATUS.INTERNAL_ERROR)
             res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Failed to retrieve page parameters: " .. content_err
-            })
+            api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to retrieve page parameters", content_err)
             return
         end
 
@@ -140,12 +125,8 @@ local function handler()
         if content_json and content_json ~= "" then
             local decoded, json_err = json.decode(content_json :: string)
             if json_err then
-                res:set_status(http.STATUS.INTERNAL_ERROR)
                 res:set_content_type(http.CONTENT.JSON)
-                res:write_json({
-                    success = false,
-                    error = "Failed to parse parameters: " .. json_err
-                })
+                api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to parse parameters", json_err)
                 return
             end
             params = decoded
@@ -162,12 +143,8 @@ local function handler()
         local rendered_content, render_err = renderer.render(page_id, params, query)
 
         if render_err then
-            res:set_status(http.STATUS.INTERNAL_ERROR)
             res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Failed to render page reference: " .. render_err
-            })
+            api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to render page reference", render_err)
             return
         end
 
@@ -181,12 +158,8 @@ local function handler()
     -- For other artifact types, continue with normal content retrieval
     local content, content_err = artifact_repo.get_content(artifact_id)
     if content_err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
         res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Failed to retrieve artifact content: " .. content_err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to retrieve artifact content", content_err)
         return
     end
 

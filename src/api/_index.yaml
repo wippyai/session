@@ -2,6 +2,15 @@ version: "1.0"
 namespace: wippy.session.api
 
 entries:
+  # wippy.session.api:api_error
+  - name: api_error
+    kind: library.lua
+    meta:
+      comment: API error helper
+    source: file://api_error.lua
+    modules:
+      - logger
+
   # wippy.session.api:delete_session
   - name: delete_session
     kind: function.lua
@@ -13,6 +22,7 @@ entries:
       - http
       - security
     imports:
+      api_error: wippy.session.api:api_error
       session_repo: wippy.session.persist:session_repo
     method: handler
     pool:
@@ -40,6 +50,7 @@ entries:
       - json
       - security
     imports:
+      api_error: wippy.session.api:api_error
       artifact_repo: wippy.session.persist:artifact_repo
       session_repo: wippy.session.persist:session_repo
     method: handler
@@ -68,6 +79,7 @@ entries:
       - json
       - security
     imports:
+      api_error: wippy.session.api:api_error
       artifact_repo: wippy.session.persist:artifact_repo
       renderer: wippy.views:renderer
       session_repo: wippy.session.persist:session_repo
@@ -96,6 +108,7 @@ entries:
       - http
       - security
     imports:
+      api_error: wippy.session.api:api_error
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
     method: handler
@@ -123,6 +136,7 @@ entries:
       - http
       - security
     imports:
+      api_error: wippy.session.api:api_error
       session_repo: wippy.session.persist:session_repo
     method: handler
     pool:
@@ -148,6 +162,7 @@ entries:
       - http
       - security
     imports:
+      api_error: wippy.session.api:api_error
       session_writer: wippy.session.persist:writer
     method: handler
 
@@ -173,6 +188,7 @@ entries:
       - security
       - time
     imports:
+      api_error: wippy.session.api:api_error
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
     method: handler

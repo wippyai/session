@@ -3,6 +3,7 @@ local json = require("json")
 local artifact_repo = require("artifact_repo")
 local session_repo = require("session_repo")
 local security = require("security")
+local api_error = require("api_error")
 
 type ArtifactMetadataResponse = {
     uuid: string,
@@ -70,12 +71,8 @@ local function handler()
         end
 
         -- Handle other errors
-        res:set_status(http.STATUS.INTERNAL_ERROR)
         res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Failed to retrieve artifact: " .. err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to retrieve artifact", err)
         return
     end
 
@@ -83,12 +80,8 @@ local function handler()
     if artifact.session_id and artifact.session_id ~= "" then
         local session, session_err = session_repo.get(artifact.session_id)
         if session_err then
-            res:set_status(http.STATUS.INTERNAL_ERROR)
             res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Failed to verify artifact ownership: " .. session_err
-            })
+            api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to verify artifact ownership", session_err)
             return
         end
 

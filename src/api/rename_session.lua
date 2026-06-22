@@ -1,6 +1,7 @@
 local http = require("http")
 local security = require("security")
 local session_writer = require("session_writer")
+local api_error = require("api_error")
 
 type RenameSessionResponse = {
     success: boolean,
@@ -76,21 +77,13 @@ local function handler()
         elseif err:find("No security actor") then
             status = http.STATUS.UNAUTHORIZED
         end
-        res:set_status(status)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, status, "Failed to open session", err)
         return
     end
 
     local _, err = writer:update_title(title)
     if err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
-        res:write_json({
-            success = false,
-            error = err
-        })
+        api_error.fail(res, http.STATUS.INTERNAL_ERROR, "Failed to rename session", err)
         return
     end
 
