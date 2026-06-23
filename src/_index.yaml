@@ -429,7 +429,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.4.0"
+    version: ">=v0.4.11"
 
   - name: dep.wippy.views
     kind: ns.dependency
