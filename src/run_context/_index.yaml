@@ -2,8 +2,8 @@ version: "1.0"
 namespace: wippy.session.run_context
 
 entries:
-  # wippy.session.run_context:lib
-  - name: lib
+  # wippy.session.run_context:run_context_lib
+  - name: run_context_lib
     kind: library.lua
     meta:
       comment: Session-backed implementation library for wippy.agent:run_context.
@@ -47,7 +47,7 @@ entries:
         - context
     source: file://get_context.lua
     imports:
-      run_context: wippy.session.run_context:lib
+      run_context: wippy.session.run_context:run_context_lib
     method: handle
 
   # wippy.session.run_context:get_history
@@ -61,7 +61,7 @@ entries:
         - history
     source: file://get_history.lua
     imports:
-      run_context: wippy.session.run_context:lib
+      run_context: wippy.session.run_context:run_context_lib
     method: handle
 
   # wippy.session.run_context:get_prompt
@@ -75,7 +75,7 @@ entries:
         - prompt
     source: file://get_prompt.lua
     imports:
-      run_context: wippy.session.run_context:lib
+      run_context: wippy.session.run_context:run_context_lib
     method: handle
 
   # wippy.session.run_context:run_context_test
