@@ -19,7 +19,19 @@ type SessionArgs = {
     start_token: string?,
 }
 
-local function run(args)
+type SessionContext = {
+    session_id: string,
+    user_id: string,
+    reader: any,
+    writer: any,
+    upstream: any,
+    config: {[string]: any},
+    agent_ctx: any,
+    queue_empty_callback: any?,
+    lifecycle_state: table?,
+}
+
+local function run(args: SessionArgs)
     if not args or not args.user_id or not args.session_id then
         error(consts.ERR.MISSING_ARGS)
     end
@@ -73,14 +85,15 @@ local function run(args)
         })
     end
 
-    local context = {
+    local context: SessionContext = {
         session_id = args.session_id,
         user_id = args.user_id,
         reader = session_reader,
         writer = session_writer,
         upstream = session_upstream,
-        config = session_data.config,
+        config = (session_data.config or {}) :: {[string]: any},
         agent_ctx = agent_ctx,
+        lifecycle_state = {},
         queue_empty_callback = function()
             session_writer:update_status(consts.STATUS.IDLE)
             session_upstream:update_session({ status = consts.STATUS.IDLE })
@@ -300,6 +313,17 @@ local function run(args)
 
     if not session_state.bus_done_received then
         bus_done:receive()
+    end
+
+    local _, lifecycle_err = message_handlers.deactivate_current_agent(context, "session_finished", {
+        state = "completed",
+        reason = "session_finished"
+    })
+    if lifecycle_err then
+        logger:warn("agent lifecycle deactivate failed", {
+            session_id = args.session_id,
+            error = tostring(lifecycle_err)
+        })
     end
 
     return { status = "shutdown", session_id = args.session_id }

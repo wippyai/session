@@ -4,6 +4,7 @@ local consts = require("consts")
 local prompt_builder = require("prompt_builder")
 local tool_caller = require("tool_caller")
 local output = require("output")
+local lifecycle_runtime = require("lifecycle_runtime")
 
 type SessionContext = {
     session_id: string,
@@ -14,9 +15,267 @@ type SessionContext = {
     config: {[string]: any},
     agent_ctx: any,
     queue_empty_callback: any?,
+    lifecycle_state: table?,
+}
+
+type ToolWrapperHostRef = {
+    kind: string,
+    session_id: string,
+}
+
+type ToolWrapperAgentRef = {
+    id: string?,
+    model: string?,
+}
+
+type ToolWrapperExecutionContext = {
+    host: ToolWrapperHostRef,
+    agent: ToolWrapperAgentRef,
+    run_context: table?,
 }
 
 local message_handlers = {}
+
+local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
+local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
+
+local OUTCOME = {
+    CONTINUES = "continues",
+    COMPLETED = "completed",
+    FAILED = "failed",
+}
+
+local REASON = {
+    NO_TOOLS_REQUIRED = "no_tools_required",
+    TOOL_RESULTS_RECORDED = "tool_results_recorded",
+    CONTEXT_LIMIT_REACHED = "context_limit_reached",
+    HOST_FAILED = "host_failed",
+    AGENT_SWITCH = "agent_switch",
+    SESSION_FINISHED = "session_finished",
+}
+
+local function copy_context(context: any): table
+    local copied = {}
+    if type(context) == "table" then
+        for k, v in pairs(context) do
+            copied[k] = v
+        end
+    end
+    return copied
+end
+
+local function with_agent_run_context(ctx: SessionContext, context: any, agent_ref: ToolWrapperAgentRef?): table
+    local next_context = copy_context(context)
+    local host = {
+        kind = "session",
+        session_id = ctx.session_id
+    }
+    local agent_info = agent_ref or {
+        id = ctx.config and ctx.config.agent_id,
+        model = ctx.config and ctx.config.model
+    }
+
+    next_context.agent_run = {
+        host = host,
+        agent = agent_info,
+        run_context = {
+            contract = RUN_CONTEXT_CONTRACT,
+            binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
+            host = host,
+            agent = agent_info
+        }
+    }
+
+    return next_context
+end
+
+local function host_ref(ctx: SessionContext): table
+    return {
+        kind = "session",
+        session_id = ctx.session_id
+    }
+end
+
+local function string_or_nil(value: any): string?
+    if type(value) == "string" and value ~= "" then
+        return value
+    end
+    return nil
+end
+
+local function agent_ref_from(ctx: SessionContext, agent: any?): ToolWrapperAgentRef
+    return {
+        id = string_or_nil(agent and agent.id or (ctx.config and ctx.config.agent_id)),
+        model = string_or_nil(agent and agent.model or (ctx.config and ctx.config.model))
+    }
+end
+
+local function run_context_ref(ctx: SessionContext, agent_ref: ToolWrapperAgentRef, host: table): table
+    return {
+        contract = RUN_CONTEXT_CONTRACT,
+        binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
+        host = host,
+        agent = agent_ref
+    }
+end
+
+local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, opts: table?): (table?, string?)
+    if not agent or type(agent.bindings) ~= "table" then
+        return { applied = 0, skipped = 0 }, nil
+    end
+
+    local host = host_ref(ctx)
+    local agent_ref = agent_ref_from(ctx, agent)
+    local payload = {
+        phase = phase,
+        host = host,
+        agent = agent_ref,
+        reason = opts and opts.reason,
+        outcome = opts and opts.outcome,
+        refs = opts and opts.refs,
+        run_context = run_context_ref(ctx, agent_ref, host),
+    } :: LifecyclePayload
+
+    return lifecycle_runtime.apply(agent.bindings, payload)
+end
+
+local function append_lifecycle_messages(builder: any, result: table?)
+    if not builder or type(result) ~= "table" or type(result.messages) ~= "table" then
+        return
+    end
+
+    for _, message in ipairs(result.messages) do
+        if type(message) == "table" then
+            local content = message.content or message.text or message.data
+            if type(content) == "string" and content ~= "" then
+                local role = message.role or message.type or "developer"
+                if role == "system" and type(builder.add_system) == "function" then
+                    builder:add_system(content)
+                elseif role == "user" and type(builder.add_user) == "function" then
+                    builder:add_user(content)
+                elseif role == "assistant" and type(builder.add_assistant) == "function" then
+                    builder:add_assistant(content, message.metadata)
+                elseif type(builder.add_developer) == "function" then
+                    builder:add_developer(content, message.metadata)
+                end
+            end
+        end
+    end
+end
+
+local function current_agent(ctx: SessionContext): any?
+    if ctx.agent_ctx and type(ctx.agent_ctx.get_current_agent) == "function" then
+        local agent = ctx.agent_ctx:get_current_agent()
+        if agent then
+            return agent
+        end
+    end
+
+    if ctx.config and ctx.config.agent_id and ctx.config.agent_id ~= "" and ctx.agent_ctx and type(ctx.agent_ctx.load_agent) == "function" then
+        local agent = ctx.agent_ctx:load_agent(ctx.config.agent_id, {
+            model = ctx.config.model
+        })
+        return agent
+    end
+
+    return nil
+end
+
+function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: string?, outcome: table?): (table?, string?)
+    ctx.lifecycle_state = ctx.lifecycle_state or {}
+    local state = ctx.lifecycle_state
+    if not state.active_agent_id then
+        return { applied = 0, skipped = 0 }, nil
+    end
+
+    local agent = state.active_agent or current_agent(ctx)
+    if not agent then
+        state.active_agent_id = nil
+        state.active_model = nil
+        state.active_agent = nil
+        return { applied = 0, skipped = 0 }, nil
+    end
+
+    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, agent, {
+        reason = reason or REASON.SESSION_FINISHED,
+        outcome = outcome or {
+            state = OUTCOME.COMPLETED,
+            reason = reason or REASON.SESSION_FINISHED
+        }
+    })
+
+    if not err then
+        state.active_agent_id = nil
+        state.active_model = nil
+        state.active_agent = nil
+    end
+
+    return result, err
+end
+
+local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: table?): (table?, string?)
+    ctx.lifecycle_state = ctx.lifecycle_state or {}
+    local state = ctx.lifecycle_state
+    local agent_ref = agent_ref_from(ctx, agent)
+    local same_agent = state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model
+
+    if same_agent then
+        state.active_agent = agent
+        return { applied = 0, skipped = 0 }, nil
+    end
+
+    if state.active_agent_id then
+        local _, deactivate_err = message_handlers.deactivate_current_agent(ctx, REASON.AGENT_SWITCH, {
+            state = OUTCOME.CONTINUES,
+            reason = REASON.AGENT_SWITCH
+        })
+        if deactivate_err then
+            return nil, deactivate_err
+        end
+    end
+
+    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.ACTIVATE, agent, {
+        reason = "agent_loaded",
+        refs = refs,
+        outcome = {
+            state = OUTCOME.CONTINUES,
+            reason = "agent_loaded"
+        }
+    })
+    if err then
+        return result, err
+    end
+
+    state.active_agent_id = agent_ref.id
+    state.active_model = agent_ref.model
+    state.active_agent = agent
+    return result, nil
+end
+
+local function outcome_from_agent_result(result: any): table
+    if result and result.truncated then
+        return {
+            state = OUTCOME.CONTINUES,
+            reason = REASON.CONTEXT_LIMIT_REACHED
+        }
+    end
+
+    local has_tools = result and (
+        (type(result.tool_calls) == "table" and #result.tool_calls > 0) or
+        (type(result.delegate_calls) == "table" and #result.delegate_calls > 0)
+    )
+    if has_tools then
+        return {
+            state = OUTCOME.CONTINUES,
+            reason = REASON.TOOL_RESULTS_RECORDED
+        }
+    end
+
+    return {
+        state = OUTCOME.COMPLETED,
+        reason = REASON.NO_TOOLS_REQUIRED
+    }
+end
 
 function message_handlers.handle_message(ctx, op)
     local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, op.data.text or "", {
@@ -67,6 +326,32 @@ function message_handlers.agent_step(ctx, op)
     if ctx_err then
         session_context = {}
     end
+    session_context = with_agent_run_context(ctx, session_context, agent_ref_from(ctx, agent))
+
+    local activate_result, activate_err = ensure_agent_activated(ctx, agent, {
+        message_id = op.message_id,
+        request_id = op.request_id
+    })
+    if activate_err then
+        return nil, activate_err
+    end
+    append_lifecycle_messages(builder, activate_result)
+
+    local before_result, before_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.BEFORE_STEP, agent, {
+        reason = "agent_step",
+        refs = {
+            message_id = op.message_id,
+            request_id = op.request_id
+        },
+        outcome = {
+            state = OUTCOME.CONTINUES,
+            reason = "agent_step"
+        }
+    })
+    if before_err then
+        return nil, before_err
+    end
+    append_lifecycle_messages(builder, before_result)
 
     ctx.upstream:response_beginning(response_id, op.message_id)
 
@@ -84,6 +369,20 @@ function message_handlers.agent_step(ctx, op)
     if exec_err then
         ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, exec_err)
         return nil, exec_err
+    end
+
+    local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+        reason = "agent_step",
+        refs = {
+            message_id = op.message_id,
+            response_id = response_id,
+            request_id = op.request_id
+        },
+        outcome = outcome_from_agent_result(result)
+    })
+    if after_err then
+        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
+        return nil, after_err
     end
 
     if result.tokens and type(result.tokens) == "table" then
@@ -208,6 +507,11 @@ function message_handlers.agent_step(ctx, op)
         table.insert(user_facing_ops, {
             type = consts.OP_TYPE.PROCESS_TOOLS,
             tool_calls = unified_tool_calls,
+            tool_wrappers = agent.tool_wrappers or {},
+            agent = {
+                id = agent.id,
+                model = agent.model
+            },
             message_id = op.message_id,
             response_id = response_id,
             request_id = op.request_id,
@@ -220,6 +524,7 @@ function message_handlers.agent_step(ctx, op)
         table.insert(background_ops, {
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
             tokens = result.tokens,
+            agent_options = agent.agent_options or {},
             message_id = op.message_id
         })
     end
@@ -248,6 +553,40 @@ function message_handlers.process_tools(ctx, op)
 
     local caller = tool_caller.new()
     caller:set_strategy(tool_caller.STRATEGY.PARALLEL)
+
+    local op_agent = op.agent
+    if type(op_agent) ~= "table" then
+        op_agent = nil
+    end
+    local fallback_agent = {
+        id = string_or_nil(ctx.config and ctx.config.agent_id),
+        model = string_or_nil(ctx.config and ctx.config.model)
+    } :: ToolWrapperAgentRef
+    local active_agent = (op_agent or fallback_agent) :: ToolWrapperAgentRef
+
+    local wrapper_context: ToolWrapperExecutionContext = {
+        host = {
+            kind = "session",
+            session_id = ctx.session_id
+        },
+        agent = active_agent,
+        run_context = {
+            contract = RUN_CONTEXT_CONTRACT,
+            binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
+            host = {
+                kind = "session",
+                session_id = ctx.session_id
+            },
+            agent = active_agent
+        }
+    }
+
+    if type(caller.set_tool_wrappers) == "function" then
+        caller:set_tool_wrappers(op.tool_wrappers or {})
+    end
+    if type(caller.set_wrapper_context) == "function" then
+        caller:set_wrapper_context(wrapper_context)
+    end
 
     local validated_tools, validate_err = caller:validate(op.tool_calls)
     if validate_err and not validated_tools then
@@ -291,6 +630,7 @@ function message_handlers.process_tools(ctx, op)
     if err then
         session_context = {}
     end
+    session_context = with_agent_run_context(ctx, session_context, active_agent)
 
     local results = caller:execute(session_context, validated_tools)
 

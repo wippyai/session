@@ -8,9 +8,28 @@ type BuildOptions = {
 }
 
 local prompt_builder = {
-    _prompt = require("prompt"),
-    _upload_repo = require("upload_repo")
+    _prompt = require("prompt")
 }
+
+local function resolve_file(file_uuid: string, options: table)
+    local resolver = options.file_resolver or options.file_lookup
+    if type(resolver) == "function" then
+        local ok, upload_or_err, err = pcall(resolver, file_uuid)
+        if ok and not err and upload_or_err then
+            return upload_or_err
+        end
+    end
+
+    local upload_repo = options.upload_repo
+    if type(upload_repo) == "table" and type(upload_repo.get) == "function" then
+        local ok, upload, err = pcall(upload_repo.get, file_uuid)
+        if ok and not err and upload then
+            return upload
+        end
+    end
+
+    return nil
+end
 
 function prompt_builder.build(messages, contexts, session_meta, options)
     if not messages then
@@ -47,12 +66,12 @@ function prompt_builder.build(messages, contexts, session_meta, options)
             if include_files and metadata.file_uuids and #metadata.file_uuids > 0 then
                 local file_info = {}
                 for _, file_uuid in ipairs(metadata.file_uuids) do
-                    local upload, err = prompt_builder._upload_repo.get(file_uuid)
-                    if not err and upload then
+                    if type(file_uuid) == "string" then
+                        local upload = resolve_file(file_uuid, options)
                         table.insert(file_info, {
-                            filename = upload.metadata and upload.metadata.filename or "Unknown filename",
-                            size = upload.size or 0,
-                            type = upload.mime_type or "Unknown type",
+                            filename = upload and upload.metadata and upload.metadata.filename or "Unknown filename",
+                            size = upload and upload.size or 0,
+                            type = upload and upload.mime_type or "Unknown type",
                             uuid = file_uuid
                         })
                     end

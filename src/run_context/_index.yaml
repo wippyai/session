@@ -1,0 +1,126 @@
+version: "1.0"
+namespace: wippy.session.run_context
+
+entries:
+  # wippy.session.run_context:lib
+  - name: lib
+    kind: library.lua
+    meta:
+      comment: Session-backed implementation library for wippy.agent:run_context.
+      tags:
+        - session
+        - agents
+        - context
+        - history
+        - prompt
+    source: file://lib.lua
+    modules:
+      - json
+    imports:
+      session: wippy.session.persist:reader
+      prompt_builder: wippy.session:prompt_builder
+
+  # wippy.session.run_context:binding
+  - name: binding
+    kind: contract.binding
+    meta:
+      comment: Session-backed run-context reader for agent traits and tools.
+      tags:
+        - session
+        - agents
+        - context
+    contracts:
+      - contract: wippy.agent:run_context
+        methods:
+          get_context: wippy.session.run_context:get_context
+          get_history: wippy.session.run_context:get_history
+          get_prompt: wippy.session.run_context:get_prompt
+
+  # wippy.session.run_context:get_context
+  - name: get_context
+    kind: function.lua
+    meta:
+      comment: Read the current session agent-run context.
+      tags:
+        - session
+        - agents
+        - context
+    source: file://get_context.lua
+    imports:
+      run_context: wippy.session.run_context:lib
+    method: handle
+
+  # wippy.session.run_context:get_history
+  - name: get_history
+    kind: function.lua
+    meta:
+      comment: Read a bounded session agent-run history slice.
+      tags:
+        - session
+        - agents
+        - history
+    source: file://get_history.lua
+    imports:
+      run_context: wippy.session.run_context:lib
+    method: handle
+
+  # wippy.session.run_context:get_prompt
+  - name: get_prompt
+    kind: function.lua
+    meta:
+      comment: Build a prompt from a bounded session agent-run slice.
+      tags:
+        - session
+        - agents
+        - prompt
+    source: file://get_prompt.lua
+    imports:
+      run_context: wippy.session.run_context:lib
+    method: handle
+
+  # wippy.session.run_context:run_context_test
+  - name: test_security_policy
+    kind: security.policy
+    meta:
+      scope: dev
+      comment: Allows the run-context contract test to read its seeded session.
+      tags:
+        - session
+        - agents
+        - run-context
+        - test
+    policy:
+      actions: "*"
+      resources: "*"
+      effect: allow
+    groups:
+      - test_group
+
+  # wippy.session.run_context:run_context_test
+  - name: run_context_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Contract-level tests for the session run-context child binding.
+      tags:
+        - session
+        - agents
+        - run-context
+        - test
+    source: file://run_context_test.lua
+    modules:
+      - contract
+      - json
+      - security
+      - sql
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      session_contexts_repo: wippy.session.persist:session_contexts_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run_tests

@@ -130,15 +130,6 @@ entries:
       - entry: wippy.session.env:delegation_func_id
         path: ".default"
 
-  - name: on_session_end_func_id
-    kind: ns.requirement
-    meta:
-      description: "Function ID called when a session ends (runs in the plugin actor context). Optional; empty disables the hook."
-    default: ""
-    targets:
-      - entry: wippy.session.env:on_session_end_func_id
-        path: ".default"
-
   - name: env_storage
     kind: ns.requirement
     meta:
@@ -162,8 +153,6 @@ entries:
         path: ".storage"
       - entry: wippy.session.env:delegation_func_id
         path: ".storage"
-      - entry: wippy.session.env:on_session_end_func_id
-        path: ".storage"
 
   # wippy.session:consts
   - name: consts
@@ -174,6 +163,257 @@ entries:
     modules:
       - env
       - time
+
+  # wippy.session:session_service
+  - name: session_service
+    kind: contract.definition
+    meta:
+      comment: Session-owned lifecycle service for external runtimes.
+      tags:
+        - session
+        - runtime
+        - lifecycle
+        - service
+      description: |
+        Stable session service contract for runtimes such as channel and DM.
+        Callers ask session to ensure, read, update, or delete a session instead
+        of importing wippy.session.persist repositories or hand-rolling context
+        creation and status recovery.
+
+        ensure is the canonical create-or-rehydrate operation. It creates the
+        primary session context when the session is new, returns the existing row
+        when it already exists, and by default resets stale running/failed status
+        to idle so a runtime can safely spawn the session process.
+    methods:
+      - name: ensure
+        description: Create a session if absent, otherwise return and prepare the existing session for rehydration.
+        input_schemas:
+          - definition: |
+              {
+                "type": "object",
+                "properties": {
+                  "session_id": { "type": "string" },
+                  "user_id": { "type": "string" },
+                  "kind": { "type": "string", "default": "default" },
+                  "title": { "type": "string", "default": "" },
+                  "meta": { "type": "object", "default": {} },
+                  "config": { "type": "object", "default": {} },
+                  "primary_context_id": { "type": "string" },
+                  "primary_context_data": {
+                    "description": "Initial primary context payload. Objects are JSON encoded; strings are stored as-is.",
+                    "oneOf": [
+                      { "type": "object" },
+                      { "type": "string" }
+                    ],
+                    "default": {}
+                  },
+                  "reset_status": {
+                    "type": "boolean",
+                    "description": "When true or omitted, running/failed sessions are reset to idle for safe rehydration.",
+                    "default": true
+                  }
+                },
+                "required": ["session_id", "user_id"]
+              }
+            format: application/schema+json
+        output_schemas:
+          - definition: |
+              {
+                "type": "object",
+                "properties": {
+                  "session": { "type": "object" },
+                  "created": { "type": "boolean" },
+                  "recovered": { "type": "boolean" },
+                  "primary_context_id": { "type": "string" }
+                },
+                "required": ["session", "created", "recovered", "primary_context_id"]
+              }
+            format: application/schema+json
+      - name: get
+        description: Read one session by id, optionally scoped to a user id.
+        input_schemas:
+          - definition: |
+              {
+                "type": "object",
+                "properties": {
+                  "session_id": { "type": "string" },
+                  "user_id": { "type": "string" }
+                },
+                "required": ["session_id"]
+              }
+            format: application/schema+json
+      - name: update
+        description: Update session metadata through the session-owned API.
+        input_schemas:
+          - definition: |
+              {
+                "type": "object",
+                "properties": {
+                  "session_id": { "type": "string" },
+                  "updates": {
+                    "type": "object",
+                    "properties": {
+                      "title": { "type": "string" },
+                      "status": { "type": "string" },
+                      "kind": { "type": "string" },
+                      "meta": { "type": "object" },
+                      "config": { "type": "object" },
+                      "public_meta": { "type": "object" },
+                      "last_message_date": { "type": "integer" }
+                    }
+                  }
+                },
+                "required": ["session_id", "updates"]
+              }
+            format: application/schema+json
+      - name: delete
+        description: Delete a session and the primary context owned by the service.
+        input_schemas:
+          - definition: |
+              {
+                "type": "object",
+                "properties": {
+                  "session_id": { "type": "string" },
+                  "user_id": {
+                    "type": "string",
+                    "description": "Optional owner guard. When provided, delete fails unless the session belongs to this user."
+                  }
+                },
+                "required": ["session_id"]
+              }
+            format: application/schema+json
+
+  # wippy.session:service
+  - name: service
+    kind: library.lua
+    meta:
+      comment: SDK implementation for the wippy.session:session_service contract.
+      tags:
+        - session
+        - runtime
+        - lifecycle
+    source: file://service.lua
+    modules:
+      - json
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+
+  # wippy.session:service_binding
+  - name: service_binding
+    kind: contract.binding
+    meta:
+      comment: Built-in implementation of the session service contract.
+      tags:
+        - session
+        - runtime
+        - lifecycle
+    contracts:
+      - contract: wippy.session:session_service
+        methods:
+          ensure: wippy.session:ensure_session
+          get: wippy.session:get_session_service
+          update: wippy.session:update_session_service
+          delete: wippy.session:delete_session_service
+
+  # wippy.session:ensure_session
+  - name: ensure_session
+    kind: function.lua
+    meta:
+      comment: Contract method wrapper for wippy.session:service.ensure.
+      tags:
+        - session
+        - runtime
+    source: file://ensure_session.lua
+    imports:
+      service: wippy.session:service
+    method: handle
+
+  # wippy.session:get_session_service
+  - name: get_session_service
+    kind: function.lua
+    meta:
+      comment: Contract method wrapper for wippy.session:service.get.
+      tags:
+        - session
+        - runtime
+    source: file://get_session_service.lua
+    imports:
+      service: wippy.session:service
+    method: handle
+
+  # wippy.session:update_session_service
+  - name: update_session_service
+    kind: function.lua
+    meta:
+      comment: Contract method wrapper for wippy.session:service.update.
+      tags:
+        - session
+        - runtime
+    source: file://update_session_service.lua
+    imports:
+      service: wippy.session:service
+    method: handle
+
+  # wippy.session:delete_session_service
+  - name: delete_session_service
+    kind: function.lua
+    meta:
+      comment: Contract method wrapper for wippy.session:service.delete.
+      tags:
+        - session
+        - runtime
+    source: file://delete_session_service.lua
+    imports:
+      service: wippy.session:service
+    method: handle
+
+  # wippy.session:service_test
+  - name: service_test_security_policy
+    kind: security.policy
+    meta:
+      scope: dev
+      comment: Allows the session service contract test to open the built-in binding.
+      tags:
+        - session
+        - runtime
+        - test
+    policy:
+      actions: "*"
+      resources: "*"
+      effect: allow
+    groups:
+      - test_group
+
+  # wippy.session:service_test
+  - name: service_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Tests the session-owned service SDK and contract binding.
+      tags:
+        - session
+        - runtime
+        - lifecycle
+        - test
+    source: file://service_test.lua
+    modules:
+      - contract
+      - json
+      - security
+      - sql
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      service: wippy.session:service
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
 
   # Dependencies
   - name: dep.wippy.llm

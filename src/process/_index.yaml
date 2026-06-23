@@ -77,6 +77,7 @@ entries:
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
       tool_caller: wippy.agent.tools:caller
+      lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
 
   # wippy.session.process:session
@@ -117,7 +118,6 @@ entries:
       - json
       - uuid
       - logger
-      - funcs
     imports:
       consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo
