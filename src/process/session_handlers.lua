@@ -317,9 +317,11 @@ function session_handlers.agent_change(ctx, op)
     if not op.agent_id then
         return nil, "Agent ID is required"
     end
-
     local session_data = ctx.reader:state()
     local current_config = session_data.config or {}
+    if type(ctx.config) ~= "table" then
+        ctx.config = current_config
+    end
     local previous_agent = current_config.agent_id
     local previous_model = current_config.model
 
@@ -375,9 +377,11 @@ function session_handlers.model_change(ctx, op)
     if not op.model then
         return nil, "Model name is required"
     end
-
     local session_data = ctx.reader:state()
     local current_config = session_data.config or {}
+    if type(ctx.config) ~= "table" then
+        ctx.config = current_config
+    end
     local previous_model = current_config.model
 
     current_config.model = op.model
