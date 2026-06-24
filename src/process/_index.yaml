@@ -34,6 +34,19 @@ entries:
       consts: wippy.session:consts
       tool_caller: wippy.agent.tools:caller
 
+  # wippy.session.process:session_handlers_test
+  - name: session_handlers_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_handlers
+      comment: Unit tests for session config normalization during agent/model changes.
+    source: file://session_handlers_test.lua
+    method: run_tests
+    imports:
+      session_handlers: wippy.session.process:session_handlers
+      test: wippy.test:test
+
   # wippy.session.process:control_handlers
   - name: control_handlers
     kind: library.lua
@@ -77,6 +90,7 @@ entries:
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
       tool_caller: wippy.agent.tools:caller
+      lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
 
   # wippy.session.process:session
@@ -117,7 +131,6 @@ entries:
       - json
       - uuid
       - logger
-      - funcs
     imports:
       consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo

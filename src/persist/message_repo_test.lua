@@ -212,6 +212,15 @@ local function define_tests()
             end
         end)
 
+        it("should keep list_after_message inclusive for backward compatibility", function()
+            local messages, err = message_repo.list_after_message(test_data.session_id, test_data.message_id, 10)
+
+            test.is_nil(err)
+            test.not_nil(messages)
+            test.ok(#messages >= 1)
+            test.eq(messages[1].message_id, test_data.message_id)
+        end)
+
         it("should list messages by type", function()
             local messages, err = message_repo.list_by_type(test_data.session_id, "user")
 

@@ -19,7 +19,19 @@ type SessionArgs = {
     start_token: string?,
 }
 
-local function run(args)
+type SessionContext = {
+    session_id: string,
+    user_id: string,
+    reader: any,
+    writer: any,
+    upstream: any,
+    config: {[string]: any},
+    agent_ctx: any,
+    queue_empty_callback: any?,
+    lifecycle_state: table?,
+}
+
+local function run(args: SessionArgs)
     if not args or not args.user_id or not args.session_id then
         error(consts.ERR.MISSING_ARGS)
     end
@@ -30,6 +42,7 @@ local function run(args)
     end
 
     local session_data = session_reader:state()
+    local session_config = session_data.config or {}
     if session_data.status == consts.STATUS.FAILED then
         error("Cannot open failed session")
     end
@@ -43,7 +56,7 @@ local function run(args)
 
     -- Initialize agent context using session config
     local agent_opts = {
-        enable_cache = session_data.config.enable_agent_cache == true,
+        enable_cache = session_config.enable_agent_cache == true,
         context = {} :: {[string]: any},
     }
     local agent_ctx = agent_context.new(agent_opts)
@@ -51,36 +64,37 @@ local function run(args)
     -- Re-apply persisted declarative trait/tool overlays so they survive a process
     -- restart. A list overlay replaces the agent's own set; `false` is the cleared
     -- marker written on an agent switch (config can't drop a key) and is skipped.
-    if type(session_data.config.active_traits) == "table" then
-        agent_ctx:set_active_traits(session_data.config.active_traits)
+    if type(session_config.active_traits) == "table" then
+        agent_ctx:set_active_traits(session_config.active_traits)
     end
-    if type(session_data.config.active_tools) == "table" then
-        agent_ctx:set_active_tools(session_data.config.active_tools)
+    if type(session_config.active_tools) == "table" then
+        agent_ctx:set_active_tools(session_config.active_tools)
     end
 
     -- Configure delegation if enabled
-    if session_data.config.delegation_func_id then
+    if session_config.delegation_func_id then
         local delegation_schema = nil
-        local tool_schema, schema_err = tools.get_tool_schema(session_data.config.delegation_func_id)
+        local tool_schema, schema_err = tools.get_tool_schema(session_config.delegation_func_id)
         if tool_schema and tool_schema.schema then
             delegation_schema = tool_schema.schema
         end
 
         agent_ctx:configure_delegate_tools({
             enabled = true,
-            description_suffix = session_data.config.delegation_description_suffix,
+            description_suffix = session_config.delegation_description_suffix,
             default_schema = delegation_schema
         })
     end
 
-    local context = {
+    local context: SessionContext = {
         session_id = args.session_id,
         user_id = args.user_id,
         reader = session_reader,
         writer = session_writer,
         upstream = session_upstream,
-        config = session_data.config,
+        config = session_config,
         agent_ctx = agent_ctx,
+        lifecycle_state = {},
         queue_empty_callback = function()
             session_writer:update_status(consts.STATUS.IDLE)
             session_upstream:update_session({ status = consts.STATUS.IDLE })
@@ -119,35 +133,35 @@ local function run(args)
     if args.create then
         session_writer:update_status(consts.STATUS.IDLE)
 
-        if session_data.config.agent_id and session_data.config.agent_id ~= "" then
+        if session_config.agent_id and session_config.agent_id ~= "" then
             bus:queue_op({
                 type = consts.OP_TYPE.AGENT_CHANGE,
-                agent_id = session_data.config.agent_id,
+                agent_id = session_config.agent_id,
                 init = true
             })
         end
 
-        if session_data.config.model and session_data.config.model ~= "" then
+        if session_config.model and session_config.model ~= "" then
             bus:queue_op({
                 type = consts.OP_TYPE.MODEL_CHANGE,
-                model = session_data.config.model,
+                model = session_config.model,
                 init = true
             })
         end
 
-        if session_data.config.init_function_id and session_data.config.init_function_id ~= "" then
+        if session_config.init_function_id and session_config.init_function_id ~= "" then
             bus:queue_op({
                 type = consts.OP_TYPE.EXECUTE_FUNCTION,
-                function_id = session_data.config.init_function_id,
-                function_params = session_data.config.init_function_params,
+                function_id = session_config.init_function_id,
+                function_params = session_config.init_function_params,
             })
         end
     end
 
     -- Send initial session data to client
     session_upstream:update_session({
-        agent = session_data.config.agent_id,
-        model = session_data.config.model,
+        agent = session_config.agent_id,
+        model = session_config.model,
         status = consts.STATUS.IDLE,
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,
@@ -300,6 +314,17 @@ local function run(args)
 
     if not session_state.bus_done_received then
         bus_done:receive()
+    end
+
+    local _, lifecycle_err = message_handlers.deactivate_current_agent(context, "session_finished", {
+        state = "completed",
+        reason = "session_finished"
+    })
+    if lifecycle_err then
+        logger:warn("agent lifecycle deactivate failed", {
+            session_id = args.session_id,
+            error = tostring(lifecycle_err)
+        })
     end
 
     return { status = "shutdown", session_id = args.session_id }

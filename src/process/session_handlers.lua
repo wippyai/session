@@ -12,6 +12,30 @@ type BackgroundTriggerResult = {
 
 local session_handlers = {}
 
+local function checkpoint_options_from_agent(op): table
+    local agent_options = op and op.agent_options
+    if type(agent_options) ~= "table" or type(agent_options.checkpoint) ~= "table" then
+        return {}
+    end
+
+    return agent_options.checkpoint
+end
+
+local function resolve_checkpoint_config(ctx, op): (string?, number?)
+    local checkpoint_options = checkpoint_options_from_agent(op)
+    local function_id = checkpoint_options.function_id or ctx.config.checkpoint_function_id
+    if type(function_id) ~= "string" or function_id == "" then
+        function_id = nil
+    end
+    local threshold = tonumber(checkpoint_options.token_threshold)
+
+    if not threshold then
+        threshold = tonumber(ctx.config.token_checkpoint_threshold)
+    end
+
+    return function_id, threshold
+end
+
 function session_handlers.execute_function(ctx, op)
     if not op.function_id then
         return nil, "Function ID is required"
@@ -117,13 +141,14 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local session_data = ctx.reader:state()
 
-    if ctx.config.checkpoint_function_id and tokens.prompt_tokens then
-        local token_threshold = ctx.config.token_checkpoint_threshold
+    local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
+    if checkpoint_function_id and tokens.prompt_tokens and token_threshold and token_threshold > 0 then
 
         if tokens.prompt_tokens > token_threshold then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
+                checkpoint_function_id = checkpoint_function_id,
                 checkpoint_id = message_id,
                 message_id = message_id,
                 trigger_tokens = tokens.prompt_tokens
@@ -198,7 +223,9 @@ function session_handlers.generate_title(ctx, op)
 end
 
 function session_handlers.create_checkpoint(ctx, op)
-    if not ctx.config.checkpoint_function_id then
+    local checkpoint_function_id = op.checkpoint_function_id or ctx.config.checkpoint_function_id
+
+    if not checkpoint_function_id then
         return nil, "No summary function ID configured"
     end
 
@@ -211,7 +238,7 @@ function session_handlers.create_checkpoint(ctx, op)
         session_context = {}
     end
 
-    local result, func_err = funcs.new():with_context(session_context):call(ctx.config.checkpoint_function_id :: string, {
+    local result, func_err = funcs.new():with_context(session_context):call(checkpoint_function_id :: string, {
         session_id = ctx.session_id
     })
 
@@ -290,9 +317,11 @@ function session_handlers.agent_change(ctx, op)
     if not op.agent_id then
         return nil, "Agent ID is required"
     end
-
     local session_data = ctx.reader:state()
     local current_config = session_data.config or {}
+    if type(ctx.config) ~= "table" then
+        ctx.config = current_config
+    end
     local previous_agent = current_config.agent_id
     local previous_model = current_config.model
 
@@ -348,9 +377,11 @@ function session_handlers.model_change(ctx, op)
     if not op.model then
         return nil, "Model name is required"
     end
-
     local session_data = ctx.reader:state()
     local current_config = session_data.config or {}
+    if type(ctx.config) ~= "table" then
+        ctx.config = current_config
+    end
     local previous_model = current_config.model
 
     current_config.model = op.model
