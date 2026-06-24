@@ -215,9 +215,15 @@ local function run(args: SessionArgs)
                         session_upstream:command_error(payload_data.request_id, "SESSION_FINISHING", "Session is finishing and cannot accept new messages")
                     end
                 else
-                    -- Set RUNNING status when user message received
-                    session_writer:update_status(consts.STATUS.RUNNING)
-                    session_upstream:update_session({ status = consts.STATUS.RUNNING })
+                    -- Context messages (developer/system) are persisted but do not run the
+                    -- agent on their own, so they must not flip the session to RUNNING; only
+                    -- a real user turn does. Matches how a turn is gated downstream.
+                    local message_data = type(payload_data.data) == "table" and payload_data.data or {}
+                    local message_type = message_data.type
+                    if message_type ~= consts.MSG_TYPE.DEVELOPER and message_type ~= consts.MSG_TYPE.SYSTEM then
+                        session_writer:update_status(consts.STATUS.RUNNING)
+                        session_upstream:update_session({ status = consts.STATUS.RUNNING })
+                    end
 
                     bus:queue_op({
                         type = consts.OP_TYPE.HANDLE_MESSAGE,

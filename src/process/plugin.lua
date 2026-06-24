@@ -6,6 +6,7 @@ local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
+local funcs = require("funcs")
 
 type PluginArgs = {
     user_id: string,
@@ -20,6 +21,24 @@ type ActiveSession = {
     terminating: boolean,
     terminate_reason: string?,
 }
+
+-- Invoke the configured on_session_end hook (non-blocking).
+-- Returns true when a hook was scheduled, false when no hook is configured.
+-- The spawn and call dependencies are injectable for testing.
+local function fire_session_end_hook(hook_func_id, params, spawn, call)
+    if not hook_func_id or hook_func_id == "" then
+        return false
+    end
+
+    spawn = spawn or coroutine.spawn
+    call = call or funcs.call
+
+    spawn(function()
+        call(hook_func_id, params)
+    end)
+
+    return true
+end
 
 local function run(args)
     if not args or not args.user_id then
@@ -569,6 +588,14 @@ local function run(args)
                             })
                         end
 
+                        -- Invoke on_session_end hook if configured (non-blocking)
+                        fire_session_end_hook(state.base_config.on_session_end_func_id, {
+                            session_id = session_id,
+                            user_id = state.user_id,
+                            status = target_status,
+                            reason = err,
+                        })
+
                         state.active_sessions[session_id] = nil
                         state.session_count = state.session_count - 1
 
@@ -619,4 +646,4 @@ local function run(args)
     return { status = "shutdown", user_id = state.user_id }
 end
 
-return { run = run }
+return { run = run, fire_session_end_hook = fire_session_end_hook }

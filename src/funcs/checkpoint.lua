@@ -20,6 +20,28 @@ local CONFIG = {
     max_tool_result_chars = 2000
 }
 
+local function positive_number(value, fallback)
+    local n = tonumber(value)
+    if not n or n <= 0 then
+        return fallback
+    end
+    return n
+end
+
+local function config_from_args(args)
+    local options = type(args.options) == "table" and args.options or {}
+    return {
+        model = type(options.model) == "string" and options.model ~= "" and options.model or CONFIG.model,
+        temperature = tonumber(options.temperature) or CONFIG.temperature,
+        max_tokens = positive_number(options.max_tokens, CONFIG.max_tokens),
+        max_tool_result_chars = positive_number(options.max_tool_result_chars, CONFIG.max_tool_result_chars),
+    }
+end
+
+local function checkpoint_prompt(template, max_tokens)
+    return template:gsub("3000", tostring(max_tokens))
+end
+
 local PROMPTS = {
     initial = [[Create comprehensive checkpoint using ALL available tokens (~3000). This serves as memory, task tracker, and behavior monitor.
 
@@ -78,6 +100,8 @@ local function handle(args)
     if not args.session_id then
         return nil, "session_id is required"
     end
+
+    local cfg = config_from_args(args)
 
     local session_reader, session_err = session.open(args.session_id)
     if not session_reader then
@@ -151,12 +175,12 @@ local function handle(args)
                 end
 
                 -- Store full tool results for important context
-                table.insert(tool_results, function_name .. "_result: " .. result_text:sub(1, CONFIG.max_tool_result_chars))
+                table.insert(tool_results, function_name .. "_result: " .. result_text:sub(1, cfg.max_tool_result_chars))
 
-                if result_text:len() <= CONFIG.max_tool_result_chars then
+                if result_text:len() <= cfg.max_tool_result_chars then
                     table.insert(conversation_parts, "[TOOL_RESULT]: " .. result_text)
                 else
-                    table.insert(conversation_parts, "[TOOL_RESULT]: " .. result_text:sub(1, CONFIG.max_tool_result_chars) .. "...")
+                    table.insert(conversation_parts, "[TOOL_RESULT]: " .. result_text:sub(1, cfg.max_tool_result_chars) .. "...")
                 end
             end
         elseif msg.type == "delegation" then
@@ -175,7 +199,7 @@ local function handle(args)
     end
 
     local summary_prompt = prompt.new()
-    summary_prompt:add_system(existing_summary and PROMPTS.update or PROMPTS.initial)
+    summary_prompt:add_system(checkpoint_prompt(existing_summary and PROMPTS.update or PROMPTS.initial, cfg.max_tokens))
 
     if existing_summary then
         summary_prompt:add_user("===PREVIOUS CHECKPOINT (PRESERVE AND BUILD ON THIS)===\n" .. existing_summary)
@@ -205,15 +229,15 @@ local function handle(args)
     end
 
     local instruction = existing_summary and
-        "\n===INSTRUCTION===\nCreate updated checkpoint that preserves ALL previous understanding while adding new insights. Use full 3000 tokens to build rich, helpful context." or
-        "\n===INSTRUCTION===\nCreate comprehensive checkpoint from this conversation. Use full 3000 tokens to capture everything that helps AI understand and assist user."
+        "\n===INSTRUCTION===\nCreate updated checkpoint that preserves ALL previous understanding while adding new insights. Use up to " .. tostring(cfg.max_tokens) .. " tokens to build rich, helpful context." or
+        "\n===INSTRUCTION===\nCreate comprehensive checkpoint from this conversation. Use up to " .. tostring(cfg.max_tokens) .. " tokens to capture everything that helps AI understand and assist user."
 
     summary_prompt:add_user(instruction)
 
     local response, llm_err = llm.generate(summary_prompt, {
-        model = CONFIG.model,
-        temperature = CONFIG.temperature,
-        max_tokens = CONFIG.max_tokens
+        model = cfg.model,
+        temperature = cfg.temperature,
+        max_tokens = cfg.max_tokens
     })
 
     if llm_err or not response or not response.result then
@@ -231,4 +255,4 @@ local function handle(args)
     }
 end
 
-return { handle = handle }
+return { handle = handle, config_from_args = config_from_args, checkpoint_prompt = checkpoint_prompt }

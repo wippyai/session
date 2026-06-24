@@ -130,6 +130,15 @@ entries:
       - entry: wippy.session.env:delegation_func_id
         path: ".default"
 
+  - name: on_session_end_func_id
+    kind: ns.requirement
+    meta:
+      description: "Function ID called when a session ends (runs in the plugin actor context). Optional; empty disables the hook."
+    default: ""
+    targets:
+      - entry: wippy.session.env:on_session_end_func_id
+        path: ".default"
+
   - name: env_storage
     kind: ns.requirement
     meta:
@@ -152,6 +161,8 @@ entries:
       - entry: wippy.session.env:gc_interval
         path: ".storage"
       - entry: wippy.session.env:delegation_func_id
+        path: ".storage"
+      - entry: wippy.session.env:on_session_end_func_id
         path: ".storage"
 
   # wippy.session:consts
@@ -473,6 +484,33 @@ entries:
     method: run
 
   # wippy.session:prompt_builder
+  # wippy.session:file_provider
+  # Optional, session-owned contract. An application that stores uploads binds it so the
+  # session resolves a message's file_uuid to file metadata WITHOUT depending on any
+  # concrete uploads module. Modeled on wippy.agent:resolver: prompt_builder consumes it
+  # only when something binds it (implementations() check) and otherwise falls back to the
+  # upload_repo / file_resolver passed via build options, so apps that never bind it work.
+  - name: file_provider
+    kind: contract.definition
+    meta:
+      comment: Optional file/upload metadata provider the session resolves message attachments through.
+      description: |
+        Resolve a file/upload identifier to its metadata for prompt rendering. Applications
+        that own uploads provide a binding; when none exists, prompt_builder falls back to
+        the upload_repo / file_resolver passed via build options. The session depends on no
+        uploads module.
+    methods:
+      - name: get_info
+        description: Resolve a file_uuid to its upload metadata.
+        input_schemas:
+          - definition: |
+              { "type": "object", "properties": { "file_uuid": { "type": "string" } }, "required": ["file_uuid"] }
+            format: application/schema+json
+        output_schemas:
+          - definition: |
+              { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" } } } } }
+            format: application/schema+json
+
   - name: prompt_builder
     kind: library.lua
     meta:
@@ -480,10 +518,10 @@ entries:
     source: file://prompt_builder.lua
     modules:
       - json
+      - contract
     imports:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
-      upload_repo: userspace.uploads:upload_repo
 
   # wippy.session:prompt_builder_test
   - name: prompt_builder_test

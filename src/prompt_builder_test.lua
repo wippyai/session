@@ -301,6 +301,90 @@ local function define_tests()
                 test.contains(tostring(err), "Messages are required")
             end)
         end)
+
+        describe("file resolution via the file_provider contract", function()
+            local original_contract = prompt_builder._contract
+
+            -- Stub the contract seam: impls drives the implementations() check (empty =>
+            -- nobody bound it => fall back), get_info returns the upload record.
+            local function stub_contract(impls, get_info)
+                return {
+                    get = function(_id)
+                        return {
+                            implementations = function(_self) return impls end,
+                            open = function(_self)
+                                return { get_info = function(_self2, args) return get_info(args) end }, nil
+                            end,
+                        }, nil
+                    end,
+                }
+            end
+
+            local function user_with_file(uuid)
+                return {
+                    { message_id = "m1", type = consts.MSG_TYPE.USER, data = "see attached", metadata = { file_uuids = { uuid } } },
+                }
+            end
+
+            local function all_text(built)
+                local parts = {}
+                for _, m in ipairs(built or {}) do
+                    local c = m.content or m.text or m.data
+                    if type(c) == "string" then
+                        parts[#parts + 1] = c
+                    elseif type(c) == "table" then
+                        parts[#parts + 1] = json.encode(c)
+                    end
+                end
+                return table.concat(parts, "\n")
+            end
+
+            it("resolves a file through the contract when an app binds one", function()
+                prompt_builder._contract = stub_contract({ "userspace.uploads:file_provider" }, function(args)
+                    if args.file_uuid == "file-1" then
+                        return { size = 1234, mime_type = "text/plain", metadata = { filename = "notes.txt" } }
+                    end
+                    return nil
+                end)
+
+                local builder, err = prompt_builder.build(user_with_file("file-1"), {}, {}, {})
+                prompt_builder._contract = original_contract
+
+                test.is_nil(err)
+                test.not_nil(builder)
+                test.contains(all_text(builder:get_messages()), "notes.txt")
+            end)
+
+            it("falls back to options.upload_repo when nothing binds the contract", function()
+                -- Empty implementations => contract path is a no-op => fallback runs.
+                prompt_builder._contract = stub_contract({}, function() return nil end)
+
+                local builder, err = prompt_builder.build(user_with_file("file-2"), {}, {}, {
+                    upload_repo = {
+                        get = function(uuid)
+                            if uuid == "file-2" then
+                                return { size = 9, mime_type = "image/png", metadata = { filename = "pic.png" } }
+                            end
+                            return nil
+                        end,
+                    },
+                })
+                prompt_builder._contract = original_contract
+
+                test.is_nil(err)
+                test.contains(all_text(builder:get_messages()), "pic.png")
+            end)
+
+            it("renders Unknown filename when neither the contract nor options resolve", function()
+                prompt_builder._contract = stub_contract({}, function() return nil end)
+
+                local builder, err = prompt_builder.build(user_with_file("file-3"), {}, {}, {})
+                prompt_builder._contract = original_contract
+
+                test.is_nil(err)
+                test.contains(all_text(builder:get_messages()), "Unknown filename")
+            end)
+        end)
     end)
 end
 

@@ -23,6 +23,28 @@ entries:
             "session_id": {
               "type": "string",
               "description": "The session ID to generate checkpoint for"
+            },
+            "options": {
+              "type": "object",
+              "description": "Optional checkpoint generation controls supplied by the active agent/trait.",
+              "properties": {
+                "max_tokens": {
+                  "type": "number",
+                  "description": "Maximum summary tokens for the default checkpoint generator."
+                },
+                "max_tool_result_chars": {
+                  "type": "number",
+                  "description": "Maximum characters kept from each tool result while building the checkpoint prompt."
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Optional model override for the default checkpoint generator."
+                },
+                "temperature": {
+                  "type": "number",
+                  "description": "Optional temperature override for the default checkpoint generator."
+                }
+              }
             }
           },
           "required": ["session_id"]
@@ -37,6 +59,24 @@ entries:
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
     method: handle
+
+  # wippy.session.funcs:checkpoint_test
+  - name: checkpoint_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: checkpoint
+      comment: Unit tests for checkpoint option overrides and prompt token substitution.
+    source: file://checkpoint_test.lua
+    modules:
+      - json
+    imports:
+      checkpoint: wippy.session.funcs:checkpoint
+      prompt: wippy.llm:prompt
+      llm: wippy.llm:llm
+      session: wippy.session.persist:reader
+      test: wippy.test:test
+    method: run_tests
 
   # wippy.session.funcs:title
   - name: title

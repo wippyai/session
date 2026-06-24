@@ -1,5 +1,6 @@
 local json = require("json")
 local consts = require("consts")
+local contract = require("contract")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -11,7 +12,47 @@ local prompt_builder = {
     _prompt = require("prompt")
 }
 
+-- The session-owned, optional file-provider contract. An application that stores
+-- uploads binds it (e.g. an uploads module) so the session can resolve a file_uuid to
+-- its metadata WITHOUT the session depending on any concrete uploads module. Modeled on
+-- wippy.agent:resolver: consumed only when something binds it; otherwise the caller
+-- falls back to the injected options below, so apps that never bound it keep working.
+local FILE_PROVIDER_CONTRACT = "wippy.session:file_provider"
+
+-- resolve_via_contract returns the upload record for file_uuid through the file_provider
+-- contract, or nil when no application binds it (the optional-contract pattern: inspect
+-- implementations() first, fall back when none). Swappable for tests via the seam below.
+prompt_builder._contract = contract
+local function resolve_via_contract(file_uuid: string): any
+    local def, err = prompt_builder._contract.get(FILE_PROVIDER_CONTRACT)
+    if err or not def then
+        return nil
+    end
+    local impls, impl_err = (def :: any):implementations()
+    if impl_err or type(impls) ~= "table" or #(impls :: { any }) == 0 then
+        -- Contract defined but unbound: this app provides no uploads. Fall back.
+        return nil
+    end
+    local inst, open_err = (def :: any):open()
+    if open_err or not inst then
+        return nil
+    end
+    local ok, info = pcall(function() return (inst :: any):get_info({ file_uuid = file_uuid }) end)
+    if not ok or type(info) ~= "table" then
+        return nil
+    end
+    return info
+end
+
 local function resolve_file(file_uuid: string, options: table)
+    -- 1. Canonical: the session's file_provider contract, when an app binds one.
+    local via_contract = resolve_via_contract(file_uuid)
+    if via_contract ~= nil then
+        return via_contract
+    end
+
+    -- 2. Fallback (preserves prior behavior for apps that bind no contract): an
+    -- explicitly injected resolver function or upload_repo passed through options.
     local resolver = options.file_resolver or options.file_lookup
     if type(resolver) == "function" then
         local ok, upload_or_err, err = pcall(resolver, file_uuid)

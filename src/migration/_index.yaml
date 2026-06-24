@@ -153,3 +153,20 @@ entries:
     imports:
       migration: wippy.migration:migration
     method: migrate
+
+  # wippy.session.migration:10_index_artifacts_session_created
+  - name: 10_index_artifacts_session_created
+    kind: function.lua
+    meta:
+      type: migration
+      tags:
+        - sessions
+      description: Add artifacts (session_id, created_at) index for list_by_session.
+      depends_on:
+        - ns:wippy.migration
+        - wippy.session.migration:05_create_artifacts_table
+      timestamp: "2026-06-23T00:00:01Z"
+    source: file://10_index_artifacts_session_created.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
