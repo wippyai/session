@@ -172,6 +172,7 @@ entries:
       - http
       - security
       - time
+      - json
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
