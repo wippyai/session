@@ -113,6 +113,7 @@ entries:
       control_handlers: wippy.session.process:control_handlers
       session_handlers: wippy.session.process:session_handlers
       agent_context: wippy.agent:context
+      tools: wippy.agent.discovery:tools
     method: run
 
   # wippy.session.process:plugin
