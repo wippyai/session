@@ -42,12 +42,19 @@ local function define_tests()
             local spawn_count = 0
 
             local scheduled = plugin.fire_session_end_hook(
-                nil,
-                { session_id = "sess-1" },
-                function()
+                (nil :: any),
+                {
+                    session_id = "sess-1",
+                    user_id = "user-1",
+                    status = "idle",
+                    reason = "disabled",
+                },
+                function(_fn)
                     spawn_count = spawn_count + 1
                 end,
-                function() end
+                function(_name, ...): any
+                    return nil
+                end
             )
 
             test.is_false(scheduled)
@@ -59,11 +66,18 @@ local function define_tests()
 
             local scheduled = plugin.fire_session_end_hook(
                 "",
-                { session_id = "sess-1" },
-                function()
+                {
+                    session_id = "sess-1",
+                    user_id = "user-1",
+                    status = "idle",
+                    reason = "disabled",
+                },
+                function(_fn)
                     spawn_count = spawn_count + 1
                 end,
-                function() end
+                function(_name, ...): any
+                    return nil
+                end
             )
 
             test.is_false(scheduled)

@@ -307,7 +307,7 @@ local function define_tests()
 
             -- Stub the contract seam: impls drives the implementations() check (empty =>
             -- nobody bound it => fall back), get_info returns the upload record.
-            local function stub_contract(impls, get_info)
+            local function stub_contract(impls: { any }, get_info: any): any
                 return {
                     get = function(_id)
                         return {

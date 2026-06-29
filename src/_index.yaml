@@ -329,6 +329,28 @@ entries:
           update: wippy.session:update_session_service
           delete: wippy.session:delete_session_service
 
+  - name: file_provider
+    kind: contract.definition
+    meta:
+      comment: Optional session file attachment resolver. Applications that own uploads bind this so prompt building can resolve file_uuid metadata without depending on a concrete uploads module.
+      tags:
+        - session
+        - files
+        - attachment
+    methods:
+      - name: get_info
+        description: Resolve a file_uuid to safe file metadata for prompt building.
+        input_schemas:
+          - definition: |
+              {
+                "type": "object",
+                "properties": {
+                  "file_uuid": { "type": "string" }
+                },
+                "required": ["file_uuid"]
+              }
+            format: application/schema+json
+
   # wippy.session:ensure_session
   - name: ensure_session
     kind: function.lua

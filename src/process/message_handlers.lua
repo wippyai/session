@@ -525,6 +525,12 @@ function message_handlers.agent_step(ctx, op)
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
             tokens = result.tokens,
             agent_options = agent.agent_options or {},
+            checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+            agent = {
+                id = agent.id,
+                model = agent.model
+            },
+            run_context_binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
             message_id = op.message_id
         })
     end

@@ -2,6 +2,7 @@ local funcs = require("funcs")
 local consts = require("consts")
 local tool_caller = require("tool_caller")
 local time = require("time")
+local checkpoint_runtime = require("checkpoint_runtime")
 
 type BackgroundTriggerResult = {
     skipped: boolean?,
@@ -11,6 +12,19 @@ type BackgroundTriggerResult = {
 }
 
 local session_handlers = {}
+session_handlers._funcs = nil
+session_handlers._checkpoint_runtime = nil
+
+local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
+local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
+
+local function funcs_module(): any
+    return session_handlers._funcs or funcs
+end
+
+local function checkpoint_runtime_module(): any
+    return session_handlers._checkpoint_runtime or checkpoint_runtime
+end
 
 local function checkpoint_options_from_agent(op): table
     local agent_options = op and op.agent_options
@@ -19,6 +33,16 @@ local function checkpoint_options_from_agent(op): table
     end
 
     return agent_options.checkpoint
+end
+
+local function has_checkpoint_bindings(bindings: any): boolean
+    if type(bindings) ~= "table" then
+        return false
+    end
+    if type(bindings.checkpoint) == "table" then
+        bindings = bindings.checkpoint
+    end
+    return #bindings > 0
 end
 
 local function resolve_checkpoint_config(ctx, op): (string?, number?)
@@ -142,16 +166,21 @@ function session_handlers.check_background_triggers(ctx, op)
     local session_data = ctx.reader:state()
 
     local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
-    if checkpoint_function_id and tokens.prompt_tokens and token_threshold and token_threshold > 0 then
+    local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
+    if checkpoint_available and tokens.prompt_tokens and token_threshold and token_threshold > 0 then
 
         if tokens.prompt_tokens > token_threshold then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
                 checkpoint_function_id = checkpoint_function_id,
+                checkpoint_bindings = op.checkpoint_bindings,
                 checkpoint_id = message_id,
                 message_id = message_id,
-                trigger_tokens = tokens.prompt_tokens
+                trigger_tokens = tokens.prompt_tokens,
+                agent = op.agent,
+                agent_options = op.agent_options,
+                run_context_binding = op.run_context_binding
             })
         end
     end
@@ -194,7 +223,7 @@ function session_handlers.generate_title(ctx, op)
         session_context = {}
     end
 
-    local result, title_err = funcs.new():with_context(session_context):call(ctx.config.title_function_id :: string, {
+    local result, title_err = funcs_module().new():with_context(session_context):call(ctx.config.title_function_id :: string, {
         session_id = ctx.session_id
     })
 
@@ -225,10 +254,6 @@ end
 function session_handlers.create_checkpoint(ctx, op)
     local checkpoint_function_id = op.checkpoint_function_id or ctx.config.checkpoint_function_id
 
-    if not checkpoint_function_id then
-        return nil, "No summary function ID configured"
-    end
-
     if not op.checkpoint_id then
         return nil, "Checkpoint ID required"
     end
@@ -238,12 +263,70 @@ function session_handlers.create_checkpoint(ctx, op)
         session_context = {}
     end
 
-    local result, func_err = funcs.new():with_context(session_context):call(checkpoint_function_id :: string, {
-        session_id = ctx.session_id
-    })
+    local result = nil
+    local checkpoint_source = "function"
+    local checkpoint_binding_metadata = nil
+    local checkpoint_options = checkpoint_options_from_agent(op)
 
-    if func_err then
-        return nil, func_err
+    if has_checkpoint_bindings(op.checkpoint_bindings) then
+        local host = {
+            kind = "session",
+            session_id = ctx.session_id
+        }
+        local agent = type(op.agent) == "table" and op.agent or {
+            id = ctx.config and ctx.config.agent_id,
+            model = ctx.config and ctx.config.model
+        }
+        local runtime_result, runtime_err = checkpoint_runtime_module().create({
+            checkpoint = op.checkpoint_bindings
+        }, {
+            host = host,
+            agent = agent,
+            reason = "token_threshold_exceeded",
+            selector = {
+                mode = "since_checkpoint"
+            },
+            run_context = {
+                contract = RUN_CONTEXT_CONTRACT,
+                binding = op.run_context_binding or (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
+                host = host,
+                agent = agent
+            },
+            refs = {
+                checkpoint_id = op.checkpoint_id,
+                message_id = op.message_id,
+                trigger_tokens = op.trigger_tokens or 0
+            },
+            options = checkpoint_options
+        })
+        if runtime_err then
+            return nil, runtime_err
+        end
+        if runtime_result and runtime_result.result then
+            result = runtime_result.result
+            checkpoint_source = "binding"
+            checkpoint_binding_metadata = runtime_result.metadata
+        end
+    end
+
+    if not result then
+        if not checkpoint_function_id then
+            return nil, "No summary function ID configured"
+        end
+
+        local func_err
+        result, func_err = funcs_module().new():with_context(session_context):call(checkpoint_function_id :: string, {
+            session_id = ctx.session_id,
+            options = checkpoint_options
+        })
+
+        if func_err then
+            return nil, func_err
+        end
+    end
+
+    if type(result) == "table" and (not result.summary) and type(result.memory) == "string" then
+        result.summary = result.memory
     end
 
     if not result or not result.summary then
@@ -256,7 +339,9 @@ function session_handlers.create_checkpoint(ctx, op)
         checkpoint_id = op.checkpoint_id,
         trigger_tokens = op.trigger_tokens or 0,
         checkpoint_generated_at = time.now():format(time.RFC3339),
-        checkpoint_tokens = result.tokens or {}
+        checkpoint_tokens = result.tokens or {},
+        checkpoint_source = checkpoint_source,
+        checkpoint_binding_metadata = checkpoint_binding_metadata
     }
 
     local success, err = ctx.writer:update_message_meta(op.message_id, checkpoint_metadata)

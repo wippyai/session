@@ -33,6 +33,7 @@ entries:
     imports:
       consts: wippy.session:consts
       tool_caller: wippy.agent.tools:caller
+      checkpoint_runtime: wippy.agent:checkpoint_runtime
 
   # wippy.session.process:session_handlers_test
   - name: session_handlers_test
