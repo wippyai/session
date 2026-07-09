@@ -1,4 +1,4 @@
-version: "1.0"
+version: "0.3.8" # x-release-please-version
 namespace: wippy.session
 
 entries:
