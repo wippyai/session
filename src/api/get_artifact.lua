@@ -134,6 +134,14 @@ local function handler()
         response.icon = artifact.meta.icon
         response.status = artifact.meta.status
         response.display_type = artifact.meta.display_type
+        -- `type` is the field artifact renderers branch on to choose between a
+        -- standalone card and an inline embed. Report the stored display mode for
+        -- every kind, not only view_ref: a Markdown/HTML artifact created with
+        -- display_type="standalone" is stored with kind="inline", so mapping only
+        -- view_ref left it advertising itself as inline and it rendered inline.
+        if artifact.meta.display_type then
+            response.type = artifact.meta.display_type
+        end
 
         -- Add page reference specific data if this is a view_ref artifact
         if artifact.kind == "view_ref" then
