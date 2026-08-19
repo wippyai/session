@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/wippyai/session/compare/v0.4.0...v0.4.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **artifacts:** render standalone artifacts (emit type=artifact message) ([5cd464b](https://github.com/wippyai/session/commit/5cd464bdbffb4f0c8f0e90e687641ad085cb1083))
+
 ## [0.4.0](https://github.com/wippyai/session/compare/v0.3.8...v0.4.0) (2026-07-09)
 
 
