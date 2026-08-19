@@ -314,6 +314,86 @@ function artifact_repo.list_by_session(session_id, limit, offset)
     return artifacts
 end
 
+-- List metadata-only artifacts owned by a user. The optional session filter is
+-- applied inside the same actor-scoped query. Cursor pagination uses the stable
+-- (created_at, artifact_id) ordering so concurrent inserts cannot shift rows
+-- between pages. Cursors carry only an opaque artifact id; the timestamp is
+-- resolved inside the same actor/session scope instead of trusting client data.
+function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_id)
+    if not user_id or user_id == "" then
+        return nil, "User ID is required"
+    end
+
+    limit = limit or 50
+    if limit < 1 then limit = 1 end
+
+    local db, err = get_db()
+    if err then return nil, err end
+
+    local cursor_created_at = nil
+    if cursor_artifact_id then
+        local cursor_filters = {
+            sql.builder.expr("user_id = ?", user_id),
+            sql.builder.expr("artifact_id = ?", cursor_artifact_id),
+        }
+        if session_id and session_id ~= "" then
+            cursor_filters[#cursor_filters + 1] = sql.builder.expr("session_id = ?", session_id)
+        end
+        local cursor_query = sql.builder.select("created_at", "artifact_id")
+            :from("artifacts")
+            :where(sql.builder.and_(cursor_filters))
+            :limit(1)
+        local cursor_rows, cursor_err = cursor_query:run_with(db):query()
+        if cursor_err then
+            db:release()
+            return nil, "Failed to resolve artifact cursor: " .. cursor_err
+        end
+        if #cursor_rows == 0 then
+            db:release()
+            return nil, "Invalid artifact cursor"
+        end
+        cursor_created_at = cursor_rows[1].created_at
+    end
+
+    local filters = { sql.builder.expr("user_id = ?", user_id) }
+    if session_id and session_id ~= "" then
+        filters[#filters + 1] = sql.builder.expr("session_id = ?", session_id)
+    end
+    if cursor_created_at and cursor_artifact_id then
+        filters[#filters + 1] = sql.builder.expr(
+            "(created_at < ? OR (created_at = ? AND artifact_id < ?))",
+            cursor_created_at,
+            cursor_created_at,
+            cursor_artifact_id
+        )
+    end
+
+    local query = sql.builder.select(
+            "artifact_id", "session_id", "kind", "title", "meta", "created_at", "updated_at"
+        )
+        :from("artifacts")
+        :where(sql.builder.and_(filters))
+        :order_by("created_at DESC, artifact_id DESC")
+        :limit(limit + 1)
+
+    local artifacts, query_err = query:run_with(db):query()
+    db:release()
+    if query_err then return nil, "Failed to list user artifacts: " .. query_err end
+
+    local has_more = #artifacts > limit
+    if has_more then table.remove(artifacts) end
+    for _, artifact in ipairs(artifacts) do
+        if artifact.meta and artifact.meta ~= "" then
+            local decoded, decode_err = json.decode(artifact.meta :: string)
+            artifact.meta = decode_err and {} or decoded
+        elseif not artifact.meta then
+            artifact.meta = {}
+        end
+    end
+
+    return { artifacts = artifacts, has_more = has_more }
+end
+
 -- List artifacts by kind
 function artifact_repo.list_by_kind(session_id, kind, limit, offset)
     if not session_id or session_id == "" then

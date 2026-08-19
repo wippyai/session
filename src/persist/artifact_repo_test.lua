@@ -303,6 +303,103 @@ local function define_tests()
             test.is_nil(result)
             test.contains(tostring(err), "Artifact ID is required")
         end)
+
+        it("should list a user's artifacts with session scoping and cursor pagination", function()
+            -- Self-contained fixtures: the shared artifacts are updated and deleted
+            -- by earlier cases, so the catalog assertions own their rows outright.
+            local owner_id = uuid.v7()
+            local other_owner_id = uuid.v7()
+            local session_a = uuid.v7()
+            local session_b = uuid.v7()
+            local first_id = uuid.v7()
+            local second_id = uuid.v7()
+            local third_id = uuid.v7()
+            local foreign_id = uuid.v7()
+
+            local db_resource, _ = consts.get_db_resource()
+            local db, db_err = sql.get(db_resource)
+            if db_err then
+                error("Failed to connect to database: " .. db_err)
+            end
+
+            insert_artifact(db, first_id, session_a, owner_id, "static", "Catalog One",
+                "first content", { content_type = "text/markdown", display_type = "standalone" })
+            insert_artifact(db, second_id, session_a, owner_id, "static", "Catalog Two",
+                "second content", { content_type = "text/html", display_type = "inline" })
+            insert_artifact(db, third_id, session_b, owner_id, "dynamic", "Catalog Three",
+                "third content", { content_type = "application/json" })
+            insert_artifact(db, foreign_id, session_a, other_owner_id, "static", "Not Yours",
+                "foreign content", nil)
+
+            -- Everything this actor owns, across sessions.
+            local page, err = artifact_repo.list_by_user(owner_id, nil, 50, nil)
+            test.is_nil(err)
+            test.not_nil(page)
+            assert(page)
+            test.eq(#page.artifacts, 3)
+            test.eq(page.has_more, false)
+
+            -- A row owned by another actor is never returned, even from a shared session.
+            local by_id = {}
+            for _, artifact in ipairs(page.artifacts) do
+                by_id[artifact.artifact_id] = artifact
+            end
+            test.is_nil(by_id[foreign_id])
+            test.not_nil(by_id[first_id])
+            test.not_nil(by_id[second_id])
+            test.not_nil(by_id[third_id])
+
+            -- Metadata only: content bytes never reach the catalog.
+            test.is_nil(by_id[first_id].content)
+            test.eq(by_id[first_id].title, "Catalog One")
+            test.eq(by_id[second_id].meta.display_type, "inline")
+            test.eq(by_id[second_id].meta.content_type, "text/html")
+
+            -- The optional session filter narrows the same actor-scoped query.
+            local scoped, scoped_err = artifact_repo.list_by_user(owner_id, session_b, 50, nil)
+            test.is_nil(scoped_err)
+            assert(scoped)
+            test.eq(#scoped.artifacts, 1)
+            test.eq(scoped.artifacts[1].artifact_id, third_id)
+
+            -- Keyset pagination walks every row exactly once, with no gaps.
+            local seen = {}
+            local seen_count = 0
+            local cursor = nil
+            local pages = 0
+            repeat
+                local chunk, chunk_err = artifact_repo.list_by_user(owner_id, nil, 1, cursor)
+                test.is_nil(chunk_err)
+                assert(chunk)
+                for _, artifact in ipairs(chunk.artifacts) do
+                    test.is_nil(seen[artifact.artifact_id])
+                    seen[artifact.artifact_id] = true
+                    seen_count = seen_count + 1
+                    cursor = artifact.artifact_id
+                end
+                pages = pages + 1
+            until not chunk.has_more or pages > 10
+            test.eq(seen_count, 3)
+            test.eq(pages, 3)
+
+            -- An unknown cursor is rejected rather than silently restarting page one.
+            local invalid, invalid_err = artifact_repo.list_by_user(owner_id, nil, 50, uuid.v7())
+            test.is_nil(invalid)
+            test.contains(tostring(invalid_err), "Invalid artifact cursor")
+
+            -- A cursor naming another actor's row is out of scope, so it is invalid too.
+            local stolen, stolen_err = artifact_repo.list_by_user(owner_id, nil, 50, foreign_id)
+            test.is_nil(stolen)
+            test.contains(tostring(stolen_err), "Invalid artifact cursor")
+
+            local missing, missing_err = artifact_repo.list_by_user("", nil, 50, nil)
+            test.is_nil(missing)
+            test.contains(tostring(missing_err), "User ID is required")
+
+            db:execute("DELETE FROM artifacts WHERE session_id = $1 OR session_id = $2",
+                { session_a, session_b })
+            db:release()
+        end)
     end)
 end
 

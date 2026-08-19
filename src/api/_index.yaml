@@ -112,6 +112,32 @@ entries:
     func: get_session
     path: /sessions/get
 
+  # wippy.session.api:list_artifacts
+  - name: list_artifacts
+    kind: function.lua
+    meta:
+      comment: Lists metadata-only artifacts owned by the authenticated actor
+      router: app:api
+    source: file://list_artifacts.lua
+    modules:
+      - http
+      - security
+    imports:
+      artifact_repo: wippy.session.persist:artifact_repo
+    method: handler
+    pool:
+      size: 4
+
+  # wippy.session.api:list_artifacts.endpoint
+  - name: list_artifacts.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Actor-scoped artifact catalog with optional session filtering and cursor pagination
+      router: app:api
+    method: GET
+    func: list_artifacts
+    path: /artifacts
+
   # wippy.session.api:list_sessions
   - name: list_sessions
     kind: function.lua
