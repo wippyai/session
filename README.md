@@ -60,6 +60,13 @@ placement with an `inline` render mode puts the content in its own message; a
 `standalone` render mode with an `inline` placement gives a chip embedded in the
 agent's reply.
 
+Placement must not be mapped onto `type`. Returning `meta.display_type` as
+`type` for every kind was tried and reverted: it collapses the two settings into
+one, so a `standalone` placement can no longer carry inline content — the
+combination the reference tools produce by default. An author who wants a chip
+asks for the render mode directly (`type = "standalone"`) rather than getting it
+as a side effect of where the artifact is delivered.
+
 ### Content modes
 
 Exactly one applies. `title` is always required.
