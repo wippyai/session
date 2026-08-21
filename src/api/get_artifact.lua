@@ -7,6 +7,8 @@ local security = require("security")
 type ArtifactMetadataResponse = {
     uuid: string,
     type: string,
+    kind: string,
+    display_type: string?,
     title: string,
     created_at: string,
     updated_at: string,
@@ -118,6 +120,7 @@ local function handler()
     local response = {
         uuid = artifact.artifact_id,
         type = artifact.kind,
+        kind = artifact.kind,
         title = artifact.title,
         created_at = artifact.created_at,
         updated_at = artifact.updated_at,
@@ -130,11 +133,17 @@ local function handler()
         response.description = artifact.meta.description
         response.icon = artifact.meta.icon
         response.status = artifact.meta.status
+        response.display_type = artifact.meta.display_type
 
         -- Add page reference specific data if this is a view_ref artifact
         if artifact.kind == "view_ref" then
             response.page_id = artifact.meta.page_id
             response.is_view_reference = true
+            response.display_type = artifact.meta.display_type or "standalone"
+            -- Legacy overload, deliberately retained: existing clients (the
+            -- <w-artifact> renderer among them) read the display mode from
+            -- `type` for view_ref artifacts. New clients should read
+            -- `display_type`, which carries the same value for every kind.
             response.type = artifact.meta.display_type or "standalone"
 
             -- Also get the params if this is a view_ref

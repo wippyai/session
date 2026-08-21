@@ -31,6 +31,10 @@ entries:
         path: .meta.router
       - entry: wippy.session.api:get_session.endpoint
         path: .meta.router
+      - entry: wippy.session.api:list_artifacts
+        path: .meta.router
+      - entry: wippy.session.api:list_artifacts.endpoint
+        path: .meta.router
       - entry: wippy.session.api:list_sessions
         path: .meta.router
       - entry: wippy.session.api:list_sessions.endpoint

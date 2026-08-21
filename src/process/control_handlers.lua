@@ -137,6 +137,7 @@ function control_handlers.control_artifacts(ctx, op)
                     {
                         content_type = artifact_data.content_type or consts.CONTENT_TYPES.HTML,
                         description = artifact_data.description,
+                        preview = artifact_data.preview,
                         icon = artifact_data.icon,
                         status = artifact_data.status or consts.ARTIFACT_STATUS.IDLE,
                         page_id = artifact_data.page_id,
@@ -179,6 +180,7 @@ function control_handlers.control_artifacts(ctx, op)
                     {
                         content_type = artifact_data.content_type or consts.CONTENT_TYPES.MARKDOWN,
                         description = artifact_data.description,
+                        preview = artifact_data.preview,
                         icon = artifact_data.icon,
                         status = artifact_data.status or consts.ARTIFACT_STATUS.IDLE,
                         display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.INLINE
@@ -226,7 +228,14 @@ function control_handlers.control_artifacts(ctx, op)
                 -- reply (see the instructions block above). Emitting an artifact
                 -- message here for the inline case too would render it TWICE.
                 if artifact_data.instructions == false then
-                    ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT, artifact_data.title, {
+                    local message_id, message_err = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT, artifact_data.title, {
+                        artifact_id = artifact_id
+                    })
+                    if message_err then
+                        return nil, "Failed to store standalone artifact message: " .. message_err
+                    end
+                    ctx.upstream:send_message_update(message_id, "artifact", {
+                        message_id = message_id,
                         artifact_id = artifact_id
                     })
                 end
