@@ -167,7 +167,16 @@ local function run(args: SessionArgs)
         public_meta = session_data.public_meta,
     })
 
-    process.registry.register("session." .. args.session_id)
+    -- The registered name is what makes a session single. Ignoring the result
+    -- let a second process start under the same id and drive the same session:
+    -- both hold their own writer, both append to the same conversation, and the
+    -- one that lost the race keeps answering on a name that no longer routes to
+    -- it. Callers cannot prevent this on their own -- the relay plugin, for
+    -- one, checks only its own map before spawning -- so the guard belongs here.
+    local registered, register_err = process.registry.register("session." .. args.session_id)
+    if not registered then
+        error("Session " .. tostring(args.session_id) .. " is already running: " .. tostring(register_err))
+    end
 
     local session_state = {
         stopping = false,
