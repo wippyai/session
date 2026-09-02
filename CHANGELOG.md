@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/wippyai/session/compare/v0.4.1...v0.5.0) (2026-09-02)
+
+
+### Features
+
+* **api:** actor-scoped artifact catalog, plus artifact creation and metadata fixes ([#30](https://github.com/wippyai/session/issues/30)) ([ce4a496](https://github.com/wippyai/session/commit/ce4a496b7439a7bad015becdd39481bb11dd9716))
+* **artifacts:** store content_version instead of returning a literal ([#34](https://github.com/wippyai/session/issues/34)) ([fe8847c](https://github.com/wippyai/session/commit/fe8847c68eec05fefe376d3aef3677ec733a0f13))
+
 ## [0.4.1](https://github.com/wippyai/session/compare/v0.4.0...v0.4.1) (2026-08-17)
 
 
