@@ -142,7 +142,7 @@ function artifact_repo.get(artifact_id)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "content", "meta", "created_at", "updated_at")
+    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "content", "meta", "created_at", "updated_at", "content_version")
         :from("artifacts")
         :where("artifact_id = ?", artifact_id)
         :limit(1)
@@ -236,6 +236,11 @@ function artifact_repo.update(artifact_id, updates)
 
     if updates.content ~= nil then
         update_query = update_query:set("content", updates.content)
+        -- Bumped here as well as in update_content, because this is the path the session
+        -- flow actually uses: control_handlers -> writer:update_artifact -> update().
+        -- Bumped only when the content changes; a title or meta edit is not a new version
+        -- of the content and must not invalidate a cached body.
+        update_query = update_query:set("content_version", sql.builder.expr("content_version + 1"))
         updated = true
     end
 
@@ -517,9 +522,13 @@ function artifact_repo.update_content(artifact_id, content)
     end
 
     -- Build the UPDATE query
+    -- content_version is bumped inside the same UPDATE rather than read, incremented and
+    -- written back: two concurrent writers doing read-then-write would both observe the
+    -- same value and one bump would be lost.
     local update_query = sql.builder.update("artifacts")
         :set("content", content)
         :set("updated_at", time.now():format(time.RFC3339))
+        :set("content_version", sql.builder.expr("content_version + 1"))
         :where("artifact_id = ?", artifact_id)
 
     -- Execute the query
@@ -532,6 +541,12 @@ function artifact_repo.update_content(artifact_id, content)
         return nil, "Failed to update artifact content: " .. err
     end
 
+    -- Deliberately not returning the new content_version. Reading it back here would be a
+    -- second statement on a fresh connection, so a concurrent writer could bump between the
+    -- UPDATE and the read and this call would report a version it did not produce. It would
+    -- also re-read the whole row including the content BLOB just to obtain an integer, which
+    -- is why list_by_session omits that column too. Callers that need the value read it from
+    -- the artifact endpoint, which is authoritative.
     return {
         artifact_id = artifact_id,
         updated = true

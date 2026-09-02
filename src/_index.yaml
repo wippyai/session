@@ -72,6 +72,8 @@ entries:
         path: ".meta.target_db"
       - entry: wippy.session.migration:10_index_artifacts_session_created
         path: ".meta.target_db"
+      - entry: wippy.session.migration:11_add_content_version_to_artifacts
+        path: ".meta.target_db"
     default: "app:db"
 
   - name: token_checkpoint_threshold
@@ -132,6 +134,7 @@ entries:
     kind: ns.requirement
     meta:
       description: "Function ID for delegation calls (delegation enabled when set)"
+    default: ""
     targets:
       - entry: wippy.session.env:delegation_func_id
         path: ".default"

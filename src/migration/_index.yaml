@@ -170,3 +170,20 @@ entries:
     imports:
       migration: wippy.migration:migration
     method: migrate
+
+  # wippy.session.migration:11_add_content_version_to_artifacts
+  - name: 11_add_content_version_to_artifacts
+    kind: function.lua
+    meta:
+      type: migration
+      tags:
+        - sessions
+      description: Add content_version to artifacts so the API value is stored rather than hardcoded.
+      depends_on:
+        - ns:wippy.migration
+        - wippy.session.migration:05_create_artifacts_table
+      timestamp: "2026-09-01T00:00:00Z"
+    source: file://11_add_content_version_to_artifacts.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
