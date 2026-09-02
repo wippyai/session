@@ -134,6 +134,7 @@ entries:
     kind: ns.requirement
     meta:
       description: "Function ID for delegation calls (delegation enabled when set)"
+    default: ""
     targets:
       - entry: wippy.session.env:delegation_func_id
         path: ".default"
