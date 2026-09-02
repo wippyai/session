@@ -124,7 +124,7 @@ local function handler()
         title = artifact.title,
         created_at = artifact.created_at,
         updated_at = artifact.updated_at,
-        content_version = 1
+        content_version = artifact.content_version or 1
     }
 
     -- Include metadata if available
