@@ -209,6 +209,108 @@ local function define_tests()
                 test.eq(built[2].content[1].text, "incomplete")
             end)
 
+            -- A tool result is replayed from its row on every turn, so a result carrying an
+            -- image keeps re-sending that image as a vision part long after the thing it
+            -- showed has changed. `stale` lets the producer withdraw its own result without
+            -- the row being deleted -- providers reject a function call whose result is
+            -- missing, so the pair has to survive.
+            it("should replace the result with a stale notice when marked stale", function()
+                local messages = {
+                    {
+                        message_id = "msg-11s",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ q = "test" }),
+                        metadata = {
+                            function_name = "look_at_thing",
+                            call_id = "call-11s",
+                            status = consts.FUNC_STATUS.SUCCESS,
+                            result = json.encode({ result = "a picture", _images = { { type = "image" } } }),
+                            stale = true
+                        }
+                    }
+                }
+
+                local builder, err = prompt_builder.build(messages, {}, {}, {
+                    include_contexts = false,
+                    include_files = false,
+                    cache_markers = false
+                })
+
+                test.is_nil(err)
+
+                local built = builder:get_messages()
+                -- The call and its result still pair up.
+                test.eq(#built, 2)
+                test.eq(built[1].role, "function_call")
+                test.eq(built[2].role, "function_result")
+
+                local text = built[2].content[1].text
+                test.is_true(text:find("STALE INFO", 1, true) ~= nil,
+                    "a withdrawn result must say so: " .. text)
+                -- The image only existed because it was encoded in the result content, so
+                -- replacing the content is what actually stops it being re-sent.
+                test.is_true(text:find("_images", 1, true) == nil,
+                    "the withdrawn content must not still carry its image: " .. text)
+                test.is_true(text:find("a picture", 1, true) == nil,
+                    "the withdrawn content must not still carry its text: " .. text)
+            end)
+
+            it("should carry the producer's reason when stale is a string", function()
+                local messages = {
+                    {
+                        message_id = "msg-11r",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ q = "test" }),
+                        metadata = {
+                            function_name = "look_at_thing",
+                            call_id = "call-11r",
+                            status = consts.FUNC_STATUS.SUCCESS,
+                            result = "old news",
+                            stale = "It was of version 4; the draft is now at version 6."
+                        }
+                    }
+                }
+
+                local builder, err = prompt_builder.build(messages, {}, {}, {
+                    include_contexts = false,
+                    include_files = false,
+                    cache_markers = false
+                })
+
+                test.is_nil(err)
+                local text = builder:get_messages()[2].content[1].text
+                test.is_true(text:find("version 4", 1, true) ~= nil,
+                    "the producer's reason is the useful half: " .. text)
+            end)
+
+            -- false and nil are the ordinary case and must not read as "withdrawn": a producer
+            -- writing stale = false is saying the result still stands.
+            it("should leave the result alone when stale is false", function()
+                local messages = {
+                    {
+                        message_id = "msg-11f",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ q = "test" }),
+                        metadata = {
+                            function_name = "fast_tool",
+                            call_id = "call-11f",
+                            status = consts.FUNC_STATUS.SUCCESS,
+                            result = "result text",
+                            stale = false
+                        }
+                    }
+                }
+
+                local builder, err = prompt_builder.build(messages, {}, {}, {
+                    include_contexts = false,
+                    include_files = false,
+                    cache_markers = false
+                })
+
+                test.is_nil(err)
+                test.eq(builder:get_messages()[2].content[1].text, "result text")
+            end)
+
             it("should add result content for success status", function()
                 local messages = {
                     {

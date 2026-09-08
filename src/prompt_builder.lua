@@ -164,15 +164,45 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                     builder:add_function_result(func_name, "incomplete", llm_call_id)
                 elseif metadata.status == consts.FUNC_STATUS.SUCCESS or
                     metadata.status == consts.FUNC_STATUS.ERROR then
-                    local result_content = metadata.result
-                    if type(result_content) == "table" then
-                        result_content = json.encode(result_content)
-                    elseif result_content == nil then
-                        result_content = "nil"
+                    -- A RESULT THAT HAS SINCE STOPPED BEING TRUE.
+                    --
+                    -- The conversation is rebuilt from these rows on every turn, so a tool
+                    -- result keeps being re-sent long after the thing it described has moved
+                    -- on. Usually that is right. It is the opposite when the result carries an
+                    -- IMAGE: the image is re-sent as a vision part every turn, and the model
+                    -- sees a picture of something that has since changed, with nothing
+                    -- attached to say so. It reads as perception rather than as a record with
+                    -- a date on it, and a model will answer from it without calling anything.
+                    --
+                    -- Only the tool that produced a result knows when it expires, and it
+                    -- cannot reach a prompt assembled here. So the producer marks its own row
+                    -- and this honours the mark.
+                    --
+                    -- The row is REPLACED, never dropped: providers reject a function call
+                    -- with no matching result, so the pair has to survive. Replacing the
+                    -- content is also what removes the image, since the image only exists
+                    -- because it is encoded in this content.
+                    local stale = metadata.stale
+                    if stale ~= nil and stale ~= false then
+                        local why = type(stale) == "string" and stale or ""
+                        builder:add_function_result(
+                            func_name,
+                            "STALE INFO: this result was withdrawn by the tool that produced " ..
+                            "it and no longer describes the current state." ..
+                            (why ~= "" and (" " .. why) or "") ..
+                            " Do not answer from it. Call the tool again if you need this.",
+                            llm_call_id)
                     else
-                        result_content = tostring(result_content)
+                        local result_content = metadata.result
+                        if type(result_content) == "table" then
+                            result_content = json.encode(result_content)
+                        elseif result_content == nil then
+                            result_content = "nil"
+                        else
+                            result_content = tostring(result_content)
+                        end
+                        builder:add_function_result(func_name, tostring(result_content), llm_call_id)
                     end
-                    builder:add_function_result(func_name, tostring(result_content), llm_call_id)
                 end
             end
         elseif msg.type == consts.MSG_TYPE.ARTIFACT then
