@@ -2,6 +2,58 @@ version: "1.0"
 namespace: wippy.session.api
 
 entries:
+  - name: context_staging_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://context_staging_test.lua
+    modules: [hash, time]
+    imports:
+      test: wippy.test:test
+      context_staging: wippy.session.api:context_staging
+      context_attachments: wippy.session:context_attachments
+    method: run
+
+  - name: context_staging
+    kind: function.lua
+    meta:
+      router: app:api
+    source: file://context_staging.lua
+    modules: [http, security, json, time]
+    imports:
+      session_writer: wippy.session.persist:writer
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      prompt_builder: wippy.session:prompt_builder
+    method: handler
+    pool:
+      size: 4
+
+  - name: context_staging.get
+    kind: http.endpoint
+    meta:
+      router: app:api
+    method: GET
+    func: context_staging
+    path: /sessions/context
+
+  - name: context_staging.post
+    kind: http.endpoint
+    meta:
+      router: app:api
+    method: POST
+    func: context_staging
+    path: /sessions/context
+
+  - name: context_staging.delete
+    kind: http.endpoint
+    meta:
+      router: app:api
+    method: DELETE
+    func: context_staging
+    path: /sessions/context
+
   # wippy.session.api:delete_session
   - name: delete_session
     kind: function.lua
@@ -196,9 +248,9 @@ entries:
     source: file://session_messages.lua
     modules:
       - http
+      - json
       - security
       - time
-      - json
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo

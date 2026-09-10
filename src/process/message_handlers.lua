@@ -1,7 +1,9 @@
 local json = require("json")
 local uuid = require("uuid")
+local hash = require("hash")
 local consts = require("consts")
 local prompt_builder = require("prompt_builder")
+local context_attachments = require("context_attachments")
 local tool_caller = require("tool_caller")
 local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
@@ -35,6 +37,68 @@ type ToolWrapperExecutionContext = {
 }
 
 local message_handlers = {}
+message_handlers._context_staging = require('context_staging_repo')
+
+message_handlers._authorize_file = function(file_uuid, actor_id, session_id)
+    return prompt_builder._authorize_file(file_uuid, actor_id, session_id)
+end
+
+function message_handlers.context_transport_capabilities(capabilities_version)
+    if capabilities_version ~= nil and capabilities_version ~= 1 then return nil, 'INVALID_CAPABILITIES_VERSION' end
+    local _, err = message_handlers._context_staging.cleanup()
+    if err then return nil, err end
+    local result = { context_attachments_transport = { version = 1, staging = true, max_context_bytes = 32768 } }
+    if capabilities_version == 1 then result.context_attachments_capabilities = context_attachments.capabilities() end
+    return result
+end
+
+local function reject_transport(ctx, op, code)
+    if op.request_id then ctx.upstream:command_error(op.request_id, code, 'Context transport request rejected') end
+    return { completed = true, rejected = true, error = code }
+end
+
+local function reject_file_references(ctx, op)
+    local code = consts.ERROR_CODES.INVALID_FILE_REFERENCES
+    if op.request_id then
+        ctx.upstream:command_error(op.request_id, code, 'One or more attached files are unavailable')
+    end
+    return { completed = true, rejected = true, error = code }
+end
+
+local function validate_file_references(file_uuids, actor_id, session_id)
+    if file_uuids == nil then return true end
+    if type(file_uuids) ~= 'table' then return false end
+
+    local length = #file_uuids
+    local key_count = 0
+    for key, _ in pairs(file_uuids) do
+        key_count = key_count + 1
+        if type(key) ~= 'number' or key % 1 ~= 0 or key < 1 or key > length then
+            return false
+        end
+    end
+    if key_count ~= length then return false end
+
+    local seen = {}
+    for index = 1, length do
+        local file_uuid = file_uuids[index]
+        if type(file_uuid) ~= 'string' or file_uuid == '' or seen[file_uuid] then
+            return false
+        end
+        local ok, authorized = pcall(message_handlers._authorize_file, file_uuid, actor_id, session_id)
+        if not ok or authorized ~= true then return false end
+        seen[file_uuid] = true
+    end
+    return true
+end
+
+message_handlers._authorize_visual = function(request)
+    return prompt_builder._authorize_visual(request)
+end
+
+message_handlers._resolve_visual = function(request)
+    return prompt_builder._resolve_visual(request)
+end
 
 local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
 local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
@@ -278,15 +342,183 @@ local function outcome_from_agent_result(result: any): table
 end
 
 function message_handlers.handle_message(ctx, op)
-    local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, op.data.text or "", {
-        file_uuids = op.data.file_uuids
-    })
+    local attachments = op.data.context_attachments
+    local reference = op.data.context_attachments_ref
+    local receipt, accepted_message = nil, nil
+    local existing_file_message = nil
+    if reference == nil and attachments == nil and op.data.file_uuids ~= nil
+        and op.request_id and type(ctx.writer.get_message_by_request_id) == 'function' then
+        local lookup_err
+        existing_file_message, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        if lookup_err then
+            ctx.upstream:command_error(op.request_id, consts.ERROR_CODES.STORAGE_ERROR, 'Unable to verify message retry')
+            return nil, lookup_err
+        end
+    end
+    if reference == nil and attachments ~= nil and op.request_id and type(ctx.writer.get_message_by_request_id) == 'function' then
+        local existing, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        if lookup_err then return reject_transport(ctx, op, 'CONTEXT_STAGING_UNAVAILABLE') end
+        if existing then
+            local supplied = context_attachments.canonical_json(attachments)
+            local original = context_attachments.canonical_json(existing.metadata and existing.metadata.context_attachments)
+            if existing.context_receipt or not supplied or supplied ~= original then
+                return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
+            end
+            accepted_message = existing
+            attachments = existing.metadata.context_attachments
+        end
+    end
+    if reference ~= nil then
+        local staging = message_handlers._context_staging
+        if attachments ~= nil or not staging.valid_reference(reference) or not staging.valid_request_id(op.request_id) then
+            return reject_transport(ctx, op, 'INVALID_CONTEXT_REFERENCE')
+        end
+        local existing, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        if lookup_err then return reject_transport(ctx, op, 'CONTEXT_STAGING_UNAVAILABLE') end
+        local prior = existing and existing.context_receipt
+        if prior and prior.actor_id == ctx.user_id
+            and context_attachments.canonical_json(prior.reference) == context_attachments.canonical_json(reference) then
+            accepted_message = existing
+            attachments = existing.metadata and existing.metadata.context_attachments
+            if type(attachments) ~= 'table' then return reject_transport(ctx, op, 'INVALID_CONTEXT_RECEIPT') end
+            local canonical = context_attachments.canonical_json(attachments)
+            if not canonical or #canonical ~= reference.content_bytes
+                or 'sha256:' .. hash.sha256(canonical) ~= reference.content_hash then
+                return reject_transport(ctx, op, 'INVALID_CONTEXT_RECEIPT')
+            end
+        else
+            local resolve_err
+            attachments, resolve_err = staging.resolve(ctx.user_id, ctx.session_id, op.request_id, reference)
+            if not attachments then return reject_transport(ctx, op, resolve_err) end
+            receipt = { actor_id = ctx.user_id, reference = reference }
+        end
+    end
+    if attachments ~= nil and not accepted_message then
+        local validated, validation_err = context_attachments.validate(attachments, {
+            session_id = ctx.session_id,
+            require_visual_authorization = true,
+            visual_authorizer = message_handlers._authorize_visual,
+            visual_resolver = message_handlers._resolve_visual,
+        })
+        if not validated then
+            if op.request_id then
+                ctx.upstream:command_error(
+                    op.request_id,
+                    consts.ERROR_CODES.INVALID_CONTEXT_ATTACHMENTS,
+                    context_attachments.format_error(validation_err)
+                )
+            end
+            return {
+                completed = true,
+                rejected = true,
+                error = validation_err
+            }
+        end
+        attachments = validated
+    end
+
+    local metadata = {
+        file_uuids = op.data.file_uuids,
+        context_attachments = attachments
+    }
+    local request_hash = nil
+    if op.request_id then
+        local canonical, canonical_err = context_attachments.canonical_json({
+            text = op.data.text or "",
+            file_uuids = op.data.file_uuids or {},
+            context_attachments = attachments or {},
+        })
+        if not canonical then
+            ctx.upstream:command_error(op.request_id, consts.ERROR_CODES.INVALID_JSON, tostring(canonical_err))
+            return { completed = true, rejected = true }, canonical_err
+        end
+        local digest, digest_err = hash.sha256(canonical)
+        if digest_err then
+            ctx.upstream:command_error(op.request_id, consts.ERROR_CODES.STORAGE_ERROR, tostring(digest_err))
+            return nil, digest_err
+        end
+        request_hash = "sha256:" .. digest
+    end
+    if existing_file_message then
+        if existing_file_message.request_hash ~= request_hash then
+            return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
+        end
+        accepted_message = existing_file_message
+    end
+    if accepted_message and accepted_message.request_hash ~= request_hash then
+        return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
+    end
+    if not accepted_message and not validate_file_references(op.data.file_uuids, ctx.user_id, ctx.session_id) then
+        return reject_file_references(ctx, op)
+    end
+    local message_id, err, duplicate
+    if accepted_message then
+        message_id, duplicate = accepted_message.message_id, true
+    else
+        message_id, err, duplicate = ctx.writer:add_message(
+        consts.MSG_TYPE.USER,
+        op.data.text or "",
+        metadata,
+        op.request_id,
+        request_hash,
+        receipt
+    )
+    end
     if err then
+        if receipt and (err == 'CONTEXT_REFERENCE_UNAVAILABLE' or err == 'INVALID_CONTEXT_REFERENCE'
+            or err == 'CONTEXT_SESSION_UNAVAILABLE') then
+            return reject_transport(ctx, op, err)
+        end
+        if op.request_id then
+            local error_code = err == "Request ID conflict"
+                and consts.ERROR_CODES.REQUEST_CONFLICT
+                or consts.ERROR_CODES.STORAGE_ERROR
+            ctx.upstream:command_error(op.request_id, error_code, err)
+        end
         return nil, err
     end
 
-    ctx.upstream:message_received(message_id, op.data.text or "", op.data.file_uuids)
+    local dispatch
+    if ctx.dispatch_manager then
+        local dispatch_err
+        dispatch, dispatch_err = require('dispatch_repo').get(ctx.session_id, message_id)
+        if not dispatch then return nil, dispatch_err or 'DISPATCH_UNAVAILABLE' end
+        ctx.dispatch_manager:accepted(dispatch, op.ui_action_runtime, duplicate)
+    end
+    local attachment_refs = {}
+    if op.request_id then
+        for _, attachment in ipairs(attachments or {}) do
+            table.insert(attachment_refs, {
+                attachment_id = attachment.attachment_id,
+                kind = attachment.kind,
+                version = attachment.version,
+                content_hash = attachment.content_hash
+            })
+        end
+    end
+    if duplicate then
+        ctx.upstream:command_success(op.request_id, {
+            message_id = message_id,
+            attachments = attachment_refs,
+            dispatch = dispatch and require('dispatch_repo').descriptor(dispatch) or nil
+        })
+        return {
+            completed = true,
+            duplicate = true,
+            message_id = message_id,
+        }
+    end
 
+    ctx.upstream:message_received(message_id, op.data.text or "", op.data.file_uuids, attachments, op.request_id)
+    if op.request_id then
+        ctx.upstream:command_success(op.request_id, {
+            message_id = message_id,
+            attachments = attachment_refs,
+            dispatch = dispatch and require('dispatch_repo').descriptor(dispatch) or nil
+        })
+    end
+
+    if ctx.dispatch_manager then return { completed = true, message_id = message_id } end
     return {
         message_id = message_id,
         next_ops = {
@@ -294,7 +526,8 @@ function message_handlers.handle_message(ctx, op)
                 type = consts.OP_TYPE.AGENT_STEP,
                 message_id = message_id,
                 request_id = op.request_id,
-                from_user = true
+                from_user = true,
+                ui_action_runtime = op.ui_action_runtime,
             }
         }
     }
@@ -318,6 +551,10 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local response_id, err = uuid.v7()
+    if ctx.dispatch_root then
+        response_id = ctx.operation_key == 'root' and ctx.dispatch_root.row.response_id
+            or require('dispatch_repo').output_id(ctx.dispatch_root.row.dispatch_id, ctx.operation_key, 'response')
+    end
     if err then
         return nil, "Failed to generate response ID: " .. err
     end
@@ -358,7 +595,9 @@ function message_handlers.agent_step(ctx, op)
     local runtime_options = {
         context = session_context
     }
-    if ctx.upstream.conn_pid then
+    if ctx.stream_target then
+        runtime_options.stream_target = ctx.stream_target
+    elseif ctx.upstream.conn_pid then
         runtime_options.stream_target = {
             reply_to = ctx.upstream.conn_pid,
             topic = ctx.upstream:get_message_topic(response_id)
@@ -432,7 +671,8 @@ function message_handlers.agent_step(ctx, op)
                     type = consts.OP_TYPE.AGENT_STEP,
                     message_id = op.message_id,
                     request_id = op.request_id,
-                    from_user = false
+                    from_user = false,
+                    ui_action_runtime = op.ui_action_runtime,
                 }
             }
         }
@@ -515,7 +755,8 @@ function message_handlers.agent_step(ctx, op)
             message_id = op.message_id,
             response_id = response_id,
             request_id = op.request_id,
-            has_text_response = (result.result and result.result ~= "")
+            has_text_response = (result.result and result.result ~= ""),
+            ui_action_runtime = op.ui_action_runtime,
         })
     end
 
@@ -523,6 +764,7 @@ function message_handlers.agent_step(ctx, op)
     if op.from_user and result.tokens then
         table.insert(background_ops, {
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
+            background = true,
             tokens = result.tokens,
             agent_options = agent.agent_options or {},
             checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
@@ -559,6 +801,19 @@ function message_handlers.process_tools(ctx, op)
 
     local caller = tool_caller.new()
     caller:set_strategy(tool_caller.STRATEGY.PARALLEL)
+    caller:set_runtime_context_resolver(function(call_id, tool_call)
+        if not op.ui_action_runtime then
+            return nil, "UI action unavailable: agent actions were not enabled for this turn"
+        end
+        return {
+            ui_action_runtime = {
+                broker_pid = op.ui_action_runtime.broker_pid,
+                delivery_handle = op.ui_action_runtime.delivery_handle,
+                session_id = op.ui_action_runtime.session_id,
+                host_instance_id = op.ui_action_runtime.host_instance_id,
+            }
+        }, nil
+    end)
 
     local op_agent = op.agent
     if type(op_agent) ~= "table" then
@@ -600,7 +855,7 @@ function message_handlers.process_tools(ctx, op)
     end
 
     for call_id, tool_call in pairs(validated_tools) do
-        if tool_call.valid then
+        if tool_call.valid or tool_call.error then
             local message_type = consts.MSG_TYPE.FUNCTION
             local send_upstream = true
 
@@ -619,12 +874,14 @@ function message_handlers.process_tools(ctx, op)
                 status = consts.FUNC_STATUS.PENDING,
                 provider_metadata = tool_call.provider_metadata
             })
+            if err or not message_id then return nil, err or 'Tool message persistence failed' end
 
             if not err then
                 tool_call.message_id = message_id
 
                 if send_upstream then
-                    ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
+                    ctx.upstream:send_message_update(message_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
+                        call_id = call_id,
                         function_name = tool_call.name
                     })
                 end
@@ -658,7 +915,7 @@ function message_handlers.process_tools(ctx, op)
             })
 
             if not is_delegation and not is_private then
-                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+                ctx.upstream:send_message_update(message_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
                     call_id = call_id,
                     function_name = result_data.tool_call.name,
                     error = "Function execution failed"
@@ -716,7 +973,7 @@ function message_handlers.process_tools(ctx, op)
             })
 
             if not is_delegation and not is_private then
-                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
+                ctx.upstream:send_message_update(message_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
                     call_id = call_id,
                     function_name = result_data.tool_call.name
                 })
@@ -732,7 +989,8 @@ function message_handlers.process_tools(ctx, op)
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,
-            request_id = op.request_id
+            request_id = op.request_id,
+            ui_action_runtime = op.ui_action_runtime,
         })
     end
 
@@ -746,7 +1004,8 @@ function message_handlers.agent_continue(ctx, op)
     return message_handlers.agent_step(ctx, {
         message_id = op.message_id,
         request_id = op.request_id,
-        from_user = false
+        from_user = false,
+        ui_action_runtime = op.ui_action_runtime,
     })
 end
 

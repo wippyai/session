@@ -2,6 +2,27 @@ version: "1.0"
 namespace: wippy.session.env
 
 entries:
+  - name: dispatch_heartbeat_seconds
+    kind: env.variable
+    meta:
+      private: true
+    variable: SESSION_DISPATCH_HEARTBEAT_SECONDS
+    default: '5'
+
+  - name: dispatch_owner_lease_seconds
+    kind: env.variable
+    meta:
+      private: true
+    variable: SESSION_DISPATCH_OWNER_LEASE_SECONDS
+    default: '30'
+
+  - name: dispatch_queue_page
+    kind: env.variable
+    meta:
+      private: true
+    variable: SESSION_DISPATCH_QUEUE_PAGE
+    default: '32'
+
   # wippy.session.env:checkpoint_function_id
   - name: checkpoint_function_id
     kind: env.variable
@@ -101,3 +122,13 @@ entries:
       private: true
 
     variable: SESSION_TOKEN_CHECKPOINT_THRESHOLD
+
+  # wippy.session.env:ui_action_ttl_seconds
+  - name: ui_action_ttl_seconds
+    kind: env.variable
+    meta:
+      comment: Maximum lifetime in seconds for a pending agent UI clarification action
+      icon: tabler:clock-hour-2
+      private: true
+
+    variable: SESSION_UI_ACTION_TTL_SECONDS

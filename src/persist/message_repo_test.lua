@@ -149,6 +149,206 @@ local function define_tests()
             test.eq(message.metadata.tokens.completion, 5)
         end)
 
+        it("should replay a durable request exactly once through a fresh repository connection", function()
+            local first_message_id = uuid.v7()
+            local retry_message_id = uuid.v7()
+            local request_id = "request-" .. uuid.v7()
+            local request_hash = "sha256:" .. string.rep("a", 64)
+            local first, first_err = message_repo.create(
+                first_message_id,
+                test_data.session_id,
+                "idempotency_test",
+                "same request",
+                { context_attachments = {} },
+                request_id,
+                request_hash
+            )
+            test.is_nil(first_err)
+            test.is_false(first.duplicate)
+
+            local retry, retry_err = message_repo.create(
+                retry_message_id,
+                test_data.session_id,
+                "idempotency_test",
+                "same request",
+                { context_attachments = {} },
+                request_id,
+                request_hash
+            )
+            test.is_nil(retry_err)
+            test.is_true(retry.duplicate)
+            test.eq(retry.message_id, first_message_id)
+
+            local other_session_id = uuid.v7()
+            local other_session, other_session_err = session_repo.create(
+                other_session_id,
+                test_data.user_id,
+                test_data.context_id,
+                "Other idempotency scope",
+                "test"
+            )
+            test.is_nil(other_session_err)
+            test.not_nil(other_session)
+            local other_scope, other_scope_err = message_repo.create(
+                uuid.v7(),
+                other_session_id,
+                "idempotency_test",
+                "same request",
+                { context_attachments = {} },
+                request_id,
+                request_hash
+            )
+            test.is_nil(other_scope_err)
+            test.is_false(other_scope.duplicate)
+
+            local recovered, recover_err = message_repo.get_by_request_id(test_data.session_id, request_id)
+            test.is_nil(recover_err)
+            test.eq(recovered.message_id, first_message_id)
+            test.eq(recovered.request_hash, request_hash)
+
+            local count, count_err = message_repo.count_by_type(test_data.session_id, "idempotency_test")
+            test.is_nil(count_err)
+            test.eq(count, 1)
+
+            local conflict, conflict_err = message_repo.create(
+                uuid.v7(),
+                test_data.session_id,
+                "idempotency_test",
+                "changed request",
+                {},
+                request_id,
+                "sha256:" .. string.rep("b", 64)
+            )
+            test.is_nil(conflict)
+            test.eq(conflict_err, "Request ID conflict")
+
+            message_repo.delete(first_message_id)
+            session_repo.delete(other_session_id)
+        end)
+
+        it("should not reserve a request ID when repository validation rejects atomically", function()
+            local request_id = "request-" .. uuid.v7()
+            local rejected, rejected_err = message_repo.create(
+                uuid.v7(),
+                test_data.session_id,
+                "idempotency_rejection",
+                "invalid",
+                {},
+                request_id,
+                "invalid-hash"
+            )
+            test.is_nil(rejected)
+            test.contains(tostring(rejected_err), "Request hash is invalid")
+
+            local accepted, accepted_err = message_repo.create(
+                uuid.v7(),
+                test_data.session_id,
+                "idempotency_rejection",
+                "valid",
+                {},
+                request_id,
+                "sha256:" .. string.rep("c", 64)
+            )
+            test.is_nil(accepted_err)
+            test.not_nil(accepted)
+            message_repo.delete(accepted.message_id)
+        end)
+
+        it("should preserve ordered context attachments across repository retrieval paths", function()
+            local message_id = uuid.v7()
+            local metadata = {
+                context_attachments = {
+                    {
+                        attachment_id = "attention-first",
+                        kind = "wippy.attention",
+                        version = 1,
+                        content_hash = "sha256:" .. string.rep("a", 64),
+                    },
+                    {
+                        attachment_id = "context-second",
+                        kind = "example.context",
+                        version = 7,
+                        content_hash = "sha256:" .. string.rep("b", 64),
+                    },
+                },
+            }
+
+            local created, create_err = message_repo.create(
+                message_id,
+                test_data.session_id,
+                "attachment_fidelity",
+                "Attachment fidelity",
+                metadata
+            )
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local fetched, fetch_err = message_repo.get(message_id)
+            test.is_nil(fetch_err)
+            test.eq(fetched.metadata.context_attachments[1].attachment_id, "attention-first")
+            test.eq(fetched.metadata.context_attachments[2].attachment_id, "context-second")
+
+            local by_type, type_err = message_repo.list_by_type(test_data.session_id, "attachment_fidelity")
+            test.is_nil(type_err)
+            test.eq(#by_type, 1)
+            test.eq(by_type[1].metadata.context_attachments[1].attachment_id, "attention-first")
+            test.eq(by_type[1].metadata.context_attachments[2].attachment_id, "context-second")
+
+            local after, after_err = message_repo.list_after_message(test_data.session_id, message_id, 10)
+            test.is_nil(after_err)
+            test.eq(#after, 1)
+            test.eq(after[1].metadata.context_attachments[1].attachment_id, "attention-first")
+            test.eq(after[1].metadata.context_attachments[2].attachment_id, "context-second")
+
+            local history, history_err = message_repo.list_by_session(test_data.session_id, 500)
+            test.is_nil(history_err)
+            local history_message = nil
+            for _, item in ipairs(history.messages) do
+                if item.message_id == message_id then
+                    history_message = item
+                    break
+                end
+            end
+            test.not_nil(history_message)
+            test.eq(history_message.metadata.context_attachments[1].attachment_id, "attention-first")
+            test.eq(history_message.metadata.context_attachments[2].attachment_id, "context-second")
+
+            local deleted, delete_err = message_repo.delete(message_id)
+            test.is_nil(delete_err)
+            test.not_nil(deleted)
+        end)
+
+        it("should order equal-date history deterministically by message ID", function()
+            local db_resource, _ = consts.get_db_resource()
+            local db, db_err = sql.get(db_resource)
+            test.is_nil(db_err)
+            local date = "2026-09-04T00:00:00.000000000Z"
+            local first_id = "00000000-0000-7000-8000-000000000001"
+            local second_id = "00000000-0000-7000-8000-000000000002"
+            local insert_first, first_err = db:execute(
+                "INSERT INTO messages (message_id, session_id, date, type, data) VALUES ($1, $2, $3, $4, $5)",
+                { first_id, test_data.session_id, date, "equal_date_order", "first" }
+            )
+            test.is_nil(first_err)
+            test.not_nil(insert_first)
+            local insert_second, second_err = db:execute(
+                "INSERT INTO messages (message_id, session_id, date, type, data) VALUES ($1, $2, $3, $4, $5)",
+                { second_id, test_data.session_id, date, "equal_date_order", "second" }
+            )
+            test.is_nil(second_err)
+            test.not_nil(insert_second)
+            db:release()
+
+            local messages, list_err = message_repo.list_by_type(test_data.session_id, "equal_date_order")
+            test.is_nil(list_err)
+            test.eq(#messages, 2)
+            test.eq(messages[1].message_id, first_id)
+            test.eq(messages[2].message_id, second_id)
+
+            message_repo.delete(first_id)
+            message_repo.delete(second_id)
+        end)
+
         it("should list messages by session ID", function()
             local messages, err = message_repo.list_by_session(test_data.session_id)
 

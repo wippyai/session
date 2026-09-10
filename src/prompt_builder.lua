@@ -1,75 +1,298 @@
 local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
+local fs = require("fs")
+local base64 = require("base64")
+local hash = require("hash")
 
 type BuildOptions = {
     include_contexts: boolean?,
     include_files: boolean?,
+    include_context_attachments: boolean?,
+    context_attachment_max_bytes: number?,
+    visual_resolver: any?,
+    file_resolver: any?,
+    upload_repo: any?,
+    now: any?,
     cache_markers: boolean?,
 }
 
 local prompt_builder = {
-    _prompt = require("prompt")
+    _prompt = require("prompt"),
+    _context_attachments = require("context_attachments"),
+    _contract = contract,
+    _fs = fs,
 }
 
--- The session-owned, optional file-provider contract. An application that stores
--- uploads binds it (e.g. an uploads module) so the session can resolve a file_uuid to
--- its metadata WITHOUT the session depending on any concrete uploads module. Modeled on
--- wippy.agent:resolver: consumed only when something binds it; otherwise the caller
--- falls back to the injected options below, so apps that never bound it keep working.
 local FILE_PROVIDER_CONTRACT = "wippy.session:file_provider"
+local CONTENT_PROVIDER_CONTRACT = "userspace.contract:content_provider"
+local UPLOAD_CONTENT_PROVIDER = "userspace.uploads:content_provider"
+local VISUAL_MAX_BYTES = 5 * 1024 * 1024
 
--- resolve_via_contract returns the upload record for file_uuid through the file_provider
--- contract, or nil when no application binds it (the optional-contract pattern: inspect
--- implementations() first, fall back when none). Swappable for tests via the seam below.
-prompt_builder._contract = contract
-local function resolve_via_contract(file_uuid: string): any
-    local def, err = prompt_builder._contract.get(FILE_PROVIDER_CONTRACT)
-    if err or not def then
+local function resolve_file_via_contract(file_uuid)
+    local definition, get_err = prompt_builder._contract.get(FILE_PROVIDER_CONTRACT)
+    if get_err or not definition then
         return nil
     end
-    local impls, impl_err = (def :: any):implementations()
-    if impl_err or type(impls) ~= "table" or #(impls :: { any }) == 0 then
-        -- Contract defined but unbound: this app provides no uploads. Fall back.
+    local implementations, implementations_err = definition:implementations()
+    if implementations_err or type(implementations) ~= "table" or #implementations == 0 then
         return nil
     end
-    local inst, open_err = (def :: any):open()
-    if open_err or not inst then
+    local instance, open_err = definition:open()
+    if open_err or not instance then
         return nil
     end
-    local ok, info = pcall(function() return (inst :: any):get_info({ file_uuid = file_uuid }) end)
-    if not ok or type(info) ~= "table" then
+    local ok, info, info_err = pcall(function()
+        return instance:get_info({ file_uuid = file_uuid })
+    end)
+    if not ok or info_err or type(info) ~= "table" then
         return nil
     end
     return info
 end
 
-local function resolve_file(file_uuid: string, options: table)
-    -- 1. Canonical: the session's file_provider contract, when an app binds one.
-    local via_contract = resolve_via_contract(file_uuid)
-    if via_contract ~= nil then
+local function resolve_file(file_uuid, options)
+    local via_contract = resolve_file_via_contract(file_uuid)
+    if via_contract then
         return via_contract
     end
-
-    -- 2. Fallback (preserves prior behavior for apps that bind no contract): an
-    -- explicitly injected resolver function or upload_repo passed through options.
     local resolver = options.file_resolver or options.file_lookup
     if type(resolver) == "function" then
-        local ok, upload_or_err, err = pcall(resolver, file_uuid)
-        if ok and not err and upload_or_err then
-            return upload_or_err
-        end
-    end
-
-    local upload_repo = options.upload_repo
-    if type(upload_repo) == "table" and type(upload_repo.get) == "function" then
-        local ok, upload, err = pcall(upload_repo.get, file_uuid)
-        if ok and not err and upload then
+        local ok, upload, resolve_err = pcall(resolver, file_uuid)
+        if ok and not resolve_err and type(upload) == "table" then
             return upload
         end
     end
-
+    if type(options.upload_repo) == "table" and type(options.upload_repo.get) == "function" then
+        local ok, upload, upload_err = pcall(options.upload_repo.get, file_uuid)
+        if ok and not upload_err and type(upload) == "table" then
+            return upload
+        end
+    end
     return nil
+end
+
+local function close_file(file)
+    pcall(function()
+        file:close()
+    end)
+end
+
+local function read_exact(file, expected_bytes)
+    local parts = {}
+    local total = 0
+    while total < expected_bytes do
+        local chunk, read_err = file:read(math.min(64 * 1024, expected_bytes - total))
+        if type(chunk) == "string" and #chunk > 0 then
+            table.insert(parts, chunk)
+            total = total + #chunk
+        end
+        if read_err and total < expected_bytes then
+            return nil
+        end
+        if type(chunk) ~= "string" or #chunk == 0 then
+            break
+        end
+    end
+    if total ~= expected_bytes then
+        return nil
+    end
+    return table.concat(parts)
+end
+
+local function authorized_file_info(file_uuid)
+    if type(file_uuid) ~= "string" or file_uuid == "" then
+        return nil
+    end
+    local definition, get_err = prompt_builder._contract.get(CONTENT_PROVIDER_CONTRACT)
+    if get_err or not definition then
+        return nil
+    end
+    local scoped, context_err = definition:with_context({
+        upload_id = file_uuid,
+    })
+    if context_err or not scoped then
+        return nil
+    end
+    local instance, open_err = scoped:open(UPLOAD_CONTENT_PROVIDER)
+    if open_err or not instance then
+        return nil
+    end
+    local ok, info, info_err = pcall(function()
+        return instance:get_info()
+    end)
+    if not ok or info_err or type(info) ~= "table"
+        or type(info.content_type) ~= "string"
+        or info.content_type == ""
+        or type(info.size) ~= "number"
+        or info.size < 0
+        or type(info.storage_id) ~= "string"
+        or info.storage_id == ""
+        or type(info.storage_path) ~= "string"
+        or info.storage_path == "" then
+        return nil
+    end
+
+    return info
+end
+
+local function authorized_visual_info(request)
+    if type(request) ~= "table"
+        or type(request.reference) ~= "table"
+        or request.reference.kind ~= "upload"
+        or type(request.reference.opaque_id) ~= "string"
+        or type(request.media) ~= "table"
+        or type(request.media.content_bytes) ~= "number"
+        or request.media.content_bytes < 1
+        or request.media.content_bytes > VISUAL_MAX_BYTES
+        or request.media.content_type ~= "image/png" and request.media.content_type ~= "image/webp" then
+        return nil
+    end
+
+    local info = authorized_file_info(request.reference.opaque_id)
+    if not info
+        or info.content_type ~= request.media.content_type
+        or info.size ~= request.media.content_bytes then
+        return nil
+    end
+    return info
+end
+
+local function authorize_visual_via_contract(request)
+    return authorized_visual_info(request) ~= nil
+end
+
+local function resolve_visual_via_contract(request)
+    local info: any = authorized_visual_info(request)
+    if not info then
+        return nil
+    end
+    local storage_id = info.storage_id
+    local storage_path = info.storage_path
+    if type(storage_id) ~= "string" or type(storage_path) ~= "string" then
+        return nil
+    end
+
+    local storage, storage_err = prompt_builder._fs.get(storage_id)
+    if storage_err or not storage then
+        return nil
+    end
+    local file, file_err = storage:open(storage_path, "r")
+    if file_err or not file then
+        return nil
+    end
+    local stat, stat_err = file:stat()
+    if stat_err or type(stat) ~= "table" or stat.size ~= request.media.content_bytes then
+        close_file(file)
+        return nil
+    end
+    local data = read_exact(file, request.media.content_bytes)
+    local final_stat, final_stat_err = file:stat()
+    close_file(file)
+    if not data or final_stat_err or type(final_stat) ~= "table"
+        or final_stat.size ~= request.media.content_bytes then
+        return nil
+    end
+    return {
+        data = data,
+        content_type = info.content_type,
+    }
+end
+
+prompt_builder._resolve_file = resolve_file
+prompt_builder._authorize_file = function(file_uuid, actor_id, session_id)
+    if type(actor_id) ~= "string" or actor_id == "" then
+        return false
+    end
+    local upload = resolve_file_via_contract(file_uuid)
+    if type(upload) ~= "table" or upload.user_id ~= actor_id then
+        return false
+    end
+    local info = authorized_file_info(file_uuid)
+    if not info then
+        return false
+    end
+    return true
+end
+
+function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
+    if type(prepared_file) ~= "table"
+        or type(actor_id) ~= "string" or actor_id == ""
+        or type(session_id) ~= "string" or session_id == "" then
+        return false, "prepared visual identity is invalid"
+    end
+    local upload = resolve_file_via_contract(prepared_file.uuid)
+    if type(upload) ~= "table" or upload.user_id ~= actor_id then
+        return false, "prepared visual is not owned by the session user"
+    end
+    local info = authorized_file_info(prepared_file.uuid)
+    if not info
+        or prepared_file.mime_type ~= upload.mime_type
+        or prepared_file.mime_type ~= info.content_type
+        or prepared_file.byte_size ~= upload.size
+        or prepared_file.byte_size ~= info.size then
+        return false, "prepared visual metadata does not match the upload"
+    end
+    local filename = type(upload.metadata) == "table" and upload.metadata.filename or nil
+    if type(filename) == "string" and filename ~= "" and filename ~= prepared_file.name then
+        return false, "prepared visual filename does not match the upload"
+    end
+    local resolved = resolve_visual_via_contract({
+        reference = {
+            kind = "upload",
+            opaque_id = prepared_file.uuid,
+        },
+        media = {
+            content_type = prepared_file.mime_type,
+            content_bytes = prepared_file.byte_size,
+        },
+    })
+    if type(resolved) ~= "table"
+        or type(resolved.data) ~= "string"
+        or #resolved.data ~= prepared_file.byte_size
+        or resolved.content_type ~= prepared_file.mime_type then
+        return false, "prepared visual content could not be resolved"
+    end
+    local digest, digest_err = hash.sha256(resolved.data)
+    if digest_err or prepared_file.sha256 ~= "sha256:" .. tostring(digest) then
+        return false, "prepared visual hash does not match the upload"
+    end
+    return true, nil
+end
+prompt_builder._authorize_visual = authorize_visual_via_contract
+prompt_builder._resolve_visual = resolve_visual_via_contract
+
+local function resolve_message_image(file_uuid, upload, options)
+    if type(upload) ~= "table"
+        or upload.mime_type ~= "image/png" and upload.mime_type ~= "image/webp" then
+        return nil
+    end
+    if type(upload.size) ~= "number" or upload.size < 1 or upload.size > VISUAL_MAX_BYTES then
+        return nil, "ATTACHED_IMAGE_INVALID"
+    end
+    local resolver = options.visual_resolver or prompt_builder._resolve_visual
+    local ok, resolved = pcall(resolver, {
+        reference = {
+            kind = "upload",
+            opaque_id = file_uuid,
+        },
+        media = {
+            content_type = upload.mime_type,
+            content_bytes = upload.size,
+        },
+    })
+    if not ok or type(resolved) ~= "table"
+        or type(resolved.data) ~= "string"
+        or resolved.content_type ~= upload.mime_type
+        or #resolved.data ~= upload.size
+        or #resolved.data > VISUAL_MAX_BYTES then
+        return nil, "ATTACHED_IMAGE_RESOLUTION_FAILED"
+    end
+    local encoded, encode_err = base64.encode(resolved.data)
+    if encode_err or type(encoded) ~= "string" or encoded == "" then
+        return nil, "ATTACHED_IMAGE_ENCODING_FAILED"
+    end
+    return prompt_builder._prompt.image_base64(resolved.content_type, encoded)
 end
 
 function prompt_builder.build(messages, contexts, session_meta, options)
@@ -80,6 +303,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     options = options or {}
     local include_contexts = options.include_contexts ~= false
     local include_files = options.include_files ~= false
+    local include_context_attachments = options.include_context_attachments ~= false
     local cache_markers = options.cache_markers ~= false
 
     local builder = prompt_builder._prompt.new()
@@ -102,13 +326,55 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
         elseif msg.type == consts.MSG_TYPE.USER then
-            builder:add_user(msg.data :: string)
+            local user_parts = { prompt_builder._prompt.text(msg.data :: string) }
+            if include_context_attachments and metadata.context_attachments then
+                local required, required_count = {}, 0
+                for _, attachment in ipairs(metadata.context_attachments) do
+                    if attachment.kind == 'wippy.attention' and attachment.version == 2 then
+                        required[attachment.attachment_id] = true
+                        required_count = required_count + 1
+                    end
+                end
+                if required_count > 0 then
+                    local ok, supported = pcall(prompt_builder._context_attachments.supports, 'wippy.attention', 2)
+                    if not ok or supported ~= true then return nil, 'REQUIRED_CONTEXT_RENDER_UNAVAILABLE' end
+                end
+                local render_ok, attachment_parts, diagnostics = pcall(prompt_builder._context_attachments.render,
+                    metadata.context_attachments,
+                    {
+                        max_bytes = options.context_attachment_max_bytes,
+                        session_id = session_meta and session_meta.session_id,
+                        visual_resolver = options.visual_resolver or prompt_builder._resolve_visual,
+                        now = options.now,
+                    }
+                )
+                if not render_ok or type(attachment_parts) ~= 'table' then
+                    return nil, 'CONTEXT_RENDER_FAILED'
+                end
+                if required_count > 0 then
+                    if #attachment_parts == 0 then return nil, 'REQUIRED_CONTEXT_RENDER_FAILED' end
+                    for _, diagnostic in ipairs(diagnostics or {}) do
+                        if required[diagnostic.attachment_id] then return nil, 'REQUIRED_CONTEXT_RENDER_FAILED' end
+                    end
+                end
+                for _, part in ipairs(attachment_parts) do
+                    table.insert(user_parts, part)
+                end
+            end
+            builder:add_message(prompt_builder._prompt.ROLE.USER, user_parts)
 
             if include_files and metadata.file_uuids and #metadata.file_uuids > 0 then
                 local file_info = {}
                 for _, file_uuid in ipairs(metadata.file_uuids) do
                     if type(file_uuid) == "string" then
-                        local upload = resolve_file(file_uuid, options)
+                        local upload = prompt_builder._resolve_file(file_uuid, options)
+                        local image_part, image_err = resolve_message_image(file_uuid, upload, options)
+                        if image_err then
+                            return nil, image_err
+                        end
+                        if image_part then
+                            builder:add_message(prompt_builder._prompt.ROLE.USER, { image_part })
+                        end
                         table.insert(file_info, {
                             filename = upload and upload.metadata and upload.metadata.filename or "Unknown filename",
                             size = upload and upload.size or 0,

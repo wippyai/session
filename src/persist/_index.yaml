@@ -2,6 +2,46 @@ version: "1.0"
 namespace: wippy.session.persist
 
 entries:
+  - name: dispatch_writer
+    kind: library.lua
+    source: file://dispatch_writer.lua
+    modules: [sql, json, time]
+    imports:
+      dispatch_repo: wippy.session.persist:dispatch_repo
+
+  - name: dispatch_repo
+    kind: library.lua
+    source: file://dispatch_repo.lua
+    modules: [sql, json, uuid, hash, time, env, security]
+    imports:
+      consts: wippy.session:consts
+      context_staging_repo: wippy.session.persist:context_staging_repo
+
+  - name: context_staging_repo
+    kind: library.lua
+    source: file://context_staging_repo.lua
+    modules: [sql, json, hash, uuid, time]
+    imports:
+      consts: wippy.session:consts
+
+  - name: context_staging_repo_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://context_staging_repo_test.lua
+    modules: [uuid, time, json, hash, sql]
+    imports:
+      test: wippy.test:test
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      context_attachments: wippy.session:context_attachments
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      consts: wippy.session:consts
+    method: run
+
   # wippy.session.persist:writer
   - name: writer
     kind: library.lua
@@ -99,7 +139,9 @@ entries:
       - json
       - time
     imports:
+      context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
+      dispatch_repo: wippy.session.persist:dispatch_repo
 
   # wippy.session.persist:message_repo_test
   - name: message_repo_test

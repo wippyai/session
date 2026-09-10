@@ -7,6 +7,8 @@ local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
 local funcs = require("funcs")
+local ui_action_broker = require("ui_action_broker")
+local prompt_builder = require("prompt_builder")
 
 type PluginArgs = {
     user_id: string,
@@ -59,7 +61,37 @@ local function run(args)
 
     process.set_options({ trap_links = true })
 
+    local broker: any = ui_action_broker.new({
+        ttl_seconds = base_config.ui_action_ttl_seconds,
+        send = function(pid, topic, payload)
+            return process.send(pid, topic, payload)
+        end,
+        monitor = function(pid)
+            return process.monitor(pid)
+        end,
+        unmonitor = function(pid)
+            return process.unmonitor(pid)
+        end,
+        new_id = function()
+            local id, id_err = uuid.v7()
+            if not id then
+                error("Failed to generate UI action ID: " .. tostring(id_err))
+            end
+            return id
+        end,
+        now = function()
+            return time.now():unix()
+        end,
+        format_time = function(unix_seconds)
+            return time.unix(unix_seconds, 0):utc():format_rfc3339()
+        end,
+        validate_prepared_file = function(prepared_file, session_id)
+            return prompt_builder.validate_prepared_file(prepared_file, state.user_id, session_id)
+        end,
+    })
+
     local gc_ticker = time.ticker(base_config.gc_interval)
+    local ui_action_ticker = time.ticker(consts.TIMEOUTS.UI_ACTION_SWEEP)
     local inbox = process.inbox()
     local events = process.events()
 
@@ -98,6 +130,7 @@ local function run(args)
 
         session_info.terminating = true
         session_info.terminate_reason = reason
+        broker:cancel_session(session_id, "unavailable", "session is terminating")
 
         logger:info("initiating graceful session termination", {
             user_id = state.user_id,
@@ -211,6 +244,7 @@ local function run(args)
         -- Reset status to IDLE to ensure clean recovery
         if existing_session and not state.active_sessions[session_id] then
             local current_meta = existing_session.meta or {}
+            current_meta.status = existing_session.status or current_meta.status
             if current_meta.status and current_meta.status ~= consts.STATUS.IDLE then
                 logger:info("detected crashed session - resetting status to idle", {
                     user_id = state.user_id,
@@ -398,7 +432,18 @@ local function run(args)
         end
     end
 
+    local action_intents = require('dispatch_action_intents').new(broker, process.pid())
+
     local function handle_message_or_command(payload_data, topic_type)
+        -- Ingress records private intent only. A claimed dispatch activates routing once.
+        local broker = {
+            bind_turn = function(_, intent)
+                local exists, err = require('dispatch_repo').request_exists(intent.session_id, intent.request_id)
+                if exists or err then return nil end
+                return action_intents:stage(intent)
+            end,
+            cancel_session = function() return true end,
+        }
         if not payload_data then
             return
         end
@@ -440,10 +485,40 @@ local function run(args)
             update_session_activity(session_id)
 
             if topic_type == consts.HANDLER_TYPES.MESSAGE then
+                local message_data = type(payload_data.data) == "table" and payload_data.data or {}
+                local clean_data = {}
+                for key, value in pairs(message_data) do
+                    if key ~= "runtime_context" then
+                        clean_data[key] = value
+                    end
+                end
+                local attention = nil
+                if type(message_data.runtime_context) == "table" then
+                    attention = message_data.runtime_context.attention
+                end
+                local ui_action_runtime = nil
+                if type(attention) == "table" then
+                    ui_action_runtime = broker:bind_turn({
+                        user_id = state.user_id,
+                        session_id = session_id,
+                        session_pid = session_info.pid,
+                        ingress_pid = state.user_hub_pid,
+                        conn_pid = conn_pid,
+                        host_instance_id = attention.host_instance_id,
+                        agent_actions_enabled = attention.agent_actions_enabled,
+                        request_id = request_id,
+                    })
+                    if ui_action_runtime then
+                        ui_action_runtime.broker_pid = process.pid()
+                    end
+                else
+                    broker:cancel_session(session_id, "unavailable", "agent actions unavailable for this turn")
+                end
                 process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
                     conn_pid = conn_pid,
-                    data = payload_data.data,
-                    request_id = request_id
+                    data = clean_data,
+                    request_id = request_id,
+                    ui_action_runtime = ui_action_runtime,
                 })
             elseif topic_type == consts.HANDLER_TYPES.COMMAND then
                 local cmd_data = payload_data.data or {}
@@ -469,10 +544,40 @@ local function run(args)
                 update_session_activity(created_session_id)
 
                 if topic_type == consts.HANDLER_TYPES.MESSAGE then
+                    local message_data = type(payload_data.data) == "table" and payload_data.data or {}
+                    local clean_data = {}
+                    for key, value in pairs(message_data) do
+                        if key ~= "runtime_context" then
+                            clean_data[key] = value
+                        end
+                    end
+                    local attention = nil
+                    if type(message_data.runtime_context) == "table" then
+                        attention = message_data.runtime_context.attention
+                    end
+                    local ui_action_runtime = nil
+                    if type(attention) == "table" then
+                        ui_action_runtime = broker:bind_turn({
+                            user_id = state.user_id,
+                            session_id = created_session_id,
+                            session_pid = recovered_session_info.pid,
+                            ingress_pid = state.user_hub_pid,
+                            conn_pid = conn_pid,
+                            host_instance_id = attention.host_instance_id,
+                            agent_actions_enabled = attention.agent_actions_enabled,
+                            request_id = request_id,
+                        })
+                        if ui_action_runtime then
+                            ui_action_runtime.broker_pid = process.pid()
+                        end
+                    else
+                        broker:cancel_session(created_session_id, "unavailable", "agent actions unavailable for this turn")
+                    end
                     process.send(recovered_session_info.pid :: string, consts.TOPICS.MESSAGE, {
                         conn_pid = conn_pid,
-                        data = payload_data.data,
-                        request_id = request_id
+                        data = clean_data,
+                        request_id = request_id,
+                        ui_action_runtime = ui_action_runtime,
                     })
                 elseif topic_type == consts.HANDLER_TYPES.COMMAND then
                     local cmd_data = payload_data.data or {}
@@ -520,7 +625,8 @@ local function run(args)
         local result = channel.select({
             inbox:case_receive(),
             events:case_receive(),
-            gc_ticker:channel():case_receive()
+            gc_ticker:channel():case_receive(),
+            ui_action_ticker:channel():case_receive()
         })
 
         if not result.ok then
@@ -534,7 +640,24 @@ local function run(args)
 
             logger:debug("received topic", { topic = topic })
 
-            if topic == consts.PLUGIN_TOPICS.OPEN then
+            if topic == 'session_dispatch_activate' then
+                local request = payload:data()
+                local active = type(request) == 'table' and state.active_sessions[request.session_id]
+                if active and active.pid == msg:from() then
+                    local row = require('dispatch_repo').get(request.session_id, request.message_id)
+                    local action_runtime = action_intents:activate(msg:from(), row, request)
+                    process.send(msg:from(), 'session_dispatch_activated', {
+                        nonce = request.nonce, dispatch_id = request.dispatch_id, runtime = action_runtime,
+                    })
+                end
+            elseif topic == 'session_dispatch_finished' then
+                local request = payload:data()
+                local active = type(request) == 'table' and state.active_sessions[request.session_id]
+                if active and active.pid == msg:from() then
+                    local row = require('dispatch_repo').get(request.session_id, request.message_id)
+                    if row and row.dispatch_id == request.dispatch_id then action_intents:finish(row) end
+                end
+            elseif topic == consts.PLUGIN_TOPICS.OPEN then
                 local payload_data = payload:data()
                 logger:debug("handling session open", { user_id = state.user_id })
                 create_session(payload_data)
@@ -556,6 +679,38 @@ local function run(args)
                     state.shutting_down = false
                     logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
                 end
+            elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_REQUEST then
+                local accepted, request_err = broker:request(msg:from(), payload:data())
+                if not accepted then
+                    logger:warn("UI action request rejected", {
+                        error = tostring(request_err or "unknown rejection"),
+                    })
+                end
+            elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_CANCEL then
+                broker:cancel(msg:from(), payload:data())
+            elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_RESULT then
+                local payload_data = payload:data() or {}
+                local accepted, result_err = broker:result(
+                    msg:from(),
+                    payload_data.conn_pid,
+                    payload_data.session_id,
+                    payload_data.data
+                )
+                if not accepted then
+                    logger:warn("UI action result rejected", {
+                        error = tostring(result_err or "unknown rejection"),
+                        request_id = payload_data.request_id,
+                        session_id = payload_data.session_id,
+                    })
+                    send_error(payload_data.conn_pid, "ui_action_invalid", "UI action result rejected", payload_data.request_id)
+                else
+                    local result_data = payload_data.data or {}
+                    logger:info("UI action result accepted", {
+                        request_id = result_data.request_id or payload_data.request_id,
+                        session_id = payload_data.session_id,
+                        status = result_data.status,
+                    })
+                end
             elseif string.sub(topic, 1, string.len(consts.TOPIC_PREFIXES.SESSION)) == consts.TOPIC_PREFIXES.SESSION then
                 if state.user_hub_pid then
                     process.send(state.user_hub_pid :: string, topic, payload:data())
@@ -564,8 +719,10 @@ local function run(args)
         elseif result.channel == events then
             local event = result.value
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
+                broker:handle_exit(event.from)
                 for session_id, session_info in pairs(state.active_sessions) do
                     if session_info.pid == event.from then
+                        action_intents:forget(session_id)
                         local err = "terminated"
                         if event.result and event.result.error then
                             err = tostring(event.result.error)
@@ -627,6 +784,7 @@ local function run(args)
 
                         if state.session_count == 0 then
                             gc_ticker:stop()
+                            ui_action_ticker:stop()
                             logger:info("plugin shutting down - no active sessions", { user_id = state.user_id })
                             return { status = "shutdown", user_id = state.user_id, reason = "no_active_sessions" }
                         end
@@ -637,11 +795,19 @@ local function run(args)
                 break
             end
         elseif result.channel == gc_ticker:channel() then
+            local _, context_cleanup_err = require('context_staging_repo').cleanup()
+            if context_cleanup_err then logger:warn('Context staging cleanup unavailable') end
             check_inactive_sessions()
+        elseif result.channel == ui_action_ticker:channel() then
+            broker:expire()
         end
     end
 
+    for session_id, _ in pairs(state.active_sessions) do
+        broker:cancel_session(session_id, "disconnected", "session plugin stopped")
+    end
     gc_ticker:stop()
+    ui_action_ticker:stop()
     logger:info("plugin shutting down", { user_id = state.user_id, active_sessions = state.session_count })
     return { status = "shutdown", user_id = state.user_id }
 end

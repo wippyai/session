@@ -2,6 +2,80 @@ version: "1.0"
 namespace: wippy.session.process
 
 entries:
+  - name: dispatch_action_intents
+    kind: library.lua
+    source: file://dispatch_action_intents.lua
+    modules: [uuid, time]
+
+  - name: dispatch_runtime
+    kind: library.lua
+    source: file://dispatch_runtime.lua
+    modules: [json, uuid, time]
+    imports:
+      dispatch_repo: wippy.session.persist:dispatch_repo
+      dispatch_writer: wippy.session.persist:dispatch_writer
+      consts: wippy.session:consts
+
+  - name: dispatch_action_intents_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://dispatch_action_intents_test.lua
+    imports:
+      dispatch_action_intents: wippy.session.process:dispatch_action_intents
+      test: wippy.test:test
+    method: run
+
+  - name: context_cleanup_group
+    kind: registry.entry
+
+  - name: context_cleanup_env_policy
+    kind: security.policy
+    groups: [wippy.session.process:context_cleanup_group]
+    policy:
+      actions: [env.get]
+      resources: 'wippy.session.env:database_resource'
+      effect: allow
+
+  - name: context_cleanup_db_policy
+    kind: security.policy
+    groups: [wippy.session.process:context_cleanup_group]
+    policy:
+      actions: [db.get]
+      resources: 'app:db'
+      effect: allow
+
+  - name: context_cleanup
+    kind: process.lua
+    source: file://context_cleanup.lua
+    modules: [time, logger]
+    imports:
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      dispatch_repo: wippy.session.persist:dispatch_repo
+    method: run
+
+  - name: context_cleanup_runtime
+    kind: library.lua
+    source: file://context_cleanup.lua
+    modules: [time, logger]
+    imports:
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      dispatch_repo: wippy.session.persist:dispatch_repo
+
+  - name: context_cleanup.service
+    kind: process.service
+    host: app:processes
+    process: context_cleanup
+    lifecycle:
+      auto_start: true
+      restart:
+        initial_delay: 1s
+      security:
+        actor:
+          id: session.context_cleanup
+        groups: [wippy.session.process:context_cleanup_group]
+
   # wippy.session.process:command_bus
   - name: command_bus
     kind: library.lua
@@ -18,6 +92,7 @@ entries:
       description: Handles communication between session process and upstream systems
     source: file://upstream.lua
     imports:
+      dispatch_repo: wippy.session.persist:dispatch_repo
       consts: wippy.session:consts
 
   # wippy.session.process:session_handlers
@@ -84,15 +159,59 @@ entries:
     modules:
       - json
       - uuid
+      - hash
       - funcs
       - time
     imports:
       consts: wippy.session:consts
       agent_context: wippy.agent:context
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
+      dispatch_repo: wippy.session.persist:dispatch_repo
       tool_caller: wippy.agent.tools:caller
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+
+  - name: message_handlers_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Tests atomic context attachment validation, persistence, and acknowledgement
+    source: file://message_handlers_test.lua
+    modules:
+      - hash
+    imports:
+      consts: wippy.session:consts
+      context_attachments: wippy.session:context_attachments
+      message_handlers: wippy.session.process:message_handlers
+      test: wippy.test:test
+    method: run
+
+  # wippy.session.process:ui_action_broker
+  - name: ui_action_broker
+    kind: library.lua
+    meta:
+      comment: Private per-user-session broker for targeted Attention UI actions
+      description: Correlates live Host UI actions without persistence or user-hub broadcast
+    source: file://ui_action_broker.lua
+    modules:
+      - hash
+
+  - name: ui_action_broker_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Tests targeted UI action routing correlation expiry replay and disconnect cleanup
+    source: file://ui_action_broker_test.lua
+    modules:
+      - hash
+    imports:
+      ui_action_broker: wippy.session.process:ui_action_broker
+      test: wippy.test:test
+    method: run
 
   # wippy.session.process:session
   - name: session
@@ -103,8 +222,11 @@ entries:
       default_host: app:processes
     source: file://session.lua
     modules:
+      - time
       - logger
     imports:
+      dispatch_runtime: wippy.session.process:dispatch_runtime
+      dispatch_repo: wippy.session.persist:dispatch_repo
       consts: wippy.session:consts
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
@@ -139,6 +261,11 @@ entries:
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
+      dispatch_repo: wippy.session.persist:dispatch_repo
+      dispatch_action_intents: wippy.session.process:dispatch_action_intents
+      ui_action_broker: wippy.session.process:ui_action_broker
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      prompt_builder: wippy.session:prompt_builder
     method: run
 
   # wippy.session.process:plugin_test

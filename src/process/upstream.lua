@@ -8,6 +8,12 @@ type UpstreamPayload = {
 local session_upstream = {}
 session_upstream.__index = session_upstream
 
+function session_upstream:with_dispatch(root, guard)
+    local scoped = setmetatable({}, { __index = self })
+    scoped._dispatch_root, scoped._dispatch_guard = root, guard
+    return scoped
+end
+
 function session_upstream.new(session_id, conn_pid, parent_pid)
     local self = setmetatable({}, session_upstream)
     self.session_id = session_id
@@ -56,12 +62,14 @@ function session_upstream:response_beginning(response_id, message_id)
 end
 
 -- Confirm message reception
-function session_upstream:message_received(message_id, text, file_uuids)
+function session_upstream:message_received(message_id, text, file_uuids, context_attachments, request_id)
     self:send_message_update(message_id, consts.UPSTREAM_TYPES.RECEIVED, {
         message_id = message_id,
+        request_id = request_id,
         text = text,
         timestamp = os.time(),
-        file_uuids = file_uuids
+        file_uuids = file_uuids,
+        context_attachments = context_attachments
     })
 end
 
@@ -83,11 +91,15 @@ function session_upstream:invalidate_message(message_id, reason)
 end
 
 -- Report command success with request_id
-function session_upstream:command_success(request_id)
-    self:_send_session_update(consts.UPSTREAM_TYPES.COMMAND_RESPONSE, {
+function session_upstream:command_success(request_id, details)
+    local payload = {
         request_id = request_id,
         success = true
-    })
+    }
+    for key, value in pairs(details or {}) do
+        payload[key] = value
+    end
+    self:_send_session_update(consts.UPSTREAM_TYPES.COMMAND_RESPONSE, payload)
 end
 
 -- Report command error with request_id
@@ -130,10 +142,19 @@ end
 
 -- Send message to appropriate recipients
 function session_upstream:_send_message(topic, message)
+    if self._dispatch_root then
+        if not self._dispatch_guard() or self._dispatch_root.failure then return nil, 'DISPATCH_FENCE_LOST' end
+        local tagged = {}
+        for key, value in pairs(message) do tagged[key] = value end
+        tagged.dispatch = require('dispatch_repo').descriptor(self._dispatch_root.row)
+        tagged.root_message_id = self._dispatch_root.row.message_id
+        message = tagged
+    end
     -- Send to parent process (which can relay to all connections)
     if self.parent_pid then
-        process.send(self.parent_pid :: string, topic, message)
+        return process.send(self.parent_pid :: string, topic, message)
     end
+    return false
 end
 
 return session_upstream

@@ -2,6 +2,162 @@ version: "1.0"
 namespace: app
 
 entries:
+  - name: dispatch_fixture_tool_policy
+    kind: security.policy
+    policy:
+      actions: [registry.get, funcs.call]
+      resources: 'app:dispatch_fixture_tool'
+      effect: allow
+
+  - name: dispatch_fixture_context_policy
+    kind: security.policy
+    policy:
+      actions: [funcs.context]
+      resources: context
+      effect: allow
+
+  - name: dispatch_fixture_tool
+    kind: function.lua
+    source: file://dispatch_fixture_tool.lua
+    method: run
+    meta:
+      type: tool
+      description: Bounded local dispatch tool lifecycle fixture
+      input_schema:
+        type: object
+        properties:
+          fail:
+            type: boolean
+
+  - name: dispatch_worker
+    kind: process.lua
+    source: file://dispatch_worker.lua
+    modules: [time, sql, json]
+    imports:
+      writer: wippy.session.persist:writer
+      reader: wippy.session.persist:reader
+      dispatch_repo: wippy.session.persist:dispatch_repo
+      dispatch_writer: wippy.session.persist:dispatch_writer
+      dispatch_runtime: wippy.session.process:dispatch_runtime
+      prompt_builder: wippy.session:prompt_builder
+      message_handlers: wippy.session.process:message_handlers
+      session_handlers: wippy.session.process:session_handlers
+      tools: wippy.agent.discovery:tools
+      command_bus: wippy.session.process:command_bus
+      upstream: wippy.session.process:upstream
+      consts: wippy.session:consts
+    method: run
+
+  - name: dispatch_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://dispatch_runtime_test.lua
+    modules: [time, uuid, sql, json, security, hash]
+    imports:
+      context_attachments: wippy.session:context_attachments
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: context_cleanup_worker
+    kind: process.lua
+    source: file://context_cleanup_worker.lua
+    modules: [env, sql, security]
+    imports:
+      context_cleanup: wippy.session.process:context_cleanup_runtime
+    method: run
+
+  - name: context_cleanup_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://context_cleanup_runtime_test.lua
+    modules: [time, uuid, sql, security]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      context_cleanup: wippy.session.process:context_cleanup_runtime
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: context_transport_reply_policy
+    kind: security.policy
+    policy:
+      actions: [process.send]
+      resources: '*'
+      effect: allow
+      conditions:
+        - field: resource
+          operator: eq
+          value_from: actor.meta.context_transport_reply_pid
+
+  - name: context_transport_name_policy
+    kind: security.policy
+    policy:
+      actions: [process.registry.register]
+      resources: 'session.*'
+      effect: allow
+
+  - name: context_transport_env_policy
+    kind: security.policy
+    policy:
+      actions: [env.get]
+      resources: 'wippy.session.env:*'
+      effect: allow
+
+  - name: context_transport_db_policy
+    kind: security.policy
+    policy:
+      actions: [db.get]
+      resources: 'app:db'
+      effect: allow
+
+  - name: context_transport_session_policy
+    kind: security.policy
+    policy:
+      actions: [read, write]
+      resources: 'session:*'
+      effect: allow
+
+  - name: context_transport_worker
+    kind: process.lua
+    source: file://context_transport_worker.lua
+    modules: [time]
+    imports:
+      writer: wippy.session.persist:writer
+      message_handlers: wippy.session.process:message_handlers
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      session_repo: wippy.session.persist:session_repo
+    method: run
+
+  - name: context_transport_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://context_transport_runtime_test.lua
+    modules: [time, uuid, hash, sql, security]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run
+
   - name: wait_for_boot
     kind: function.lua
     meta:
@@ -67,6 +223,7 @@ entries:
     meta:
       description: Session module configuration for testing
     component: "wippy/session"
+    version: ">=v0.1.0"
     parameters:
       - name: database_resource
         value: app:db
@@ -74,12 +231,15 @@ entries:
         value: app:api.public
       - name: env_storage
         value: app:env_storage
+      - name: ui_action_ttl_seconds
+        value: "2"
 
   - name: dep.wippy.llm
     kind: ns.dependency
     meta:
       description: LLM module configuration for testing
     component: "wippy/llm"
+    version: ">=v0.4.0"
     parameters:
       - name: process_host
         value: app:processes
@@ -91,6 +251,7 @@ entries:
     meta:
       description: Bootloader configuration for testing
     component: "wippy/bootloader"
+    version: ">=v0.3.0"
     parameters:
       - name: application_host
         value: app:processes
@@ -104,6 +265,7 @@ entries:
     meta:
       description: Views module for rendering
     component: "wippy/views"
+    version: ">=v0.4.0"
     parameters:
       - name: api_router
         value: app:api.public
@@ -116,3 +278,36 @@ entries:
     storage: app:env_storage
     default: "046e5a0594bb339ef5ddcd8c3a9b9b828ed066d53ee99138ec6da8795e38b55d"
     variable: ENCRYPTION_KEY
+
+  - name: attention_monitor_worker
+    kind: process.lua
+    source: file://attention_monitor_worker.lua
+    modules:
+      - time
+    method: run
+
+  - name: attention_monitor_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+      comment: Exercises real monitor and unmonitor without terminating the target
+    source: file://attention_monitor_test.lua
+    modules:
+      - time
+    imports:
+      test: wippy.test:test
+    method: run
+
+  - name: file_provider_func
+    kind: function.lua
+    source: file://file_provider_func.lua
+    method: get_info
+
+  - name: file_provider
+    kind: contract.binding
+    contracts:
+      - contract: wippy.session:file_provider
+        default: true
+        methods:
+          get_info: app:file_provider_func

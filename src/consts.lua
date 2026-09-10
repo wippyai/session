@@ -15,6 +15,7 @@ type SessionConfig = {
     encryption_key: string?,
     enable_agent_cache: boolean?,
     delegation_description_suffix: string?,
+    ui_action_ttl_seconds: number?,
 }
 
 local consts = {
@@ -30,6 +31,7 @@ local consts = {
         GC_INTERVAL = "wippy.session.env:gc_interval",
         DELEGATION_FUNC_ID = "wippy.session.env:delegation_func_id",
         ON_SESSION_END_FUNC_ID = "wippy.session.env:on_session_end_func_id",
+        UI_ACTION_TTL_SECONDS = "wippy.session.env:ui_action_ttl_seconds",
         ENCRYPTION_KEY = "ENCRYPTION_KEY"
     },
 
@@ -51,7 +53,10 @@ local consts = {
         MESSAGE = "message",
         COMMAND = "command",
         SHUTDOWN = "shutdown",
-        RESUME = "resume"
+        RESUME = "resume",
+        UI_ACTION_RESULT = "ui_action_result",
+        UI_ACTION_REQUEST = "session_ui_action_request",
+        UI_ACTION_CANCEL = "session_ui_action_cancel"
     },
 
     -- Session Status Constants
@@ -128,6 +133,7 @@ local consts = {
         STOP = "stop",
         MESSAGE = "message",
         COMMAND = "command",
+        UI_ACTION_RESULT = "session_ui_action_result",
         CONTINUE = "continue",
         CONTEXT = "context",
         ERROR = "error",
@@ -235,6 +241,9 @@ local consts = {
         SESSION_NOT_FOUND = "session_not_found",
         INVALID_MESSAGE_TYPE = "invalid_message_type",
         TOKEN_INVALID = "token_invalid",
+        REQUEST_CONFLICT = "request_conflict",
+        INVALID_FILE_REFERENCES = "invalid_file_references",
+        INVALID_CONTEXT_ATTACHMENTS = "invalid_context_attachments",
         AGENT_ERROR = "agent_error",
         STORAGE_ERROR = "storage_error"
     },
@@ -248,7 +257,8 @@ local consts = {
     TIMEOUTS = {
         CANCEL = "5s",
         SESSION_INACTIVITY = "1800s",
-        SHUTDOWN_GRACE = "10s"
+        SHUTDOWN_GRACE = "10s",
+        UI_ACTION_SWEEP = "250ms"
     },
 
     CONTEXT_ACTIONS = {
@@ -303,6 +313,7 @@ local consts = {
         CHECKPOINT_FUNCTION_ID = "wippy.session.funcs:checkpoint",
         TITLE_FUNCTION_ID = "wippy.session.funcs:title",
         GC_INTERVAL = "300s",
+        UI_ACTION_TTL_SECONDS = 120,
     }
 }
 
@@ -324,7 +335,15 @@ function consts.get_config()
     local gc_interval, _ = env.get(consts.ENV_IDS.GC_INTERVAL)
     local delegation_func_id, _ = env.get(consts.ENV_IDS.DELEGATION_FUNC_ID)
     local on_session_end_func_id, _ = env.get(consts.ENV_IDS.ON_SESSION_END_FUNC_ID)
+    local ui_action_ttl_seconds, _ = env.get(consts.ENV_IDS.UI_ACTION_TTL_SECONDS)
     local encryption_key, _ = env.get(consts.ENV_IDS.ENCRYPTION_KEY)
+    local parsed_ui_action_ttl = tonumber(ui_action_ttl_seconds)
+    if not parsed_ui_action_ttl
+        or parsed_ui_action_ttl % 1 ~= 0
+        or parsed_ui_action_ttl < 1 then
+        parsed_ui_action_ttl = consts.DEFAULTS.UI_ACTION_TTL_SECONDS
+    end
+    parsed_ui_action_ttl = math.min(parsed_ui_action_ttl, consts.DEFAULTS.UI_ACTION_TTL_SECONDS)
 
     return {
         -- Base configuration
@@ -338,6 +357,7 @@ function consts.get_config()
         gc_interval = gc_interval,
         delegation_func_id = delegation_func_id,
         on_session_end_func_id = on_session_end_func_id,
+        ui_action_ttl_seconds = parsed_ui_action_ttl,
         encryption_key = encryption_key,
 
         -- Internal constants
