@@ -235,8 +235,20 @@ local function define_tests()
         end)
     end)
     describe("Message context attachment ingestion", function()
+        local original_file_authorizer = message_handlers._authorize_file
+        after_each(function()
+            message_handlers._authorize_file = original_file_authorizer
+        end)
+
         it("persists text files and attachments before correlated acceptance", function()
             local ctx, calls = context()
+            ctx.user_id = "actor-1"
+            message_handlers._authorize_file = function(file_uuid, actor_id, session_id)
+                test.eq(file_uuid, "file-1")
+                test.eq(actor_id, "actor-1")
+                test.eq(session_id, "session-1")
+                return true
+            end
             local result, err = message_handlers.handle_message(ctx, {
                 request_id = "request-1",
                 data = {
