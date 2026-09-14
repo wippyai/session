@@ -589,9 +589,90 @@ local function define_tests()
                 test.is_nil(err)
                 test.contains(builder:get_messages()[2].content[1].text, "Unknown filename")
             end)
+
+            it("maps an ordinary uploaded image file into multimodal model input", function()
+                local data = "ordinary-image-bytes"
+                local original_contract = prompt_builder._contract
+                prompt_builder._contract = {
+                    get = function()
+                        return {
+                            implementations = function()
+                                return {}
+                            end,
+                        }
+                    end,
+                }
+                local builder, err = prompt_builder.build({ file_message() }, {}, {}, {
+                    file_resolver = function(file_uuid)
+                        test.eq(file_uuid, "upload-1")
+                        return {
+                            size = #data,
+                            mime_type = "image/png",
+                            metadata = { filename = "attention-target.png" },
+                        }
+                    end,
+                    visual_resolver = function(request)
+                        test.eq(request.reference.kind, "upload")
+                        test.eq(request.reference.opaque_id, "upload-1")
+                        test.eq(request.media.content_type, "image/png")
+                        test.eq(request.media.content_bytes, #data)
+                        return { data = data, content_type = "image/png" }
+                    end,
+                    cache_markers = false,
+                })
+                prompt_builder._contract = original_contract
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.eq(#built, 2)
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, "Inspect the file")
+                test.eq(built[1].content[2].type, "image")
+                test.eq(built[1].content[2].source.type, "base64")
+                test.eq(built[2].role, "developer")
+                test.contains(built[2].content[1].text, "attention-target.png")
+            end)
+
+            it("fails closed when an ordinary uploaded image resolves to different bytes", function()
+                local data = "ordinary-image-bytes"
+                local original_contract = prompt_builder._contract
+                prompt_builder._contract = {
+                    get = function()
+                        return {
+                            implementations = function()
+                                return {}
+                            end,
+                        }
+                    end,
+                }
+                local builder, err = prompt_builder.build({ file_message() }, {}, {}, {
+                    file_resolver = function()
+                        return {
+                            size = #data,
+                            mime_type = "image/png",
+                            metadata = { filename = "attention-target.png" },
+                        }
+                    end,
+                    visual_resolver = function()
+                        return { data = data .. "-changed", content_type = "image/png" }
+                    end,
+                    cache_markers = false,
+                })
+                prompt_builder._contract = original_contract
+
+                test.is_nil(builder)
+                test.eq(err, "ATTACHED_IMAGE_RESOLUTION_FAILED")
+            end)
         end)
 
         describe("authorized visual upload resolution", function()
+            local original_contract = prompt_builder._contract
+            local original_fs = prompt_builder._fs
+            after_each(function()
+                prompt_builder._contract = original_contract
+                prompt_builder._fs = original_fs
+            end)
+
             local function visual_request(data)
                 return {
                     reference = { kind = "upload", opaque_id = "upload-visual" },
@@ -659,6 +740,26 @@ local function define_tests()
                 local offset = 1
                 prompt_builder._contract = {
                     get = function(contract_id)
+                        if contract_id == "wippy.session:file_provider" then
+                            return {
+                                implementations = function()
+                                    return { "userspace.uploads:file_provider" }
+                                end,
+                                open = function()
+                                    return {
+                                        get_info = function(_, args)
+                                            test.eq(args.file_uuid, "upload-visual")
+                                            return overrides.upload or {
+                                                user_id = "actor-visual",
+                                                mime_type = "image/png",
+                                                size = #data,
+                                                metadata = { filename = "attention-target.png" },
+                                            }
+                                        end,
+                                    }
+                                end,
+                            }
+                        end
                         test.eq(contract_id, "userspace.contract:content_provider")
                         return {
                             with_context = function(_, context)
@@ -716,6 +817,18 @@ local function define_tests()
                 end
             end
 
+            local function prepared_file(data, overrides)
+                overrides = overrides or {}
+                return {
+                    uuid = "upload-visual",
+                    name = overrides.name or "attention-target.png",
+                    mime_type = overrides.mime_type or "image/png",
+                    byte_size = overrides.byte_size or #data,
+                    sha256 = overrides.sha256 or "sha256:" .. hash.sha256(data),
+                    scope = "target",
+                }
+            end
+
             it("authorizes the exact upload binding and reads only the declared bytes", function()
                 local original_contract = prompt_builder._contract
                 local original_fs = prompt_builder._fs
@@ -761,6 +874,67 @@ local function define_tests()
                 test.eq(built[1].role, "user")
                 test.eq(built[1].content[2].type, "image")
                 test.eq(built[1].content[2].source.type, "base64")
+            end)
+
+            it("validates prepared visual ownership metadata bytes and hash", function()
+                local data = "authorized-visual-bytes"
+                local requested_bytes = install_visual_mocks(data)
+
+                local valid, err = prompt_builder.validate_prepared_file(
+                    prepared_file(data),
+                    "actor-visual",
+                    "session-visual"
+                )
+
+                test.is_true(valid)
+                test.is_nil(err)
+                test.eq(#requested_bytes, 1)
+                test.eq(requested_bytes[1], #data)
+            end)
+
+            it("rejects prepared visuals owned by another actor before reading bytes", function()
+                local data = "authorized-visual-bytes"
+                local requested_bytes = install_visual_mocks(data, {
+                    upload = {
+                        user_id = "other-actor",
+                        mime_type = "image/png",
+                        size = #data,
+                        metadata = { filename = "attention-target.png" },
+                    },
+                })
+
+                local valid, err = prompt_builder.validate_prepared_file(
+                    prepared_file(data),
+                    "actor-visual",
+                    "session-visual"
+                )
+
+                test.is_false(valid)
+                test.eq(err, "prepared visual is not owned by the session user")
+                test.eq(#requested_bytes, 0)
+            end)
+
+            it("rejects prepared visual metadata and content hash mismatches", function()
+                local data = "authorized-visual-bytes"
+                local requested_bytes = install_visual_mocks(data)
+                local metadata_valid, metadata_err = prompt_builder.validate_prepared_file(
+                    prepared_file(data, { byte_size = #data + 1 }),
+                    "actor-visual",
+                    "session-visual"
+                )
+                test.is_false(metadata_valid)
+                test.eq(metadata_err, "prepared visual metadata does not match the upload")
+                test.eq(#requested_bytes, 0)
+
+                requested_bytes = install_visual_mocks(data)
+                local hash_valid, hash_err = prompt_builder.validate_prepared_file(
+                    prepared_file(data, { sha256 = "sha256:" .. string.rep("0", 64) }),
+                    "actor-visual",
+                    "session-visual"
+                )
+                test.is_false(hash_valid)
+                test.eq(hash_err, "prepared visual hash does not match the upload")
+                test.eq(#requested_bytes, 1)
             end)
 
             it("fails closed on authorization, metadata, or storage-size mismatch", function()

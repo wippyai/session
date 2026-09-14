@@ -2,6 +2,17 @@ version: "1.0"
 namespace: wippy.session.api
 
 entries:
+  - name: session_messages_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://session_messages_test.lua
+    imports:
+      test: wippy.test:test
+      session_messages: wippy.session.api:session_messages
+    method: run
+
   - name: context_staging_test
     kind: function.lua
     meta:

@@ -57,6 +57,7 @@ local function harness(ttl_seconds, overrides): (any, {any}, {any}, {any}, any)
         format_time = function(value)
             return "time-" .. value
         end,
+        validate_prepared_file = overrides and overrides.validate_prepared_file or nil,
     })
     return broker, sends, monitors, unmonitors, function(value)
         now = value
@@ -88,6 +89,21 @@ local function request(broker: any, runtime: any, waiter_pid, call_id, target_re
         session_id = runtime.session_id,
         host_instance_id = runtime.host_instance_id,
         args = { targets = { target_ref } },
+    })
+end
+
+local function capture_request(broker: any, runtime: any, waiter_pid, call_id, target_ref)
+    return broker:request(waiter_pid, {
+        delivery_handle = runtime.delivery_handle,
+        registry_id = "wippy.agent.tools:ui_action_capture_visual",
+        call_id = call_id,
+        reply_topic = reply_topic(call_id),
+        session_id = runtime.session_id,
+        host_instance_id = runtime.host_instance_id,
+        args = {
+            targets = { target_ref },
+            capture = { scope = "target", format = "image/png" },
+        },
     })
 end
 
@@ -324,6 +340,127 @@ local function define_tests()
             test.eq(#sends, 2)
             test.eq(sends[2].pid, "session-pid-s1")
             test.eq(sends[2].payload.status, "confirmed")
+        end)
+
+        it("validates a prepared visual before returning it to the tool worker", function()
+            local validated_file, validated_actor, validated_session
+            local broker, sends = harness(nil, {
+                validate_prepared_file = function(prepared_file, actor_id, session_id)
+                    validated_file = prepared_file
+                    validated_actor = actor_id
+                    validated_session = session_id
+                    return true, nil
+                end,
+            })
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            test.is_true(capture_request(broker, runtime, "tool-worker-pid", "call-visual", target("host-1", "one")))
+            local action: any = broker.pending.s1
+            local result = {
+                schema = "wippy.ui-action.v1",
+                message_type = "result",
+                result_id = "result-" .. action.action_id,
+                in_reply_to_action_id = action.action_id,
+                request_id = action.request_id,
+                session_id = action.session_id,
+                host_instance_id = action.host_instance_id,
+                completed_at = "2026-09-04T12:00:00Z",
+                status = "prepared",
+                prepared_file = {
+                    uuid = "file-1",
+                    name = "attention-target.png",
+                    mime_type = "image/png",
+                    byte_size = 128,
+                    sha256 = "sha256:" .. string.rep("b", 64),
+                    scope = "target",
+                },
+            }
+
+            test.is_true(broker:result("user-hub-pid", "conn-1", "s1", result))
+            test.eq(validated_file.uuid, "file-1")
+            test.eq(validated_actor, "user-1")
+            test.eq(validated_session, "s1")
+            test.eq(#sends, 2)
+            test.eq(sends[2].pid, "tool-worker-pid")
+            test.eq(sends[2].topic, reply_topic("call-visual"))
+            test.eq(sends[2].payload.status, "prepared")
+            test.eq(sends[2].payload.prepared_file.sha256, result.prepared_file.sha256)
+        end)
+
+        it("returns one terminal error when prepared visual integrity validation fails", function()
+            local broker, sends = harness(nil, {
+                validate_prepared_file = function()
+                    return false, "file hash mismatch"
+                end,
+            })
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            test.is_true(capture_request(broker, runtime, "tool-worker-pid", "call-visual", target("host-1", "one")))
+            local action: any = broker.pending.s1
+            local result = {
+                schema = "wippy.ui-action.v1",
+                message_type = "result",
+                result_id = "result-" .. action.action_id,
+                in_reply_to_action_id = action.action_id,
+                request_id = action.request_id,
+                session_id = action.session_id,
+                host_instance_id = action.host_instance_id,
+                completed_at = "2026-09-04T12:00:00Z",
+                status = "prepared",
+                prepared_file = {
+                    uuid = "file-1",
+                    name = "attention-target.png",
+                    mime_type = "image/png",
+                    byte_size = 128,
+                    sha256 = "sha256:" .. string.rep("b", 64),
+                    scope = "target",
+                },
+            }
+
+            local accepted, err = broker:result("user-hub-pid", "conn-1", "s1", result)
+            test.is_false(accepted)
+            test.eq(err, "file hash mismatch")
+            test.is_nil(broker.pending.s1)
+            test.eq(#sends, 2)
+            test.eq(sends[2].payload.status, "error")
+            test.eq(sends[2].payload.reason, "Prepared visual failed integrity validation")
+
+            local duplicate, duplicate_status = broker:result("user-hub-pid", "conn-1", "s1", result)
+            test.is_true(duplicate)
+            test.eq(duplicate_status, "duplicate")
+            test.eq(#sends, 2)
+        end)
+
+        it("returns one terminal error when prepared visual validation is unavailable", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            test.is_true(capture_request(broker, runtime, "tool-worker-pid", "call-visual", target("host-1", "one")))
+            local action: any = broker.pending.s1
+            local result = {
+                schema = "wippy.ui-action.v1",
+                message_type = "result",
+                result_id = "result-" .. action.action_id,
+                in_reply_to_action_id = action.action_id,
+                request_id = action.request_id,
+                session_id = action.session_id,
+                host_instance_id = action.host_instance_id,
+                completed_at = "2026-09-04T12:00:00Z",
+                status = "prepared",
+                prepared_file = {
+                    uuid = "file-1",
+                    name = "attention-target.png",
+                    mime_type = "image/png",
+                    byte_size = 128,
+                    sha256 = "sha256:" .. string.rep("b", 64),
+                    scope = "target",
+                },
+            }
+
+            local accepted, err = broker:result("user-hub-pid", "conn-1", "s1", result)
+            test.is_false(accepted)
+            test.eq(err, "prepared visual validation is unavailable")
+            test.is_nil(broker.pending.s1)
+            test.eq(#sends, 2)
+            test.eq(sends[2].payload.status, "error")
+            test.eq(sends[2].payload.reason, "Prepared visual validation is unavailable")
         end)
 
         it("authenticates completed-action correlation before accepting a replay", function()

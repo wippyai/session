@@ -539,6 +539,7 @@ function ui_action_broker:request(waiter_pid, request)
         action_id = self.deps.new_id(),
         request_id = request.call_id,
         reply_topic = request.reply_topic,
+        user_id = binding.user_id,
         session_id = binding.session_id,
         session_pid = binding.session_pid,
         ingress_pid = binding.ingress_pid,
@@ -638,7 +639,12 @@ function ui_action_broker:result(sender_pid, conn_pid, session_id, result)
             self:_finish(action, self:_make_result(action, "error", "Prepared visual validation is unavailable"))
             return false, "prepared visual validation is unavailable"
         end
-        local ok, accepted, validation_error = pcall(validator, checked.prepared_file, action.session_id)
+        local ok, accepted, validation_error = pcall(
+            validator,
+            checked.prepared_file,
+            action.user_id,
+            action.session_id
+        )
         if not ok or accepted ~= true then
             self:_finish(action, self:_make_result(action, "error", "Prepared visual failed integrity validation"))
             return false, validation_error or "prepared visual failed integrity validation"

@@ -7,17 +7,20 @@
 
 TEST_DIR := test
 TEST_DB  := .wippy/test.db
+WIPPY ?= wippy
+TEST_CONFIG ?=
+TEST_CONFIG_ARG := $(if $(TEST_CONFIG),--config $(TEST_CONFIG))
 
 .PHONY: test lint install clean
 
 test: clean
-	cd $(TEST_DIR) && wippy run test
+	cd $(TEST_DIR) && $(WIPPY) test -c $(TEST_CONFIG_ARG)
 
 lint:
-	cd $(TEST_DIR) && wippy lint
+	cd $(TEST_DIR) && $(WIPPY) lint
 
 install:
-	cd $(TEST_DIR) && wippy install
+	cd $(TEST_DIR) && $(WIPPY) install
 
 clean:
 	cd $(TEST_DIR) && rm -f $(TEST_DB) $(TEST_DB)-wal $(TEST_DB)-shm
