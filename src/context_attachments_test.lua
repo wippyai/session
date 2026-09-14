@@ -203,18 +203,19 @@ local function define_tests()
         local function compact_v3()
             local attachment, payload = compact()
             for index, segment in ipairs(payload.path_dictionary) do
+                local segment_data = segment :: any
                 local attrs = {}
                 for _, key in ipairs({ 'label', 'panel_id', 'surface_id', 'artifact_id', 'page_id', 'package_id',
                     'tag_name', 'selector_hint', 'frame_origin', 'coordinate_quality' }) do
-                    if segment[key] ~= nil then attrs[key] = segment[key] end
+                    if segment_data[key] ~= nil then attrs[key] = segment_data[key] end
                 end
                 for _, key in ipairs({ 'rect', 'clip_rect' }) do
-                    if segment[key] ~= nil then
-                        attrs[key] = { segment[key].x, segment[key].y, segment[key].width, segment[key].height }
+                    if segment_data[key] ~= nil then
+                        attrs[key] = { segment_data[key].x, segment_data[key].y, segment_data[key].width, segment_data[key].height }
                     end
                 end
-                if segment.local_to_parent ~= nil then attrs.local_to_parent = segment.local_to_parent.matrix end
-                payload.path_dictionary[index] = { segment.kind, segment.mount_id, segment.generation, attrs }
+                if segment_data.local_to_parent ~= nil then attrs.local_to_parent = segment_data.local_to_parent.matrix end
+                payload.path_dictionary[index] = { segment_data.kind, segment_data.mount_id, segment_data.generation, attrs }
             end
             payload.schema, attachment.version, attachment.attachment_id = 'wippy.attention.v3', 3, 'compact-v3-1'
             replace_content(attachment, payload)
@@ -346,7 +347,7 @@ local function define_tests()
                 local copy = assert(json.decode(context_attachments.canonical_json(attachment)))
                 copy.attachment_id = 'compact-' .. index
                 array[#array + 1] = copy
-                sum = sum + bytes
+                sum = sum + (bytes :: number)
                 if sum <= 262144 then test.is_true(context_attachments.validate(array) ~= nil)
                 else
                     test.is_true(#context_attachments.canonical_json(array) < 32768)

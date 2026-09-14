@@ -4,6 +4,7 @@ local contract = require("contract")
 local fs = require("fs")
 local base64 = require("base64")
 local hash = require("hash")
+local time = require("time")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -17,6 +18,11 @@ type BuildOptions = {
     cache_markers: boolean?,
 }
 
+type VisualRequest = {
+    reference: { kind: string, opaque_id: string },
+    media: { content_type: string, content_bytes: number },
+}
+
 local prompt_builder = {
     _prompt = require("prompt"),
     _context_attachments = require("context_attachments"),
@@ -28,6 +34,34 @@ local FILE_PROVIDER_CONTRACT = "wippy.session:file_provider"
 local CONTENT_PROVIDER_CONTRACT = "userspace.contract:content_provider"
 local UPLOAD_CONTENT_PROVIDER = "userspace.uploads:content_provider"
 local VISUAL_MAX_BYTES = 5 * 1024 * 1024
+
+local function file_not_expired(value)
+    if value == nil then
+        return true
+    end
+    if type(value) == "number" then
+        return value > time.now():unix()
+    end
+    if type(value) ~= "string" or value == "" then
+        return false
+    end
+    local ok, expires = pcall(time.parse, time.RFC3339, value)
+    return ok == true and expires ~= nil and expires:unix() > time.now():unix()
+end
+
+local function upload_session_matches(upload, session_id)
+    if type(upload) ~= "table" then
+        return false
+    end
+    local metadata = type(upload.metadata) == "table" and upload.metadata or {}
+    local bound_session = upload.session_id or metadata.session_id
+    return bound_session == nil or bound_session == session_id
+end
+
+local function upload_not_expired(upload)
+    local metadata = type(upload) == "table" and type(upload.metadata) == "table" and upload.metadata or {}
+    return file_not_expired(upload and (upload.expires_at or metadata.expires_at))
+end
 
 local function resolve_file_via_contract(file_uuid)
     local definition, get_err = prompt_builder._contract.get(FILE_PROVIDER_CONTRACT)
@@ -129,14 +163,15 @@ local function authorized_file_info(file_uuid)
         or type(info.storage_id) ~= "string"
         or info.storage_id == ""
         or type(info.storage_path) ~= "string"
-        or info.storage_path == "" then
+        or info.storage_path == ""
+        or not file_not_expired(info.expires_at) then
         return nil
     end
 
     return info
 end
 
-local function authorized_visual_info(request)
+local function authorized_visual_info(request: VisualRequest)
     if type(request) ~= "table"
         or type(request.reference) ~= "table"
         or request.reference.kind ~= "upload"
@@ -158,11 +193,11 @@ local function authorized_visual_info(request)
     return info
 end
 
-local function authorize_visual_via_contract(request)
+local function authorize_visual_via_contract(request: VisualRequest)
     return authorized_visual_info(request) ~= nil
 end
 
-local function resolve_visual_via_contract(request)
+local function resolve_visual_via_contract(request: VisualRequest)
     local info: any = authorized_visual_info(request)
     if not info then
         return nil
@@ -205,7 +240,9 @@ prompt_builder._authorize_file = function(file_uuid, actor_id, session_id)
         return false
     end
     local upload = resolve_file_via_contract(file_uuid)
-    if type(upload) ~= "table" or upload.user_id ~= actor_id then
+    if type(upload) ~= "table" or upload.user_id ~= actor_id
+        or not upload_session_matches(upload, session_id)
+        or not upload_not_expired(upload) then
         return false
     end
     local info = authorized_file_info(file_uuid)
@@ -221,8 +258,15 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
         or type(session_id) ~= "string" or session_id == "" then
         return false, "prepared visual identity is invalid"
     end
+    if type(prepared_file.uuid) ~= "string" or prepared_file.uuid == ""
+        or type(prepared_file.mime_type) ~= "string"
+        or type(prepared_file.byte_size) ~= "number" then
+        return false, "prepared visual identity is invalid"
+    end
     local upload = resolve_file_via_contract(prepared_file.uuid)
-    if type(upload) ~= "table" or upload.user_id ~= actor_id then
+    if type(upload) ~= "table" or upload.user_id ~= actor_id
+        or not upload_session_matches(upload, session_id)
+        or not upload_not_expired(upload) then
         return false, "prepared visual is not owned by the session user"
     end
     local info = authorized_file_info(prepared_file.uuid)
@@ -288,11 +332,13 @@ local function resolve_message_image(file_uuid, upload, options)
         or #resolved.data > VISUAL_MAX_BYTES then
         return nil, "ATTACHED_IMAGE_RESOLUTION_FAILED"
     end
-    local encoded, encode_err = base64.encode(resolved.data)
+    local resolved_data = resolved.data :: string
+    local resolved_content_type = resolved.content_type :: string
+    local encoded, encode_err = base64.encode(resolved_data)
     if encode_err or type(encoded) ~= "string" or encoded == "" then
         return nil, "ATTACHED_IMAGE_ENCODING_FAILED"
     end
-    return prompt_builder._prompt.image_base64(resolved.content_type, encoded)
+    return prompt_builder._prompt.image_base64(resolved_content_type, encoded)
 end
 
 function prompt_builder.build(messages, contexts, session_meta, options)
@@ -368,7 +414,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 for _, file_uuid in ipairs(metadata.file_uuids) do
                     if type(file_uuid) == "string" then
                         local upload = prompt_builder._resolve_file(file_uuid, options)
-                        local image_part, image_err = resolve_message_image(file_uuid, upload, options)
+                        local image_part, image_err = resolve_message_image(file_uuid, upload, options :: BuildOptions)
                         if image_err then
                             return nil, image_err
                         end

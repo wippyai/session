@@ -4,10 +4,11 @@ local staging = require('context_staging_repo')
 local sessions = require('session_repo')
 
 local function run(args)
-    local sent, send_err = process.send(args.reply_pid, 'context_worker_started', {})
-    if not sent then error(tostring(send_err)) end
+    local reply_pid = args.reply_pid :: string
+    local sent, send_err = process.send(reply_pid, 'context_worker_started', {})
+    if not sent then error('context worker send failed') end
     local session_writer, writer_err = writer.new(args.session_id)
-    assert(process.send(args.reply_pid, 'context_worker_ready', { authorized = session_writer ~= nil, reason = writer_err }))
+    assert(process.send(reply_pid, 'context_worker_ready', { authorized = session_writer ~= nil, reason = writer_err }))
     local inbox = process.inbox()
     while true do
         local msg = inbox:receive()
@@ -24,10 +25,10 @@ local function run(args)
             result.error = 'UNAUTHORIZED_WORKER'
         else
             local acknowledgements, echoes = {}, {}
-            local add_message = session_writer.add_message
+            local add_message = assert(session_writer.add_message, 'session writer add_message unavailable')
             if request.pause_before_commit then
                 session_writer.add_message = function(self, ...)
-                    assert(process.send(args.reply_pid, 'context_worker_before_commit', {}))
+                    assert(process.send(reply_pid, 'context_worker_before_commit', {}))
                     local deadline = require('time').after('3s')
                     local selected = channel.select({ inbox:case_receive(), deadline:case_receive() })
                     assert(selected.channel ~= deadline and selected.ok, 'commit barrier timed out')
@@ -47,7 +48,7 @@ local function run(args)
             result.acknowledgements, result.echoes = acknowledgements, echoes
         end
         result.sequence = request.sequence
-        assert(process.send(args.reply_pid, 'context_worker_result', result))
+        assert(process.send(reply_pid, 'context_worker_result', result))
     end
 end
 

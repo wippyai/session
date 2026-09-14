@@ -58,20 +58,21 @@ function runtime:wake(bus)
     local row, err = dispatches.claim(self.owner)
     if err then return nil, err end
     if not row then return true end
-    local config, decode_err = json.decode(row.config_json)
+    local row_data = row :: any
+    local config, decode_err = json.decode(row_data.config_json :: string)
     if decode_err or type(config) ~= 'table' then
-        dispatches.finish({ session_id = row.session_id, dispatch_id = row.dispatch_id,
-            generation = row.generation, worker_id = self.worker_id }, 'DISPATCH_HANDLER_FAILED')
+        dispatches.finish({ session_id = row_data.session_id, dispatch_id = row_data.dispatch_id,
+            generation = row_data.generation, worker_id = self.worker_id }, 'DISPATCH_HANDLER_FAILED')
         return nil, 'DISPATCH_INVALID_CONFIG'
     end
-    local root = { row = row, config = config, pending = 1, operation_count = 1, operations = { root = 'queued' }, stream_nonce = uuid.v7(),
-        fence = { session_id = row.session_id, dispatch_id = row.dispatch_id, generation = row.generation, worker_id = self.worker_id },
-        action_runtime = self.pending_actions[row.dispatch_id] }
-    self.pending_actions[row.dispatch_id] = nil
+    local root = { row = row_data, config = config, pending = 1, operation_count = 1, operations = { root = 'queued' }, stream_nonce = uuid.v7(),
+        fence = { session_id = row_data.session_id, dispatch_id = row_data.dispatch_id, generation = row_data.generation, worker_id = self.worker_id },
+        action_runtime = self.pending_actions[row_data.dispatch_id] }
+    self.pending_actions[row_data.dispatch_id] = nil
     self.root = root
-    self:status(row)
-    local queued, queue_err = bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, message_id = row.message_id,
-        request_id = row.request_id, from_user = true, dispatch_root = root, operation_key = 'root',
+    self:status(row_data)
+    local queued, queue_err = bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, message_id = row_data.message_id,
+        request_id = row_data.request_id, from_user = true, dispatch_root = root, operation_key = 'root',
         ui_action_runtime = root.action_runtime, internal = true })
     if not queued then
         root.failure = 'DISPATCH_ENQUEUE_FAILED'
@@ -142,7 +143,9 @@ function runtime:before(op)
             if sent then
                 local deadline = time.after('3s')
                 local selected = channel.select({ mailbox:case_receive(), deadline:case_receive() })
-                if selected.ok and selected.channel == mailbox then root.action_runtime = selected.value.runtime end
+                if selected.ok and selected.channel == mailbox then
+                    root.action_runtime = (selected.value :: any).runtime
+                end
             end
             self.activation = nil
         end

@@ -27,7 +27,7 @@ type ActiveSession = {
 -- Invoke the configured on_session_end hook (non-blocking).
 -- Returns true when a hook was scheduled, false when no hook is configured.
 -- The spawn and call dependencies are injectable for testing.
-local function fire_session_end_hook(hook_func_id, params, spawn, call)
+local function fire_session_end_hook(hook_func_id: string?, params: table, spawn: any?, call: any?)
     if not hook_func_id or hook_func_id == "" then
         return false
     end
@@ -432,7 +432,7 @@ local function run(args)
         end
     end
 
-    local action_intents = require('dispatch_action_intents').new(broker, process.pid())
+    local action_intents: any = require('dispatch_action_intents').new(broker, process.pid())
 
     local function handle_message_or_command(payload_data, topic_type)
         -- Ingress records private intent only. A claimed dispatch activates routing once.

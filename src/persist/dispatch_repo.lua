@@ -15,11 +15,11 @@ repo.CODES = { DISPATCH_COMPLETED = true, DISPATCH_CANCELLED = true, DISPATCH_OW
     DISPATCH_HANDLER_FAILED = true, DISPATCH_ENQUEUE_FAILED = true, DISPATCH_INTERRUPTED = true }
 
 function repo.settings()
-    local function bounded(id, fallback, low, high)
+    local function bounded(id, fallback, low, high): number
         local raw = env.get('wippy.session.env:' .. id)
         local value = tonumber(raw)
         if not value or value % 1 ~= 0 or value < low or value > high then return fallback end
-        return value
+        return value :: number
     end
     local heartbeat = bounded('dispatch_heartbeat_seconds', 5, 1, 30)
     return { heartbeat = heartbeat, lease = math.max(heartbeat * 3, bounded('dispatch_owner_lease_seconds', 30, 3, 300)),
@@ -169,7 +169,7 @@ local function interrupt_owner(tx, owner)
         :where('state = ?', 'started'):limit(32):run_with(tx):query()
     if err then return nil, 'DISPATCH_STORAGE_UNAVAILABLE' end
     for _, row in ipairs(rows) do
-        local done, terminal_err = terminal(tx, row, 'interrupted', 'DISPATCH_OWNER_LOST')
+        local done, terminal_err = terminal(tx, row :: { state: string, dispatch_id: string, generation: number, revision: number }, 'interrupted', 'DISPATCH_OWNER_LOST')
         if not done then return nil, terminal_err end
     end
     return true
@@ -188,7 +188,7 @@ function repo.acquire(session_id, worker_id)
             if not interrupted then return nil, lost_err end
         end
         local next_owner = { session_id = session_id, actor_id = session.user_id, worker_id = worker_id,
-            generation = owner and owner.generation + 1 or 1, next_sequence = owner and owner.next_sequence or 0,
+            generation = owner and (owner.generation :: number) + 1 or 1, next_sequence = owner and owner.next_sequence or 0,
             lease_expires_at = repo._now() + repo.settings().lease, updated_at = repo._stamp() }
         local _, write_err
         if owner then _, write_err = sql.builder.update('session_dispatch_owners'):set_map(next_owner):where('session_id = ?', session_id):run_with(tx):exec()

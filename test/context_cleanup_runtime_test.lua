@@ -47,11 +47,11 @@ local function define_tests()
             local scope = security.new_scope()
             for _, policy_id in ipairs({ 'wippy.session.process:context_cleanup_env_policy',
                 'wippy.session.process:context_cleanup_db_policy', 'app:context_transport_reply_policy' }) do
-                scope = scope:with(assert(security.policy(policy_id)))
+                scope = scope:with(assert(security.policy(policy_id)) :: security.Policy)
             end
             local pid, err = process.with_context({}):with_actor(security.new_actor('session.context_cleanup', { context_transport_reply_pid = process.pid() }))
                 :with_scope(scope):spawn_monitored('app:context_cleanup_worker', 'app:processes', { reply_pid = process.pid(), fail_first = fail_first })
-            assert(pid, err or 'cleanup spawn failed')
+            assert(pid, tostring(err or 'cleanup spawn failed'))
             worker_pid = pid
         end
         local function sweep_result()

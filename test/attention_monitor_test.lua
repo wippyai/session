@@ -17,7 +17,7 @@ local function define_tests()
             local worker_pid, spawn_err = process.spawn('app:attention_monitor_worker', 'app:processes', {
                 reply_pid = process.pid(),
             })
-            assert(worker_pid, spawn_err or 'monitor fixture spawn failed')
+            assert(worker_pid, tostring(spawn_err or 'monitor fixture spawn failed'))
             local success, failure = pcall(function()
                 local ready = receive(inbox)
                 test.eq(ready:topic(), 'attention_monitor_ready')
@@ -49,7 +49,7 @@ local function define_tests()
                 local stopped, stop_err = process.send(worker_pid, 'attention_monitor_stop', {})
                 test.is_nil(stop_err)
                 test.is_true(stopped)
-                local exited = receive(events)
+                local exited = receive(events) :: { kind: string, from: string, result: { error: string? } }
                 test.eq(exited.kind, process.event.EXIT)
                 test.eq(exited.from, worker_pid)
                 test.is_nil(exited.result.error)

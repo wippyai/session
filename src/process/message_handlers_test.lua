@@ -59,7 +59,7 @@ local function visual_attachment()
     }
 end
 
-local function context(writer_error, duplicate)
+local function context(writer_error, duplicate): (any, any)
     local calls = {}
     local ctx = {
         session_id = "session-1",
@@ -104,7 +104,7 @@ end
 local function define_tests()
     describe('Referenced context ingestion boundaries', function()
         local original_renderer = context_attachments._renderer
-        local original_staging = message_handlers._context_staging
+        local original_staging = message_handlers._context_staging :: any
         local original_authorizer = message_handlers._authorize_visual
         local original_resolver = message_handlers._resolve_visual
         after_each(function()
@@ -113,7 +113,7 @@ local function define_tests()
             message_handlers._authorize_visual = original_authorizer
             message_handlers._resolve_visual = original_resolver
         end)
-        local function referenced(array)
+        local function referenced(array): (any, any, any)
             local canonical = context_attachments.canonical_json(array)
             local ref = { version = 1, id = 'stage-1', content_hash = 'sha256:' .. hash.sha256(canonical), content_bytes = #canonical }
             local ctx, calls = context()

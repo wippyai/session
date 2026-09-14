@@ -78,7 +78,7 @@ function api.handler()
     local expires_at = time.now():unix() + 300
     for _, attachment in ipairs(validated) do
         if attachment.expires_at then
-            local expiry = time.parse(time.RFC3339, attachment.expires_at)
+            local expiry = time.parse(time.RFC3339, attachment.expires_at :: string)
             expires_at = math.min(expires_at, expiry:unix())
         end
     end

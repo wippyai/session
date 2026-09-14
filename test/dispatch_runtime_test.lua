@@ -40,12 +40,14 @@ local function define_tests()
             local scope = security.new_scope()
             for _, id in ipairs({ 'app:context_transport_session_policy', 'app:context_transport_env_policy',
                 'app:context_transport_db_policy', 'app:context_transport_reply_policy',
-                'app:dispatch_fixture_tool_policy', 'app:dispatch_fixture_context_policy' }) do scope = scope:with(assert(security.policy(id))) end
+                'app:dispatch_fixture_tool_policy', 'app:dispatch_fixture_context_policy' }) do
+                scope = scope:with(assert(security.policy(id)) :: security.Policy)
+            end
             options = options or {}
             options.user_id, options.session_id, options.reply_pid = actor, session_id, process.pid()
             local pid, err = process.with_context({}):with_actor(security.new_actor(actor, { context_transport_reply_pid = process.pid() }))
                 :with_scope(scope):spawn_monitored('app:dispatch_worker', 'app:processes', options)
-            assert(pid, err or 'dispatch worker unavailable')
+            assert(pid, tostring(err or 'dispatch worker unavailable'))
             workers[pid] = true
             receive('dispatch_test_ready', pid)
             return pid
@@ -226,16 +228,19 @@ local function define_tests()
             test.is_true(relay('fixture-stream:root').value)
             test.eq(request(a, { action = 'stats' }).value.last_relay_validations, 1)
             test.eq(#wire_packets, 1)
-            local first = wire_packets[1]
-            test.eq(first.data.root_message_id, root_message)
-            test.eq(first.data.dispatch.dispatch_id, claimed.dispatch_id)
-            test.eq(first.data.dispatch.response_id, claimed.response_id)
-            test.eq(first.data.dispatch.generation, claimed.generation)
-            test.eq(first.data.dispatch.revision, claimed.revision)
+            local first = assert(wire_packets[1])
+            local first_data = assert(first.data)
+            local first_dispatch = assert(first_data.dispatch)
+            test.eq(first_data.root_message_id, root_message)
+            test.eq(first_dispatch.dispatch_id, claimed.dispatch_id)
+            test.eq(first_dispatch.response_id, claimed.response_id)
+            test.eq(first_dispatch.generation, claimed.generation)
+            test.eq(first_dispatch.revision, claimed.revision)
             test.eq(string.sub(first.topic, -#claimed.response_id), claimed.response_id)
             test.is_true(relay('fixture-stream:root.1').value)
             test.eq(#wire_packets, 2)
-            test.eq(wire_packets[2].data.dispatch.response_id, claimed.response_id)
+            local second_data = assert(wire_packets[2]).data
+            test.eq(assert(second_data).dispatch.response_id, claimed.response_id)
             assert(request(a, { action = 'finish_operation', operation_key = 'root' }).value)
             test.is_false(relay('fixture-stream:root').value)
             test.eq(request(a, { action = 'stats' }).value.last_relay_validations, 0)
@@ -264,9 +269,11 @@ local function define_tests()
             assert(request(a, { action = 'open' }).value)
             assert(request(a, { action = 'run' }).value)
             local first = request(a, { action = 'idle' }).value
+            local first_snapshot = assert(first.snapshot)
+            local first_dispatches = assert(first_snapshot.dispatches)
             test.eq(first.child_effects, 0)
-            test.eq(first.snapshot.dispatches[1].terminal_code, 'DISPATCH_ENQUEUE_FAILED')
-            test.eq(first.snapshot.dispatches[1].message_id, rejected.message_id)
+            test.eq(first_dispatches[1].terminal_code, 'DISPATCH_ENQUEUE_FAILED')
+            test.eq(first_dispatches[1].message_id, rejected.message_id)
             local next_root = accepted(a, 'usable after sparse descendants')
             assert(request(a, { action = 'run' }).value)
             local second = request(a, { action = 'idle' }).value
@@ -303,9 +310,11 @@ local function define_tests()
                 assert(request(a, { action = 'open' }).value)
                 assert(request(a, { action = 'run' }).value)
                 local done = request(a, { action = 'idle' }).value
+                local done_snapshot = assert(done.snapshot)
+                local done_dispatches = assert(done_snapshot.dispatches)
                 test.eq(done.child_effects, options.expected)
-                test.eq(done.snapshot.dispatches[1].state, options.terminal)
-                if options.terminal == 'interrupted' then test.eq(done.snapshot.dispatches[1].terminal_code, 'DISPATCH_ENQUEUE_FAILED') end
+                test.eq(done_dispatches[1].state, options.terminal)
+                if options.terminal == 'interrupted' then test.eq(done_dispatches[1].terminal_code, 'DISPATCH_ENQUEUE_FAILED') end
                 stop(a)
             end
         end)

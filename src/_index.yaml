@@ -570,6 +570,7 @@ entries:
       - fs
       - base64
       - hash
+      - time
     imports:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt

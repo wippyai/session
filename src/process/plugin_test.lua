@@ -8,7 +8,7 @@ local function define_tests()
             local called = nil :: table?
 
             local scheduled = plugin.fire_session_end_hook(
-                "app:on_end",
+                ("app:on_end" :: string),
                 {
                     session_id = "sess-1",
                     user_id = "user-1",
@@ -42,7 +42,7 @@ local function define_tests()
             local spawn_count = 0
 
             local scheduled = plugin.fire_session_end_hook(
-                (nil :: any),
+                (nil :: string?),
                 {
                     session_id = "sess-1",
                     user_id = "user-1",

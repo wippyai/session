@@ -168,14 +168,14 @@ function repo.resolve(actor_id, session_id, request_id, ref)
     return transaction(function(tx)
         local row, err = repo.check_in_transaction(tx, { actor_id = actor_id, reference = ref }, session_id, request_id)
         if not row then return nil, err end
-        local attachments, decode_err = json.decode(row.canonical_content)
+        local attachments, decode_err = json.decode(row.canonical_content :: string)
         if decode_err then return nil, 'INVALID_CONTEXT_REFERENCE' end
         return attachments
     end)
 end
 
 function repo.cancel(actor_id, session_id, request_id, id)
-    if not repo.valid_id(id) or not repo.valid_request_id(request_id) then return nil, 'INVALID_CONTEXT_REFERENCE' end
+    if type(id) ~= 'string' or type(request_id) ~= 'string' or not repo.valid_id(id) or not repo.valid_request_id(request_id :: string) then return nil, 'INVALID_CONTEXT_REFERENCE' end
     return transaction(function(tx)
         local _, err = sql.builder.update('context_stages'):set('cancelled', 1):set('canonical_content', '')
             :where('id = ?', id):where('actor_id = ?', actor_id):where('session_id = ?', session_id)

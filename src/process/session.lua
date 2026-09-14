@@ -105,7 +105,7 @@ local function run(args: SessionArgs)
         end
     }
 
-    local dispatch_manager = dispatch_runtime.new(context)
+    local dispatch_manager: any = dispatch_runtime.new(context)
     context.dispatch_manager = dispatch_manager
     local bus = command_bus.new(context)
 

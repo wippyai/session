@@ -30,7 +30,14 @@ local function define_tests()
         end)
         local function invoke(options)
             local opts = options or {}
-            local result = { headers = {}, calls = {}, body_reads = 0 }
+            local result = { headers = {}, calls = {}, body_reads = 0 } :: {
+                headers: { [string]: string },
+                calls: { [number]: { [string]: any } },
+                body_reads: number,
+                status: number?,
+                body: any?,
+                reader_config: { max_body: number, timeout: number }?,
+            }
             local body = opts.body or attachments.canonical_json({ envelope() })
             local req = {
                 query = function(_, key)

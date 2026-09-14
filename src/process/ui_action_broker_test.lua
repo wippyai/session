@@ -313,6 +313,22 @@ local function define_tests()
             test.is_false(pcall(function() harness(1.5) end))
         end)
 
+        it("recovers request capacity when a late result removes an expired completion", function()
+            local broker, sends, _, _, set_now = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            request(broker, runtime, "session-pid-s1", "call-1", target("host-1", "one"))
+            local action: any = broker.pending.s1
+            set_now(1120)
+            broker:expire()
+            test.eq(broker.request_count, 1)
+            set_now(1240)
+            local _, _, result = client_result(action, "conn-1")
+            test.is_false(broker:result("user-hub-pid", "conn-1", "s1", result))
+            test.eq(broker.request_count, 0)
+            test.is_nil(broker.completed[action.action_id])
+            test.eq(#sends, 2)
+        end)
+
         it("allows only one pending action per session and rejects the second immediately", function()
             local broker, sends = harness()
             local runtime = bind(broker, "s1", "conn-1", "host-1")
@@ -324,6 +340,64 @@ local function define_tests()
             test.eq(#sends, 2)
             test.eq(sends[2].pid, "session-pid-s1")
             test.eq(sends[2].payload.status, "unavailable")
+        end)
+
+        it("replays a cached validation rejection for the same request", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            local invalid = {
+                delivery_handle = runtime.delivery_handle,
+                registry_id = "wippy.agent.tools:ui_action_confirm",
+                call_id = "call-invalid",
+                reply_topic = reply_topic("call-invalid"),
+                session_id = runtime.session_id,
+                host_instance_id = runtime.host_instance_id,
+                args = { targets = { { bad = true } } },
+            }
+            test.is_false(broker:request("tool-worker-pid", invalid))
+            test.is_true(broker:request("replacement-worker-pid", invalid))
+            test.eq(#sends, 2)
+            test.eq(sends[1].payload.reason, "target reference is invalid")
+            test.eq(sends[2].payload.reason, "target reference is invalid")
+        end)
+
+        it("does not cache or send a rejection when request capacity is full", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            broker.request_count = 1024
+            local accepted, err = broker:request("tool-worker-pid", {
+                delivery_handle = runtime.delivery_handle,
+                registry_id = "wippy.agent.tools:ui_action_confirm",
+                call_id = "call-capacity",
+                reply_topic = reply_topic("call-capacity"),
+                session_id = runtime.session_id,
+                host_instance_id = runtime.host_instance_id,
+                args = { targets = { { bad = true } } },
+            })
+            test.is_false(accepted)
+            test.eq(err, "UI action request capacity reached")
+            test.eq(broker.request_count, 1024)
+            test.eq(#sends, 0)
+        end)
+
+        it("does not reuse a call ID when the request fingerprint changes", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            request(broker, runtime, "tool-worker-pid", "call-reuse", target("host-1", "one"))
+            local accepted, err = request(broker, runtime, "replacement-worker-pid", "call-reuse", target("host-1", "two"))
+            test.is_false(accepted)
+            test.eq(err, "UI action request correlation mismatch")
+            test.eq(#sends, 1)
+        end)
+
+        it("allows the same call ID in a later delivery handle", function()
+            local broker, sends = harness()
+            local first = bind(broker, "s1", "conn-1", "host-1")
+            request(broker, first, "tool-worker-pid", "call-turn", target("host-1", "one"))
+            local second = bind(broker, "s1", "conn-2", "host-1")
+            test.is_true(request(broker, second, "replacement-worker-pid", "call-turn", target("host-1", "one")))
+            test.eq(#sends, 3)
+            test.eq(sends[3].pid, "conn-2")
         end)
 
         it("accepts only the first terminal result", function()
@@ -582,7 +656,46 @@ local function define_tests()
 
             test.is_nil(disabled)
             test.not_nil(err)
+            test.is_nil(broker.bindings.s1)
             test.is_false(request(broker, runtime, "waiter-1", "call-1", target("host-1", "one")))
+        end)
+
+        it("keeps the prior route when the next turn has malformed identity fields", function()
+            local broker = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            local replacement, err = broker:bind_turn({
+                user_id = "user-1",
+                session_id = "s1",
+                session_pid = "session-pid-s1",
+                ingress_pid = "user-hub-pid",
+                conn_pid = "conn-2",
+                host_instance_id = "host-2",
+                agent_actions_enabled = "false",
+            })
+
+            test.is_nil(replacement)
+            test.not_nil(err)
+            test.eq(broker.bindings.s1.delivery_handle, runtime.delivery_handle)
+            test.is_true(request(broker, runtime, "waiter-1", "call-1", target("host-1", "one")))
+        end)
+
+        it("does not let a different user cancel the prior route", function()
+            local broker = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            local replacement, err = broker:bind_turn({
+                user_id = "user-2",
+                session_id = "s1",
+                session_pid = "session-pid-s1-new",
+                ingress_pid = "user-hub-pid-new",
+                conn_pid = "conn-2",
+                host_instance_id = "host-2",
+                agent_actions_enabled = false,
+            })
+
+            test.is_nil(replacement)
+            test.not_nil(err)
+            test.eq(broker.bindings.s1.delivery_handle, runtime.delivery_handle)
+            test.is_true(request(broker, runtime, "waiter-1", "call-1", target("host-1", "one")))
         end)
     end)
 end

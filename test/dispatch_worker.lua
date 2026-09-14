@@ -10,10 +10,34 @@ local dispatches = require('dispatch_repo')
 local dispatch_writer = require('dispatch_writer')
 local consts = require('consts')
 
+type FixtureQuery = {
+    from_checkpoint: (self: FixtureQuery) -> FixtureQuery,
+    all: (self: FixtureQuery) -> ({}, string?),
+    count: (self: FixtureQuery) -> (number?, string?),
+}
+
+type FixtureReader = {
+    state: (self: FixtureReader) -> { config: {} },
+    reset: (self: FixtureReader) -> (boolean?, string?),
+    messages: (self: FixtureReader) -> FixtureQuery,
+}
+
+type DispatchManager = {
+    root: { fence: { session_id: string, dispatch_id: string, generation: number, worker_id: string } }?,
+    worker_id: string,
+    close: (self: DispatchManager) -> (boolean?, string?),
+    open: (self: DispatchManager) -> (boolean?, string?),
+    wake: (self: DispatchManager, bus: {}) -> (boolean?, string?),
+    heartbeat: (self: DispatchManager) -> (boolean?, string?),
+    after: (self: DispatchManager, op: {}, result: {}?, err: string?, intercepted: boolean?) -> (),
+    relay: (self: DispatchManager, topic: string, payload: {}) -> (boolean?, string?),
+    scoped_context: (self: DispatchManager, root: {}, operation_key: string) -> { reader: FixtureReader },
+}
+
 local function run(args)
     if args.now then dispatches._now = function() return args.now end end
     local base_writer = assert(writer.new(args.session_id))
-    local base_reader = assert(reader.open(args.session_id))
+    local base_reader = assert((reader :: { open: (string) -> FixtureReader }).open(args.session_id))
     local packets, calls, histories, agent_ids = {}, 0, {}, {}
     local background_counts = {}
     local child_effects, last_relay_validations = 0, 0
@@ -46,14 +70,15 @@ local function run(args)
     end
     local context = { session_id = args.session_id, user_id = args.user_id, writer = base_writer,
         reader = base_reader, upstream = upstream, config = base_reader:state().config }
-    local manager = dispatch_runtime.new(context)
+    local manager = dispatch_runtime.new(context) :: DispatchManager
     context.dispatch_manager = manager
     context.agent_ctx = { load_agent = function(_, agent_id, opts)
         table.insert(agent_ids, { agent_id = agent_id, model = opts.model })
         if args.prompt_failure then error('fixture prompt failure') end
         return { step = function(_, prompt, runtime_options)
             calls = calls + 1
-            local history = assert(dispatches.history(manager.root.fence))
+            local root = assert(manager.root)
+            local history = assert(dispatches.history(root.fence))
             local texts = {}
             for _, message in ipairs(history) do table.insert(texts, message.data) end
             table.insert(histories, texts)
@@ -196,7 +221,8 @@ local function run(args)
             local root = { row = claimed, fence = { session_id = args.session_id, dispatch_id = claimed.dispatch_id,
                 generation = claimed.generation, worker_id = manager.worker_id } }
             local scoped = dispatch_writer.new(base_writer, root, 'fixture')
-            value, err = scoped[request.method](scoped, table.unpack(request.arguments or {}))
+            local method = assert(scoped[request.method], 'unknown fenced writer method')
+            value, err = method(scoped, table.unpack(request.arguments or {}))
         elseif request.action == 'relay' then
             if not manager.root then
                 manager.root = { row = claimed, pending = 2, operation_count = 2,

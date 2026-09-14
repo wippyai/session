@@ -39,12 +39,12 @@ local function define_tests()
         end
         local function worker(actor, session, entry)
             local policy, policy_err = security.policy('app:context_transport_session_policy')
-            assert(policy, policy_err or 'test session policy unavailable')
+            assert(policy, tostring(policy_err or 'test session policy unavailable'))
             local scope = (security.scope() or security.new_scope()):with(policy)
             for _, policy_id in ipairs({ 'app:context_transport_env_policy', 'app:context_transport_db_policy',
                 'app:context_transport_reply_policy', 'app:context_transport_name_policy' }) do
                 local fixture_policy, policy_err = security.policy(policy_id)
-                assert(fixture_policy, policy_err or 'test infrastructure policy unavailable')
+                assert(fixture_policy, tostring(policy_err or 'test infrastructure policy unavailable'))
                 scope = scope:with(fixture_policy)
             end
             local pid, err = process.with_context({}):with_actor(security.new_actor(actor, { context_transport_reply_pid = process.pid() }))
@@ -52,7 +52,7 @@ local function define_tests()
                 :spawn_monitored(entry or 'app:context_transport_worker', 'app:processes', {
                     user_id = actor, session_id = session, reply_pid = process.pid(), parent_pid = process.pid(), conn_pid = process.pid(),
                 })
-            assert(pid, err or 'worker spawn failed')
+            assert(pid, tostring(err or 'worker spawn failed'))
             workers[pid] = entry or 'app:context_transport_worker'
             if not entry then
                 local ready = receive('context_worker_ready', pid)
@@ -172,7 +172,7 @@ local function define_tests()
                 end
                 local pid = worker(actor, session)
                 local bad_request = uuid.v7()
-                local bad_content = content:gsub('wippy.attention.v2', 'wippy.attention.v1')
+                local bad_content = assert(content):gsub('wippy.attention.v2', 'wippy.attention.v1')
                 local bad_array = { { attachment_id = 'runtime-invalid-compact', kind = 'wippy.attention', version = 2,
                     created_at = payload.created_at, content_type = 'application/json', content = bad_content,
                     content_bytes = #bad_content, content_hash = 'sha256:' .. hash.sha256(bad_content) } }

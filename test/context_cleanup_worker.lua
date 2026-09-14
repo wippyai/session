@@ -4,6 +4,7 @@ local sql = require('sql')
 local security = require('security')
 
 local function run(args)
+    local reply_pid = args.reply_pid :: string
     cleanup.INTERVAL = '20ms'
     local sweep, calls = cleanup._sweep, 0
     cleanup._sweep = function()
@@ -21,8 +22,8 @@ local function run(args)
                 foreign_db_allowed = security.can('db.get', 'other:db'), session_write_allowed = security.can('write', 'session:other') }
             if db then db:release() end
         end
-        local sent, send_err = process.send(args.reply_pid, 'cleanup_sweep', { count = count, unavailable = err ~= nil, calls = calls, diagnostics = diagnostics })
-        if not sent then error(tostring(send_err)) end
+        local sent, send_err = process.send(reply_pid, 'cleanup_sweep', { count = count, unavailable = err ~= nil, calls = calls, diagnostics = diagnostics })
+        if not sent then error('cleanup worker send failed') end
         return count, err
     end
     return cleanup.run()

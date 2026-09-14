@@ -148,7 +148,7 @@ local function define_tests()
             local older_count = 0
             while older_count <= staging.CLEANUP_BATCH do
                 local older_actor, older_session = fixture()
-                for i = 1, staging.MAX_SESSION do
+                for i = 1, staging.MAX_SESSION :: number do
                     assert(staging.create(older_actor, older_session, 'older-' .. i, '[]', clock + 10))
                     older_count = older_count + 1
                 end
