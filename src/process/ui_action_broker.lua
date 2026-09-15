@@ -869,20 +869,34 @@ function ui_action_broker:cancel_session(session_id, status, reason)
 end
 
 function ui_action_broker:handle_exit(pid)
-    local disconnected_sessions = {}
+    local session_exits = {}
     for session_id, binding in pairs(self.bindings) do
-        if binding.conn_pid == pid or binding.session_pid == pid then
-            disconnected_sessions[#disconnected_sessions + 1] = session_id
+        if binding.session_pid == pid then
+            session_exits[#session_exits + 1] = session_id
         end
     end
-    for _, session_id in ipairs(disconnected_sessions) do
-        self:cancel_session(session_id, "disconnected", "UI action route disconnected")
+    for _, session_id in ipairs(session_exits) do
+        self:cancel_session(session_id, "unavailable", "session process exited")
     end
+
+    self:handle_disconnect(pid)
 
     for _, action in pairs(self.pending) do
         if action.waiter_pid == pid then
             self:_finish(action, self:_make_result(action, "cancelled", "tool process exited"))
         end
+    end
+end
+
+function ui_action_broker:handle_disconnect(pid)
+    local disconnected_sessions = {}
+    for session_id, binding in pairs(self.bindings) do
+        if binding.conn_pid == pid then
+            disconnected_sessions[#disconnected_sessions + 1] = session_id
+        end
+    end
+    for _, session_id in ipairs(disconnected_sessions) do
+        self:cancel_session(session_id, "disconnected", "UI action route disconnected")
     end
 end
 
