@@ -92,8 +92,8 @@ local function run(args)
         format_time = function(unix_seconds)
             return time.unix(unix_seconds, 0):utc():format_rfc3339()
         end,
-        validate_prepared_file = function(prepared_file, session_id)
-            return prompt_builder.validate_prepared_file(prepared_file, state.user_id, session_id)
+        validate_prepared_file = function(prepared_file, actor_id, session_id)
+            return prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
         end,
     })
 

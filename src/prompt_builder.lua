@@ -259,8 +259,16 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
         return false, "prepared visual identity is invalid"
     end
     if type(prepared_file.uuid) ~= "string" or prepared_file.uuid == ""
+        or type(prepared_file.name) ~= "string" or prepared_file.name == ""
         or type(prepared_file.mime_type) ~= "string"
-        or type(prepared_file.byte_size) ~= "number" then
+        or prepared_file.mime_type ~= "image/png" and prepared_file.mime_type ~= "image/webp"
+        or type(prepared_file.byte_size) ~= "number"
+        or prepared_file.byte_size % 1 ~= 0
+        or prepared_file.byte_size < 1
+        or prepared_file.byte_size > VISUAL_MAX_BYTES
+        or type(prepared_file.sha256) ~= "string"
+        or #prepared_file.sha256 ~= 71
+        or string.match(prepared_file.sha256, "^sha256:[a-f0-9]+$") == nil then
         return false, "prepared visual identity is invalid"
     end
     local upload = resolve_file_via_contract(prepared_file.uuid)
@@ -281,16 +289,17 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
     if type(filename) == "string" and filename ~= "" and filename ~= prepared_file.name then
         return false, "prepared visual filename does not match the upload"
     end
-    local resolved = resolve_visual_via_contract({
+    local visual_request: VisualRequest = {
         reference = {
             kind = "upload",
-            opaque_id = prepared_file.uuid,
+            opaque_id = prepared_file.uuid :: string,
         },
         media = {
-            content_type = prepared_file.mime_type,
-            content_bytes = prepared_file.byte_size,
+            content_type = prepared_file.mime_type :: string,
+            content_bytes = prepared_file.byte_size :: number,
         },
-    })
+    }
+    local resolved = resolve_visual_via_contract(visual_request)
     if type(resolved) ~= "table"
         or type(resolved.data) ~= "string"
         or #resolved.data ~= prepared_file.byte_size
