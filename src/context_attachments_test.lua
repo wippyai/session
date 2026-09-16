@@ -307,7 +307,10 @@ local function define_tests()
                 attachment.version = 99
                 test.is_true(context_attachments.validate({ attachment }) ~= nil)
             end
-            context_attachments._renderer = { supports = function() return true end }
+            context_attachments._renderer = {
+                supports = function() return true end,
+                expand_attention_v4 = active.expand_attention_v4,
+            }
             test.eq(context_attachments.canonical_json(context_attachments.capabilities().handlers[1].versions), '[1,4]')
         end)
         it('enforces the complete canonical envelope boundary rather than only payload bytes', function()

@@ -11,8 +11,16 @@ local function define_tests()
         local function stored(version, kind)
             local payload = { schema = 'wippy.attention.v2', snapshot_id = 'stored-v2', host_instance_id = 'host-v2', mount_generation = 1,
                 created_at = '2026-09-04T12:00:00Z', coordinate_space = { kind = 'host-viewport', width = 800, height = 600, device_pixel_ratio = 1 },
-                capture = { radius_css_px = 20, grid_step_css_px = 5, sampled_points = 0, points = {}, duration_ms = 0, complete = true },
-                path_dictionary = {}, candidates = {}, recent_events = {}, omissions = {} }
+                capture = { radius_css_px = 20, grid_step_css_px = 5, sampled_points = 1,
+                    points = { { point_id = 'p0', x = 120, y = 112 } }, duration_ms = 0, complete = true },
+                path_dictionary = {
+                    { kind = 'host', mount_id = 'host-v2', generation = 1 },
+                    { kind = 'element', mount_id = 'leaf-v2', generation = 1, tag_name = 'span' },
+                },
+                candidates = { { target_id = 'target-v2', path_indices = { 0, 1 },
+                    rect = { x = 100, y = 100, width = 80, height = 24 }, sample_refs = { 0 },
+                    occluded = false, summary = { role = 'status', name = 'Nested status', text = 'Ready' } } },
+                recent_events = {}, omissions = {} }
             return { message_id = 'stored-user', type = consts.MSG_TYPE.USER, data = 'Pointed context',
                 metadata = { context_attachments = { { attachment_id = 'stored-context', kind = kind or 'wippy.attention', version = version or 2,
                     content_type = 'application/json', content = json.encode(payload) } } } }
@@ -22,7 +30,7 @@ local function define_tests()
             test.is_nil(err)
             test.eq(#built:get_messages()[1].content, 2)
             test.contains(built:get_messages()[1].content[2].text, 'untrusted user-provided observation')
-            for _, message in ipairs({ stored(3), stored(1, 'example.future') }) do
+            for _, message in ipairs({ stored(5), stored(1, 'example.future') }) do
                 built, err = prompt_builder.build({ message }, {}, {}, { include_files = false })
                 test.is_nil(err)
                 test.eq(#built:get_messages()[1].content, 1)
@@ -1216,7 +1224,7 @@ local function define_tests()
 
             it("does not render unknown attachment versions", function()
                 local builder = prompt_builder.build(
-                    { message_with_attachment(3, 'Confirm') },
+                    { message_with_attachment(5, 'Confirm') },
                     {},
                     {},
                     { include_files = false, cache_markers = false }
