@@ -236,6 +236,7 @@ entries:
       control_handlers: wippy.session.process:control_handlers
       session_handlers: wippy.session.process:session_handlers
       session_repo: wippy.session.persist:session_repo
+      context_attachments: wippy.session:context_attachments
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
     method: run

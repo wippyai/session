@@ -383,15 +383,19 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         elseif msg.type == consts.MSG_TYPE.USER then
             local user_parts = { prompt_builder._prompt.text(msg.data :: string) }
             if include_context_attachments and metadata.context_attachments then
-                local required, required_count = {}, 0
+                local required, required_count, required_versions = {}, 0, {}
                 for _, attachment in ipairs(metadata.context_attachments) do
-                    if attachment.kind == 'wippy.attention' and attachment.version == 2 then
+                    if attachment.kind == 'wippy.attention'
+                        and type(attachment.version) == 'number'
+                        and attachment.version >= 1 and attachment.version <= 4
+                        and attachment.version % 1 == 0 then
                         required[attachment.attachment_id] = true
+                        required_versions[attachment.version] = true
                         required_count = required_count + 1
                     end
                 end
-                if required_count > 0 then
-                    local ok, supported = pcall(prompt_builder._context_attachments.supports, 'wippy.attention', 2)
+                for version in pairs(required_versions) do
+                    local ok, supported = pcall(prompt_builder._context_attachments.supports, 'wippy.attention', version)
                     if not ok or supported ~= true then return nil, 'REQUIRED_CONTEXT_RENDER_UNAVAILABLE' end
                 end
                 local render_ok, attachment_parts, diagnostics = pcall(prompt_builder._context_attachments.render,

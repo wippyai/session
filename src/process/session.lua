@@ -22,6 +22,7 @@ type SessionArgs = {
 
 type SessionContext = {
     session_id: string,
+    controller_pid: string,
     user_id: string,
     reader: any,
     writer: any,
@@ -30,11 +31,16 @@ type SessionContext = {
     agent_ctx: any,
     queue_empty_callback: any?,
     lifecycle_state: table?,
+    set_attention_context: any?,
 }
 
 local dispatch_runtime = require('dispatch_runtime')
+local context_attachments = require('context_attachments')
 local dispatch_repo = require('dispatch_repo')
 local time = require('time')
+local ATTENTION_CONTROL_REQUEST_TOPIC = 'session_attention_context_request'
+local ATTENTION_CONTROL_RESULT_PREFIX = 'session_attention_context_result:'
+local ATTENTION_CONTROL_RESULT_SCHEMA = 'wippy.attention.session-control.v1'
 
 local function run(args: SessionArgs)
     if not args or not args.user_id or not args.session_id then
@@ -93,6 +99,7 @@ local function run(args: SessionArgs)
 
     local context: SessionContext = {
         session_id = args.session_id,
+        controller_pid = tostring(process.pid()),
         user_id = args.user_id,
         reader = session_reader,
         writer = session_writer,
@@ -191,6 +198,27 @@ local function run(args: SessionArgs)
         session_upstream:update_session({ attention_context = attention_context })
         return true
     end
+    context.set_attention_context = function(enabled, expected_revision, agent_id)
+        if not context_attachments.supports('wippy.attention', 4) then
+            return nil, "ATTENTION_CONTEXT_CAPABILITY_UNAVAILABLE"
+        end
+        if type(agent_id) ~= "string" or agent_id == "" then
+            return nil, "ATTENTION_CONTEXT_AGENT_REQUIRED"
+        end
+        if agent_id ~= context.config.agent_id then
+            return nil, "ATTENTION_CONTEXT_AGENT_STALE"
+        end
+        local state, update_err, current = session_repo.update_attention_context(
+            args.session_id,
+            enabled,
+            expected_revision,
+            "agent:" .. agent_id
+        )
+        if state then
+            emit_attention_context(state)
+        end
+        return state, update_err, current
+    end
 
     process.registry.register("session." .. args.session_id)
 
@@ -239,6 +267,39 @@ local function run(args: SessionArgs)
                 dispatch_manager:activated(msg:from(), payload:data())
             elseif string.sub(topic, 1, #dispatch_runtime.STREAM_TOPIC) == dispatch_runtime.STREAM_TOPIC then
                 dispatch_manager:relay(topic, payload:data())
+            elseif topic == ATTENTION_CONTROL_REQUEST_TOPIC then
+                local request = payload:data() or {}
+                local reply_topic = request.reply_topic
+                if type(reply_topic) == 'string'
+                    and #reply_topic <= 160
+                    and string.sub(reply_topic, 1, #ATTENTION_CONTROL_RESULT_PREFIX) == ATTENTION_CONTROL_RESULT_PREFIX
+                    and type(request.request_id) == 'string'
+                    and request.request_id ~= '' then
+                    local response: any = {
+                        schema = ATTENTION_CONTROL_RESULT_SCHEMA,
+                        request_id = request.request_id,
+                        session_id = args.session_id,
+                    }
+                    if request.session_id ~= args.session_id then
+                        response.error = 'ATTENTION_CONTEXT_SESSION_STALE'
+                    elseif type(request.agent_id) ~= 'string' or request.agent_id ~= context.config.agent_id then
+                        response.error = 'ATTENTION_CONTEXT_AGENT_STALE'
+                    elseif type(request.enabled) ~= 'boolean' then
+                        response.error = 'ATTENTION_CONTEXT_ENABLED_REQUIRED'
+                    else
+                        local attention_context, attention_err = context.set_attention_context(
+                            request.enabled,
+                            request.expected_revision,
+                            request.agent_id
+                        )
+                        if attention_context then
+                            response.attention_context = attention_context
+                        else
+                            response.error = attention_err or 'ATTENTION_CONTEXT_UPDATE_REJECTED'
+                        end
+                    end
+                    process.send(msg:from(), reply_topic, response)
+                end
             elseif topic == consts.TOPICS.ATTENTION_CONTEXT_UPDATED then
                 local notification = payload:data() or {}
                 if type(notification.attention_context) == 'table' then

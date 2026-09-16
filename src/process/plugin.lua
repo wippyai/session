@@ -481,6 +481,71 @@ local function run(args)
             end,
             cancel_session = function() return true end,
         }
+
+        local function resolve_ui_action_runtime(message_data, resolved_session_id, resolved_session_info)
+            local runtime_context = type(message_data.runtime_context) == "table" and message_data.runtime_context or nil
+            local intent_nonce = runtime_context and runtime_context.ui_action_intent_nonce
+            if type(intent_nonce) == "string" and intent_nonce ~= "" and #intent_nonce <= 160 then
+                return { deferred_action_nonce = intent_nonce }
+            end
+            local attention = runtime_context and runtime_context.attention
+            if type(attention) ~= "table" then
+                broker:cancel_session(resolved_session_id, "unavailable", "agent actions unavailable for this turn")
+                return nil
+            end
+            local runtime = broker:bind_turn({
+                user_id = state.user_id,
+                session_id = resolved_session_id,
+                session_pid = resolved_session_info.pid,
+                ingress_pid = state.user_hub_pid,
+                conn_pid = payload_data.conn_pid,
+                host_instance_id = attention.host_instance_id,
+                agent_actions_enabled = attention.agent_actions_enabled,
+                request_id = payload_data.request_id,
+            })
+            if runtime then
+                runtime.broker_pid = process.pid()
+            end
+            return runtime
+        end
+
+        local function prepare_ui_action_turn(cmd_data, resolved_session_id, resolved_session_info)
+            if cmd_data.command ~= "attention_prepare_ui_action_turn" then
+                return false
+            end
+            local message_request_id = cmd_data.message_request_id
+            local host_instance_id = cmd_data.host_instance_id
+            local valid = type(payload_data.conn_pid) == "string" and payload_data.conn_pid ~= ""
+                and type(payload_data.request_id) == "string" and payload_data.request_id ~= ""
+                and type(message_request_id) == "string" and message_request_id ~= "" and #message_request_id <= 128
+                and type(host_instance_id) == "string" and host_instance_id ~= "" and #host_instance_id <= 160
+                and cmd_data.agent_actions_enabled == true
+            local runtime = valid and broker:bind_turn({
+                user_id = state.user_id,
+                session_id = resolved_session_id,
+                session_pid = resolved_session_info.pid,
+                ingress_pid = state.user_hub_pid,
+                conn_pid = payload_data.conn_pid,
+                host_instance_id = host_instance_id,
+                agent_actions_enabled = true,
+                request_id = message_request_id,
+            }) or nil
+            local response = {
+                type = consts.UPSTREAM_TYPES.COMMAND_RESPONSE,
+                session_id = resolved_session_id,
+                request_id = payload_data.request_id,
+                success = runtime ~= nil,
+            }
+            if runtime then
+                response.deferred_action_nonce = runtime.deferred_action_nonce
+            else
+                response.code = "ui_action_unavailable"
+                response.message = "Agent action routing could not be prepared"
+            end
+            process.send(payload_data.conn_pid :: string, consts.TOPIC_PREFIXES.SESSION .. resolved_session_id, response)
+            return true
+        end
+
         if not payload_data then
             return
         end
@@ -529,28 +594,7 @@ local function run(args)
                         clean_data[key] = value
                     end
                 end
-                local attention = nil
-                if type(message_data.runtime_context) == "table" then
-                    attention = message_data.runtime_context.attention
-                end
-                local ui_action_runtime = nil
-                if type(attention) == "table" then
-                    ui_action_runtime = broker:bind_turn({
-                        user_id = state.user_id,
-                        session_id = session_id,
-                        session_pid = session_info.pid,
-                        ingress_pid = state.user_hub_pid,
-                        conn_pid = conn_pid,
-                        host_instance_id = attention.host_instance_id,
-                        agent_actions_enabled = attention.agent_actions_enabled,
-                        request_id = request_id,
-                    })
-                    if ui_action_runtime then
-                        ui_action_runtime.broker_pid = process.pid()
-                    end
-                else
-                    broker:cancel_session(session_id, "unavailable", "agent actions unavailable for this turn")
-                end
+                local ui_action_runtime = resolve_ui_action_runtime(message_data, session_id, session_info)
                 process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
                     conn_pid = conn_pid,
                     data = clean_data,
@@ -559,6 +603,9 @@ local function run(args)
                 })
             elseif topic_type == consts.HANDLER_TYPES.COMMAND then
                 local cmd_data = payload_data.data or {}
+                if prepare_ui_action_turn(cmd_data, session_id, session_info) then
+                    return
+                end
                 cmd_data.conn_pid = conn_pid
                 if request_id then
                     cmd_data.request_id = request_id
@@ -588,28 +635,7 @@ local function run(args)
                             clean_data[key] = value
                         end
                     end
-                    local attention = nil
-                    if type(message_data.runtime_context) == "table" then
-                        attention = message_data.runtime_context.attention
-                    end
-                    local ui_action_runtime = nil
-                    if type(attention) == "table" then
-                        ui_action_runtime = broker:bind_turn({
-                            user_id = state.user_id,
-                            session_id = created_session_id,
-                            session_pid = recovered_session_info.pid,
-                            ingress_pid = state.user_hub_pid,
-                            conn_pid = conn_pid,
-                            host_instance_id = attention.host_instance_id,
-                            agent_actions_enabled = attention.agent_actions_enabled,
-                            request_id = request_id,
-                        })
-                        if ui_action_runtime then
-                            ui_action_runtime.broker_pid = process.pid()
-                        end
-                    else
-                        broker:cancel_session(created_session_id, "unavailable", "agent actions unavailable for this turn")
-                    end
+                    local ui_action_runtime = resolve_ui_action_runtime(message_data, created_session_id, recovered_session_info)
                     process.send(recovered_session_info.pid :: string, consts.TOPICS.MESSAGE, {
                         conn_pid = conn_pid,
                         data = clean_data,
@@ -618,6 +644,9 @@ local function run(args)
                     })
                 elseif topic_type == consts.HANDLER_TYPES.COMMAND then
                     local cmd_data = payload_data.data or {}
+                    if prepare_ui_action_turn(cmd_data, created_session_id, recovered_session_info) then
+                        return
+                    end
                     cmd_data.conn_pid = conn_pid
                     if request_id then
                         cmd_data.request_id = request_id

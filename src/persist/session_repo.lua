@@ -385,6 +385,11 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
         db:release()
         return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
     end
+    if current_state.enabled == enabled then
+        tx:rollback()
+        db:release()
+        return current_state
+    end
 
     local now = time.now():format(time.RFC3339)
     local next_revision = current_revision + 1

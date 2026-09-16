@@ -10,6 +10,7 @@ local lifecycle_runtime = require("lifecycle_runtime")
 
 type SessionContext = {
     session_id: string,
+    controller_pid: string,
     user_id: string,
     reader: any,
     writer: any,
@@ -18,6 +19,7 @@ type SessionContext = {
     agent_ctx: any,
     queue_empty_callback: any?,
     lifecycle_state: table?,
+    set_attention_context: any?,
 }
 
 type ToolWrapperHostRef = {
@@ -802,6 +804,24 @@ function message_handlers.process_tools(ctx, op)
     local caller = tool_caller.new()
     caller:set_strategy(tool_caller.STRATEGY.PARALLEL)
     caller:set_runtime_context_resolver(function(call_id, tool_call)
+        if tostring(tool_call.registry_id) == "wippy.agent.tools:attention_context_set" then
+            if type(ctx.set_attention_context) ~= "function" then
+                return nil, "Attention context control unavailable for this Session"
+            end
+            local op_agent = type(op.agent) == "table" and op.agent or nil
+            local agent_id = string_or_nil(op_agent and op_agent.id)
+                or string_or_nil(ctx.config and ctx.config.agent_id)
+            if not agent_id then
+                return nil, "Attention context control requires an active agent identity"
+            end
+            return {
+                attention_context_runtime = {
+                    session_id = ctx.session_id,
+                    controller_pid = ctx.controller_pid,
+                    agent_id = agent_id,
+                },
+            }, nil
+        end
         if not op.ui_action_runtime then
             return nil, "UI action unavailable: agent actions were not enabled for this turn"
         end
