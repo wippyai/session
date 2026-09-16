@@ -15,6 +15,7 @@ type Session = {
     public_meta: {[string]: any},
     start_date: string,
     last_message_date: string,
+    attention_context: {[string]: any},
 }
 
 type SessionUpdates = {
@@ -28,6 +29,30 @@ type SessionUpdates = {
 }
 
 local session_repo = {}
+
+local function attention_context(enabled, revision, updated_at, updated_by)
+    return {
+        schema = 'wippy.attention.session.v1',
+        enabled = enabled == true or enabled == 1 or enabled == '1' or enabled == 'true',
+        revision = tonumber(revision) or 0,
+        updated_at = updated_at,
+        updated_by = updated_by or 'system',
+    }
+end
+
+local function attention_context_from_row(session)
+    session.attention_context = attention_context(
+        session.attention_enabled,
+        tonumber(session.attention_revision) or 0,
+        session.attention_updated_at,
+        session.attention_updated_by
+    )
+    session.attention_enabled = nil
+    session.attention_revision = nil
+    session.attention_updated_at = nil
+    session.attention_updated_by = nil
+    return session
+end
 
 -- Get a database connection
 local function get_db()
@@ -90,6 +115,18 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
     meta = meta or {}
     config = config or {}
 
+    local initial_attention_enabled = false
+    local initial_attention_revision = 0
+    local initial_attention_updated_by = 'system'
+    if type(config.attention_context) == 'table' and config.attention_context.enabled ~= nil then
+        if type(config.attention_context.enabled) ~= 'boolean' then
+            return nil, 'INVALID_ATTENTION_CONTEXT_ENABLED'
+        end
+        initial_attention_enabled = config.attention_context.enabled
+        initial_attention_revision = 1
+        initial_attention_updated_by = 'application'
+    end
+
     -- Encode JSON fields
     local encoded_meta, err = json.encode(meta)
     if err then
@@ -118,6 +155,10 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
             meta = encoded_meta,
             config = encoded_config,
             public_meta = '{}',
+            attention_enabled = initial_attention_enabled,
+            attention_revision = initial_attention_revision,
+            attention_updated_at = now,
+            attention_updated_by = initial_attention_updated_by,
             start_date = now,
             last_message_date = now
         })
@@ -140,6 +181,7 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
         meta = meta,
         config = config,
         public_meta = {},
+        attention_context = attention_context(initial_attention_enabled, initial_attention_revision, now, initial_attention_updated_by),
         start_date = now,
         last_message_date = now
     }
@@ -159,6 +201,7 @@ function session_repo.get(session_id, user_id)
     local query = sql.builder.select(
             "session_id", "user_id", "status", "primary_context_id",
             "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+            , "attention_enabled", "attention_revision", "attention_updated_at", "attention_updated_by"
         )
         :from("sessions")
         :where("session_id = ?", session_id)
@@ -217,7 +260,7 @@ function session_repo.get(session_id, user_id)
         session.public_meta = {}
     end
 
-    return session
+    return attention_context_from_row(session)
 end
 
 -- List sessions by user ID
@@ -234,6 +277,7 @@ function session_repo.list_by_user(user_id, limit, offset)
     local query = sql.builder.select(
             "session_id", "user_id", "status", "primary_context_id",
             "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+            , "attention_enabled", "attention_revision", "attention_updated_at", "attention_updated_by"
         )
         :from("sessions")
         :where("user_id = ?", user_id)
@@ -289,9 +333,82 @@ function session_repo.list_by_user(user_id, limit, offset)
         else
             session.public_meta = {}
         end
+
+        attention_context_from_row(session)
     end
 
     return sessions
+end
+
+function session_repo.update_attention_context(session_id, enabled, expected_revision, updated_by)
+    if not session_id or session_id == '' then
+        return nil, 'INVALID_SESSION_ID'
+    end
+    if type(enabled) ~= 'boolean' then
+        return nil, 'INVALID_ATTENTION_CONTEXT_ENABLED'
+    end
+    if expected_revision ~= nil and (type(expected_revision) ~= 'number' or expected_revision < 0 or expected_revision % 1 ~= 0) then
+        return nil, 'INVALID_ATTENTION_CONTEXT_REVISION'
+    end
+    if type(updated_by) ~= 'string' or updated_by == '' then
+        return nil, 'INVALID_ATTENTION_CONTEXT_UPDATED_BY'
+    end
+
+    local db, err = get_db()
+    if err then return nil, err end
+    local tx, tx_err = db:begin()
+    if tx_err then
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+    end
+
+    local current_rows, read_err = sql.builder.select(
+        'attention_enabled', 'attention_revision', 'attention_updated_at', 'attention_updated_by'
+    ):from('sessions'):where('session_id = ?', session_id):limit(1):run_with(tx):query()
+    if read_err then
+        tx:rollback()
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+    end
+    if #current_rows == 0 then
+        tx:rollback()
+        db:release()
+        return nil, 'SESSION_NOT_FOUND'
+    end
+
+    local current = current_rows[1]
+    local current_revision = tonumber(current.attention_revision) or 0
+    local current_state = attention_context(current.attention_enabled, current_revision,
+        current.attention_updated_at, current.attention_updated_by)
+    if expected_revision ~= nil and expected_revision ~= current_revision then
+        tx:rollback()
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+    end
+
+    local now = time.now():format(time.RFC3339)
+    local next_revision = current_revision + 1
+    local result, update_err = sql.builder.update('sessions'):set_map({
+        attention_enabled = enabled,
+        attention_revision = next_revision,
+        attention_updated_at = now,
+        attention_updated_by = updated_by,
+    }):where('session_id = ?', session_id):where('attention_revision = ?', current_revision):run_with(tx):exec()
+    if update_err or not result or result.rows_affected ~= 1 then
+        tx:rollback()
+        db:release()
+        return nil, update_err and 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' or 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+    end
+
+    local commit_ok, commit_err = tx:commit()
+    if commit_err then
+        tx:rollback()
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+    end
+    db:release()
+
+    return attention_context(enabled, next_revision, now, updated_by)
 end
 
 -- Update session metadata (title, meta, config, public_meta, status, last_message_date)

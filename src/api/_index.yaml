@@ -2,6 +2,31 @@ version: "1.0"
 namespace: wippy.session.api
 
 entries:
+  - name: set_attention_context
+    kind: function.lua
+    meta:
+      comment: Update normalized per-session Attention context state
+      router: app:api
+    source: file://set_attention_context.lua
+    modules:
+      - http
+      - security
+    imports:
+      session_repo: wippy.session.persist:session_repo
+      consts: wippy.session:consts
+    method: handler
+    pool:
+      size: 4
+
+  - name: set_attention_context.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Update session Attention context state
+      router: app:api
+    method: PATCH
+    func: set_attention_context
+    path: /sessions/{session_id}/attention-context
+
   - name: session_messages_test
     kind: function.lua
     meta:

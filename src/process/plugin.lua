@@ -210,7 +210,7 @@ local function run(args)
         return token_data, nil
     end
 
-    local function create_session_in_db(session_id, token_data)
+    local function create_session_in_db(session_id, token_data, attention_context_enabled)
         local primary_context_id, ctx_err = uuid.v7()
         if ctx_err then
             return nil, "Failed to generate context ID: " .. ctx_err
@@ -241,6 +241,9 @@ local function run(args)
             init_function_id = token_data.start_func or nil,
             init_function_params = token_data.start_params or nil,
         }
+        if attention_context_enabled ~= nil then
+            session_config.attention_context = { enabled = attention_context_enabled }
+        end
 
         local session_meta = {}
 
@@ -301,6 +304,18 @@ local function run(args)
             return nil, "Payload data is required"
         end
 
+        logger:info('attention session open opt-in', {
+            supplied = payload_data.attention_context_enabled ~= nil,
+            requested = payload_data.attention_context_enabled == true,
+        })
+
+        if payload_data.attention_context_enabled ~= nil
+            and type(payload_data.attention_context_enabled) ~= "boolean" then
+            send_error(payload_data.conn_pid, consts.ERROR_CODES.INVALID_JSON,
+                "attention_context_enabled must be a boolean", payload_data.request_id)
+            return nil, "attention_context_enabled must be a boolean"
+        end
+
         enforce_session_limit()
 
         local session_id = payload_data.session_id
@@ -354,7 +369,7 @@ local function run(args)
                 return nil, err
             end
 
-            local _, session_create_err = create_session_in_db(session_id, token_data)
+            local _, session_create_err = create_session_in_db(session_id, token_data, payload_data.attention_context_enabled)
             if session_create_err then
                 send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
                     "Failed to create session: " .. session_create_err, payload_data.request_id)

@@ -24,7 +24,7 @@ end
 
 function context_attachments.capabilities()
     local handlers = {}
-    for _, entry in ipairs({ { kind = 'wippy.attention', versions = { 1, 2, 3 } },
+    for _, entry in ipairs({ { kind = 'wippy.attention', versions = { 1, 2, 3, 4 } },
         { kind = 'wippy.attention.visual', versions = { 1 } } }) do
         local versions = {}
         for _, version in ipairs(entry.versions) do
@@ -906,9 +906,9 @@ function context_attachments.validate(attachments, options)
             and not validate_attention(payload) then
             return nil, failure("invalid-attention-payload", path .. ".content", "wippy.attention v1 content is invalid", attachment_id)
         end
-        if attachment.kind == 'wippy.attention' and (attachment.version == 1 or attachment.version == 2 or attachment.version == 3) then
+        if attachment.kind == 'wippy.attention' and (attachment.version == 1 or attachment.version == 2 or attachment.version == 3 or attachment.version == 4) then
             local expanded_bytes = #canonical
-            if attachment.version == 2 or attachment.version == 3 then
+            if attachment.version == 2 or attachment.version == 3 or attachment.version == 4 then
                 if not renderer_supports(attachment.kind, attachment.version) then
                     return nil, failure('unsupported-attention-version', path, 'Attention version ' .. tostring(attachment.version) .. ' admission and rendering are unavailable', attachment_id)
                 end
@@ -916,14 +916,20 @@ function context_attachments.validate(attachments, options)
                 if not envelope or #envelope > context_attachments.ATTENTION_V2_MAX_ENVELOPE_BYTES then
                     return nil, failure('attachment-bytes-exceeded', path, 'Attention version ' .. tostring(attachment.version) .. ' envelope exceeds the byte limit', attachment_id)
                 end
-                local expand = attachment.version == 3
-                    and context_attachments._renderer.expand_attention_v3
-                    or context_attachments._renderer.expand_attention_v2
-                local ok, expanded, _, bytes = pcall(expand, payload, remaining_expanded)
-                if not ok or not expanded or not validate_attention(expanded) then
-                    return nil, failure('invalid-attention-payload', path, 'Attention version ' .. tostring(attachment.version) .. ' reconstruction is invalid', attachment_id)
+                if attachment.version == 4 then
+                    if type(payload) ~= 'table' or payload.schema ~= 'wippy.attention.v4' then
+                        return nil, failure('invalid-attention-payload', path, 'Attention version 4 content is invalid', attachment_id)
+                    end
+                else
+                    local expand = attachment.version == 3
+                        and context_attachments._renderer.expand_attention_v3
+                        or context_attachments._renderer.expand_attention_v2
+                    local ok, expanded, _, bytes = pcall(expand, payload, remaining_expanded)
+                    if not ok or not expanded or not validate_attention(expanded) then
+                        return nil, failure('invalid-attention-payload', path, 'Attention version ' .. tostring(attachment.version) .. ' reconstruction is invalid', attachment_id)
+                    end
+                    expanded_bytes = bytes
                 end
-                expanded_bytes = bytes
             end
             if type(expanded_bytes) ~= 'number' or expanded_bytes > remaining_expanded then
                 return nil, failure('expanded-bytes-exceeded', path, 'Attention reconstruction exceeds the aggregate byte limit', attachment_id)

@@ -106,7 +106,8 @@ local consts = {
         AGENT = "agent",
         MODEL = "model",
         ARTIFACT = "artifact",
-        CONTEXT = "context"
+        CONTEXT = "context",
+        ATTENTION_CONTEXT_SET = "attention_context_set"
     },
 
     -- Message Types
@@ -133,6 +134,7 @@ local consts = {
         STOP = "stop",
         MESSAGE = "message",
         COMMAND = "command",
+        ATTENTION_CONTEXT_UPDATED = "attention_context_updated",
         UI_ACTION_RESULT = "session_ui_action_result",
         CONTINUE = "continue",
         CONTEXT = "context",

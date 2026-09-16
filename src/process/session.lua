@@ -7,6 +7,7 @@ local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
 local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
+local session_repo = require("session_repo")
 local agent_context = require("agent_context")
 local tools = require("tools")
 
@@ -177,7 +178,19 @@ local function run(args: SessionArgs)
         status = consts.STATUS.IDLE,
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,
+        attention_context = session_data.attention_context,
     })
+    local current_attention_context = session_data.attention_context or { revision = 0 }
+    local function emit_attention_context(attention_context)
+        local incoming_revision = tonumber(attention_context and attention_context.revision)
+        local current_revision = tonumber(current_attention_context.revision) or 0
+        if not incoming_revision or incoming_revision <= current_revision then
+            return false
+        end
+        current_attention_context = attention_context
+        session_upstream:update_session({ attention_context = attention_context })
+        return true
+    end
 
     process.registry.register("session." .. args.session_id)
 
@@ -226,6 +239,11 @@ local function run(args: SessionArgs)
                 dispatch_manager:activated(msg:from(), payload:data())
             elseif string.sub(topic, 1, #dispatch_runtime.STREAM_TOPIC) == dispatch_runtime.STREAM_TOPIC then
                 dispatch_manager:relay(topic, payload:data())
+            elseif topic == consts.TOPICS.ATTENTION_CONTEXT_UPDATED then
+                local notification = payload:data() or {}
+                if type(notification.attention_context) == 'table' then
+                    emit_attention_context(notification.attention_context)
+                end
             elseif topic == consts.TOPICS.MESSAGE then
                 local payload_data = payload:data()
                 if payload_data.conn_pid then
@@ -282,6 +300,25 @@ local function run(args: SessionArgs)
                         from_pid = payload_data.from_pid,
                         request_id = payload_data.request_id
                     })
+                elseif payload_data.command == consts.COMMANDS.ATTENTION_CONTEXT_SET then
+                    local attention_context, attention_err = session_repo.update_attention_context(
+                        args.session_id,
+                        payload_data.enabled,
+                        payload_data.expected_revision,
+                        args.user_id
+                    )
+                    if attention_context then
+                        emit_attention_context(attention_context)
+                        session_upstream:command_success(payload_data.request_id, {
+                            attention_context = attention_context,
+                        })
+                    elseif attention_err == 'ATTENTION_CONTEXT_REVISION_CONFLICT' then
+                        session_upstream:command_error(payload_data.request_id, attention_err,
+                            'Attention context revision is stale')
+                    else
+                        session_upstream:command_error(payload_data.request_id, attention_err,
+                            'Attention context update rejected')
+                    end
                 elseif payload_data.command == consts.COMMANDS.STOP then
                     dispatch_manager:cancel()
                     bus:intercept(intercept_handler)

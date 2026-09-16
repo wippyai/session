@@ -294,7 +294,7 @@ local function define_tests()
             test.is_true(context_attachments.validate({ attachment }) ~= nil)
         end)
         it('advertises deterministic strict intersection and rejects unavailable known v2 while preserving inert future versions', function()
-            local expected = { version = 1, handlers = { { kind = 'wippy.attention', versions = { 1, 2, 3 } },
+            local expected = { version = 1, handlers = { { kind = 'wippy.attention', versions = { 1, 2, 3, 4 } },
                 { kind = 'wippy.attention.visual', versions = { 1 } } } }
             test.eq(context_attachments.canonical_json(context_attachments.capabilities()), context_attachments.canonical_json(expected))
             for _, probe in ipairs({ function() return 'yes' end, function() error('unavailable') end, function() return false end }) do
@@ -304,11 +304,11 @@ local function define_tests()
                 local attachment = compact()
                 local _, err = context_attachments.validate({ attachment })
                 test.eq(err.code, 'unsupported-attention-version')
-                attachment.version = 4
+                attachment.version = 99
                 test.is_true(context_attachments.validate({ attachment }) ~= nil)
             end
             context_attachments._renderer = { supports = function() return true end }
-            test.eq(context_attachments.canonical_json(context_attachments.capabilities().handlers[1].versions), '[1]')
+            test.eq(context_attachments.canonical_json(context_attachments.capabilities().handlers[1].versions), '[1,4]')
         end)
         it('enforces the complete canonical envelope boundary rather than only payload bytes', function()
             local attachment, payload = compact()
