@@ -18,8 +18,12 @@ local function respond(res, status, body)
     res:write_json(body)
 end
 
-local function fail(res, status, code)
-    respond(res, status, { error = { code = code, message = 'Context transport request rejected' } })
+local function fail(res, status, code, validation_code)
+    local error = { code = code, message = 'Context transport request rejected' }
+    if type(validation_code) == 'string' and string.match(validation_code, '^[a-z][a-z0-9-]*$') and #validation_code <= 64 then
+        error.validation_code = validation_code
+    end
+    respond(res, status, { error = error })
 end
 
 function api.handler()
@@ -69,12 +73,14 @@ function api.handler()
     if decode_err then return fail(res, 400, 'INVALID_JSON') end
     local canonical = attachments.canonical_json(decoded)
     if not canonical or canonical ~= body then return fail(res, 422, 'NONCANONICAL_CONTEXT') end
-    local validated = attachments.validate(decoded, {
+    local validated, validation_err = attachments.validate(decoded, {
         session_id = session_id, require_visual_authorization = true,
         visual_authorizer = prompt_builder._authorize_visual,
         visual_resolver = prompt_builder._resolve_visual,
     })
-    if not validated then return fail(res, 422, 'INVALID_CONTEXT_ATTACHMENTS') end
+    if not validated then
+        return fail(res, 422, 'INVALID_CONTEXT_ATTACHMENTS', type(validation_err) == 'table' and validation_err.code or nil)
+    end
     local expires_at = time.now():unix() + 300
     for _, attachment in ipairs(validated) do
         if attachment.expires_at then

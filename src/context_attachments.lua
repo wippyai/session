@@ -13,6 +13,7 @@ local function renderer_supports(kind, version)
     if type(active) ~= 'table' or type(active.supports) ~= 'function' then return false end
     if kind == 'wippy.attention' and version == 2 and type(active.expand_attention_v2) ~= 'function' then return false end
     if kind == 'wippy.attention' and version == 3 and type(active.expand_attention_v3) ~= 'function' then return false end
+    if kind == 'wippy.attention' and version == 4 and type(active.expand_attention_v4) ~= 'function' then return false end
     local ok, supported = pcall(active.supports, kind, version)
     return ok and supported == true
 end
@@ -286,6 +287,32 @@ local function same_rect(left, right)
         and left.height == right.height
 end
 
+local function attention_path_digest_matches(path, expected)
+    local semantic_path = {}
+    local geometry_keys = {
+        rect = true,
+        clip_rect = true,
+        local_to_parent = true,
+        coordinate_quality = true
+    }
+    for _, segment in ipairs(path) do
+        local semantic = {}
+        for key, value in pairs(segment) do
+            if not geometry_keys[key] then semantic[key] = value end
+        end
+        table.insert(semantic_path, semantic)
+    end
+    local semantic_json = canonical_json(semantic_path)
+    if semantic_json then
+        local semantic_digest = hash.sha256(semantic_json)
+        if semantic_digest and expected == "sha256:" .. semantic_digest then return true end
+    end
+    local legacy_json = canonical_json(path)
+    if not legacy_json then return false end
+    local legacy_digest = hash.sha256(legacy_json)
+    return legacy_digest ~= nil and expected == "sha256:" .. legacy_digest
+end
+
 local function is_transform(value)
     if type(value) ~= "table"
         or not has_only_keys(value, { matrix = true, convention = true, direction = true })
@@ -355,6 +382,55 @@ local function is_path(value)
             or (segment.clip_rect ~= nil and not is_rect(segment.clip_rect))
             or (segment.local_to_parent ~= nil and not is_transform(segment.local_to_parent))
             or (segment.coordinate_quality ~= nil and segment.coordinate_quality ~= "exact" and segment.coordinate_quality ~= "approximate") then
+            return false
+        end
+    end
+    return true
+end
+
+local selection_directions = {
+    none = true,
+    forward = true,
+    backward = true
+}
+
+local function is_mount_ref(value)
+    return type(value) == "table"
+        and has_only_keys(value, { mount_id = true, generation = true })
+        and is_string(value.mount_id, 160, false)
+        and is_integer(value.generation, 0)
+end
+
+local function is_selection(value)
+    if type(value) ~= "table"
+        or not has_only_keys(value, {
+            selection_id = true,
+            selected_at = true,
+            kind = true,
+            collapsed = true,
+            direction = true,
+            text = true,
+            anchor_path = true,
+            focus_path = true,
+            ranges = true
+        })
+        or not is_string(value.selection_id, 128, false)
+        or not is_timestamp(value.selected_at)
+        or value.kind ~= "text"
+        or value.collapsed ~= false
+        or selection_directions[value.direction] ~= true
+        or not is_string(value.text, 1024, true)
+        or not is_path(value.anchor_path)
+        or not is_path(value.focus_path)
+        or not is_array(value.ranges)
+        or #value.ranges > 4 then
+        return false
+    end
+    for _, range in ipairs(value.ranges) do
+        if type(range) ~= "table"
+            or not has_only_keys(range, { rect = true, coordinate_space = true })
+            or not is_rect(range.rect)
+            or (range.coordinate_space ~= "host-viewport" and not is_mount_ref(range.coordinate_space)) then
             return false
         end
     end
@@ -600,28 +676,30 @@ local function is_provenance(value)
         and (value.runtime_source == "document" or value.runtime_source == "iframe-realm" or value.runtime_source == "fragment-realm")
 end
 
-local function validate_attention(payload)
+local function validate_attention(payload, allow_selection)
+    local allowed_keys = {
+        schema = true,
+        snapshot_id = true,
+        host_instance_id = true,
+        mount_generation = true,
+        created_at = true,
+        coordinate_space = true,
+        capture = true,
+        pointer = true,
+        focus = true,
+        recent_events = true,
+        candidates = true,
+        omissions = true
+    }
+    if allow_selection then allowed_keys.selection = true end
     if type(payload) ~= "table"
-        or not has_only_keys(payload, {
-            schema = true,
-            snapshot_id = true,
-            host_instance_id = true,
-            mount_generation = true,
-            created_at = true,
-            coordinate_space = true,
-            capture = true,
-            pointer = true,
-            focus = true,
-            recent_events = true,
-            candidates = true,
-            omissions = true
-        })
+        or not has_only_keys(payload, allowed_keys)
         or payload.schema ~= context_attachments.ATTENTION_SCHEMA
         or not is_string(payload.snapshot_id, 128, false)
         or not is_string(payload.host_instance_id, 160, false)
         or not is_integer(payload.mount_generation, 0)
         or not is_timestamp(payload.created_at) then
-        return false
+        return false, 'root'
     end
     local space = payload.coordinate_space
     if type(space) ~= "table"
@@ -633,7 +711,7 @@ local function validate_attention(payload)
         or space.height < 0
         or not is_number(space.device_pixel_ratio)
         or space.device_pixel_ratio <= 0 then
-        return false
+        return false, 'coordinate-space'
     end
     local capture = payload.capture
     if type(capture) ~= "table"
@@ -659,17 +737,17 @@ local function validate_attention(payload)
         or not is_number(capture.duration_ms)
         or capture.duration_ms < 0
         or type(capture.complete) ~= "boolean" then
-        return false
+        return false, 'capture'
     end
     local point_ids = {}
     for _, point in ipairs(capture.points) do
         if not is_query_point(point) or point_ids[point.point_id] then
-            return false
+            return false, 'capture-point'
         end
         point_ids[point.point_id] = true
     end
     if payload.pointer ~= nil and not is_observed_event(payload.pointer) then
-        return false
+        return false, 'pointer'
     end
     if payload.focus ~= nil then
         if type(payload.focus) ~= "table"
@@ -690,15 +768,18 @@ local function validate_attention(payload)
             or (payload.focus.candidate_id ~= nil and not is_string(payload.focus.candidate_id, 128, true))
             or not is_path(payload.focus.path)
             or not is_summary(payload.focus.summary) then
-            return false
+            return false, 'focus'
         end
     end
+    if payload.selection ~= nil and (not allow_selection or not is_selection(payload.selection)) then
+        return false, 'selection'
+    end
     if not is_array(payload.recent_events) or #payload.recent_events > 32 then
-        return false
+        return false, 'recent-events'
     end
     for _, event in ipairs(payload.recent_events) do
         if not is_observed_event(event) then
-            return false
+            return false, 'recent-event'
         end
     end
     local observation_point_ids = {}
@@ -712,7 +793,7 @@ local function validate_attention(payload)
         observation_point_ids[event.event_id] = true
     end
     if not is_array(payload.candidates) or #payload.candidates > 128 then
-        return false
+        return false, 'candidates'
     end
     local candidate_ids = {}
     for _, candidate in ipairs(payload.candidates) do
@@ -739,25 +820,18 @@ local function validate_attention(payload)
             or not is_summary(candidate.summary)
             or (candidate.provenance ~= nil and not is_provenance(candidate.provenance))
             or (candidate.action_ref ~= nil and not is_action_ref(candidate.action_ref)) then
-            return false
+            return false, 'candidate'
         end
         if candidate.action_ref ~= nil then
             local leaf = candidate.path[#candidate.path]
-            local canonical_path, canonical_path_err = canonical_json(candidate.path)
-            local path_digest, path_digest_err
-            if canonical_path then
-                path_digest, path_digest_err = hash.sha256(canonical_path)
-            end
             if candidate.action_ref.snapshot_id ~= payload.snapshot_id
                 or candidate.action_ref.target_id ~= candidate.target_id
                 or candidate.action_ref.host_instance_id ~= payload.host_instance_id
                 or candidate.action_ref.mount_id ~= leaf.mount_id
                 or candidate.action_ref.generation ~= leaf.generation
                 or not same_rect(candidate.action_ref.rect, candidate.rect)
-                or canonical_path_err ~= nil
-                or path_digest_err ~= nil
-                or candidate.action_ref.path_digest ~= "sha256:" .. tostring(path_digest) then
-                return false
+                or not attention_path_digest_matches(candidate.path, candidate.action_ref.path_digest) then
+                return false, 'action-reference'
             end
         end
         candidate_ids[candidate.target_id] = true
@@ -766,7 +840,7 @@ local function validate_attention(payload)
             if not is_string(point_id, 128, false)
                 or sample_point_ids[point_id]
                 or (not point_ids[point_id] and not observation_point_ids[point_id]) then
-                return false
+                return false, 'sample-point-reference'
             end
             sample_point_ids[point_id] = true
         end
@@ -774,28 +848,28 @@ local function validate_attention(payload)
     if payload.pointer ~= nil then
         for _, candidate_id in ipairs(payload.pointer.candidate_ids) do
             if not candidate_ids[candidate_id] then
-                return false
+                return false, 'pointer-candidate-reference'
             end
         end
     end
     for _, event in ipairs(payload.recent_events) do
         for _, candidate_id in ipairs(event.candidate_ids) do
             if not candidate_ids[candidate_id] then
-                return false
+                return false, 'event-candidate-reference'
             end
         end
     end
     if payload.focus ~= nil
         and payload.focus.candidate_id ~= nil
         and not candidate_ids[payload.focus.candidate_id] then
-        return false
+        return false, 'focus-candidate-reference'
     end
     if not is_array(payload.omissions) or #payload.omissions > 128 then
-        return false
+        return false, 'omissions'
     end
     for _, omission in ipairs(payload.omissions) do
         if not is_omission(omission) then
-            return false
+            return false, 'omission'
         end
     end
     return true
@@ -916,20 +990,20 @@ function context_attachments.validate(attachments, options)
                 if not envelope or #envelope > context_attachments.ATTENTION_V2_MAX_ENVELOPE_BYTES then
                     return nil, failure('attachment-bytes-exceeded', path, 'Attention version ' .. tostring(attachment.version) .. ' envelope exceeds the byte limit', attachment_id)
                 end
-                if attachment.version == 4 then
-                    if type(payload) ~= 'table' or payload.schema ~= 'wippy.attention.v4' then
-                        return nil, failure('invalid-attention-payload', path, 'Attention version 4 content is invalid', attachment_id)
-                    end
-                else
-                    local expand = attachment.version == 3
+                local expand = attachment.version == 4
+                    and context_attachments._renderer.expand_attention_v4
+                    or attachment.version == 3
                         and context_attachments._renderer.expand_attention_v3
                         or context_attachments._renderer.expand_attention_v2
-                    local ok, expanded, _, bytes = pcall(expand, payload, remaining_expanded)
-                    if not ok or not expanded or not validate_attention(expanded) then
-                        return nil, failure('invalid-attention-payload', path, 'Attention version ' .. tostring(attachment.version) .. ' reconstruction is invalid', attachment_id)
-                    end
-                    expanded_bytes = bytes
+                local ok, expanded, _, bytes = pcall(expand, payload, remaining_expanded)
+                if not ok or not expanded then
+                    return nil, failure('invalid-attention-expansion', path, 'Attention version ' .. tostring(attachment.version) .. ' expansion is invalid', attachment_id)
                 end
+                local reconstruction_valid, reconstruction_stage = validate_attention(expanded, attachment.version == 4)
+                if not reconstruction_valid then
+                    return nil, failure('invalid-attention-reconstruction-' .. tostring(reconstruction_stage or 'unknown'), path, 'Attention version ' .. tostring(attachment.version) .. ' reconstruction is invalid', attachment_id)
+                end
+                expanded_bytes = bytes
             end
             if type(expanded_bytes) ~= 'number' or expanded_bytes > remaining_expanded then
                 return nil, failure('expanded-bytes-exceeded', path, 'Attention reconstruction exceeds the aggregate byte limit', attachment_id)
