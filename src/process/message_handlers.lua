@@ -796,6 +796,41 @@ function message_handlers.agent_step(ctx, op)
     }
 end
 
+message_handlers._resolve_tool_runtime_context = function(context, operation, tool_call)
+    if tostring(tool_call.registry_id) == "wippy.agent.tools:attention_context_set" then
+        if not operation.ui_action_runtime or operation.ui_action_runtime.agent_actions_authorized ~= true then
+            return nil, "Attention context control unavailable: agent actions were not enabled for this turn"
+        end
+        if type(context.set_attention_context) ~= "function" then
+            return nil, "Attention context control unavailable for this Session"
+        end
+        local op_agent = type(operation.agent) == "table" and operation.agent or nil
+        local agent_id = string_or_nil(op_agent and op_agent.id)
+            or string_or_nil(context.config and context.config.agent_id)
+        if not agent_id then
+            return nil, "Attention context control requires an active agent identity"
+        end
+        return {
+            attention_context_runtime = {
+                session_id = context.session_id,
+                controller_pid = context.controller_pid,
+                agent_id = agent_id,
+            },
+        }, nil
+    end
+    if not operation.ui_action_runtime or operation.ui_action_runtime.agent_actions_authorized ~= true then
+        return nil, "UI action unavailable: agent actions were not enabled for this turn"
+    end
+    return {
+        ui_action_runtime = {
+            broker_pid = operation.ui_action_runtime.broker_pid,
+            delivery_handle = operation.ui_action_runtime.delivery_handle,
+            session_id = operation.ui_action_runtime.session_id,
+            host_instance_id = operation.ui_action_runtime.host_instance_id,
+        }
+    }, nil
+end
+
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
@@ -804,35 +839,7 @@ function message_handlers.process_tools(ctx, op)
     local caller = tool_caller.new()
     caller:set_strategy(tool_caller.STRATEGY.PARALLEL)
     caller:set_runtime_context_resolver(function(call_id, tool_call)
-        if tostring(tool_call.registry_id) == "wippy.agent.tools:attention_context_set" then
-            if type(ctx.set_attention_context) ~= "function" then
-                return nil, "Attention context control unavailable for this Session"
-            end
-            local op_agent = type(op.agent) == "table" and op.agent or nil
-            local agent_id = string_or_nil(op_agent and op_agent.id)
-                or string_or_nil(ctx.config and ctx.config.agent_id)
-            if not agent_id then
-                return nil, "Attention context control requires an active agent identity"
-            end
-            return {
-                attention_context_runtime = {
-                    session_id = ctx.session_id,
-                    controller_pid = ctx.controller_pid,
-                    agent_id = agent_id,
-                },
-            }, nil
-        end
-        if not op.ui_action_runtime then
-            return nil, "UI action unavailable: agent actions were not enabled for this turn"
-        end
-        return {
-            ui_action_runtime = {
-                broker_pid = op.ui_action_runtime.broker_pid,
-                delivery_handle = op.ui_action_runtime.delivery_handle,
-                session_id = op.ui_action_runtime.session_id,
-                host_instance_id = op.ui_action_runtime.host_instance_id,
-            }
-        }, nil
+        return message_handlers._resolve_tool_runtime_context(ctx, op, tool_call)
     end)
 
     local op_agent = op.agent

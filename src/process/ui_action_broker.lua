@@ -596,6 +596,7 @@ function ui_action_broker:bind_turn(fields)
         delivery_handle = binding.delivery_handle,
         session_id = binding.session_id,
         host_instance_id = binding.host_instance_id,
+        agent_actions_authorized = true,
     }, nil
 end
 

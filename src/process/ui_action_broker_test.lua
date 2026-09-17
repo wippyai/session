@@ -77,6 +77,7 @@ local function bind(broker: any, session_id, conn_pid, host_instance_id): any
     })
     test.is_nil(err)
     test.not_nil(runtime)
+    test.is_true(runtime.agent_actions_authorized)
     return runtime
 end
 

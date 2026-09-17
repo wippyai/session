@@ -101,7 +101,125 @@ local function context(writer_error, duplicate): (any, any)
     return ctx, calls
 end
 
+local function attention_context_tool()
+    return { registry_id = "wippy.agent.tools:attention_context_set" }
+end
+
+local function generic_ui_action_tool()
+    return { registry_id = "wippy.agent.tools:ui_action_confirm" }
+end
+
 local function define_tests()
+    describe("Attention context tool authorization", function()
+        it("rejects a setting tool without current-turn Host authority before calling the handler", function()
+            local handler_calls = 0
+            local ctx = {
+                session_id = "session-1",
+                controller_pid = "controller-1",
+                config = { agent_id = "agent-1" },
+                set_attention_context = function()
+                    handler_calls = handler_calls + 1
+                end,
+            }
+            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+                agent = { id = "agent-1" },
+            }, attention_context_tool())
+
+            test.is_nil(runtime)
+            test.eq(err, "Attention context control unavailable: agent actions were not enabled for this turn")
+            test.eq(handler_calls, 0)
+        end)
+
+        it("rejects a setting tool when the runtime object has no trusted authority marker", function()
+            local ctx = {
+                session_id = "session-1",
+                controller_pid = "controller-1",
+                config = { agent_id = "agent-1" },
+                set_attention_context = function() end,
+            }
+            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+                agent = { id = "agent-1" },
+                ui_action_runtime = {},
+            }, attention_context_tool())
+
+            test.is_nil(runtime)
+            test.eq(err, "Attention context control unavailable: agent actions were not enabled for this turn")
+        end)
+
+        it("rejects a setting tool when the runtime authority marker is false", function()
+            local ctx = {
+                session_id = "session-1",
+                controller_pid = "controller-1",
+                config = { agent_id = "agent-1" },
+                set_attention_context = function() end,
+            }
+            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+                agent = { id = "agent-1" },
+                ui_action_runtime = { agent_actions_authorized = false },
+            }, attention_context_tool())
+
+            test.is_nil(runtime)
+            test.eq(err, "Attention context control unavailable: agent actions were not enabled for this turn")
+        end)
+
+        it("returns Session control authority when the current turn enables agent actions", function()
+            local ctx = {
+                session_id = "session-1",
+                controller_pid = "controller-1",
+                config = { agent_id = "fallback-agent" },
+                set_attention_context = function() end,
+            }
+            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+                agent = { id = "agent-1" },
+                ui_action_runtime = { broker_pid = "broker-1", agent_actions_authorized = true },
+            }, attention_context_tool())
+
+            test.is_nil(err)
+            test.eq(runtime.attention_context_runtime.session_id, "session-1")
+            test.eq(runtime.attention_context_runtime.controller_pid, "controller-1")
+            test.eq(runtime.attention_context_runtime.agent_id, "agent-1")
+            test.is_nil((runtime.attention_context_runtime :: any).agent_actions_authorized)
+            test.is_nil(runtime.ui_action_runtime)
+        end)
+
+        it("rejects a generic UI action when the runtime object has no trusted authority marker", function()
+            local runtime, err = message_handlers._resolve_tool_runtime_context({}, {
+                ui_action_runtime = { delivery_handle = "delivery-1" },
+            }, generic_ui_action_tool())
+
+            test.is_nil(runtime)
+            test.eq(err, "UI action unavailable: agent actions were not enabled for this turn")
+        end)
+
+        it("rejects a generic UI action when the runtime authority marker is false", function()
+            local runtime, err = message_handlers._resolve_tool_runtime_context({}, {
+                ui_action_runtime = { agent_actions_authorized = false },
+            }, generic_ui_action_tool())
+
+            test.is_nil(runtime)
+            test.eq(err, "UI action unavailable: agent actions were not enabled for this turn")
+        end)
+
+        it("copies generic UI action routing without exposing the authority marker", function()
+            local runtime, err = message_handlers._resolve_tool_runtime_context({}, {
+                ui_action_runtime = {
+                    broker_pid = "broker-1",
+                    delivery_handle = "delivery-1",
+                    session_id = "session-1",
+                    host_instance_id = "host-1",
+                    agent_actions_authorized = true,
+                },
+            }, generic_ui_action_tool())
+
+            test.is_nil(err)
+            test.eq(runtime.ui_action_runtime.broker_pid, "broker-1")
+            test.eq(runtime.ui_action_runtime.delivery_handle, "delivery-1")
+            test.eq(runtime.ui_action_runtime.session_id, "session-1")
+            test.eq(runtime.ui_action_runtime.host_instance_id, "host-1")
+            test.is_nil((runtime.ui_action_runtime :: any).agent_actions_authorized)
+        end)
+    end)
+
     describe('Referenced context ingestion boundaries', function()
         local original_renderer = context_attachments._renderer
         local original_staging = message_handlers._context_staging :: any
