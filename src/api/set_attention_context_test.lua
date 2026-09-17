@@ -61,6 +61,9 @@ local function define_tests()
                         expected_revision = expected_revision,
                         updated_by = updated_by,
                     }
+                    if options.update_err then
+                        return nil, options.update_err, options.current
+                    end
                     return options.state or {
                         enabled = enabled,
                         revision = (expected_revision or 0) + 1,
@@ -131,6 +134,22 @@ local function define_tests()
             test.eq(result.sends, 1)
             test.eq(result.topic, 'attention-updated')
             test.is_false(result.payload.attention_context.enabled)
+        end)
+
+        it('returns the current state for an expected revision conflict without emitting an update', function()
+            local current = { enabled = true, revision = 4, updated_by = 'agent:agent-1' }
+            local result = install({
+                body = { enabled = false, expected_revision = 2 },
+                session_pid = 'session-pid',
+                update_err = 'ATTENTION_CONTEXT_REVISION_CONFLICT',
+                current = current,
+            })
+            api.handler()
+            test.eq(result.status, 409)
+            test.eq(result.body.error.code, 'ATTENTION_CONTEXT_REVISION_CONFLICT')
+            test.eq(result.body.attention_context.revision, 4)
+            test.eq(result.updates, 1)
+            test.eq(result.sends, 0)
         end)
     end)
 end
