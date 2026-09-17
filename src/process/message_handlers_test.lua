@@ -163,21 +163,31 @@ local function define_tests()
         end)
 
         it("returns Session control authority when the current turn enables agent actions", function()
+            local issued_agent = nil
+            local issued_call = nil
             local ctx = {
                 session_id = "session-1",
                 controller_pid = "controller-1",
                 config = { agent_id = "fallback-agent" },
                 set_attention_context = function() end,
+                issue_attention_control = function(agent_id, call_id)
+                    issued_agent = agent_id
+                    issued_call = call_id
+                    return "grant-1"
+                end,
             }
             local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
                 agent = { id = "agent-1" },
                 ui_action_runtime = { broker_pid = "broker-1", agent_actions_authorized = true },
-            }, attention_context_tool())
+            }, attention_context_tool(), "call-1")
 
             test.is_nil(err)
             test.eq(runtime.attention_context_runtime.session_id, "session-1")
             test.eq(runtime.attention_context_runtime.controller_pid, "controller-1")
             test.eq(runtime.attention_context_runtime.agent_id, "agent-1")
+            test.eq(runtime.attention_context_runtime.capability, "grant-1")
+            test.eq(issued_agent, "agent-1")
+            test.eq(issued_call, "call-1")
             test.is_nil((runtime.attention_context_runtime :: any).agent_actions_authorized)
             test.is_nil(runtime.ui_action_runtime)
         end)

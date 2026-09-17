@@ -16,6 +16,21 @@ entries:
       dispatch_writer: wippy.session.persist:dispatch_writer
       consts: wippy.session:consts
 
+  - name: attention_control_runtime
+    kind: library.lua
+    source: file://attention_control_runtime.lua
+
+  - name: attention_control_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://attention_control_runtime_test.lua
+    imports:
+      attention_control_runtime: wippy.session.process:attention_control_runtime
+      test: wippy.test:test
+    method: run
+
   - name: dispatch_action_intents_test
     kind: function.lua
     meta:
@@ -224,6 +239,8 @@ entries:
     modules:
       - time
       - logger
+      - uuid
+      - hash
     imports:
       dispatch_runtime: wippy.session.process:dispatch_runtime
       dispatch_repo: wippy.session.persist:dispatch_repo
@@ -237,6 +254,7 @@ entries:
       session_handlers: wippy.session.process:session_handlers
       session_repo: wippy.session.persist:session_repo
       context_attachments: wippy.session:context_attachments
+      attention_control_runtime: wippy.session.process:attention_control_runtime
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
     method: run

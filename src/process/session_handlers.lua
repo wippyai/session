@@ -427,6 +427,10 @@ function session_handlers.agent_change(ctx, op)
     ctx.config.model = new_model
     ctx.config.agent_id = op.agent_id
 
+    if previous_agent ~= op.agent_id and type(ctx.invalidate_attention_control) == "function" then
+        ctx.invalidate_attention_control()
+    end
+
     local success, err = ctx.writer:update_meta({ config = current_config })
     if not success then
         return nil, "Failed to update agent config: " .. (err or "unknown error")
