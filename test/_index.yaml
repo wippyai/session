@@ -299,6 +299,27 @@ entries:
       test: wippy.test:test
     method: run
 
+  - name: attention_context_state_worker
+    kind: process.lua
+    source: file://attention_context_state_worker.lua
+    imports:
+      session_repo: wippy.session.persist:session_repo
+    method: run
+
+  - name: attention_context_state_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://attention_context_state_runtime_test.lua
+    modules: [time, uuid, security]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+    method: run
+
   - name: file_provider_func
     kind: function.lua
     source: file://file_provider_func.lua
