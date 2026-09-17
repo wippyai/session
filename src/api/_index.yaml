@@ -14,6 +14,7 @@ entries:
     imports:
       session_repo: wippy.session.persist:session_repo
       consts: wippy.session:consts
+      context_attachments: wippy.session:context_attachments
     method: handler
     pool:
       size: 4
@@ -26,6 +27,17 @@ entries:
     method: PATCH
     func: set_attention_context
     path: /sessions/{session_id}/attention-context
+
+  - name: set_attention_context_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://set_attention_context_test.lua
+    imports:
+      test: wippy.test:test
+      set_attention_context: wippy.session.api:set_attention_context
+    method: run
 
   - name: session_messages_test
     kind: function.lua

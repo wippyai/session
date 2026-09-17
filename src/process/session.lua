@@ -198,18 +198,25 @@ local function run(args: SessionArgs)
         session_upstream:update_session({ attention_context = attention_context })
         return true
     end
-    context.set_attention_context = function(enabled, expected_revision, agent_id)
-        if not context_attachments.supports('wippy.attention', 4) then
-            return nil, "ATTENTION_CONTEXT_CAPABILITY_UNAVAILABLE"
+    local function update_attention_context(enabled: any, expected_revision: any, updated_by: string)
+        if enabled and not context_attachments.supports('wippy.attention', 4) then
+            return nil, 'ATTENTION_CONTEXT_CAPABILITY_UNAVAILABLE'
         end
+        return session_repo.update_attention_context(
+            args.session_id,
+            enabled,
+            expected_revision,
+            updated_by
+        )
+    end
+    context.set_attention_context = function(enabled, expected_revision, agent_id)
         if type(agent_id) ~= "string" or agent_id == "" then
             return nil, "ATTENTION_CONTEXT_AGENT_REQUIRED"
         end
         if agent_id ~= context.config.agent_id then
             return nil, "ATTENTION_CONTEXT_AGENT_STALE"
         end
-        local state, update_err, current = session_repo.update_attention_context(
-            args.session_id,
+        local state, update_err, current = update_attention_context(
             enabled,
             expected_revision,
             "agent:" .. agent_id
@@ -362,8 +369,7 @@ local function run(args: SessionArgs)
                         request_id = payload_data.request_id
                     })
                 elseif payload_data.command == consts.COMMANDS.ATTENTION_CONTEXT_SET then
-                    local attention_context, attention_err = session_repo.update_attention_context(
-                        args.session_id,
+                    local attention_context, attention_err = update_attention_context(
                         payload_data.enabled,
                         payload_data.expected_revision,
                         args.user_id
