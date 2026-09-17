@@ -221,6 +221,12 @@ local function define_tests()
             replace_content(attachment, payload)
             return attachment, payload
         end
+        local function compact_v4()
+            local attachment, payload = compact_v3()
+            payload.schema, attachment.version, attachment.attachment_id = 'wippy.attention.v4', 4, 'compact-v4-1'
+            replace_content(attachment, payload)
+            return attachment, payload
+        end
         it('matches the Host compact golden bytes and digest and persists the original envelope', function()
             local attachment = compact()
             test.eq(#attachment.content, 1040)
@@ -267,6 +273,29 @@ local function define_tests()
             test.is_false(context_attachments.supports('wippy.attention', 3))
             local _, err = context_attachments.validate({ attachment })
             test.eq(err.code, 'unsupported-attention-version')
+        end)
+        it('admits Host v4 selection and query omissions after reconstruction', function()
+            for _, reason in ipairs({
+                'query-budget',
+                'selection-unavailable',
+                'selection-detached',
+                'selection-excluded',
+                'selection-redacted',
+            }) do
+                local attachment, payload = compact_v4()
+                payload.omissions = { { reason = reason, mount_id = 'leaf-1' } }
+                replace_content(attachment, payload)
+                local validated, err = context_attachments.validate({ attachment })
+                test.is_nil(err)
+                test.not_nil(validated)
+            end
+
+            local attachment, payload = compact_v4()
+            payload.omissions = { { reason = 'future-selection-state', mount_id = 'leaf-1' } }
+            replace_content(attachment, payload)
+            local validated, err = context_attachments.validate({ attachment })
+            test.is_nil(validated)
+            test.eq(err.code, 'invalid-attention-reconstruction-omission')
         end)
         it('reconstructs a lattice and rejects malformed indices identity digests and semantic fields atomically', function()
             local changes = {
