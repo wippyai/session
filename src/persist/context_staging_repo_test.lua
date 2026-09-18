@@ -128,6 +128,20 @@ local function define_tests()
             test.eq(stored.context_receipt.reference.id, staged.context_attachments_ref.id)
             test.is_true(staging.create(actor, session, 'new-request', '[]', staging._now() + 60) ~= nil)
         end)
+        it('does not charge retained committed rows against pending staging capacity', function()
+            local actor, session = fixture()
+            for i = 1, staging.MAX_SESSION do
+                local request_id = 'committed-capacity-' .. i
+                local staged = assert(staging.create(actor, session, request_id, '[]', time.now():unix() + 60))
+                local fingerprint = 'sha256:' .. hash.sha256(request_id)
+                local receipt = { actor_id = actor, reference = staged.context_attachments_ref }
+                assert(messages.create(uuid.v7(), session, 'user', request_id, { context_attachments = {} },
+                    request_id, fingerprint, receipt))
+            end
+            local next_stage, err = staging.create(actor, session, 'next-pending', '[]', time.now():unix() + 60)
+            test.is_nil(err)
+            test.not_nil(next_stage)
+        end)
         it('rejects unknown reference versions and extra fields', function()
             local ref = { version = 2, id = 'id', content_hash = 'sha256:' .. string.rep('a', 64), content_bytes = 2 }
             test.is_false(staging.valid_reference(ref))

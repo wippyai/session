@@ -70,13 +70,17 @@ function attention_control_runtime:_cleanup()
     for capability, grant in pairs(self.pending) do
         if grant.expires_at <= now then
             self.pending[capability] = nil
-            self.pending_count = self.pending_count - 1
+            local pending_count = self.pending_count
+            assert(type(pending_count) == "number", "pending_count must be numeric")
+            self.pending_count = pending_count - 1
         end
     end
     for request_id, entry in pairs(self.completed) do
         if entry.expires_at <= now then
             self.completed[request_id] = nil
-            self.completed_count = self.completed_count - 1
+            local completed_count = self.completed_count
+            assert(type(completed_count) == "number", "completed_count must be numeric")
+            self.completed_count = completed_count - 1
         end
     end
 end
@@ -219,7 +223,9 @@ function attention_control_runtime:handle(request, sender, expected, update)
         expires_at = self.deps.now() + self.replay_ttl_seconds,
         response = copy_response(response),
     }
-    self.completed_count = self.completed_count + 1
+    local completed_count = self.completed_count
+    assert(type(completed_count) == "number", "completed_count must be numeric")
+    self.completed_count = completed_count + 1
     return copy_response(response)
 end
 

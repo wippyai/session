@@ -64,13 +64,13 @@ local function define_tests()
     describe("Attention Session control authority", function()
         it("consumes one grant and replays an exact duplicate once without another update", function()
             local runtime, update, _, update_count = harness()
-            local capability = runtime:issue({
+            local capability = attention_control_runtime.issue(runtime, {
                 session_id = "session-1",
                 agent_id = "agent-1",
                 request_id = "call-1",
             })
-            local first = runtime:handle(request(capability), "worker-1", expected(), update)
-            local repeated = runtime:handle(request(capability), "worker-1", expected(), update)
+            local first = attention_control_runtime.handle(runtime, request(capability), "worker-1", expected(), update)
+            local repeated = attention_control_runtime.handle(runtime, request(capability), "worker-1", expected(), update)
 
             test.eq(first.attention_context.revision, 1)
             test.eq(repeated.attention_context.revision, 1)
@@ -79,15 +79,17 @@ local function define_tests()
 
         it("rejects a changed duplicate and a replay from another sender", function()
             local runtime, update, _, update_count = harness()
-            local capability = runtime:issue({
+            local capability = attention_control_runtime.issue(runtime, {
                 session_id = "session-1",
                 agent_id = "agent-1",
                 request_id = "call-1",
             })
-            runtime:handle(request(capability), "worker-1", expected(), update)
+            attention_control_runtime.handle(runtime, request(capability), "worker-1", expected(), update)
 
-            local changed = runtime:handle(request(capability, { enabled = false }), "worker-1", expected(), update)
-            local wrong_sender = runtime:handle(request(capability), "worker-2", expected(), update)
+            local changed = attention_control_runtime.handle(runtime,
+                request(capability, { enabled = false }), "worker-1", expected(), update)
+            local wrong_sender = attention_control_runtime.handle(runtime,
+                request(capability), "worker-2", expected(), update)
 
             test.eq(changed.error, "ATTENTION_CONTEXT_REQUEST_CONFLICT")
             test.eq(wrong_sender.error, "ATTENTION_CONTEXT_REQUEST_CONFLICT")
@@ -96,27 +98,31 @@ local function define_tests()
 
         it("rejects wrong Session, stale agent, expiry, and connection replacement", function()
             local runtime, update, set_now, update_count = harness()
-            local capability = runtime:issue({
+            local capability = attention_control_runtime.issue(runtime, {
                 session_id = "session-1",
                 agent_id = "agent-1",
                 request_id = "call-1",
             })
-            test.eq(runtime:handle(request(capability), "worker-1", expected({ session_id = "other" }), update).error,
+            test.eq(attention_control_runtime.handle(runtime,
+                request(capability), "worker-1", expected({ session_id = "other" }), update).error,
                 "ATTENTION_CONTEXT_SESSION_STALE")
-            test.eq(runtime:handle(request(capability), "worker-1", expected({ agent_id = "other" }), update).error,
+            test.eq(attention_control_runtime.handle(runtime,
+                request(capability), "worker-1", expected({ agent_id = "other" }), update).error,
                 "ATTENTION_CONTEXT_AGENT_STALE")
 
             set_now(1030)
-            test.eq(runtime:handle(request(capability), "worker-1", expected(), update).error,
+            test.eq(attention_control_runtime.handle(runtime,
+                request(capability), "worker-1", expected(), update).error,
                 "ATTENTION_CONTEXT_AUTHORITY_STALE")
 
-            local fresh = runtime:issue({
+            local fresh = attention_control_runtime.issue(runtime, {
                 session_id = "session-1",
                 agent_id = "agent-1",
                 request_id = "call-1",
             })
-            runtime:set_connection("conn-2")
-            test.eq(runtime:handle(request(fresh), "worker-1", expected(), update).error,
+            attention_control_runtime.set_connection(runtime, "conn-2")
+            test.eq(attention_control_runtime.handle(runtime,
+                request(fresh), "worker-1", expected(), update).error,
                 "ATTENTION_CONTEXT_AUTHORITY_STALE")
             test.eq(update_count(), 0)
         end)

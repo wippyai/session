@@ -281,6 +281,20 @@ local function define_tests()
             test.eq(accepted, 1)
             test.eq(rejected, 3)
         end)
+        it('does not charge retained committed rows against pending staging capacity', function()
+            local actor, session = fixture()
+            for i = 1, staging.MAX_SESSION do
+                local request_id = 'committed-capacity-' .. i
+                local staged = assert(staging.create(actor, session, request_id, '[]', time.now():unix() + 60))
+                local fingerprint = 'sha256:' .. hash.sha256(request_id)
+                local receipt = { actor_id = actor, reference = staged.context_attachments_ref }
+                assert(messages.create(uuid.v7(), session, 'user', request_id, { context_attachments = {} },
+                    request_id, fingerprint, receipt))
+            end
+            local next_stage, err = staging.create(actor, session, 'next-pending', '[]', time.now():unix() + 60)
+            test.is_nil(err)
+            test.not_nil(next_stage)
+        end)
         it('accepts concurrent identical sends once with one agent step and one stable server message ID', function()
             local actor, session = fixture()
             local request_id = uuid.v7()

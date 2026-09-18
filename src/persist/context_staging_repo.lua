@@ -124,8 +124,14 @@ function repo.create(actor_id, session_id, request_id, canonical, expires_at)
             :where('session_id = ?', session_id):where('request_id = ?', request_id):limit(1):run_with(tx):query()
         if committed_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
         if #committed > 0 then return nil, 'CONTEXT_STAGE_CONFLICT' end
-        -- All retained rows count, including cancellation tombstones: cancellation cannot bypass rate/cap limits.
-        local all, count_err = sql.builder.select('actor_id', 'session_id'):from('context_stages')
+        -- Only pending rows consume staging capacity. A committed row remains briefly so an
+        -- idempotent staging retry can recover its original descriptor, but its message already
+        -- owns the validated attachment and it must not block later turns in the same session.
+        -- Cancellation tombstones still count because they have no committed message.
+        local all, count_err = sql.builder.select('cs.actor_id', 'cs.session_id')
+            :from('context_stages cs')
+            :left_join('messages m ON m.session_id = cs.session_id AND m.request_id = cs.request_id')
+            :where('m.message_id IS NULL')
             :limit(repo.MAX_TOTAL + 1):run_with(tx):query()
         if count_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
         local actor_count, session_count = 0, 0
