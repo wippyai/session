@@ -402,6 +402,39 @@ local function define_tests()
             test.eq(success_call.details.attachments[1].content_hash, attachment().content_hash)
         end)
 
+        it("rejects an unauthorized ordinary file atomically and accepts the next message", function()
+            local ctx, calls = context()
+            ctx.user_id = "actor-1"
+            message_handlers._authorize_file = function(file_uuid, actor_id, session_id)
+                test.eq(file_uuid, "foreign-file")
+                test.eq(actor_id, "actor-1")
+                test.eq(session_id, "session-1")
+                return false
+            end
+
+            local rejected, reject_err = message_handlers.handle_message(ctx, {
+                request_id = "request-foreign-file",
+                data = {
+                    text = "Do not persist without this file",
+                    file_uuids = { "foreign-file" },
+                    context_attachments = { attachment() }
+                }
+            })
+            test.is_nil(reject_err)
+            test.is_true(rejected.rejected)
+            test.eq(rejected.error, consts.ERROR_CODES.INVALID_FILE_REFERENCES)
+            test.eq(#calls, 1)
+            test.eq(calls[1].type, "error")
+
+            local accepted, accept_err = message_handlers.handle_message(ctx, {
+                request_id = "request-after-foreign-file",
+                data = { text = "Session remains usable", context_attachments = { attachment() } }
+            })
+            test.is_nil(accept_err)
+            test.eq(accepted.message_id, "persisted-message-1")
+            test.eq(calls[2].type, "write")
+        end)
+
         it("rejects invalid attachments without writing a message", function()
             local ctx, calls = context()
             local invalid = attachment()
