@@ -42,7 +42,7 @@ local function define_tests()
             local spawn_count = 0
 
             local scheduled = plugin.fire_session_end_hook(
-                (nil :: any),
+                (nil :: string),
                 {
                     session_id = "sess-1",
                     user_id = "user-1",
@@ -52,8 +52,8 @@ local function define_tests()
                 function(_fn)
                     spawn_count = spawn_count + 1
                 end,
-                function(_name, ...): any
-                    return nil
+                function(_name, ...)
+                    return nil, nil
                 end
             )
 
@@ -75,8 +75,8 @@ local function define_tests()
                 function(_fn)
                     spawn_count = spawn_count + 1
                 end,
-                function(_name, ...): any
-                    return nil
+                function(_name, ...)
+                    return nil, nil
                 end
             )
 

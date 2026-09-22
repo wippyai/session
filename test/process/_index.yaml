@@ -1,0 +1,53 @@
+version: "1.0"
+namespace: app.process
+
+# Suites for src/process/.
+entries:
+  - name: control_handlers_test
+    kind: function.lua
+    meta:
+      name: Control config overlays
+      type: test
+      suite: session
+      comment: Unit tests for control_config trait/tool overlay routing
+    source: file://control_handlers_test.lua
+    imports:
+      control_handlers: wippy.session.process:control_handlers
+      test: wippy.test:test
+    method: run_tests
+
+  - name: plugin_test
+    kind: function.lua
+    meta:
+      name: Session end lifecycle hook
+      type: test
+      suite: session
+      comment: Unit tests for the on_session_end lifecycle hook firing
+    source: file://plugin_test.lua
+    modules:
+      - time
+      - json
+      - uuid
+      - logger
+      - funcs
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      plugin: wippy.session.process:plugin
+      session_repo: wippy.session.persist:session_repo
+      start_tokens: wippy.session:start_tokens
+      test: wippy.test:test
+    method: run_tests
+
+  - name: session_handlers_test
+    kind: function.lua
+    meta:
+      name: Session config normalization
+      type: test
+      suite: session
+      comment: Unit tests for session config normalization during agent/model changes
+    source: file://session_handlers_test.lua
+    imports:
+      session_handlers: wippy.session.process:session_handlers
+      test: wippy.test:test
+    method: run_tests

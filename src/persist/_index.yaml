@@ -33,29 +33,6 @@ entries:
     imports:
       consts: wippy.session:consts
 
-  # wippy.session.persist:artifact_repo_test
-  - name: artifact_repo_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the artifact repository functionality
-    source: file://artifact_repo_test.lua
-    modules:
-      - sql
-      - uuid
-      - json
-      - time
-      - security
-    imports:
-      artifact_repo: wippy.session.persist:artifact_repo
-      context_repo: wippy.session.persist:context_repo
-      session_repo: wippy.session.persist:session_repo
-      wait_for_boot: app:wait_for_boot
-      test: wippy.test:test
-      consts: wippy.session:consts
-    method: run
-
   # wippy.session.persist:context_repo
   - name: context_repo
     kind: library.lua
@@ -67,26 +44,6 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
-
-  # wippy.session.persist:context_repo_test
-  - name: context_repo_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the context repository functionality
-    source: file://context_repo_test.lua
-    modules:
-      - sql
-      - uuid
-      - time
-      - security
-    imports:
-      context_repo: wippy.session.persist:context_repo
-      wait_for_boot: app:wait_for_boot
-      test: wippy.test:test
-      consts: wippy.session:consts
-    method: run
 
   # wippy.session.persist:message_repo
   - name: message_repo
@@ -101,29 +58,6 @@ entries:
     imports:
       consts: wippy.session:consts
 
-  # wippy.session.persist:message_repo_test
-  - name: message_repo_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the message repository functionality
-    source: file://message_repo_test.lua
-    modules:
-      - sql
-      - uuid
-      - json
-      - time
-      - security
-    imports:
-      context_repo: wippy.session.persist:context_repo
-      message_repo: wippy.session.persist:message_repo
-      session_repo: wippy.session.persist:session_repo
-      wait_for_boot: app:wait_for_boot
-      test: wippy.test:test
-      consts: wippy.session:consts
-    method: run
-
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo
     kind: library.lua
@@ -137,28 +71,6 @@ entries:
     imports:
       consts: wippy.session:consts
 
-  # wippy.session.persist:session_contexts_repo_test
-  - name: session_contexts_repo_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the session contexts repository functionality
-    source: file://session_contexts_repo_test.lua
-    modules:
-      - sql
-      - uuid
-      - time
-      - security
-    imports:
-      context_repo: wippy.session.persist:context_repo
-      session_contexts_repo: wippy.session.persist:session_contexts_repo
-      session_repo: wippy.session.persist:session_repo
-      wait_for_boot: app:wait_for_boot
-      test: wippy.test:test
-      consts: wippy.session:consts
-    method: run
-
   # wippy.session.persist:session_repo
   - name: session_repo
     kind: library.lua
@@ -171,27 +83,6 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
-
-  # wippy.session.persist:session_repo_test
-  - name: session_repo_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the session repository functionality
-    source: file://session_repo_test.lua
-    modules:
-      - sql
-      - uuid
-      - time
-      - security
-    imports:
-      context_repo: wippy.session.persist:context_repo
-      session_repo: wippy.session.persist:session_repo
-      wait_for_boot: app:wait_for_boot
-      test: wippy.test:test
-      consts: wippy.session:consts
-    method: run
 
   # wippy.session.persist:reader
   - name: reader

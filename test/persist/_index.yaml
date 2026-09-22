@@ -1,0 +1,113 @@
+version: "1.0"
+namespace: app.persist
+
+# Suites for src/persist/.
+entries:
+  - name: artifact_repo_test
+    kind: function.lua
+    meta:
+      name: Artifact repository
+      type: test
+      suite: session
+      comment: Tests the artifact repository functionality
+    source: file://artifact_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - json
+      - time
+      - security
+    imports:
+      artifact_repo: wippy.session.persist:artifact_repo
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: context_repo_test
+    kind: function.lua
+    meta:
+      name: Context repository
+      type: test
+      suite: session
+      comment: Tests the context repository functionality
+    source: file://context_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: message_repo_test
+    kind: function.lua
+    meta:
+      name: Message repository
+      type: test
+      suite: session
+      comment: Tests the message repository functionality
+    source: file://message_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - json
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: session_contexts_repo_test
+    kind: function.lua
+    meta:
+      name: Session contexts repository
+      type: test
+      suite: session
+      comment: Tests the session contexts repository functionality
+    source: file://session_contexts_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_contexts_repo: wippy.session.persist:session_contexts_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: session_repo_test
+    kind: function.lua
+    meta:
+      name: Session repository
+      type: test
+      suite: session
+      comment: Tests the session repository functionality
+    source: file://session_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
