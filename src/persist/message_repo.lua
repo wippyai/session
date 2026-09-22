@@ -338,8 +338,7 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
     }
 end
 
--- List messages after a specific message ID (efficient range query)
-function message_repo.list_after_message(session_id, after_message_id, limit)
+function message_repo.list_after_message(session_id, after_message_id, limit: number?)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"
     end
@@ -353,9 +352,6 @@ function message_repo.list_after_message(session_id, after_message_id, limit)
         return nil, err
     end
 
-    -- Default limit if not provided
-    limit = limit or 250
-
     -- Build the SELECT query
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
@@ -363,8 +359,15 @@ function message_repo.list_after_message(session_id, after_message_id, limit)
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("message_id >= ?", after_message_id)
         }))
-        :order_by("date ASC")
-        :limit(limit)
+
+    local bounded = false
+    if limit ~= nil and limit > 0 then
+        -- Newest rows first; flipped back to chronological order below.
+        bounded = true
+        query = query:order_by("date DESC"):limit(limit)
+    else
+        query = query:order_by("date ASC")
+    end
 
     -- Execute the query
     local executor = query:run_with(db)
@@ -384,6 +387,14 @@ function message_repo.list_after_message(session_id, after_message_id, limit)
                 message.metadata = decoded
             end
         end
+    end
+
+    if bounded then
+        local chronological = {}
+        for i = #messages, 1, -1 do
+            table.insert(chronological, messages[i])
+        end
+        messages = chronological
     end
 
     return messages

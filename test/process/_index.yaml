@@ -51,3 +51,31 @@ entries:
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
     method: run_tests
+
+  - name: message_handlers_test
+    kind: function.lua
+    meta:
+      name: Checkpoint trigger in a tool loop
+      type: test
+      suite: session
+      comment: The token-threshold checkpoint check must be scheduled on continuation steps of a tool loop, not only on the step that answers the user
+    source: file://message_handlers_test.lua
+    imports:
+      consts: wippy.session:consts
+      message_handlers: wippy.session.process:message_handlers
+      session_handlers: wippy.session.process:session_handlers
+      test: wippy.test:test
+    method: run_tests
+
+  - name: command_bus_test
+    kind: function.lua
+    meta:
+      name: Command bus termination
+      type: test
+      suite: session
+      comment: finish() and intercept() must stop a self-perpetuating chain of operations once the in-flight one completes
+    source: file://command_bus_test.lua
+    imports:
+      command_bus: wippy.session.process:command_bus
+      test: wippy.test:test
+    method: run_tests

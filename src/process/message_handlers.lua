@@ -453,6 +453,8 @@ function message_handlers.agent_step(ctx, op)
         end
     end
 
+    local assistant_message_id: any = nil
+
     if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
@@ -475,11 +477,12 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result or "", metadata)
+        local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result or "", metadata)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
         end
+        assistant_message_id = stored_id
 
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
@@ -519,8 +522,12 @@ function message_handlers.agent_step(ctx, op)
         })
     end
 
-    -- Background operations don't affect user-facing status
-    if op.from_user and result.tokens then
+    if result.tokens then
+        local checkpoint_anchor_id = op.message_id
+        if not op.from_user and assistant_message_id then
+            checkpoint_anchor_id = assistant_message_id
+        end
+
         table.insert(background_ops, {
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
             tokens = result.tokens,
@@ -531,16 +538,17 @@ function message_handlers.agent_step(ctx, op)
                 model = agent.model
             },
             run_context_binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
-            message_id = op.message_id
+            message_id = op.message_id,
+            checkpoint_anchor_id = checkpoint_anchor_id
         })
     end
 
-    -- Combine all operations for processing
+    -- Background operations first (see above), then the user-facing tool round.
     local all_ops = {}
-    for _, op_item in ipairs(user_facing_ops) do
+    for _, op_item in ipairs(background_ops) do
         table.insert(all_ops, op_item)
     end
-    for _, op_item in ipairs(background_ops) do
+    for _, op_item in ipairs(user_facing_ops) do
         table.insert(all_ops, op_item)
     end
 

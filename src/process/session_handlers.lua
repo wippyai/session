@@ -160,6 +160,8 @@ function session_handlers.check_background_triggers(ctx, op)
         return { skipped = true }
     end
 
+    local anchor_id = op.checkpoint_anchor_id or message_id
+
     local checkpoint_needed = false
     local title_needed = false
 
@@ -175,8 +177,8 @@ function session_handlers.check_background_triggers(ctx, op)
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
                 checkpoint_function_id = checkpoint_function_id,
                 checkpoint_bindings = op.checkpoint_bindings,
-                checkpoint_id = message_id,
-                message_id = message_id,
+                checkpoint_id = anchor_id,
+                message_id = anchor_id,
                 trigger_tokens = tokens.prompt_tokens,
                 agent = op.agent,
                 agent_options = op.agent_options,
@@ -373,6 +375,8 @@ function session_handlers.create_checkpoint(ctx, op)
     if not success1 then
         return nil, err1
     end
+
+    ctx.reader:reset()
 
     ctx.writer:delete_session_contexts_by_type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY)
 

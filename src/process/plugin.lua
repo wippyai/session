@@ -174,7 +174,6 @@ local function run(args)
 
         local session_config = {
             token_checkpoint_threshold = state.base_config.token_checkpoint_threshold,
-            max_message_limit = state.base_config.max_message_limit,
             checkpoint_function_id = state.base_config.checkpoint_function_id,
             title_function_id = state.base_config.title_function_id,
             delegation_func_id = state.base_config.delegation_func_id,

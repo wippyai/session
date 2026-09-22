@@ -52,16 +52,6 @@ entries:
 
     variable: SESSION_GC_INTERVAL
 
-  # wippy.session.env:max_message_limit
-  - name: max_message_limit
-    kind: env.variable
-    meta:
-      comment: Maximum messages to load for prompt building
-      icon: tabler:list
-      private: true
-
-    variable: SESSION_MAX_MESSAGE_LIMIT
-
   # wippy.session.env:session_security_scope
   - name: session_security_scope
     kind: env.variable

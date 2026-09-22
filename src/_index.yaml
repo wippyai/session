@@ -85,15 +85,6 @@ entries:
         path: ".default"
     default: "50000"
 
-  - name: max_message_limit
-    kind: ns.requirement
-    meta:
-      description: "Maximum messages to load for prompt building"
-    targets:
-      - entry: wippy.session.env:max_message_limit
-        path: ".default"
-    default: "500"
-
   - name: checkpoint_function_id
     kind: ns.requirement
     meta:
@@ -156,8 +147,6 @@ entries:
       - entry: wippy.session.env:database_resource
         path: ".storage"
       - entry: wippy.session.env:token_checkpoint_threshold
-        path: ".storage"
-      - entry: wippy.session.env:max_message_limit
         path: ".storage"
       - entry: wippy.session.env:checkpoint_function_id
         path: ".storage"

@@ -64,6 +64,7 @@ local function mock_checkpoint_ctx(config)
         context_key = nil :: string?,
         context_value = nil :: string?,
         summary = nil :: string?,
+        resets = 0,
     }
 
     local ctx = {
@@ -92,6 +93,7 @@ local function mock_checkpoint_ctx(config)
                 }
             end,
             reset = function()
+                captured.resets = captured.resets + 1
                 return true
             end,
         },
@@ -342,6 +344,73 @@ local function define_tests()
             test.eq(captured.summary, "fallback summary")
             test.eq((captured.message_meta or {}).checkpoint_source, "function")
             test.eq(result.tokens.prompt_tokens, 12)
+        end)
+
+        it("anchors the checkpoint on checkpoint_anchor_id when the step provides one", function()
+            local ctx = {
+                config = {
+                    token_checkpoint_threshold = 100,
+                    checkpoint_function_id = "fallback:checkpoint",
+                    title_function_id = nil,
+                },
+                reader = {
+                    state = function() return { title = "", meta = {} } end,
+                    messages = function() return { count = function() return 0 end } end,
+                    get_context = function() return nil end,
+                }
+            }
+
+            local result, err = session_handlers.check_background_triggers(ctx, {
+                tokens = { prompt_tokens = 200 },
+                message_id = "msg-user",
+                checkpoint_anchor_id = "msg-assistant-7",
+            })
+
+            test.is_nil(err)
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].type, "create_checkpoint")
+            test.eq(result.next_ops[1].checkpoint_id, "msg-assistant-7")
+            test.eq(result.next_ops[1].message_id, "msg-assistant-7", "the summary is stored on the anchor row")
+
+            -- Callers that pass only message_id keep anchoring on it.
+            local legacy, legacy_err = session_handlers.check_background_triggers(ctx, {
+                tokens = { prompt_tokens = 200 },
+                message_id = "msg-user",
+            })
+            test.is_nil(legacy_err)
+            test.eq(legacy.next_ops[1].checkpoint_id, "msg-user")
+            test.eq(legacy.next_ops[1].message_id, "msg-user")
+        end)
+
+        it("refreshes the reader once the new anchor is recorded, so the next prompt starts from it", function()
+            local ctx, captured = mock_checkpoint_ctx({
+                checkpoint_function_id = "fallback:checkpoint",
+                title_function_id = nil,
+            })
+
+            session_handlers._funcs = {
+                new = function()
+                    return {
+                        with_context = function(self, _context) return self end,
+                        call = function(_, _function_id, _args)
+                            return { summary = "summary", tokens = { prompt_tokens = 1 } }
+                        end
+                    }
+                end
+            }
+
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "msg-assistant-7",
+                message_id = "msg-assistant-7",
+                trigger_tokens = 200,
+            })
+
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(captured.context_key, "current_checkpoint_id")
+            test.eq(captured.context_value, "msg-assistant-7")
+            test.gte(captured.resets, 1,
+                "the reader caches the primary context; without a reset the next prompt is built from the old anchor")
         end)
     end)
 end
