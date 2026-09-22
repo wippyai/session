@@ -390,51 +390,6 @@ entries:
       service: wippy.session:service
     method: handle
 
-  # wippy.session:service_test
-  - name: service_test_security_policy
-    kind: security.policy
-    meta:
-      scope: dev
-      comment: Allows the session service contract test to open the built-in binding.
-      tags:
-        - session
-        - runtime
-        - test
-    policy:
-      actions: "*"
-      resources: "*"
-      effect: allow
-    groups:
-      - test_group
-
-  # wippy.session:service_test
-  - name: service_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the session-owned service SDK and contract binding.
-      tags:
-        - session
-        - runtime
-        - lifecycle
-        - test
-    source: file://service_test.lua
-    modules:
-      - contract
-      - json
-      - security
-      - sql
-      - uuid
-    imports:
-      consts: wippy.session:consts
-      context_repo: wippy.session.persist:context_repo
-      service: wippy.session:service
-      session_repo: wippy.session.persist:session_repo
-      test: wippy.test:test
-      wait_for_boot: app:wait_for_boot
-    method: run
-
   # Dependencies
   - name: dep.wippy.llm
     kind: ns.dependency
@@ -456,13 +411,6 @@ entries:
     component: wippy/views
     version: ">=v0.4.0"
 
-  - name: dep.wippy.test
-    kind: ns.dependency
-    meta:
-      scope: dev
-    component: wippy/test
-    version: "*"
-
   # wippy.session:start_tokens
   - name: start_tokens
     kind: library.lua
@@ -475,22 +423,6 @@ entries:
       - json
     imports:
       consts: wippy.session:consts
-
-  # wippy.session:start_tokens_test
-  - name: start_tokens_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the start_tokens library for creating and validating session start tokens
-    source: file://start_tokens_test.lua
-    modules:
-      - base64
-    imports:
-      start_tokens: wippy.session:start_tokens
-      test: wippy.test:test
-      wait_for_boot: app:wait_for_boot
-    method: run
 
   # wippy.session:prompt_builder
   # wippy.session:file_provider
@@ -531,19 +463,3 @@ entries:
     imports:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
-
-  # wippy.session:prompt_builder_test
-  - name: prompt_builder_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests the prompt builder functionality
-    source: file://prompt_builder_test.lua
-    modules:
-      - json
-    imports:
-      prompt_builder: wippy.session:prompt_builder
-      consts: wippy.session:consts
-      test: wippy.test:test
-    method: run

@@ -1,0 +1,22 @@
+version: "1.0"
+namespace: app.funcs
+
+# Suites for src/funcs/.
+entries:
+  - name: checkpoint_test
+    kind: function.lua
+    meta:
+      name: Checkpoint options and prompt tokens
+      type: test
+      suite: session
+      comment: Unit tests for checkpoint option overrides and prompt token substitution
+    source: file://checkpoint_test.lua
+    modules:
+      - json
+    imports:
+      checkpoint: wippy.session.funcs:checkpoint
+      llm: wippy.llm:llm
+      prompt: wippy.llm:prompt
+      session: wippy.session.persist:reader
+      test: wippy.test:test
+    method: run_tests

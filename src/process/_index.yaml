@@ -35,19 +35,6 @@ entries:
       tool_caller: wippy.agent.tools:caller
       checkpoint_runtime: wippy.agent:checkpoint_runtime
 
-  # wippy.session.process:session_handlers_test
-  - name: session_handlers_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session_handlers
-      comment: Unit tests for session config normalization during agent/model changes.
-    source: file://session_handlers_test.lua
-    method: run_tests
-    imports:
-      session_handlers: wippy.session.process:session_handlers
-      test: wippy.test:test
-
   # wippy.session.process:control_handlers
   - name: control_handlers
     kind: library.lua
@@ -60,19 +47,6 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
-
-  # wippy.session.process:control_handlers_test
-  - name: control_handlers_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: control_handlers
-      comment: Unit tests for control_config trait/tool overlay routing
-    source: file://control_handlers_test.lua
-    method: run_tests
-    imports:
-      control_handlers: wippy.session.process:control_handlers
-      test: wippy.test:test
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -140,26 +114,3 @@ entries:
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
     method: run
-
-  # wippy.session.process:plugin_test
-  - name: plugin_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: plugin
-      comment: Unit tests for the on_session_end lifecycle hook firing.
-    source: file://plugin_test.lua
-    method: run_tests
-    modules:
-      - time
-      - json
-      - uuid
-      - logger
-      - funcs
-    imports:
-      plugin: wippy.session.process:plugin
-      consts: wippy.session:consts
-      session_repo: wippy.session.persist:session_repo
-      context_repo: wippy.session.persist:context_repo
-      start_tokens: wippy.session:start_tokens
-      test: wippy.test:test
