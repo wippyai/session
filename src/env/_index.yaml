@@ -52,6 +52,26 @@ entries:
 
     variable: SESSION_GC_INTERVAL
 
+  # wippy.session.env:max_turn_iterations
+  - name: max_turn_iterations
+    kind: env.variable
+    meta:
+      comment: Maximum agent steps one user message may trigger before the turn is stopped (0 disables)
+      icon: tabler:repeat
+      private: true
+
+    variable: SESSION_MAX_TURN_ITERATIONS
+
+  # wippy.session.env:max_repeated_tool_calls
+  - name: max_repeated_tool_calls
+    kind: env.variable
+    meta:
+      comment: How many times in a row the same tool round may repeat with identical arguments before the turn is stopped (0 disables)
+      icon: tabler:repeat-off
+      private: true
+
+    variable: SESSION_MAX_REPEATED_TOOL_CALLS
+
   # wippy.session.env:session_security_scope
   - name: session_security_scope
     kind: env.variable

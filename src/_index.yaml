@@ -85,6 +85,24 @@ entries:
         path: ".default"
     default: "50000"
 
+  - name: max_turn_iterations
+    kind: ns.requirement
+    meta:
+      description: "Maximum agent steps one user message may trigger before the turn is stopped (0 disables)"
+    targets:
+      - entry: wippy.session.env:max_turn_iterations
+        path: ".default"
+    default: "1000"
+
+  - name: max_repeated_tool_calls
+    kind: ns.requirement
+    meta:
+      description: "How many times in a row the same tool round may repeat with identical arguments before the turn is stopped (0 disables)"
+    targets:
+      - entry: wippy.session.env:max_repeated_tool_calls
+        path: ".default"
+    default: "50"
+
   - name: checkpoint_function_id
     kind: ns.requirement
     meta:
@@ -147,6 +165,10 @@ entries:
       - entry: wippy.session.env:database_resource
         path: ".storage"
       - entry: wippy.session.env:token_checkpoint_threshold
+        path: ".storage"
+      - entry: wippy.session.env:max_turn_iterations
+        path: ".storage"
+      - entry: wippy.session.env:max_repeated_tool_calls
         path: ".storage"
       - entry: wippy.session.env:checkpoint_function_id
         path: ".storage"
