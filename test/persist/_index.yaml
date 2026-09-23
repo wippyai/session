@@ -111,3 +111,19 @@ entries:
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run
+
+  - name: steering_persistence_test
+    kind: function.lua
+    meta:
+      name: Durable steering inputs
+      type: test
+      suite: session
+    source: file://steering_persistence_test.lua
+    modules: [uuid, security, contract]
+    imports:
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run_tests

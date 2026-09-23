@@ -19,6 +19,7 @@ entries:
     source: file://upstream.lua
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:session_handlers
   - name: session_handlers
@@ -47,6 +48,7 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -67,6 +69,14 @@ entries:
       tool_caller: wippy.agent.tools:caller
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      input_policy: wippy.session.process:input_policy
+
+  - name: input_policy
+    kind: library.lua
+    meta:
+      comment: Session-owned input admission and interaction policy resolver
+    source: file://input_policy.lua
+    modules: [json]
 
   # wippy.session.process:session
   - name: session
@@ -89,6 +99,7 @@ entries:
       session_handlers: wippy.session.process:session_handlers
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
+      input_policy: wippy.session.process:input_policy
     method: run
 
   # wippy.session.process:plugin
@@ -113,4 +124,5 @@ entries:
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
+      input_policy: wippy.session.process:input_policy
     method: run

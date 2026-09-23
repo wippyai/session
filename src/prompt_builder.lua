@@ -6,6 +6,7 @@ type BuildOptions = {
     include_contexts: boolean?,
     include_files: boolean?,
     cache_markers: boolean?,
+    input_overrides: table?,
 }
 
 local prompt_builder = {
@@ -82,6 +83,25 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     local include_files = options.include_files ~= false
     local cache_markers = options.cache_markers ~= false
 
+    if options.input_overrides and #options.input_overrides > 0 then
+        local overrides = {}
+        for _, update in ipairs(options.input_overrides) do overrides[update.message_id] = update.metadata end
+        local preview = {}
+        for _, message in ipairs(messages) do
+            local override = overrides[message.message_id]
+            if override then
+                local copy, metadata = {}, {}
+                for key, value in pairs(message) do copy[key] = value end
+                for key, value in pairs(message.metadata or {}) do metadata[key] = value end
+                for key, value in pairs(override) do metadata[key] = value end
+                copy.metadata = metadata
+                preview[#preview + 1] = copy
+            else
+                preview[#preview + 1] = message
+            end
+        end
+        messages = preview
+    end
     local builder = prompt_builder._prompt.new()
 
     if include_contexts and contexts and #contexts > 0 then
@@ -96,8 +116,24 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
-    for i, msg in ipairs(messages) do
+    local anchored = {}
+    for _, msg in ipairs(messages) do
+        local metadata = msg.metadata or {}
+        local input = metadata.input
+        if msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.steering == true and input.state == "applied" then
+            local anchor = metadata.after_message_id or input.after_message_id
+            anchored[anchor or ""] = anchored[anchor or ""] or {}
+            table.insert(anchored[anchor or ""], msg)
+        end
+    end
+
+    local function add_message(msg, render_steering)
         local metadata: table = msg.metadata or {}
+
+        local input = metadata.input
+        if not render_steering and msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.steering == true then
+            return
+        end
 
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
@@ -212,6 +248,30 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
+    local function add_anchored(anchor)
+        local rows = anchored[anchor or ""]
+        if rows then
+            table.sort(rows, function(a, b)
+                local av = tonumber((a.metadata or {}).accepted_sequence) or 0
+                local bv = tonumber((b.metadata or {}).accepted_sequence) or 0
+                return av < bv
+            end)
+            for _, row in ipairs(rows) do
+                add_message(row, true)
+            end
+            anchored[anchor or ""] = nil
+        end
+    end
+
+    add_anchored("")
+    for _, msg in ipairs(messages) do
+        local metadata = msg.metadata or {}
+        local input = metadata.input
+        if not (msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.steering == true and input.state ~= "applied") then
+            add_message(msg)
+            add_anchored(msg.message_id)
+        end
+    end
     return builder, nil
 end
 

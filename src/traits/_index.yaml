@@ -1,0 +1,65 @@
+version: "1.0"
+namespace: wippy.session.traits
+
+entries:
+  - name: steering
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      title: Session steering
+      public: true
+      icon: tabler:message-plus
+      comment: Accept user steering during an active session turn.
+    agent_options:
+      session_input:
+        while_running: steer
+    prompt: |
+      The session can accept user messages while you work. New messages are
+      inserted after the completed response and tool results, before your next
+      model step. Use those messages to adjust the current task.
+
+  - name: input_control
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      title: Session input control
+      public: true
+      icon: tabler:adjustments
+      comment: Allow the agent to manage the calling session's input policy.
+    agent_options:
+      session_input:
+        can_manage: true
+    tools:
+      - wippy.session.traits:set_input_policy
+    prompt: |
+      Use set_session_input_policy to control whether users can send messages
+      during your work. Use block to pause input or steer to accept steering.
+      Changes default to the current turn and clear when it ends. Use session
+      scope only when a lasting change is intended. Use inherit to remove an
+      override at the selected scope. Application restrictions still apply.
+      Stop remains available independently of the sending policy.
+
+  - name: set_input_policy
+    kind: function.lua
+    meta:
+      type: tool
+      title: Set session input policy
+      public: true
+      icon: tabler:adjustments
+      llm_alias: set_session_input_policy
+      llm_description: Set block, steer, or inherited input behavior for the calling session. Defaults to this turn; session scope makes the change persistent.
+      input_schema: |
+        {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["block", "steer", "inherit"] },
+            "scope": { "type": "string", "enum": ["turn", "session"], "default": "turn" }
+          },
+          "required": ["mode"],
+          "additionalProperties": false
+        }
+    source: file://set_input_policy.lua
+    modules: [ctx]
+    imports:
+      input_policy: wippy.session.process:input_policy
+    method: handler

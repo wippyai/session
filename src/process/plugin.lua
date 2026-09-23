@@ -6,6 +6,7 @@ local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
+local input_policy = require("input_policy")
 local funcs = require("funcs")
 
 type PluginArgs = {
@@ -212,14 +213,16 @@ local function run(args)
         -- Reset status to IDLE to ensure clean recovery
         if existing_session and not state.active_sessions[session_id] then
             local current_meta = existing_session.meta or {}
-            if current_meta.status and current_meta.status ~= consts.STATUS.IDLE then
+            if existing_session.status and existing_session.status ~= consts.STATUS.IDLE then
                 logger:info("detected crashed session - resetting status to idle", {
                     user_id = state.user_id,
                     session_id = session_id,
-                    previous_status = current_meta.status
+                    previous_status = existing_session.status
                 })
 
-                local success, err = session_repo.update_session_meta(session_id, { status = consts.STATUS.IDLE })
+                local interaction = input_policy.recovery_snapshot(existing_session, consts.STATUS.IDLE)
+                current_meta.interaction = interaction
+                local success, err = session_repo.update_session_meta(session_id, { status = consts.STATUS.IDLE, meta = current_meta })
                 if not success then
                     logger:warn("failed to reset session status after crash", {
                         session_id = session_id,
@@ -233,7 +236,8 @@ local function run(args)
                     process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
                         type = consts.UPSTREAM_TYPES.UPDATE,
                         session_id = session_id,
-                        status = consts.STATUS.IDLE
+                        status = consts.STATUS.IDLE,
+                        interaction = interaction,
                     })
                 end
             end
@@ -444,6 +448,7 @@ local function run(args)
                 process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
                     conn_pid = conn_pid,
                     data = payload_data.data,
+                    message_id = payload_data.message_id or payload_data.client_message_id,
                     request_id = request_id
                 })
             elseif topic_type == consts.HANDLER_TYPES.COMMAND then
@@ -473,6 +478,7 @@ local function run(args)
                     process.send(recovered_session_info.pid :: string, consts.TOPICS.MESSAGE, {
                         conn_pid = conn_pid,
                         data = payload_data.data,
+                        message_id = payload_data.message_id or payload_data.client_message_id,
                         request_id = request_id
                     })
                 elseif topic_type == consts.HANDLER_TYPES.COMMAND then
@@ -580,7 +586,16 @@ local function run(args)
                             target_status = consts.STATUS.IDLE
                         end
 
-                        local success, status_err = session_repo.update_session_meta(session_id, { status = target_status })
+                        local stored, read_err = session_repo.get(session_id, state.user_id)
+                        local interaction = stored and input_policy.recovery_snapshot(stored, target_status)
+                        local success, status_err
+                        if stored then
+                            local meta = stored.meta or {}
+                            meta.interaction = interaction
+                            success, status_err = session_repo.update_session_meta(session_id, { status = target_status, meta = meta })
+                        else
+                            status_err = read_err or "Session was not found"
+                        end
                         if not success then
                             logger:warn("failed to update session status", {
                                 session_id = session_id,
@@ -614,7 +629,8 @@ local function run(args)
                                 process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
                                     type = consts.UPSTREAM_TYPES.UPDATE,
                                     session_id = session_id,
-                                    status = target_status
+                                    status = target_status,
+                                    interaction = interaction,
                                 })
                             end
 

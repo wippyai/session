@@ -58,8 +58,8 @@ function command_bus:queue_op(op)
     if self.finishing and not op.internal then
         return false, "Command bus is finishing"
     end
-    self.ops_channel:send(op)
     self.pending_ops = self.pending_ops + 1
+    self.ops_channel:send(op)
     return true, nil
 end
 
@@ -97,6 +97,7 @@ function command_bus:process_operation(op)
     local result, err = handler(self.context, op)
 
     if err then
+        if self.context.operation_error_callback then self.context.operation_error_callback(op, err) end
         local is_fatal = self:is_fatal_error(err, op.type)
 
         if is_fatal then
@@ -128,8 +129,8 @@ function command_bus:process_operation(op)
 
     if result and result.next_ops then
         for _, next_op in ipairs(result.next_ops) do
-            self.ops_channel:send(next_op)
             self.pending_ops = self.pending_ops + 1
+            self.ops_channel:send(next_op)
         end
     end
 

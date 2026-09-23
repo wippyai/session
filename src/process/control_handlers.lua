@@ -1,6 +1,7 @@
 local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
+local input_policy = require("input_policy")
 
 type ArtifactData = {
     id: string?,
@@ -433,12 +434,30 @@ function control_handlers.control_config(ctx, op)
     end
 
     local session_data = ctx.reader:state()
-    local current_config = session_data.config or {}
+    local current_config = {}
+    for key, value in pairs(ctx.config or session_data.config or {}) do current_config[key] = value end
     local config_changed = false
     local agent_changed = false
     local model_changed = false
     local previous_agent = current_config.agent_id
     local previous_model = current_config.model
+
+    local policy_request = op.config_changes.input_policy
+    if policy_request ~= nil then
+        local agent = ctx.current_agent
+        if not agent and ctx.agent_ctx and type(ctx.agent_ctx.get_current_agent) == "function" then
+            agent = ctx.agent_ctx:get_current_agent()
+        end
+        local resolved, policy_err
+        if type(ctx.request_input_policy) == "function" then
+            resolved, policy_err = ctx.request_input_policy(policy_request, agent)
+        else
+            resolved, policy_err = input_policy.apply_request(ctx, policy_request, agent)
+        end
+        if not resolved then return nil, policy_err end
+        current_config = {}
+        for key, value in pairs(ctx.config or {}) do current_config[key] = value end
+    end
 
     if op.config_changes.agent then
         current_config.agent_id = op.config_changes.agent
@@ -551,6 +570,12 @@ function control_handlers.control_config(ctx, op)
         end
     end
 
+    if config_changed and type(ctx.refresh_interaction) == "function" then
+        local _, policy_err = ctx.refresh_interaction(agent_changed)
+        if policy_err then return nil, policy_err end
+    elseif agent_changed then
+        input_policy.clear_turn(ctx)
+    end
     return { completed = true }
 end
 

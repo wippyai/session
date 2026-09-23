@@ -15,6 +15,53 @@
 
 </div>
 
+## Session steering
+
+Sessions block new messages during an active turn by default. Add the
+`wippy.session.traits:steering` agent trait to accept steering, or set the
+persistent session override:
+
+```yaml
+config:
+  input_policy:
+    while_running: steer
+```
+
+The effective mode resolves the temporary turn override, the session override,
+the active agent's `agent_options.session_input.while_running`, then `block`.
+Applications can limit modes with `config.input_policy.allowed_modes` and
+disable agent changes with `allow_agent_changes: false`. Stop is independent
+of the sending mode.
+
+The optional `wippy.session.traits:input_control` trait supplies the
+`set_session_input_policy` tool and the `session_input.can_manage` capability.
+The tool accepts `mode: block | steer | inherit` and `scope: turn | session`.
+Scope defaults to `turn`; lasting changes require explicit session scope.
+The tool is bound to its calling session. The session validates and persists a
+change before reporting tool success. Temporary overrides clear on completion,
+Stop, failure, recovery, and agent handoff.
+
+Clients send a stable `message_id` and `request_id` with each
+`session_message`. Acceptance is acknowledged only after persistence.
+Retrying the same message ID and content returns the existing message; reusing
+the ID with different content is rejected.
+
+Accepted steering is pending until the current response and its tool batch
+finish. The next model request includes it after those results, in arrival
+order, within the same turn. Stop acknowledges promptly and prevents the next
+continuation at the operation boundary. Unused steering remains pending after
+Stop or recovery, and is included when the user starts another turn.
+
+REST session responses and WebSocket session updates expose `interaction`:
+`mode`, `can_send`, `can_stop`, `revision`, and optional `reason`. Clients
+must honor false values and ignore older revisions. Servers without these
+fields retain the legacy status-based client behavior. Message metadata
+exposes `input.state` as `pending` or `applied`. The messages endpoint also
+returns `pending_inputs` independently of history pagination.
+
+On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
+when Wippy is not on PATH. The test target clears only its own test database.
+
 ## Artifacts
 
 An artifact is generated content that outlives the message that produced it. A

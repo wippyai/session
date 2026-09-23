@@ -17,6 +17,7 @@ local session_writer = {
     user_id = nil :: string?,
     actor = nil :: any,
     _session_data = nil :: any,
+    _meta_lock = nil :: any,
 }
 session_writer.__index = session_writer
 
@@ -54,6 +55,8 @@ function session_writer.new(session_id)
     self.user_id = user_id
     self.actor = actor
     self._session_data = session_data
+    self._meta_lock = channel.new(1)
+    self._meta_lock:send(true)
     return self, nil
 end
 
@@ -64,9 +67,22 @@ function session_writer:update_meta(updates)
         return nil, "Updates must be a table"
     end
 
-    local result, err = session_writer._session_repo.update_session_meta(self.session_id, updates)
-    if err then
-        return nil, "Failed to update session metadata: " .. err
+    self._meta_lock:receive()
+    local prepared = {}
+    for key, value in pairs(updates) do prepared[key] = value end
+    if updates.meta ~= nil then
+        local current, read_err = session_writer._session_repo.get(self.session_id, self.user_id)
+        if not current then
+            self._meta_lock:send(true)
+            return nil, read_err or "Failed to read current session metadata"
+        end
+        prepared.meta = current.meta or {}
+        for key, value in pairs(updates.meta) do prepared.meta[key] = value end
+    end
+    local result, err = session_writer._session_repo.update_session_meta(self.session_id, prepared)
+    self._meta_lock:send(true)
+    if err or not result then
+        return nil, "Failed to update session metadata: " .. tostring(err or "No result")
     end
 
     return true
@@ -84,12 +100,7 @@ function session_writer:update_status(status, error_message)
     local updates = { status = status, last_message_date = os.time() }
 
     if error_message then
-        local session, err = session_writer._session_repo.get(self.session_id, self.user_id)
-        if session then
-            local current_meta = session.meta or {}
-            current_meta.error = error_message
-            updates.meta = current_meta
-        end
+        updates.meta = { error = error_message }
     end
 
     return self:update_meta(updates)
@@ -127,11 +138,15 @@ function session_writer:add_message(msg_type, content, metadata)
     end
 
     local result, err = session_writer._message_repo.create(message_id, self.session_id, msg_type, content, metadata)
-    if err then
-        return nil, "Failed to create message: " .. err
+    if err or not result then
+        return nil, "Failed to create message: " .. tostring(err or "No result")
     end
 
     return message_id
+end
+
+function session_writer:apply_inputs(updates)
+    return session_writer._message_repo.apply_inputs(self.session_id, updates)
 end
 
 function session_writer:update_message_meta(message_id, metadata)
@@ -143,9 +158,19 @@ function session_writer:update_message_meta(message_id, metadata)
         return nil, "Metadata must be a table"
     end
 
+    local message, get_err = session_writer._message_repo.get(message_id)
+    if get_err then
+        return nil, "Failed to get message: " .. get_err
+    end
+    if not message then
+        return nil, "Message not found"
+    end
+    if message.session_id ~= self.session_id then
+        return nil, "Message belongs to different session"
+    end
     local result, err = session_writer._message_repo.update_metadata(message_id, metadata)
-    if err then
-        return nil, "Failed to update message metadata: " .. err
+    if err or not result then
+        return nil, "Failed to update message metadata: " .. tostring(err or "No result")
     end
 
     return true

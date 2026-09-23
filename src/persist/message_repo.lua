@@ -183,6 +183,108 @@ function message_repo.get(message_id)
     return message
 end
 
+function message_repo.list_all_by_session(session_id)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    local db, err = get_db()
+    if err then
+        return nil, err
+    end
+    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+        :from("messages")
+        :where("session_id = ?", session_id)
+        :order_by("date ASC, message_id ASC")
+    local executor = query:run_with(db)
+    local messages, query_err = executor:query()
+    db:release()
+    if query_err then
+        return nil, "Failed to list all messages: " .. query_err
+    end
+    for _, message in ipairs(messages or {}) do
+        if message.metadata and message.metadata ~= "" then
+            local decoded, decode_err = json.decode(message.metadata :: string)
+            if decode_err then return nil, "Failed to decode message metadata: " .. decode_err end
+            message.metadata = decoded
+        end
+    end
+    return messages or {}
+end
+
+-- Look up a client supplied message id within one session. Client ids are
+-- deliberately stored in metadata because messages.message_id is global.
+function message_repo.find_by_client_message_id(session_id, client_message_id)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if not client_message_id or client_message_id == "" then
+        return nil, "Client message ID is required"
+    end
+    local result, err = message_repo.list_all_by_session(session_id)
+    if err then
+        return nil, err
+    end
+    for _, message in ipairs(result or {}) do
+        local metadata = message.metadata
+        if type(metadata) == "table" and metadata.client_message_id == client_message_id then
+            return message
+        end
+    end
+    return nil
+end
+
+function message_repo.list_pending_inputs(session_id)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    local result, err = message_repo.list_all_by_session(session_id)
+    if err then
+        return nil, err
+    end
+    local pending = {}
+    for _, message in ipairs(result or {}) do
+        local metadata = message.metadata
+        local input = type(metadata) == "table" and metadata.input
+        if message.type == consts.MSG_TYPE.USER and type(input) == "table" and input.state == "pending" then
+            pending[#pending + 1] = message
+        end
+    end
+    return pending
+end
+
+-- Apply a pending batch atomically before the next provider operation.
+function message_repo.apply_inputs(session_id, updates)
+    local db, err = get_db()
+    if not db then return nil, err end
+    local tx, begin_err = db:begin()
+    if not tx then db:release(); return nil, begin_err end
+    local function abort(reason)
+        tx:rollback()
+        db:release()
+        return nil, reason
+    end
+    for _, update in ipairs(updates) do
+        local rows, read_err = sql.builder.select("metadata"):from("messages")
+            :where("session_id = ?", session_id):where("message_id = ?", update.message_id):run_with(tx):query()
+        if read_err or not rows or #rows ~= 1 then return abort(read_err or "Pending message not found in session") end
+        local metadata, decode_err = json.decode(tostring(rows[1].metadata or ""))
+        if decode_err then return abort(decode_err) end
+        if type(metadata) ~= "table" or type(metadata.input) ~= "table" or metadata.input.state ~= "pending" then
+            return abort("Input is no longer pending")
+        end
+        for key, value in pairs(update.metadata) do metadata[key] = value end
+        local encoded, encode_err = json.encode(metadata)
+        if encode_err then return abort(encode_err) end
+        local result, write_err = sql.builder.update("messages"):set("metadata", encoded)
+            :where("session_id = ?", session_id):where("message_id = ?", update.message_id):run_with(tx):exec()
+        if write_err or not result or result.rows_affected ~= 1 then return abort(write_err or "Failed to apply pending input") end
+    end
+    local ok, commit_err = tx:commit()
+    if not ok then return abort(commit_err or "Failed to commit pending input") end
+    db:release()
+    return true
+end
+
 function message_repo.update_metadata(message_id, metadata)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
