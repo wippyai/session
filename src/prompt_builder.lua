@@ -215,6 +215,21 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     return builder, nil
 end
 
+prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Everything before this point is "
+    .. "summarized in the session context memory above. Continue the current task from the latest messages below."
+
+local function anchors_on_agent_message(session: any, messages: any): boolean
+    if type(session.get_context) ~= "function" then
+        return false
+    end
+    local checkpoint_id = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
+    local first = messages[1]
+    if not checkpoint_id or not first or first.message_id ~= checkpoint_id then
+        return false
+    end
+    return first.type ~= consts.MSG_TYPE.USER and first.type ~= consts.MSG_TYPE.DEVELOPER
+end
+
 function prompt_builder.from_session(session, options)
     if not session then
         return nil, "Session reader is required"
@@ -223,6 +238,15 @@ function prompt_builder.from_session(session, options)
     local messages, err = session:messages():from_checkpoint():all()
     if err then
         return nil, "Failed to load messages: " .. err
+    end
+
+    if anchors_on_agent_message(session, messages) then
+        table.insert(messages, 1, {
+            message_id = "checkpoint-resume:" .. tostring(messages[1].message_id),
+            type = consts.MSG_TYPE.DEVELOPER,
+            data = prompt_builder.CHECKPOINT_RESUME_NOTE,
+            metadata = {}
+        })
     end
 
     local contexts, err = session:contexts():all()

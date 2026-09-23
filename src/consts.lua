@@ -4,7 +4,8 @@ local time = require("time")
 type SessionConfig = {
     database_resource: string?,
     token_checkpoint_threshold: number?,
-    max_message_limit: number?,
+    max_turn_iterations: number?,
+    max_repeated_tool_calls: number?,
     checkpoint_function_id: string?,
     title_function_id: string?,
     default_host: string?,
@@ -22,7 +23,8 @@ local consts = {
     ENV_IDS = {
         DATABASE_RESOURCE = "wippy.session.env:database_resource",
         TOKEN_CHECKPOINT_THRESHOLD = "wippy.session.env:token_checkpoint_threshold",
-        MAX_MESSAGE_LIMIT = "wippy.session.env:max_message_limit",
+        MAX_TURN_ITERATIONS = "wippy.session.env:max_turn_iterations",
+        MAX_REPEATED_TOOL_CALLS = "wippy.session.env:max_repeated_tool_calls",
         CHECKPOINT_FUNCTION_ID = "wippy.session.env:checkpoint_function_id",
         TITLE_FUNCTION_ID = "wippy.session.env:title_function_id",
         DEFAULT_HOST = "wippy.session.env:default_host",
@@ -222,7 +224,8 @@ local consts = {
         MODEL_CHANGED = "model_changed",
         SESSION_INIT = "session_init",
         TITLE_GENERATED = "title_generated",
-        CHECKPOINT_CREATED = "checkpoint_created"
+        CHECKPOINT_CREATED = "checkpoint_created",
+        TURN_LIMIT = "turn_limit"
     },
 
     -- Error Codes for Plugin
@@ -299,7 +302,8 @@ local consts = {
 
     -- Defaults for environment variables
     DEFAULTS = {
-        MAX_MESSAGE_LIMIT = 2500,
+        MAX_TURN_ITERATIONS = 1000,
+        MAX_REPEATED_TOOL_CALLS = 50,
         CHECKPOINT_FUNCTION_ID = "wippy.session.funcs:checkpoint",
         TITLE_FUNCTION_ID = "wippy.session.funcs:title",
         GC_INTERVAL = "300s",
@@ -316,7 +320,8 @@ end
 function consts.get_config()
     local database_resource, _ = env.get(consts.ENV_IDS.DATABASE_RESOURCE)
     local token_checkpoint_threshold, _ = env.get(consts.ENV_IDS.TOKEN_CHECKPOINT_THRESHOLD)
-    local max_message_limit, _ = env.get(consts.ENV_IDS.MAX_MESSAGE_LIMIT)
+    local max_turn_iterations, _ = env.get(consts.ENV_IDS.MAX_TURN_ITERATIONS)
+    local max_repeated_tool_calls, _ = env.get(consts.ENV_IDS.MAX_REPEATED_TOOL_CALLS)
     local checkpoint_function_id, _ = env.get(consts.ENV_IDS.CHECKPOINT_FUNCTION_ID)
     local title_function_id, _ = env.get(consts.ENV_IDS.TITLE_FUNCTION_ID)
     local default_host, _ = env.get(consts.ENV_IDS.DEFAULT_HOST)
@@ -330,7 +335,8 @@ function consts.get_config()
         -- Base configuration
         database_resource = database_resource,
         token_checkpoint_threshold = tonumber(token_checkpoint_threshold),
-        max_message_limit = tonumber(max_message_limit),
+        max_turn_iterations = tonumber(max_turn_iterations),
+        max_repeated_tool_calls = tonumber(max_repeated_tool_calls),
         checkpoint_function_id = checkpoint_function_id,
         title_function_id = title_function_id,
         default_host = default_host,

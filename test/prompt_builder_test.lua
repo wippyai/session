@@ -487,6 +487,80 @@ local function define_tests()
                 test.contains(all_text(builder:get_messages()), "Unknown filename")
             end)
         end)
+
+        describe("from_session checkpoint resume note", function()
+            -- A checkpoint taken mid-turn anchors on the agent's own message, so the window
+            -- would open with an assistant turn. Providers expect the user's turn first, and
+            -- the model should know why it sees tool traffic with no request above it.
+            local function mock_reader(messages, checkpoint_id)
+                local query = {
+                    from_checkpoint = function(self) return self end,
+                    all = function(_self) return messages, nil end,
+                }
+                return {
+                    messages = function(_self) return query end,
+                    contexts = function(_self) return { all = function() return {}, nil end } end,
+                    state = function(_self) return { meta = {}, config = {} } end,
+                    get_context = function(_self, key)
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then
+                            return checkpoint_id
+                        end
+                        return nil
+                    end,
+                }
+            end
+
+            local function assistant_anchor_window()
+                return {
+                    { message_id = "asst-9", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {} },
+                    {
+                        message_id = "fn-9",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ x = 1 }),
+                        metadata = { function_name = "pack_document", call_id = "call-9", status = consts.FUNC_STATUS.SUCCESS, result = "ok" }
+                    },
+                }
+            end
+
+            it("opens with a developer note when the window anchors on an assistant message", function()
+                local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "asst-9"))
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.ok(#built >= 3)
+                test.eq(built[1].role, "developer")
+                test.contains(built[1].content[1].text, "resumed from a checkpoint")
+                test.eq(built[2].role, "assistant")
+                test.eq(built[3].role, "function_call")
+            end)
+
+            it("adds nothing when the window anchors on the user's message", function()
+                local window = {
+                    { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "please pack", metadata = {} },
+                    { message_id = "asst-1", type = consts.MSG_TYPE.ASSISTANT, data = "on it", metadata = {} },
+                }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "user-1"))
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.eq(#built, 2)
+                test.eq(built[1].role, "user")
+            end)
+
+            it("adds nothing when no checkpoint exists", function()
+                local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), nil))
+
+                test.is_nil(err)
+                test.eq(builder:get_messages()[1].role, "assistant")
+            end)
+
+            it("adds nothing when the window does not start at the anchor", function()
+                local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "some-other-id"))
+
+                test.is_nil(err)
+                test.eq(builder:get_messages()[1].role, "assistant")
+            end)
+        end)
     end)
 end
 

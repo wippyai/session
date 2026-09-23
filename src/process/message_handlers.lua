@@ -16,6 +16,7 @@ type SessionContext = {
     agent_ctx: any,
     queue_empty_callback: any?,
     lifecycle_state: table?,
+    turn_state: table?,
 }
 
 type ToolWrapperHostRef = {
@@ -49,6 +50,7 @@ local REASON = {
     NO_TOOLS_REQUIRED = "no_tools_required",
     TOOL_RESULTS_RECORDED = "tool_results_recorded",
     CONTEXT_LIMIT_REACHED = "context_limit_reached",
+    MAX_ITERATIONS_REACHED = "max_iterations_reached",
     HOST_FAILED = "host_failed",
     AGENT_SWITCH = "agent_switch",
     SESSION_FINISHED = "session_finished",
@@ -277,6 +279,143 @@ local function outcome_from_agent_result(result: any): table
     }
 end
 
+-- LOOP GUARDS. One turn is one user message and the chain of agent steps it triggers
+-- (agent_step -> process_tools -> agent_continue -> agent_step ...).
+local function non_negative(value: any): number?
+    local n = tonumber(value)
+    if n == nil or n < 0 then
+        return nil
+    end
+    return n
+end
+
+local function loop_limits(ctx: SessionContext, agent: any): (number, number)
+    local options = nil
+    if agent and type(agent.agent_options) == "table" then
+        options = agent.agent_options.loop
+    end
+    if type(options) ~= "table" then
+        options = {}
+    end
+
+    local max_steps = non_negative(options.max_iterations)
+        or non_negative(ctx.config and ctx.config.max_turn_iterations)
+        or consts.DEFAULTS.MAX_TURN_ITERATIONS
+    local max_repeats = non_negative(options.max_repeated_calls)
+        or non_negative(ctx.config and ctx.config.max_repeated_tool_calls)
+        or consts.DEFAULTS.MAX_REPEATED_TOOL_CALLS
+
+    return max_steps, max_repeats
+end
+
+local function turn_state(ctx: SessionContext): table
+    if type(ctx.turn_state) ~= "table" then
+        ctx.turn_state = { steps = 0, repeated_calls = 0 }
+    end
+    return ctx.turn_state :: table
+end
+
+local function begin_turn(ctx: SessionContext, message_id: any): table
+    ctx.turn_state = { message_id = message_id, steps = 0, repeated_calls = 0 }
+    return ctx.turn_state :: table
+end
+
+-- Deterministic rendering of a tool call's arguments, so two rounds compare equal regardless
+-- of table iteration order.
+local function canonical(value: any): string
+    if type(value) ~= "table" then
+        return type(value) .. ":" .. tostring(value)
+    end
+    local keys = {}
+    for key in pairs(value) do
+        keys[#keys + 1] = key
+    end
+    table.sort(keys, function(a, b)
+        return tostring(a) < tostring(b)
+    end)
+    local parts = {}
+    for _, key in ipairs(keys) do
+        parts[#parts + 1] = tostring(key) .. "=" .. canonical(value[key])
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- Records one executed tool round (the tool_caller results map; only each entry's tool_call
+-- is read) against the current turn and returns how many times in a row a round with these
+-- exact tools and arguments has now occurred.
+function message_handlers.note_tool_round(ctx: SessionContext, results: any): number
+    local state = turn_state(ctx)
+    local parts = {}
+    local tools = {}
+    for _, entry in pairs(results or {}) do
+        local call = (type(entry) == "table" and entry.tool_call) or {}
+        parts[#parts + 1] = tostring(call.name) .. "(" .. canonical(call.args) .. ")"
+        tools[tostring(call.name)] = true
+    end
+    local count: number = tonumber(state.repeated_calls) or 0
+    if #parts == 0 then
+        return count
+    end
+
+    table.sort(parts)
+    local fingerprint = table.concat(parts, "|")
+    if fingerprint == state.last_round then
+        count = count + 1
+    else
+        count = 1
+    end
+    state.repeated_calls = count
+    state.last_round = fingerprint
+
+    local names = {}
+    for name in pairs(tools) do
+        names[#names + 1] = name
+    end
+    table.sort(names)
+    state.last_round_tools = table.concat(names, ", ")
+
+    return count
+end
+
+local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table, reason: string, detail: string): table
+    local notice = "Turn stopped: " .. detail
+    ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, notice, {
+        system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
+        reason = reason,
+        steps = state.steps - 1,
+        repeated_calls = state.repeated_calls,
+        source_id = op.message_id
+    })
+    ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
+        "The previous turn was stopped by the session: " .. detail
+            .. " Do not resume that loop when the conversation continues. Report what was done, "
+            .. "what failed and why, and ask the user how to proceed.",
+        { system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT })
+    ctx.upstream:session_error("turn_limit_reached", notice)
+
+    local _, lifecycle_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+        reason = reason,
+        refs = {
+            message_id = op.message_id,
+            request_id = op.request_id
+        },
+        outcome = {
+            state = OUTCOME.COMPLETED,
+            reason = REASON.MAX_ITERATIONS_REACHED
+        }
+    })
+    if lifecycle_err then
+        ctx.upstream:message_error(op.message_id, consts.ERROR_CODES.AGENT_ERROR, lifecycle_err)
+    end
+
+    return {
+        message_id = op.message_id,
+        completed = true,
+        stopped = reason,
+        next_ops = {}
+    }
+end
+
 function message_handlers.handle_message(ctx, op)
     local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, op.data.text or "", {
         file_uuids = op.data.file_uuids
@@ -315,6 +454,21 @@ function message_handlers.agent_step(ctx, op)
     })
     if not agent then
         return nil, "Failed to load agent: " .. (agent_err or "unknown error")
+    end
+
+    -- Loop guards (see above). Every step of the turn is counted, including the one that
+    -- answers the user's message, which also starts a fresh count.
+    local state = op.from_user and begin_turn(ctx, op.message_id) or turn_state(ctx)
+    state.steps = state.steps + 1
+    local max_steps, max_repeats = loop_limits(ctx, agent)
+    if max_steps > 0 and state.steps > max_steps then
+        return stop_turn(ctx, op, agent, state, "max_iterations", string.format(
+            "%d agent steps without a final answer (limit %d).", state.steps - 1, max_steps))
+    end
+    if max_repeats > 0 and state.repeated_calls >= max_repeats then
+        return stop_turn(ctx, op, agent, state, "repeated_tool_calls", string.format(
+            "the same tool round (%s) repeated %d times in a row with identical arguments (limit %d).",
+            tostring(state.last_round_tools), state.repeated_calls, max_repeats))
     end
 
     local response_id, err = uuid.v7()
@@ -453,6 +607,8 @@ function message_handlers.agent_step(ctx, op)
         end
     end
 
+    local assistant_message_id: any = nil
+
     if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
@@ -475,11 +631,12 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result or "", metadata)
+        local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result or "", metadata)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
         end
+        assistant_message_id = stored_id
 
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
@@ -519,8 +676,12 @@ function message_handlers.agent_step(ctx, op)
         })
     end
 
-    -- Background operations don't affect user-facing status
-    if op.from_user and result.tokens then
+    if result.tokens then
+        local checkpoint_anchor_id = op.message_id
+        if not op.from_user and assistant_message_id then
+            checkpoint_anchor_id = assistant_message_id
+        end
+
         table.insert(background_ops, {
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
             tokens = result.tokens,
@@ -531,16 +692,17 @@ function message_handlers.agent_step(ctx, op)
                 model = agent.model
             },
             run_context_binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
-            message_id = op.message_id
+            message_id = op.message_id,
+            checkpoint_anchor_id = checkpoint_anchor_id
         })
     end
 
-    -- Combine all operations for processing
+    -- Background operations first (see above), then the user-facing tool round.
     local all_ops = {}
-    for _, op_item in ipairs(user_facing_ops) do
+    for _, op_item in ipairs(background_ops) do
         table.insert(all_ops, op_item)
     end
-    for _, op_item in ipairs(background_ops) do
+    for _, op_item in ipairs(user_facing_ops) do
         table.insert(all_ops, op_item)
     end
 
@@ -723,6 +885,8 @@ function message_handlers.process_tools(ctx, op)
             end
         end
     end
+
+    message_handlers.note_tool_round(ctx, results)
 
     for _, control_op in ipairs(control_ops) do
         table.insert(next_ops, control_op)

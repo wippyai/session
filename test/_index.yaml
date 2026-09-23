@@ -214,3 +214,27 @@ entries:
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run
+
+  - name: prompt_window_test
+    kind: function.lua
+    meta:
+      name: Prompt window since checkpoint
+      type: test
+      suite: session
+      comment: The prompt rebuilt since the current checkpoint must keep the newest messages when the conversation outgrows the default message page
+    source: file://prompt_window_test.lua
+    modules:
+      - contract
+      - json
+      - security
+      - sql
+      - time
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
