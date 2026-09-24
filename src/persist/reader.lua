@@ -192,10 +192,6 @@ function session_reader:messages()
     return query
 end
 
-function session_reader:find_by_client_message_id(client_message_id)
-    return session._message_repo.find_by_client_message_id(self.session_id, client_message_id)
-end
-
 function session_reader:list_pending_inputs()
     return session._message_repo.list_pending_inputs(self.session_id)
 end
@@ -309,20 +305,22 @@ function message_query:all()
             return nil, "Failed to fetch pending inputs: " .. pending_err
         end
         messages = messages or {}
-        local seen = {}
+        local seen, all_ids = {}, {}
         for _, message in ipairs(messages) do
             seen[message.message_id] = true
         end
         for _, message in ipairs(pending or {}) do
+            all_ids[message.message_id] = true
+        end
+        for _, message in ipairs(pending or {}) do
             local metadata = message.metadata or {}
             local input = metadata.input
-            local anchor = metadata.after_message_id
             local relevant = false
             if type(input) == "table" then
-                anchor = anchor or input.after_message_id
+                local anchor = input.after_message_id
                 relevant = input.state == "pending"
-                    or (input.steering == true and input.state == "applied"
-                        and (seen[anchor] or (self._after_message_id and anchor == self._after_message_id)))
+                    or (input.state == "applied" and (not anchor or not all_ids[anchor]
+                        or seen[anchor] or (self._after_message_id and anchor == self._after_message_id)))
             end
             if relevant and not seen[message.message_id] then
                 table.insert(messages, message)

@@ -139,6 +139,71 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata)
     }
 end
 
+-- Create the first user message of a turn together with the RUNNING session
+-- state. A failed write leaves neither half committed.
+function message_repo.admit(message_id, session_id, msg_type, data, metadata, session_updates)
+    if not message_id or message_id == "" then return nil, "Message ID is required" end
+    if not session_id or session_id == "" then return nil, "Session ID is required" end
+    if not msg_type or msg_type == "" then return nil, "Message type is required" end
+    if data == nil then return nil, "Message data is required" end
+    if type(session_updates) ~= "table" then return nil, "Session updates are required" end
+
+    local metadata_json = nil
+    if metadata ~= nil then
+        metadata_json = type(metadata) == "table" and json.encode(metadata) or metadata
+        if not metadata_json then return nil, "Failed to encode metadata" end
+    end
+
+    local db, db_err = get_db()
+    if not db then return nil, db_err end
+    local tx, begin_err = db:begin()
+    if not tx then db:release(); return nil, "Failed to begin transaction: " .. tostring(begin_err) end
+    local function abort(reason)
+        tx:rollback()
+        db:release()
+        return nil, reason
+    end
+
+    local now = time.now():format(time.RFC3339NANO)
+    local inserted, insert_err = sql.builder.insert("messages"):set_map({
+        message_id = message_id,
+        session_id = session_id,
+        date = now,
+        type = msg_type,
+        data = data,
+        metadata = metadata_json or sql.as.null(),
+    }):run_with(tx):exec()
+    if insert_err or not inserted then return abort("Failed to create message: " .. tostring(insert_err or "No result")) end
+
+    local rows, read_err = sql.builder.select("meta"):from("sessions")
+        :where("session_id = ?", session_id):run_with(tx):query()
+    if read_err or not rows or #rows ~= 1 then return abort(read_err or "Session not found") end
+    local current_meta = {}
+    if rows[1].meta and rows[1].meta ~= "" then
+        local decoded, decode_err = json.decode(rows[1].meta :: string)
+        if decode_err or type(decoded) ~= "table" then return abort(decode_err or "Invalid session metadata") end
+        current_meta = decoded
+    end
+    for key, value in pairs(session_updates.meta or {}) do current_meta[key] = value end
+    local encoded_meta, meta_err = json.encode(current_meta)
+    if meta_err then return abort("Failed to encode session metadata: " .. meta_err) end
+
+    local update = sql.builder.update("sessions")
+        :set("last_message_date", now)
+        :set("meta", encoded_meta)
+    if session_updates.status ~= nil then update = update:set("status", session_updates.status) end
+    update = update:where("session_id = ?", session_id)
+    local updated, update_err = update:run_with(tx):exec()
+    if update_err or not updated or updated.rows_affected ~= 1 then
+        return abort("Failed to update session state: " .. tostring(update_err or "Session not found"))
+    end
+
+    local committed, commit_err = tx:commit()
+    if not committed then return abort("Failed to commit admission: " .. tostring(commit_err or "No result")) end
+    db:release()
+    return { message_id = message_id, session_id = session_id, date = now, type = msg_type }
+end
+
 -- Get a message by ID
 function message_repo.get(message_id)
     if not message_id or message_id == "" then
@@ -211,28 +276,6 @@ function message_repo.list_all_by_session(session_id)
     return messages or {}
 end
 
--- Look up a client supplied message id within one session. Client ids are
--- deliberately stored in metadata because messages.message_id is global.
-function message_repo.find_by_client_message_id(session_id, client_message_id)
-    if not session_id or session_id == "" then
-        return nil, "Session ID is required"
-    end
-    if not client_message_id or client_message_id == "" then
-        return nil, "Client message ID is required"
-    end
-    local result, err = message_repo.list_all_by_session(session_id)
-    if err then
-        return nil, err
-    end
-    for _, message in ipairs(result or {}) do
-        local metadata = message.metadata
-        if type(metadata) == "table" and metadata.client_message_id == client_message_id then
-            return message
-        end
-    end
-    return nil
-end
-
 function message_repo.list_pending_inputs(session_id)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"
@@ -245,15 +288,20 @@ function message_repo.list_pending_inputs(session_id)
     for _, message in ipairs(result or {}) do
         local metadata = message.metadata
         local input = type(metadata) == "table" and metadata.input
-        if message.type == consts.MSG_TYPE.USER and type(input) == "table" and input.state == "pending" then
-            pending[#pending + 1] = message
+        if message.type == consts.MSG_TYPE.USER and input ~= nil then
+            if type(input) ~= "table" or (input.state ~= "pending" and input.state ~= "applied")
+                or (input.state == "pending" and input.after_message_id ~= nil)
+                or (input.after_message_id ~= nil and (type(input.after_message_id) ~= "string" or input.after_message_id == "")) then
+                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
+            end
+            if input.state == "pending" then pending[#pending + 1] = message end
         end
     end
     return pending
 end
 
 -- Apply a pending batch atomically before the next provider operation.
-function message_repo.apply_inputs(session_id, updates)
+function message_repo.apply_inputs(session_id, updates, expected_revision)
     local db, err = get_db()
     if not db then return nil, err end
     local tx, begin_err = db:begin()
@@ -263,7 +311,31 @@ function message_repo.apply_inputs(session_id, updates)
         db:release()
         return nil, reason
     end
+    if type(expected_revision) ~= "number" then
+        return abort("Expected interaction revision is required")
+    end
+    local session_rows, session_err = sql.builder.select("meta"):from("sessions")
+        :where("session_id = ?", session_id):run_with(tx):query()
+    if session_err or not session_rows or #session_rows ~= 1 then
+        return abort(session_err or "Session not found")
+    end
+    local session_meta = {}
+    if session_rows[1].meta and session_rows[1].meta ~= "" then
+        local decoded, decode_err = json.decode(tostring(session_rows[1].meta))
+        if decode_err or type(decoded) ~= "table" then return abort(decode_err or "Invalid session metadata") end
+        session_meta = decoded
+    end
+    local interaction = type(session_meta.interaction) == "table" and session_meta.interaction or {}
+    if (tonumber(interaction.revision) or 0) ~= expected_revision then
+        return abort("Interaction revision changed before input application")
+    end
     for _, update in ipairs(updates) do
+        local next_input = type(update.metadata) == "table" and update.metadata.input
+        if type(next_input) ~= "table" or next_input.state ~= "applied"
+            or (next_input.after_message_id ~= nil and (type(next_input.after_message_id) ~= "string"
+                or next_input.after_message_id == "")) then
+            return abort("Invalid applied input metadata")
+        end
         local rows, read_err = sql.builder.select("metadata"):from("messages")
             :where("session_id = ?", session_id):where("message_id = ?", update.message_id):run_with(tx):query()
         if read_err or not rows or #rows ~= 1 then return abort(read_err or "Pending message not found in session") end
@@ -281,6 +353,74 @@ function message_repo.apply_inputs(session_id, updates)
     end
     local ok, commit_err = tx:commit()
     if not ok then return abort(commit_err or "Failed to commit pending input") end
+    db:release()
+    return true
+end
+
+-- Commit Stop together with restoring an in-flight input batch. This closes the
+-- interval where pending rows may already be applied but have not entered a
+-- provider prompt.
+function message_repo.stop_with_input_rollback(session_id, updates, session_updates)
+    if type(session_updates) ~= "table" then return nil, "Session updates are required" end
+    local db, err = get_db()
+    if not db then return nil, err end
+    local tx, begin_err = db:begin()
+    if not tx then db:release(); return nil, begin_err end
+    local function abort(reason)
+        tx:rollback()
+        db:release()
+        return nil, reason
+    end
+    for _, update in ipairs(updates) do
+        local expected = type(update.metadata) == "table" and update.metadata.input
+        if type(expected) ~= "table" or expected.state ~= "applied" then
+            return abort("Invalid applied input metadata")
+        end
+        local rows, read_err = sql.builder.select("metadata"):from("messages")
+            :where("session_id = ?", session_id):where("message_id = ?", update.message_id):run_with(tx):query()
+        if read_err or not rows or #rows ~= 1 then return abort(read_err or "Applied message not found in session") end
+        local metadata, decode_err = json.decode(tostring(rows[1].metadata or ""))
+        if decode_err then return abort(decode_err) end
+        local current = type(metadata) == "table" and metadata.input
+        if type(current) ~= "table" or (current.state ~= "pending" and current.state ~= "applied") then
+            return abort("Malformed steering metadata")
+        end
+        if current.state == "applied" then
+            if current.after_message_id ~= expected.after_message_id then
+                return abort("Input application changed before Stop")
+            end
+            metadata.input = { state = "pending" }
+            local encoded, encode_err = json.encode(metadata)
+            if encode_err then return abort(encode_err) end
+            local result, write_err = sql.builder.update("messages"):set("metadata", encoded)
+                :where("session_id = ?", session_id):where("message_id = ?", update.message_id):run_with(tx):exec()
+            if write_err or not result or result.rows_affected ~= 1 then
+                return abort(write_err or "Failed to restore pending input")
+            end
+        end
+    end
+    local session_rows, session_err = sql.builder.select("meta"):from("sessions")
+        :where("session_id = ?", session_id):run_with(tx):query()
+    if session_err or not session_rows or #session_rows ~= 1 then
+        return abort(session_err or "Session not found")
+    end
+    local current_meta = {}
+    if session_rows[1].meta and session_rows[1].meta ~= "" then
+        local decoded, decode_err = json.decode(tostring(session_rows[1].meta))
+        if decode_err or type(decoded) ~= "table" then return abort(decode_err or "Invalid session metadata") end
+        current_meta = decoded
+    end
+    for key, value in pairs(session_updates.meta or {}) do current_meta[key] = value end
+    local encoded_meta, meta_err = json.encode(current_meta)
+    if meta_err then return abort(meta_err) end
+    local session_update = sql.builder.update("sessions"):set("meta", encoded_meta)
+    if session_updates.status ~= nil then session_update = session_update:set("status", session_updates.status) end
+    local updated, update_err = session_update:where("session_id = ?", session_id):run_with(tx):exec()
+    if update_err or not updated or updated.rows_affected ~= 1 then
+        return abort(update_err or "Failed to commit Stop state")
+    end
+    local ok, commit_err = tx:commit()
+    if not ok then return abort(commit_err or "Failed to commit Stop") end
     db:release()
     return true
 end

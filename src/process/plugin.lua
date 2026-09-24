@@ -74,6 +74,19 @@ local function run(args)
         end
     end
 
+    local function publish_after_commit(target_pid, topic, payload)
+        if not target_pid then return true end
+        local ok, send_err = pcall(process.send, target_pid :: string, topic, payload)
+        if not ok then
+            logger:warn("failed to publish committed session state", {
+                topic = topic,
+                error = tostring(send_err),
+            })
+            return false
+        end
+        return true
+    end
+
     local function get_active_session_ids()
         local session_ids = {}
         for session_id, _ in pairs(state.active_sessions) do
@@ -233,7 +246,7 @@ local function run(args)
 
                 -- Notify hub of status reset if available
                 if state.user_hub_pid then
-                    process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
+                    publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, {
                         type = consts.UPSTREAM_TYPES.UPDATE,
                         session_id = session_id,
                         status = consts.STATUS.IDLE,
@@ -448,7 +461,6 @@ local function run(args)
                 process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
                     conn_pid = conn_pid,
                     data = payload_data.data,
-                    message_id = payload_data.message_id or payload_data.client_message_id,
                     request_id = request_id
                 })
             elseif topic_type == consts.HANDLER_TYPES.COMMAND then
@@ -478,7 +490,6 @@ local function run(args)
                     process.send(recovered_session_info.pid :: string, consts.TOPICS.MESSAGE, {
                         conn_pid = conn_pid,
                         data = payload_data.data,
-                        message_id = payload_data.message_id or payload_data.client_message_id,
                         request_id = request_id
                     })
                 elseif topic_type == consts.HANDLER_TYPES.COMMAND then
@@ -626,7 +637,7 @@ local function run(args)
                         if state.user_hub_pid then
                             -- Send session status update first
                             if success then
-                                process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
+                                publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, {
                                     type = consts.UPSTREAM_TYPES.UPDATE,
                                     session_id = session_id,
                                     status = target_status,
@@ -635,7 +646,7 @@ local function run(args)
                             end
 
                             -- Then send session closed notification
-                            process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_CLOSED, {
+                            publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,
                                 reason = err,
                                 active_session_ids = get_active_session_ids()

@@ -22,7 +22,6 @@ type SessionContext = {
     status: string?,
     current_agent: any?,
     request_input_policy: any?,
-    input_sequence: number?,
     turn_generation: number?,
 }
 
@@ -42,7 +41,11 @@ type ToolWrapperExecutionContext = {
     run_context: table?,
 }
 
-local message_handlers = { _prompt_builder = nil :: any, _tool_caller = nil :: any }
+local message_handlers = {
+    _prompt_builder = nil :: any,
+    _tool_caller = nil :: any,
+    _lifecycle_runtime = nil :: any,
+}
 
 local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
 local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
@@ -145,7 +148,7 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
         run_context = run_context_ref(ctx, agent_ref, host),
     } :: LifecyclePayload
 
-    return lifecycle_runtime.apply(agent.bindings, payload)
+    return (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
 end
 
 local function append_lifecycle_messages(builder: any, result: table?)
@@ -333,46 +336,50 @@ local function all_messages(ctx)
     return ctx.reader:messages():all()
 end
 
-local function prepare_pending_inputs(ctx, turn_id, new_user_id)
+local function prepare_pending_inputs(ctx, new_user_id)
     local messages, read_err = all_messages(ctx)
     if not messages then return nil, read_err or "Failed to read pending inputs" end
     local pending, anchor_id = {}, nil
     for _, message in ipairs(messages) do
         local input = message.metadata and message.metadata.input
-        if message.type == consts.MSG_TYPE.USER and type(input) == "table" and input.state == "pending" then
-            pending[#pending + 1] = message
-        elseif message.message_id ~= new_user_id and not (type(input) == "table" and input.steering) then
+        if input ~= nil then
+            if message.type ~= consts.MSG_TYPE.USER or type(input) ~= "table"
+                or (input.state ~= "pending" and input.state ~= "applied")
+                or (input.state == "pending" and input.after_message_id ~= nil)
+                or (input.after_message_id ~= nil and (type(input.after_message_id) ~= "string"
+                    or input.after_message_id == "")) then
+                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
+            end
+            if input.state == "pending" then pending[#pending + 1] = message end
+        elseif message.message_id ~= new_user_id then
             anchor_id = message.message_id
         end
     end
     table.sort(pending, function(a, b)
-        local av = tonumber((a.metadata or {}).accepted_sequence) or 0
-        local bv = tonumber((b.metadata or {}).accepted_sequence) or 0
-        if av ~= bv then return av < bv end
+        if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
         return tostring(a.message_id) < tostring(b.message_id)
     end)
     local updates = {}
     for _, message in ipairs(pending) do
         updates[#updates + 1] = {
             message_id = message.message_id,
-            metadata = { input = { state = "applied", steering = true, turn_id = turn_id,
-                after_message_id = anchor_id }, after_message_id = anchor_id },
+            metadata = { input = { state = "applied", after_message_id = anchor_id } },
         }
     end
     return updates
 end
 
-local function commit_pending_inputs(ctx, updates)
+local function persist_pending_inputs(ctx, updates, expected_revision)
     if #updates == 0 then return 0 end
-    if type(ctx.writer.apply_inputs) == "function" then
-        local ok, err = ctx.writer:apply_inputs(updates)
-        if not ok then return nil, err end
-    else
-        for _, update in ipairs(updates) do
-            local ok, err = ctx.writer:update_message_meta(update.message_id, update.metadata)
-            if not ok then return nil, err or "Failed to apply pending input" end
-        end
+    if type(ctx.writer.apply_inputs) ~= "function" then
+        return nil, "Session writer does not support atomic input application"
     end
+    local ok, err = ctx.writer:apply_inputs(updates, expected_revision)
+    if not ok then return nil, err end
+    return #updates
+end
+
+local function publish_applied_inputs(ctx, updates)
     for _, update in ipairs(updates) do
         ctx.upstream:send_message_update(update.message_id, "input_state", {
             message_id = update.message_id, input = update.metadata.input,
@@ -381,8 +388,16 @@ local function commit_pending_inputs(ctx, updates)
     return #updates
 end
 
-function message_handlers.apply_pending_inputs(ctx, turn_id, new_user_id)
-    local updates, err = prepare_pending_inputs(ctx, turn_id, new_user_id)
+local function commit_pending_inputs(ctx, updates)
+    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
+    local count, err = persist_pending_inputs(ctx, updates, expected_revision)
+    if not count then return nil, err end
+    publish_applied_inputs(ctx, updates)
+    return count
+end
+
+function message_handlers.apply_pending_inputs(ctx, new_user_id)
+    local updates, err = prepare_pending_inputs(ctx, new_user_id)
     if not updates then return nil, err end
     return commit_pending_inputs(ctx, updates)
 end
@@ -400,11 +415,44 @@ function message_handlers.finish_turn(ctx)
             } } }
         end
     end
-    if state then state.active = false end
-    input_policy.clear_turn(ctx)
-    if ctx.status ~= "finishing" then ctx.status = consts.STATUS.IDLE end
-    local _, err = input_policy.publish(ctx, current_agent(ctx))
-    if err then return nil, err end
+    local candidate_state = nil
+    if state then
+        candidate_state = {}
+        for key, value in pairs(state) do candidate_state[key] = value end
+        candidate_state.active = false
+        candidate_state.input_policy = nil
+        -- A failed runtime must remain failed at the queue-empty boundary. The
+        -- previous code cleared this marker and persisted idle, allowing a
+        -- failed control operation to look recoverable without an explicit
+        -- recovery path.
+        local failed = ctx.status == consts.STATUS.FAILED
+        candidate_state.failed = failed and true or nil
+        candidate_state.handoff = nil
+        candidate_state.stopped = nil
+    end
+    local target_status
+    if ctx.status == consts.STATUS.FAILED then
+        target_status = consts.STATUS.FAILED
+    else
+        target_status = ctx.status ~= "finishing" and consts.STATUS.IDLE or ctx.status
+    end
+    local candidate = {
+        config = ctx.config,
+        turn_state = candidate_state,
+        status = target_status,
+        stop_requested = ctx.stop_requested,
+        current_agent = current_agent(ctx),
+        input_policy_revision = ctx.input_policy_revision,
+        interaction = ctx.interaction,
+    }
+    local interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+    local ok, err = ctx.writer:update_meta({ status = target_status, meta = { interaction = interaction } })
+    if not ok then
+        return nil, err or "Failed to persist turn completion"
+    end
+    ctx.turn_state = candidate_state
+    ctx.status = target_status
+    input_policy.accept_committed(ctx, interaction)
     return { completed = true, next_ops = {} }
 end
 
@@ -508,67 +556,60 @@ end
 
 function message_handlers.handle_message(ctx, op)
     local data = type(op.data) == "table" and op.data or {}
-    local client_id = op.message_id or data.message_id or data.client_message_id
-    local fingerprint, fingerprint_err = input_policy.fingerprint(data.text or "", data.file_uuids)
-    if not fingerprint then return nil, fingerprint_err end
-    local existing, lookup_err
-    if client_id and type(ctx.reader.find_by_client_message_id) == "function" then
-        existing, lookup_err = ctx.reader:find_by_client_message_id(client_id)
-        if lookup_err then return nil, lookup_err end
-    end
-    if existing then
-        local metadata = existing.metadata or {}
-        if metadata.input_fingerprint ~= fingerprint then
-            if op.request_id then ctx.upstream:command_error(op.request_id, "DUPLICATE_MESSAGE_ID",
-                "Client message ID was already used with different content") end
-            return { completed = true }
-        end
-        if op.request_id then ctx.upstream:command_success(op.request_id, {
-            message_id = existing.message_id, client_message_id = client_id, input = metadata.input,
-        }) end
-        return { completed = true, message_id = existing.message_id }
-    end
     local active = ctx.turn_state and ctx.turn_state.active == true or false
     local interaction = input_policy.resolve(ctx, current_agent(ctx))
     if not interaction.can_send then
         if op.request_id then ctx.upstream:command_error(op.request_id, "INPUT_BLOCKED",
-            interaction.reason or "Session is not accepting input") end
+            "Session is not accepting messages right now") end
         return { completed = true }
     end
-    if ctx.input_sequence == nil then
-        local history, history_err = all_messages(ctx)
-        if not history then return nil, history_err end
-        ctx.input_sequence = 0
-        for _, message in ipairs(history) do
-            ctx.input_sequence = math.max(ctx.input_sequence, tonumber((message.metadata or {}).accepted_sequence) or 0)
+
+    local input = active and { state = "pending" } or nil
+    local metadata = { file_uuids = data.file_uuids }
+    if input then metadata.input = input end
+    local message_id, err
+    if active then
+        message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, data.text or "", metadata)
+    else
+        if type(ctx.writer.admit_message) ~= "function" then
+            return nil, "Session writer does not support atomic admission"
+        end
+        local next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        local candidate = {
+            config = ctx.config,
+            turn_state = next_turn,
+            status = consts.STATUS.RUNNING,
+            stop_requested = false,
+            current_agent = current_agent(ctx),
+            input_policy_revision = ctx.input_policy_revision,
+            interaction = ctx.interaction,
+        }
+        local next_interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+        message_id, err = ctx.writer:admit_message(consts.MSG_TYPE.USER, data.text or "", metadata, {
+            status = consts.STATUS.RUNNING,
+            meta = { interaction = next_interaction },
+        })
+        if message_id then
+            next_turn.message_id = message_id
+            ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
+            ctx.turn_state = next_turn
+            ctx.stop_requested = false
+            ctx.status = consts.STATUS.RUNNING
+            input_policy.accept_committed(ctx, next_interaction)
         end
     end
-    local old_turn, old_stop = ctx.turn_state, ctx.stop_requested
-    if not active then
-        ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
-        ctx.turn_state = { active = true, steps = 0, repeated_calls = 0, request_id = op.request_id }
-        ctx.stop_requested = false
-    end
-    local sequence = (tonumber(ctx.input_sequence) or 0) + 1
-    local input = { state = active and "pending" or "applied", steering = active }
-    local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, data.text or "", {
-        file_uuids = data.file_uuids, client_message_id = client_id, input_fingerprint = fingerprint,
-        accepted_sequence = sequence, input = input,
-    })
     if not message_id then
-        if not active then ctx.turn_state, ctx.stop_requested = old_turn, old_stop end
         return nil, err or "Failed to persist input"
     end
-    ctx.input_sequence = sequence
-    if not active then ctx.turn_state.message_id = message_id end
-    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, client_id, input)
+
+    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input)
     if op.request_id then ctx.upstream:command_success(op.request_id, {
-        message_id = message_id, client_message_id = client_id, input = input,
+        message_id = message_id, input = input,
     }) end
     return {
         message_id = message_id, completed = active,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
-            request_id = op.request_id, from_user = true } },
+            from_user = true } },
     }
 end
 
@@ -593,7 +634,7 @@ local function record_cancelled_tools(ctx, calls)
 end
 
 function message_handlers.agent_step(ctx: any, op: any)
-    if ctx.stop_requested then
+    if ctx.stop_requested or (ctx.turn_state and (ctx.turn_state.failed or ctx.turn_state.handoff)) then
         if ctx.turn_state then
             ctx.turn_state.stopped = true
             ctx.turn_state.input_policy = nil
@@ -632,7 +673,7 @@ function message_handlers.agent_step(ctx: any, op: any)
 
     -- Prepare the next prompt without consuming input. Load/build/lifecycle
     -- failures leave the durable pending rows available for a later user turn.
-    local input_updates, input_err = prepare_pending_inputs(ctx, op.message_id, op.from_user and op.message_id or nil)
+    local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
     local builder, build_err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, {
         input_overrides = input_updates,
@@ -646,7 +687,7 @@ function message_handlers.agent_step(ctx: any, op: any)
 
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
-        session_context = {}
+        return nil, "Failed to load session context: " .. tostring(ctx_err)
     end
     session_context = with_agent_run_context((ctx :: SessionContext), session_context, agent_ref_from(ctx, agent))
 
@@ -675,8 +716,30 @@ function message_handlers.agent_step(ctx: any, op: any)
     end
     append_lifecycle_messages(builder, before_result)
 
-    local _, input_err = commit_pending_inputs(ctx, input_updates)
-    if input_err then return nil, input_err end
+    -- Stop may race this database transaction. It either commits first and
+    -- invalidates the revision, or commits after this write and restores the
+    -- same batch in its own transaction. The gate prevents provider dispatch
+    -- until that Stop transaction has a definite result.
+    if ctx.stop_requested or (ctx.turn_state and (ctx.turn_state.failed or ctx.turn_state.handoff)) then
+        return { completed = true, next_ops = {} }
+    end
+    ctx.input_apply_batch = input_updates
+    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
+    local _, input_err = persist_pending_inputs(ctx, input_updates, expected_revision)
+    local stop_gate = ctx.stop_commit_channel
+    if stop_gate then
+        stop_gate:receive()
+        if ctx.stop_commit_channel == stop_gate then ctx.stop_commit_channel = nil end
+    end
+    ctx.input_apply_batch = nil
+    if input_err then
+        if ctx.stop_requested then return { completed = true, next_ops = {} } end
+        return nil, input_err
+    end
+    if ctx.stop_requested or (ctx.turn_state and (ctx.turn_state.failed or ctx.turn_state.handoff)) then
+        return { completed = true, next_ops = {} }
+    end
+    publish_applied_inputs(ctx, input_updates)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
@@ -826,7 +889,9 @@ function message_handlers.agent_step(ctx: any, op: any)
         ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, result.memory_prompt.content, memory_metadata)
     end
 
-    if ctx.stop_requested and #unified_tool_calls > 0 then
+    local turn_blocked = ctx.stop_requested
+        or (ctx.turn_state and (ctx.turn_state.failed or ctx.turn_state.handoff))
+    if turn_blocked and #unified_tool_calls > 0 then
         local saved, cancel_err = record_cancelled_tools(ctx, unified_tool_calls)
         if not saved then return nil, cancel_err end
     end
@@ -835,7 +900,7 @@ function message_handlers.agent_step(ctx: any, op: any)
     local user_facing_ops = {}
     local background_ops = {}
 
-    if #unified_tool_calls > 0 and not ctx.stop_requested then
+    if #unified_tool_calls > 0 and not turn_blocked then
         table.insert(user_facing_ops, {
             type = consts.OP_TYPE.PROCESS_TOOLS,
             tool_calls = unified_tool_calls,
@@ -895,7 +960,9 @@ function message_handlers.agent_step(ctx: any, op: any)
 end
 
 function message_handlers.process_tools(ctx: any, op: any)
-    if ctx.stop_requested then
+    local turn_blocked = ctx.stop_requested
+        or (ctx.turn_state and (ctx.turn_state.failed or ctx.turn_state.handoff))
+    if turn_blocked then
         local saved, err = record_cancelled_tools(ctx, op.tool_calls)
         if not saved then return nil, err end
         return { completed = true, next_ops = {} }
@@ -1120,7 +1187,9 @@ function message_handlers.process_tools(ctx: any, op: any)
         table.insert(next_ops, control_op)
     end
 
-    if #op.tool_calls > 0 and not ctx.stop_requested then
+    turn_blocked = ctx.stop_requested
+        or (ctx.turn_state and (ctx.turn_state.failed or ctx.turn_state.handoff))
+    if #op.tool_calls > 0 and not turn_blocked then
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,

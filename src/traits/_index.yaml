@@ -36,8 +36,8 @@ entries:
       during your work. Use block to pause input or steer to accept steering.
       Changes default to the current turn and clear when it ends. Use session
       scope only when a lasting change is intended. Use inherit to remove an
-      override at the selected scope. Application restrictions still apply.
-      Stop remains available independently of the sending policy.
+      override at the selected scope. Stop remains available independently of
+      the sending policy.
 
   - name: set_input_policy
     kind: function.lua

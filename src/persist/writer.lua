@@ -145,8 +145,34 @@ function session_writer:add_message(msg_type, content, metadata)
     return message_id
 end
 
-function session_writer:apply_inputs(updates)
-    return session_writer._message_repo.apply_inputs(self.session_id, updates)
+function session_writer:admit_message(msg_type, content, metadata, session_updates)
+    if not msg_type or msg_type == "" then return nil, "Message type is required" end
+    if content == nil then return nil, "Message content is required" end
+    local message_id, id_err = uuid.v7()
+    if not message_id then return nil, "Failed to generate message ID: " .. tostring(id_err) end
+    local result, err = session_writer._message_repo.admit(
+        message_id, self.session_id, msg_type, content, metadata or {}, session_updates)
+    if err or not result then return nil, "Failed to admit message: " .. tostring(err or "No result") end
+    return message_id
+end
+
+function session_writer:apply_inputs(updates, expected_revision)
+    -- Stop and pending-input application share the session metadata revision. Keep
+    -- both repository transactions behind the same writer lock so Stop cannot
+    -- observe an input between its apply and rollback boundaries.
+    self._meta_lock:receive()
+    local result, err = session_writer._message_repo.apply_inputs(
+        self.session_id, updates, expected_revision)
+    self._meta_lock:send(true)
+    return result, err
+end
+
+function session_writer:stop_with_input_rollback(updates, session_updates)
+    self._meta_lock:receive()
+    local result, err = session_writer._message_repo.stop_with_input_rollback(
+        self.session_id, updates, session_updates)
+    self._meta_lock:send(true)
+    return result, err
 end
 
 function session_writer:update_message_meta(message_id, metadata)

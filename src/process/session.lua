@@ -42,6 +42,69 @@ type SessionContext = {
     operation_error_callback: any?,
 }
 
+local function clone(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, item in pairs(value) do result[key] = clone(item) end
+    return result
+end
+
+local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
+    if context.stop_requested then
+        if request_id then session_upstream:command_success(request_id, { stopped = true }) end
+        return true
+    end
+    local running = context.status == consts.STATUS.RUNNING
+        or (context.turn_state and context.turn_state.active == true)
+    if request_id and not running then
+        session_upstream:command_error(request_id, "SESSION_NOT_RUNNING", "Session is not running")
+        return nil, "Session is not running"
+    end
+
+    local candidate_state = clone(context.turn_state)
+    if candidate_state then candidate_state.input_policy = nil end
+    local candidate = {
+        config = context.config,
+        turn_state = candidate_state,
+        status = context.status,
+        stop_requested = true,
+        current_agent = context.current_agent,
+        input_policy_revision = context.input_policy_revision,
+        interaction = context.interaction,
+    }
+    local interaction = input_policy.snapshot(context, candidate, context.current_agent)
+    local stop_gate = nil
+    local stopped, stop_err
+    if context.input_apply_batch and type(context.writer.stop_with_input_rollback) == "function" then
+        stop_gate = channel.new(1)
+        context.stop_commit_channel = stop_gate
+        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch, {
+            status = context.status,
+            meta = { interaction = interaction },
+        })
+    else
+        stopped, stop_err = context.writer:update_meta({
+            status = context.status,
+            meta = { interaction = interaction },
+        })
+    end
+    if not stopped then
+        if stop_gate then stop_gate:send({ success = false, error = stop_err }) end
+        if request_id then
+            session_upstream:command_error(request_id, "STORAGE_ERROR", stop_err or "Failed to persist Stop")
+        else
+            session_upstream:session_error("STORAGE_ERROR", stop_err or "Failed to persist Stop")
+        end
+        return nil, stop_err
+    end
+    context.stop_requested = true
+    context.turn_state = candidate_state
+    input_policy.accept_committed(context, interaction)
+    if stop_gate then stop_gate:send({ success = true }) end
+    if request_id then session_upstream:command_success(request_id, { stopped = true }) end
+    return true
+end
+
 local function run(args: SessionArgs)
     if not args or not args.user_id or not args.session_id then
         error(consts.ERR.MISSING_ARGS)
@@ -158,11 +221,7 @@ local function run(args: SessionArgs)
 
     local bus = command_bus.new(context)
     local function request_stop(request_id)
-        context.stop_requested = true
-        input_policy.clear_turn(context)
-        if request_id then session_upstream:command_success(request_id, { stopped = true }) end
-        local _, policy_err = input_policy.publish(context, context.current_agent)
-        if policy_err then session_upstream:session_error("STORAGE_ERROR", policy_err) end
+        return commit_stop(context, session_upstream, request_id)
     end
 
     -- Mount all operation handlers
@@ -176,13 +235,7 @@ local function run(args: SessionArgs)
     bus:mount_op_handler(consts.OP_TYPE.CONTROL_MEMORY, control_handlers.control_memory)
     bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONFIG, control_handlers.control_config)
 
-    bus:mount_op_handler(consts.OP_TYPE.AGENT_CHANGE, function(ctx, op)
-        local result, err = session_handlers.agent_change(ctx, op)
-        if err then return nil, err end
-        local _, policy_err = ctx.refresh_interaction(true)
-        if policy_err then return nil, policy_err end
-        return result
-    end)
+    bus:mount_op_handler(consts.OP_TYPE.AGENT_CHANGE, session_handlers.agent_change)
     bus:mount_op_handler(consts.OP_TYPE.MODEL_CHANGE, session_handlers.model_change)
     bus:mount_op_handler(consts.OP_TYPE.GENERATE_TITLE, session_handlers.generate_title)
     bus:mount_op_handler(consts.OP_TYPE.CREATE_CHECKPOINT, session_handlers.create_checkpoint)
@@ -264,10 +317,14 @@ local function run(args: SessionArgs)
             local request: any = (result.value :: any)
             local value, policy_err
             if request.refresh then
+                local previous_policy = context.turn_state and context.turn_state.input_policy
                 if request.clear_turn then input_policy.clear_turn(context) end
                 local agent, load_err = active_agent()
                 if load_err then policy_err = load_err
                 else value, policy_err = input_policy.publish(context, agent, true) end
+                if policy_err and context.turn_state then
+                    context.turn_state.input_policy = previous_policy
+                end
             else
                 value, policy_err = input_policy.apply_request(context, request.request, request.agent)
             end
@@ -283,8 +340,6 @@ local function run(args: SessionArgs)
                     local finished, finish_err = message_handlers.finish_turn(context)
                     if finish_err then
                         session_upstream:session_error("STORAGE_ERROR", finish_err)
-                        if context.turn_state then context.turn_state.failed = true end
-                        finished = message_handlers.finish_turn(context)
                     end
                     for _, next_op in ipairs(finished and finished.next_ops or {}) do bus:queue_op(next_op) end
                 end
@@ -295,9 +350,7 @@ local function run(args: SessionArgs)
                 end
 
                 local message_data = type(payload_data.data) == "table" and payload_data.data or {}
-                message_data.message_id = payload_data.message_id or message_data.message_id or payload_data.client_message_id
                 local message_type = message_data.type
-                -- User retries still reach durable deduplication during shutdown.
                 -- Admission rejects new input from the finishing interaction state.
                 if session_state.finishing and (message_type == consts.MSG_TYPE.DEVELOPER or message_type == consts.MSG_TYPE.SYSTEM) then
                     if payload_data.request_id then
@@ -316,11 +369,6 @@ local function run(args: SessionArgs)
                                 session_upstream:command_error(payload_data.request_id, consts.ERROR_CODES.STORAGE_ERROR, admit_err or "Failed to accept input")
                             end
                         else
-                            if #(admitted.next_ops or {}) > 0 then
-                                context.status = consts.STATUS.RUNNING
-                                local _, publish_err = input_policy.publish(context, context.current_agent)
-                                if publish_err then session_upstream:session_error("STORAGE_ERROR", publish_err) end
-                            end
                             for _, next_op in ipairs(admitted.next_ops or {}) do bus:queue_op(next_op) end
                         end
                     else
@@ -445,4 +493,4 @@ local function run(args: SessionArgs)
     return { status = "shutdown", session_id = args.session_id }
 end
 
-return { run = run }
+return { run = run, _commit_stop = commit_stop }

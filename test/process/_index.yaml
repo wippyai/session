@@ -3,6 +3,18 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: stop_control_test
+    kind: function.lua
+    meta:
+      name: Stop persistence boundary
+      type: test
+      suite: session
+    source: file://stop_control_test.lua
+    imports:
+      session: wippy.session.process:session
+      test: wippy.test:test
+    method: run_tests
+
   - name: control_handlers_test
     kind: function.lua
     meta:

@@ -35,6 +35,7 @@ entries:
       consts: wippy.session:consts
       tool_caller: wippy.agent.tools:caller
       checkpoint_runtime: wippy.agent:checkpoint_runtime
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:control_handlers
   - name: control_handlers

@@ -9,6 +9,9 @@ local function mock_ctx(state_config)
         developer_messages = 0,
         switched_agent = nil :: string?,
         switched_model = nil :: string?,
+        resets = 0,
+        persisted_update = nil :: table?,
+        session_errors = 0,
     }
 
     local ctx = {
@@ -18,11 +21,13 @@ local function mock_ctx(state_config)
                 return { config = state_config or {} }
             end,
             reset = function()
+                captured.resets = captured.resets + 1
                 return true
             end,
         },
         writer = {
             update_meta = function(self, meta)
+                captured.persisted_update = meta
                 captured.persisted = meta.config
                 return true
             end,
@@ -39,6 +44,7 @@ local function mock_ctx(state_config)
             update_session = function(self, payload)
                 captured.upstream = payload
             end,
+            session_error = function() captured.session_errors = captured.session_errors + 1 end,
         },
         agent_ctx = {
             current_model = "model:new",
@@ -50,6 +56,10 @@ local function mock_ctx(state_config)
             switch_to_model = function(self, model)
                 captured.switched_model = model
                 return true
+            end,
+            get_current_agent = function()
+                return { id = captured.switched_agent, model = "model:new",
+                    agent_options = { session_input = { while_running = "steer" } } }
             end,
         },
     }
@@ -169,6 +179,82 @@ local function define_tests()
             test.eq(captured.switched_model, "model:new")
             test.eq((captured.persisted or {}).model, "model:new")
             test.eq((captured.upstream or {}).model, "model:new")
+        end)
+
+        it("retains the authoritative session input policy across handoff", function()
+            local ctx, captured = mock_ctx({
+                agent_id = "agent:stale",
+                model = "model:stale",
+            })
+            ctx.config = {
+                agent_id = "agent:old",
+                model = "model:old",
+                input_policy = { while_running = "steer" },
+            }
+            ctx.status = "running"
+            ctx.interaction = { can_send = true, revision = 0 }
+            ctx.turn_state = { active = true, input_policy = { while_running = "steer" } }
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq((captured.persisted or {}).input_policy.while_running, "steer")
+            test.eq(ctx.config.input_policy.while_running, "steer")
+            test.eq(captured.resets, 1)
+            test.is_false((captured.persisted_update or {}).meta.interaction.can_send)
+            test.is_true((ctx.turn_state :: any).handoff)
+            test.is_nil((ctx.turn_state :: any).input_policy)
+        end)
+
+        it("marks the session failed when config persistence and runtime rollback both fail", function()
+            local ctx, captured = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+            ctx.config = { agent_id = "agent:old", model = "model:old" }
+            local switches = 0
+            ctx.agent_ctx.switch_to_agent = function(self, agent_id)
+                switches = switches + 1
+                captured.switched_agent = agent_id
+                if switches > 1 then return false, "rollback unavailable" end
+                return true
+            end
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(result)
+            test.contains(err, "runtime rollback failed")
+            test.eq((ctx :: any).status, "failed")
+            test.eq(captured.session_errors, 1)
+        end)
+
+        it("fails closed when a first agent cannot be rolled back after a write failure", function()
+            local ctx, captured = mock_ctx({})
+            ctx.config = {}
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(result)
+            test.contains(err, "no previous agent")
+            test.eq((ctx :: any).status, "failed")
+            test.eq(captured.session_errors, 1)
+        end)
+
+        it("restores the prior agent and leaves turn state unchanged after persistence failure", function()
+            local ctx, captured = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+            ctx.config = { agent_id = "agent:old", model = "model:old" }
+            ctx.turn_state = { active = true, input_policy = { while_running = "steer" } }
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(result)
+            test.contains(err, "disk failure")
+            test.eq(captured.switched_agent, "agent:old")
+            test.eq(ctx.config.agent_id, "agent:old")
+            test.is_nil((ctx.turn_state :: any).handoff)
+            test.eq(ctx.turn_state.input_policy.while_running, "steer")
+            test.eq(captured.resets, 0)
         end)
     end)
 

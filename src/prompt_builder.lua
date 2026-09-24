@@ -13,6 +13,27 @@ local prompt_builder = {
     _prompt = require("prompt")
 }
 
+local function validate_input_metadata(message): (boolean, string?)
+    local metadata = message.metadata
+    if type(metadata) ~= "table" or metadata.input == nil then return true end
+    if message.type ~= consts.MSG_TYPE.USER then
+        return false, "Steering metadata is only valid on user messages"
+    end
+    local input = metadata.input
+    if type(input) ~= "table" then return false, "Steering metadata must be a table" end
+    if input.state ~= "pending" and input.state ~= "applied" then
+        return false, "Steering state must be pending or applied"
+    end
+    local anchor = input.after_message_id
+    if input.state == "pending" and anchor ~= nil then
+        return false, "Pending steering input cannot have an anchor"
+    end
+    if anchor ~= nil and (type(anchor) ~= "string" or anchor == "") then
+        return false, "Steering anchor must be a non-empty string"
+    end
+    return true
+end
+
 -- The session-owned, optional file-provider contract. An application that stores
 -- uploads binds it (e.g. an uploads module) so the session can resolve a file_uuid to
 -- its metadata WITHOUT the session depending on any concrete uploads module. Modeled on
@@ -104,6 +125,14 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     end
     local builder = prompt_builder._prompt.new()
 
+    for _, msg in ipairs(messages) do
+        local valid, validation_err = validate_input_metadata(msg)
+        if not valid then
+            return nil, "Malformed steering metadata on message " .. tostring(msg.message_id)
+                .. ": " .. tostring(validation_err)
+        end
+    end
+
     if include_contexts and contexts and #contexts > 0 then
         local memory_text = "Session context memory:\n\n"
         for _, context in ipairs(contexts) do
@@ -116,14 +145,20 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
-    local anchored = {}
+    local anchored, message_ids = {}, {}
     for _, msg in ipairs(messages) do
-        local metadata = msg.metadata or {}
-        local input = metadata.input
-        if msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.steering == true and input.state == "applied" then
-            local anchor = metadata.after_message_id or input.after_message_id
-            anchored[anchor or ""] = anchored[anchor or ""] or {}
-            table.insert(anchored[anchor or ""], msg)
+        local input = (msg.metadata or {}).input
+        if not (msg.type == consts.MSG_TYPE.USER and type(input) == "table") then
+            message_ids[msg.message_id] = true
+        end
+    end
+    for _, msg in ipairs(messages) do
+        local input = (msg.metadata or {}).input
+        if msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.state == "applied" then
+            local anchor = input.after_message_id
+            if not anchor or not message_ids[anchor] then anchor = "" end
+            anchored[anchor] = anchored[anchor] or {}
+            table.insert(anchored[anchor], msg)
         end
     end
 
@@ -131,7 +166,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         local metadata: table = msg.metadata or {}
 
         local input = metadata.input
-        if not render_steering and msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.steering == true then
+        if not render_steering and msg.type == consts.MSG_TYPE.USER and type(input) == "table" then
             return
         end
 
@@ -252,9 +287,8 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         local rows = anchored[anchor or ""]
         if rows then
             table.sort(rows, function(a, b)
-                local av = tonumber((a.metadata or {}).accepted_sequence) or 0
-                local bv = tonumber((b.metadata or {}).accepted_sequence) or 0
-                return av < bv
+                if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
+                return tostring(a.message_id) < tostring(b.message_id)
             end)
             for _, row in ipairs(rows) do
                 add_message(row, true)
@@ -267,7 +301,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     for _, msg in ipairs(messages) do
         local metadata = msg.metadata or {}
         local input = metadata.input
-        if not (msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.steering == true and input.state ~= "applied") then
+        if not (msg.type == consts.MSG_TYPE.USER and type(input) == "table") then
             add_message(msg)
             add_anchored(msg.message_id)
         end

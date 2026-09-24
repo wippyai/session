@@ -82,6 +82,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         config = config,
         reader = {
             messages = function(_self) return empty_query end,
+            list_pending_inputs = function(_self) return {}, nil end,
             contexts = function(_self) return empty_query end,
             state = function(_self) return { title = "t", meta = {}, config = {} } end,
             get_full_context = function(_self) return {}, nil end,
@@ -359,6 +360,32 @@ local function define_tests()
             test.eq(message_handlers.note_tool_round(ctx, b), 2, "the same call must match whatever the key order")
             test.eq(message_handlers.note_tool_round(ctx, failing), 3)
             test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
+        end)
+    end)
+
+    describe("failed queue boundary", function()
+        it("persists failed status instead of returning a failed turn to idle", function()
+            local ctx = mock_ctx(fake_agent(1000))
+            ctx.status = consts.STATUS.FAILED
+            ctx.turn_state = {
+                active = false,
+                failed = true,
+                input_policy = { while_running = "steer" },
+            }
+            local persisted = nil
+            ctx.writer.update_meta = function(_self, updates)
+                persisted = updates
+                return true
+            end
+
+            local finished, err = message_handlers.finish_turn(ctx)
+
+            test.is_nil(err)
+            test.is_true(finished.completed)
+            test.eq(ctx.status, consts.STATUS.FAILED)
+            test.is_true((ctx.turn_state :: any).failed)
+            test.eq((persisted :: any).status, consts.STATUS.FAILED)
+            test.is_false((persisted :: any).meta.interaction.can_send)
         end)
     end)
 end

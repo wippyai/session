@@ -56,13 +56,12 @@ function session_upstream:response_beginning(response_id, message_id)
 end
 
 -- Confirm message reception
-function session_upstream:message_received(message_id, text, file_uuids, client_message_id, input)
+function session_upstream:message_received(message_id, text, file_uuids, input)
     self:send_message_update(message_id, consts.UPSTREAM_TYPES.RECEIVED, {
         message_id = message_id,
         text = text,
         timestamp = os.time(),
         file_uuids = file_uuids,
-        client_message_id = client_message_id,
         input = input
     })
 end
@@ -91,7 +90,6 @@ function session_upstream:command_success(request_id, payload)
         request_id = request_id,
         success = true,
         message_id = payload.message_id,
-        client_message_id = payload.client_message_id,
         input = payload.input
     })
 end
@@ -105,7 +103,6 @@ function session_upstream:command_error(request_id, code, message, payload)
         code = code,
         message = message,
         message_id = payload.message_id,
-        client_message_id = payload.client_message_id,
         input = payload.input
     })
 end
@@ -142,8 +139,10 @@ end
 function session_upstream:_send_message(topic, message)
     -- Send to parent process (which can relay to all connections)
     if self.parent_pid then
-        process.send(self.parent_pid :: string, topic, message)
+        local ok, err = pcall(process.send, self.parent_pid :: string, topic, message)
+        if not ok then return nil, tostring(err) end
     end
+    return true
 end
 
 return session_upstream
