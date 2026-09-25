@@ -71,15 +71,24 @@ end
 local function flush_held(ctx: any, run_agent: boolean)
     local last_user_id = nil
     local last_request_id = nil
-    for _, item in ipairs(ctx.held) do
+    while #ctx.held > 0 do
+        local item = ctx.held[1]
         local message_id, msg_type = write_input(ctx, item)
-        if not message_id then return nil, msg_type end
+        if not message_id then
+            if ctx.upstream then
+                for _, pending in ipairs(ctx.held) do
+                    ctx.upstream:message_error(pending.message_id,
+                        consts.ERROR_CODES.STORAGE_ERROR, msg_type)
+                end
+            end
+            return nil, msg_type
+        end
+        table.remove(ctx.held :: {any}, 1)
         if msg_type == consts.MSG_TYPE.USER then
             last_user_id = message_id
             last_request_id = item.request_id
         end
     end
-    ctx.held = {}
     return run_agent and last_user_id or nil, nil, last_request_id
 end
 
@@ -131,9 +140,9 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             end
         end
         if data.type ~= consts.MSG_TYPE.DEVELOPER and data.type ~= consts.MSG_TYPE.SYSTEM then
-            ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
             local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
             if status_err then return nil, status_err end
+            ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
             ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
         end
         return true
@@ -270,6 +279,10 @@ local function run(args: SessionArgs)
     }
 
     context.flush_held = function(run_agent) return flush_held(context, run_agent) end
+    context.settle_intents = function()
+        return message_repo.recover_pending(args.session_id,
+            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
+    end
 
     local bus = command_bus.new(context)
     context.on_turn_end = function(turn_id, stop_requested, stop_request_id)
@@ -302,7 +315,8 @@ local function run(args: SessionArgs)
     bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, reference_artifact)
 
     if args.create then
-        session_writer:update_status(consts.STATUS.IDLE)
+        local status_ok, status_err = session_writer:update_status(consts.STATUS.IDLE)
+        if not status_ok then error("Failed to initialize session status: " .. tostring(status_err)) end
 
         if session_config.agent_id and session_config.agent_id ~= "" then
             bus:queue_op({

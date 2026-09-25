@@ -73,6 +73,44 @@ local function define_tests()
             test.eq(received[2].id, (ctx.held[1] :: any).message_id)
         end)
 
+        it("persists a received queued message when an earlier control fails", function()
+            local ctx, bus, saved, received = fixture()
+            local steps = 0
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_ARTIFACTS, function()
+                return nil, "control failed"
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                steps = steps + 1
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.CONTROL_ARTIFACTS })
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "queued" }, request_id = "queued" }, {})
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.eq(err, "control failed")
+            test.eq(#saved, 1)
+            test.eq(saved[1].message_id, received[1].id)
+            test.eq(saved[1].content, "queued")
+            test.eq(steps, 0)
+        end)
+
+        it("does not acknowledge input when the running status write fails", function()
+            local ctx, bus, saved, received = fixture()
+            ctx.writer.update_status = function() return nil, "status disk unavailable" end
+
+            local ok, err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "not received" } }, {})
+
+            test.is_nil(ok)
+            test.eq(err, "status disk unavailable")
+            test.eq(#received, 0)
+            test.eq(#saved, 0)
+        end)
+
         it("rejects a full held buffer and still accepts STOP", function()
             local ctx, bus, saved, received, errors = fixture()
             bus.state = "running"
@@ -101,6 +139,39 @@ local function define_tests()
             test.is_nil(last_id)
             test.eq(saved[1].message_id, "held-user")
             test.eq(#ctx.held, 0)
+        end)
+
+        it("keeps unwritten held input after a partial write failure", function()
+            local ctx, _, saved = fixture()
+            local errors = {} :: {any}
+            ctx.upstream.message_error = function(_self, id, code, message)
+                table.insert(errors, { id = id, code = code, message = message })
+            end
+            ctx.held = {
+                { message_id = "held-1", data = { text = "one" } },
+                { message_id = "held-2", data = { text = "two" } },
+                { message_id = "held-3", data = { text = "three" } }
+            }
+            local original_add = ctx.writer.add_message
+            ctx.writer.add_message = function(self, kind, content, metadata)
+                if metadata.message_id == "held-2" then return nil, "disk unavailable" end
+                return original_add(self, kind, content, metadata)
+            end
+
+            local _, err = session.flush_held(ctx, false)
+
+            test.eq(err, "disk unavailable")
+            test.eq(#saved, 1)
+            test.eq(saved[1].message_id, "held-1")
+            test.eq(#ctx.held, 2)
+            test.eq(errors[1].id, "held-2")
+            test.eq(errors[2].id, "held-3")
+            ctx.writer.add_message = original_add
+            local _, retry_err = session.flush_held(ctx, false)
+            test.is_nil(retry_err)
+            test.eq(#saved, 3)
+            test.eq(saved[2].message_id, "held-2")
+            test.eq(saved[3].message_id, "held-3")
         end)
 
         it("routes both stop forms and artifact references through the bus", function()

@@ -120,6 +120,7 @@ local function run_start_through_session(actor, session_id, registry, session_pi
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
             spawned_init = init
+            if options.force_create then init.create = true end
             in_session = true
             local ok, result = pcall(session.run, init)
             in_session = false
@@ -588,6 +589,35 @@ local function define_tests()
                 cleanup_session_fixture(session_id, context_id)
             end
         end)
+        it("rejects queued requests when the initial status write fails", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Initial status failure")
+            local original_update_status = writer.update_status
+            writer.update_status = function() return nil, "startup disk unavailable" end
+            local run = run_start_through_session(actor, session_id, {}, "failed-initial-status",
+                "cancel", { force_create = true, pending_after_start = {
+                    { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id,
+                        conn_pid = "second-open-caller", request_id = "second-open" } },
+                    { topic = consts.PLUGIN_TOPICS.MESSAGE, data = { session_id = session_id,
+                        conn_pid = "waiting-caller", request_id = "waiting-message",
+                        data = { text = "waiting" } } }
+                } })
+            writer.update_status = original_update_status
+
+            local errors = {}
+            for _, sent in ipairs(run.sent) do
+                test.is_false(sent.topic == consts.TOPICS.SESSION_OPENED)
+                if sent.topic == consts.TOPICS.ERROR then errors[sent.payload.request_id] = sent end
+            end
+            test.not_nil(errors["start-request"])
+            test.not_nil(errors["second-open"])
+            test.not_nil(errors["waiting-message"])
+            test.contains(errors["start-request"].payload.message, "startup disk unavailable")
+            test.not_nil(run.spawned_init)
+            test.eq(errors["start-request"].payload.error, consts.ERROR_CODES.SESSION_SPAWN)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
         it("answers every request queued before a refused start and never forwards to that pid", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Refused start", consts.STATUS.IDLE)

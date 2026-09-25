@@ -1,6 +1,8 @@
 local test = require("test")
 local command_bus = require("command_bus")
 local consts = require("consts")
+local message_handlers = require("message_handlers")
+local message_repo = require("message_repo")
 local context_repo = require("context_repo")
 local reader = require("reader")
 local security = require("security")
@@ -102,6 +104,86 @@ local function define_tests()
         end)
     end)
     describe("turn boundaries", function()
+        it("persists received input on a fatal turn before exiting and accepts input after reopen", function()
+            local session_id, context_id = create_persisted_fixture()
+            local session_writer, writer_err = writer.new(session_id)
+            test.is_nil(writer_err)
+            local received = {} :: {any}
+            local command_errors = {} :: {any}
+            local steps = 0
+            local function context(current_writer)
+                local ctx = { session_id = session_id, writer = current_writer, held = {},
+                    upstream = {
+                        message_received = function(_self, id, text)
+                            table.insert(received, { id = id, text = text })
+                        end,
+                        update_session = function() end,
+                        command_error = function(_self, id, code)
+                            table.insert(command_errors, { id = id, code = code })
+                        end
+                    } }
+                ctx.flush_held = function(run_agent) return session.flush_held(ctx, run_agent) end
+                return ctx
+            end
+            local ctx = context(session_writer)
+            local bus = command_bus.new(ctx)
+            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                steps = steps + 1
+                session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                    { data = { text = "held one" }, request_id = "held-one" }, {})
+                session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                    { data = { text = "held two" }, request_id = "held-two" }, {})
+                bus:queue_op({ type = consts.OP_TYPE.AGENT_CHANGE,
+                    request_id = "queued-command", user_command = true })
+                return nil, "fatal turn failure"
+            end)
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "first" }, request_id = "first" }, {})
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.eq(err, "fatal turn failure")
+            test.eq(steps, 1)
+            test.eq(command_errors[1].id, "queued-command")
+            test.eq(bus.state, "closed")
+            local session_reader, reader_err = reader.open(session_id)
+            test.is_nil(reader_err)
+            local history, history_err = session_reader:messages():all()
+            test.is_nil(history_err)
+            test.eq(#history, 3)
+            for index, expected in ipairs({ "first", "held one", "held two" }) do
+                test.eq(history[index].message_id, received[index].id)
+                test.eq(history[index].data, expected)
+            end
+
+            local reopened_writer, reopen_err = writer.new(session_id)
+            test.is_nil(reopen_err)
+            local reopened = context(reopened_writer)
+            local next_bus = command_bus.new(reopened)
+            next_bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
+            next_bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                steps = steps + 1
+                next_bus:stop()
+                return { completed = true }
+            end)
+            session.route_input(reopened, next_bus, consts.TOPICS.MESSAGE,
+                { data = { text = "after reopen" }, request_id = "next" }, {})
+            local next_ok, next_err = next_bus:run()
+            test.is_nil(next_err)
+            test.is_true(next_ok)
+            test.eq(steps, 2)
+            local reopened_reader, reopened_reader_err = reader.open(session_id)
+            test.is_nil(reopened_reader_err)
+            local next_history, next_history_err = reopened_reader:messages():all()
+            test.is_nil(next_history_err)
+            test.eq(next_history[4].data, "after reopen")
+
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+        end)
+
         it("persists assistant, call results, and held input in boundary order", function()
             local session_id, context_id = create_persisted_fixture()
             local session_writer, writer_err = writer.new(session_id)
@@ -209,6 +291,59 @@ local function define_tests()
             test.is_nil(ok)
             test.eq(err, "agent step failed")
             test.eq(#errors, 0)
+        end)
+
+        it("terminalizes pending tool intents before returning a fatal error", function()
+            local cancelled = false
+            local bus = command_bus.new({})
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS, round_effect = true })
+                return nil, "step failed"
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, function(_ctx, op)
+                cancelled = op.cancel_only == true
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                message_id = "first", from_user = true })
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.eq(err, "step failed")
+            test.is_true(cancelled)
+            test.eq(bus.state, "closed")
+        end)
+
+        it("terminalizes the failing tool operation's persisted intent before exit", function()
+            local session_id, context_id = create_persisted_fixture()
+            local session_writer, writer_err = writer.new(session_id)
+            test.is_nil(writer_err)
+            local _, _, response_err = session_writer:add_response("thinking", {}, {{
+                id = "call-1", name = "lookup", arguments = "{}",
+                registry_id = "app:lookup", type = consts.MSG_TYPE.FUNCTION
+            }})
+            test.is_nil(response_err)
+            local ctx = { settle_intents = function()
+                return message_repo.recover_pending(session_id)
+            end }
+            local bus = command_bus.new(ctx)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, function()
+                return nil, "tool control failed"
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS })
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.eq(err, "tool control failed")
+            local session_reader, reader_err = reader.open(session_id)
+            test.is_nil(reader_err)
+            local history, history_err = session_reader:messages():all()
+            test.is_nil(history_err)
+            test.eq(history[2].metadata.status, consts.FUNC_STATUS.ERROR)
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
         end)
 
         it("terminalizes unstarted calls when STOP arrives during the agent step", function()

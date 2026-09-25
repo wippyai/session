@@ -171,6 +171,45 @@ function command_bus:flush_held(run_agent)
     return self.context.flush_held(run_agent)
 end
 
+function command_bus:fail(err, held_already_flushed)
+    local failures = {}
+    for _, op in ipairs(self.ops) do
+        if op.type == consts.OP_TYPE.PROCESS_TOOLS and op.round_effect then
+            op.cancel_only = true
+            local handler = self.handlers[op.type]
+            if handler then
+                local _, settle_err = handler(self.context, op)
+                if settle_err then table.insert(failures, tostring(settle_err)) end
+            end
+        elseif op.type == consts.OP_TYPE.HANDLE_MESSAGE then
+            local handler = self.handlers[op.type]
+            if handler then
+                local _, write_err = handler(self.context, op)
+                if write_err then
+                    table.insert(failures, tostring(write_err))
+                    if self.context.upstream then
+                        self.context.upstream:message_error(op.message_id,
+                            consts.ERROR_CODES.STORAGE_ERROR, write_err)
+                    end
+                end
+            end
+        end
+    end
+    if self.context.settle_intents then
+        local _, settle_err = self.context.settle_intents()
+        if settle_err then table.insert(failures, tostring(settle_err)) end
+    end
+    if not held_already_flushed then
+        local _, flush_err = self:flush_held(false)
+        if flush_err then table.insert(failures, tostring(flush_err)) end
+    end
+    self:stop()
+    if #failures > 0 then
+        return nil, tostring(err) .. "; settlement failed: " .. table.concat(failures, "; ")
+    end
+    return nil, err
+end
+
 function command_bus:end_turn()
     local stop_id = self.turn_state.stop_request_id
     local turn_id = self.turn_state.id
@@ -210,7 +249,7 @@ function command_bus:run()
             self.pending_ops = self.pending_ops - 1
             if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" then
                 local _, flush_err = self:flush_held(true)
-                if flush_err then return nil, flush_err end
+                if flush_err then return self:fail(flush_err, true) end
             end
             if self:admitted(op) then
                 if op.type == consts.OP_TYPE.AGENT_STEP and op.from_user and self.state == "idle" then
@@ -223,7 +262,7 @@ function command_bus:run()
                 self.current_op = op
                 local result, err = self:process_operation(op)
                 self.current_op = nil
-                if err then return nil, err end
+                if err then return self:fail(err) end
                 self:enqueue_result(result)
             elseif op.user_command then
                 local code = self.state == "closed" and "SESSION_FINISHING" or "SESSION_STOPPING"
@@ -231,11 +270,11 @@ function command_bus:run()
             end
         elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then
             local _, err = self:end_turn()
-            if err then return nil, err end
+            if err then return self:fail(err, true) end
         else
             if self.context.queue_empty_callback then
                 local _, err = self.context.queue_empty_callback()
-                if err then return nil, err end
+                if err then return self:fail(err) end
             end
             if self.state ~= "closed" and #self.ops == 0 then
                 self.wake:receive()

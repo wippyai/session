@@ -109,6 +109,8 @@ entries:
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
+      message_handlers: wippy.session.process:message_handlers
+      message_repo: wippy.session.persist:message_repo
       reader: wippy.session.persist:reader
       session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo

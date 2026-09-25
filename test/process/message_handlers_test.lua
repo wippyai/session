@@ -426,6 +426,48 @@ local function define_tests()
     end)
 
     describe("turn loop guards", function()
+        it("fails when either turn-limit notice cannot be stored", function()
+            for _, failed_type in ipairs({ consts.MSG_TYPE.SYSTEM, consts.MSG_TYPE.DEVELOPER }) do
+                local ctx = mock_ctx(fake_agent(1000), { max_turn_iterations = 1 })
+                local original_add = ctx.writer.add_message
+                user_step(ctx)
+                ctx.writer.add_message = function(self, kind, content, metadata)
+                    if kind == failed_type then return nil, "turn notice disk unavailable" end
+                    return original_add(self, kind, content, metadata)
+                end
+                local result, err = continue_step(ctx)
+                test.is_nil(result)
+                test.contains(tostring(err), "turn notice disk unavailable")
+            end
+        end)
+
+        it("fails when a truncation notice cannot be stored", function()
+            local agent = fake_agent(nil)
+            agent.step = function() return { result = "", truncated = true, tool_calls = {} } end
+            local ctx = mock_ctx(agent)
+            ctx.writer.add_message = function() return nil, "truncation disk unavailable" end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(result)
+            test.contains(tostring(err), "truncation disk unavailable")
+        end)
+
+        it("fails when a memory prompt cannot be stored", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return { result = "", tool_calls = {},
+                    memory_prompt = { content = "remember this" } }
+            end
+            local ctx = mock_ctx(agent)
+            ctx.writer.add_message = function() return nil, "memory disk unavailable" end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(result)
+            test.contains(tostring(err), "memory disk unavailable")
+        end)
+
         it("records cancellation for every call when stop arrives during the model step", function()
             local agent = fake_agent(nil)
             agent.step = function()

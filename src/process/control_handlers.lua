@@ -251,10 +251,12 @@ function control_handlers.control_artifacts(ctx, op)
                     })
                 end
 
-                ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
+                local system_id, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM,
+                    "Artifact created: " .. artifact_data.title, {
                     system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
                     artifact_id = artifact_id
                 })
+                if not system_id then return nil, "Failed to store artifact announcement: " .. tostring(system_err) end
 
                 ctx.upstream:update_session({
                     artifact_added = artifact_id
@@ -273,15 +275,20 @@ function control_handlers.control_artifacts(ctx, op)
             }
 
             local success, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
+            if not success then
+                return nil, "Failed to update artifact: " .. tostring(update_err)
+            end
         end
     end
 
     if #instructions > 0 then
         local instruction_text = table.concat(instructions, "\n\n")
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, instruction_text, {
+        local instruction_id, instruction_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
+            instruction_text, {
             system_action = "artifact_instructions",
             created_artifacts = created_artifacts
         })
+        if not instruction_id then return nil, "Failed to store artifact instructions: " .. tostring(instruction_err) end
     end
 
     return {
@@ -294,8 +301,6 @@ function control_handlers.control_context(ctx, op)
     if not op.context_operations then
         return nil, "No context operations provided"
     end
-
-    local success = true
 
     if op.context_operations.public_meta then
         local session_data = ctx.reader:state()
@@ -334,7 +339,7 @@ function control_handlers.control_context(ctx, op)
         if changed_public_meta then
             local update_success, update_err = ctx.writer:update_meta({ public_meta = current_meta })
             if not update_success then
-                success = false
+                return nil, "Failed to update public meta: " .. tostring(update_err)
             else
                 local result = {}
                 for id, data in pairs(current_meta) do
@@ -355,7 +360,7 @@ function control_handlers.control_context(ctx, op)
             for key, value in pairs(op.context_operations.session.set) do
                 local set_success, set_err = ctx.writer:set_context(key, value)
                 if not set_success then
-                    success = false
+                    return nil, "Failed to set session context: " .. tostring(set_err)
                 end
             end
         end
@@ -364,14 +369,10 @@ function control_handlers.control_context(ctx, op)
             for _, key in ipairs(op.context_operations.session.delete) do
                 local delete_success, delete_err = ctx.writer:delete_context(key)
                 if not delete_success then
-                    success = false
+                    return nil, "Failed to delete session context: " .. tostring(delete_err)
                 end
             end
         end
-    end
-
-    if not success then
-        return nil, "Failed to process some context operations"
     end
 
     ctx.reader:reset()
@@ -384,8 +385,6 @@ function control_handlers.control_memory(ctx, op)
         return nil, "No memory operations provided"
     end
 
-    local success = true
-
     if op.memory_operations.clear then
         local clear_keys = {}
         if type(op.memory_operations.clear) == "string" then
@@ -396,14 +395,14 @@ function control_handlers.control_memory(ctx, op)
 
         local contexts, err = ctx.reader:contexts():all()
         if err then
-            success = false
+            return nil, err
         else
             for _, context in ipairs(contexts) do
                 for _, clear_key in ipairs(clear_keys) do
                     if context.type == clear_key then
                         local delete_success, delete_err = ctx.writer:delete_session_context(context.id)
                         if not delete_success then
-                            success = false
+                            return nil, "Failed to clear memory: " .. tostring(delete_err)
                         end
                     end
                 end
@@ -416,7 +415,7 @@ function control_handlers.control_memory(ctx, op)
             if mem_item.type and mem_item.text then
                 local memory_id, err = ctx.writer:add_session_context(mem_item.type, mem_item.text)
                 if not memory_id then
-                    success = false
+                    return nil, "Failed to add memory: " .. tostring(err)
                 end
             end
         end
@@ -426,13 +425,9 @@ function control_handlers.control_memory(ctx, op)
         for _, mem_id in ipairs(op.memory_operations.delete) do
             local deleted, err = ctx.writer:delete_session_context(mem_id)
             if not deleted then
-                success = false
+                return nil, "Failed to delete memory: " .. tostring(err)
             end
         end
-    end
-
-    if not success then
-        return nil, "Failed to process some memory operations"
     end
 
     return { completed = true }
@@ -551,14 +546,18 @@ function control_handlers.control_config(ctx, op)
             end
 
             local change_message = string.format("Configuration changed (%s)", table.concat(change_parts, ", "))
-            ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, change_message, {
+            local system_id, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM,
+                change_message, {
                 system_action = "config_change",
                 previous_agent = previous_agent,
                 new_agent = agent_changed and current_config.agent_id or nil,
                 previous_model = previous_model,
                 new_model = current_config.model
             })
-            ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, change_message)
+            if not system_id then return nil, "Failed to store config change: " .. tostring(system_err) end
+            local developer_id, developer_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
+                change_message)
+            if not developer_id then return nil, "Failed to store config change: " .. tostring(developer_err) end
         end
     end
 

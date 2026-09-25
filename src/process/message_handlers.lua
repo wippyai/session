@@ -398,20 +398,23 @@ function message_handlers.note_tool_round(ctx: SessionContext, results: any): nu
     return count
 end
 
-local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table, reason: string, detail: string): table
+local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
+    reason: string, detail: string): (table?, string?)
     local notice = "Turn stopped: " .. detail
-    ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, notice, {
+    local system_id, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, notice, {
         system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
         reason = reason,
         steps = state.steps - 1,
         repeated_calls = state.repeated_calls,
         source_id = op.message_id
     })
-    ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
+    if not system_id then return nil, system_err end
+    local developer_id, developer_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
         "The previous turn was stopped by the session: " .. detail
             .. " Do not resume that loop when the conversation continues. Report what was done, "
             .. "what failed and why, and ask the user how to proceed.",
         { system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT })
+    if not developer_id then return nil, developer_err end
     ctx.upstream:session_error("turn_limit_reached", notice)
 
     local _, lifecycle_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
@@ -577,7 +580,9 @@ function message_handlers.agent_step(ctx, op)
             })
         end
 
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, (output :: any).TRUNCATION_MSG, {})
+        local notice_id, notice_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
+            (output :: any).TRUNCATION_MSG, {})
+        if not notice_id then return nil, notice_err end
 
         return {
             message_id = op.message_id,
@@ -744,7 +749,9 @@ function message_handlers.agent_step(ctx, op)
         if result.memory_prompt.metadata and result.memory_prompt.metadata.memory_ids then
             memory_metadata.memory_ids = result.memory_prompt.metadata.memory_ids
         end
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, result.memory_prompt.content, memory_metadata)
+        local memory_id, memory_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
+            result.memory_prompt.content, memory_metadata)
+        if not memory_id then return nil, memory_err end
     end
 
     -- Separate user-facing operations from background operations
