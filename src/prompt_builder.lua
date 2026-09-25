@@ -163,7 +163,8 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 if metadata.status == consts.FUNC_STATUS.PENDING then
                     builder:add_function_result(func_name, "incomplete", llm_call_id)
                 elseif metadata.status == consts.FUNC_STATUS.SUCCESS or
-                    metadata.status == consts.FUNC_STATUS.ERROR then
+                    metadata.status == consts.FUNC_STATUS.ERROR or
+                    metadata.status == consts.FUNC_STATUS.CANCELLED then
                     -- A RESULT THAT HAS SINCE STOPPED BEING TRUE.
                     --
                     -- The conversation is rebuilt from these rows on every turn, so a tool

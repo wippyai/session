@@ -2,8 +2,62 @@ local test = require("test")
 local json = require("json")
 local consts = require("consts")
 local prompt_builder = require("prompt_builder")
+local claude_mapper = require("claude_mapper")
 
 local function define_tests()
+    describe("interrupted tool rounds", function()
+        it("renders a cancelled call result after a thinking-only assistant", function()
+            local builder, err = prompt_builder.build({
+                { message_id = "thinking", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                    thinking = "considering the call"
+                } },
+                { message_id = "call", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                    function_name = "lookup", call_id = "call-1", status = consts.FUNC_STATUS.CANCELLED,
+                    result = "Session stopped before execution"
+                } }
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            test.is_nil(err)
+            local messages = builder:get_messages()
+            test.eq(messages[#messages - 1].role, "function_call")
+            test.eq(messages[#messages].role, "function_result")
+            test.eq(messages[#messages].content[1].text, "Session stopped before execution")
+        end)
+
+        it("renders an interrupted unknown outcome as a function result", function()
+            local builder, err = prompt_builder.build({
+                { message_id = "thinking-error", type = consts.MSG_TYPE.ASSISTANT,
+                    data = "", metadata = { thinking = "checking" } },
+                { message_id = "call-error", type = consts.MSG_TYPE.DELEGATION,
+                    data = "{}", metadata = { function_name = "delegate", call_id = "delegate-1",
+                        status = consts.FUNC_STATUS.ERROR, result = "interrupted, outcome unknown" } }
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            test.is_nil(err)
+            local messages = builder:get_messages()
+            test.eq(messages[#messages - 1].role, "function_call")
+            test.eq(messages[#messages].role, "function_result")
+            test.eq(messages[#messages].content[1].text, "interrupted, outcome unknown")
+        end)
+
+        it("maps a thinking-only stopped round to Claude tool use and result", function()
+            local builder = prompt_builder.build({
+                { message_id = "thinking-2", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                    thinking_blocks = {{ type = "thinking", thinking = "checking", signature = "sig" }}
+                } },
+                { message_id = "call-2", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                    function_name = "lookup", call_id = "call-2", status = consts.FUNC_STATUS.CANCELLED,
+                    result = "Session stopped before the call executed"
+                } }
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            local mapped = claude_mapper.map_messages(builder:get_messages())
+            local messages: any = mapped.messages
+            local assistant: any = messages[#messages - 1]
+            local tool_result: any = messages[#messages]
+            test.eq(assistant.role, "assistant")
+            test.eq(assistant.content[#assistant.content].type, "tool_use")
+            test.eq(tool_result.role, "user")
+            test.eq(tool_result.content[1].type, "tool_result")
+        end)
+    end)
     describe("Prompt Builder", function()
         describe("provider_metadata in function calls", function()
             it("should pass provider_metadata to function call when present", function()

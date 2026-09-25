@@ -7,7 +7,6 @@ local security = require("security")
 local session_repo = require("session_repo")
 local sql = require("sql")
 local test = require("test")
-local time = require("time")
 local uuid = require("uuid")
 local wait_for_boot = require("wait_for_boot")
 
@@ -124,9 +123,7 @@ local function seed_session()
 
     create_message(test_data.anchor_id, consts.MSG_TYPE.USER, "please pack the document", {})
 
-    -- Every later row must sort after the anchor by id (list_after_message filters on
-    -- message_id >= anchor); a UUIDv7 minted in the same millisecond is not guaranteed to.
-    time.sleep("5ms")
+    -- The checkpoint window includes the anchor and orders later rows by date and id.
 
     for round = 1, TOOL_ROUNDS do
         local is_newest = round == TOOL_ROUNDS

@@ -110,6 +110,7 @@ function control_handlers.control_artifacts(ctx, op)
 
     for _, artifact_data in ipairs(op.artifacts) do
         if artifact_data.title and (artifact_data.content or artifact_data.page_id) then
+            local stored = false
             local artifact_id, err = uuid.v7()
             if err then
                 return nil, "Failed to generate artifact ID: " .. err
@@ -144,6 +145,11 @@ function control_handlers.control_artifacts(ctx, op)
                         display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.STANDALONE
                     }
                 )
+
+                if not success then
+                    return nil, "Failed to create artifact: " .. tostring(create_err)
+                end
+                stored = true
 
                 if success then
                     table.insert(created_artifacts, {
@@ -187,6 +193,11 @@ function control_handlers.control_artifacts(ctx, op)
                     }
                 )
 
+                if not success then
+                    return nil, "Failed to create artifact: " .. tostring(create_err)
+                end
+                stored = true
+
                 if success then
                     table.insert(created_artifacts, {
                         artifact_id = artifact_id,
@@ -215,7 +226,7 @@ function control_handlers.control_artifacts(ctx, op)
                 end
             end
 
-            if #created_artifacts > 0 then
+            if stored then
                 -- ⚠️ DO NOT REVERT unless you know exactly what you are doing. ⚠️
                 -- Chat front-ends render a standalone artifact card from a message
                 -- with type='artifact' + metadata.artifact_id. Without the line
@@ -262,6 +273,9 @@ function control_handlers.control_artifacts(ctx, op)
             }
 
             local success, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
+            if not success then
+                return nil, "Failed to update artifact: " .. tostring(update_err)
+            end
         end
     end
 
@@ -283,8 +297,6 @@ function control_handlers.control_context(ctx, op)
     if not op.context_operations then
         return nil, "No context operations provided"
     end
-
-    local success = true
 
     if op.context_operations.public_meta then
         local session_data = ctx.reader:state()
@@ -323,7 +335,7 @@ function control_handlers.control_context(ctx, op)
         if changed_public_meta then
             local update_success, update_err = ctx.writer:update_meta({ public_meta = current_meta })
             if not update_success then
-                success = false
+                return nil, "Failed to update public meta: " .. tostring(update_err)
             else
                 local result = {}
                 for id, data in pairs(current_meta) do
@@ -344,7 +356,7 @@ function control_handlers.control_context(ctx, op)
             for key, value in pairs(op.context_operations.session.set) do
                 local set_success, set_err = ctx.writer:set_context(key, value)
                 if not set_success then
-                    success = false
+                    return nil, "Failed to set session context: " .. tostring(set_err)
                 end
             end
         end
@@ -353,14 +365,10 @@ function control_handlers.control_context(ctx, op)
             for _, key in ipairs(op.context_operations.session.delete) do
                 local delete_success, delete_err = ctx.writer:delete_context(key)
                 if not delete_success then
-                    success = false
+                    return nil, "Failed to delete session context: " .. tostring(delete_err)
                 end
             end
         end
-    end
-
-    if not success then
-        return nil, "Failed to process some context operations"
     end
 
     ctx.reader:reset()
@@ -373,8 +381,6 @@ function control_handlers.control_memory(ctx, op)
         return nil, "No memory operations provided"
     end
 
-    local success = true
-
     if op.memory_operations.clear then
         local clear_keys = {}
         if type(op.memory_operations.clear) == "string" then
@@ -385,14 +391,14 @@ function control_handlers.control_memory(ctx, op)
 
         local contexts, err = ctx.reader:contexts():all()
         if err then
-            success = false
+            return nil, err
         else
             for _, context in ipairs(contexts) do
                 for _, clear_key in ipairs(clear_keys) do
                     if context.type == clear_key then
                         local delete_success, delete_err = ctx.writer:delete_session_context(context.id)
                         if not delete_success then
-                            success = false
+                            return nil, "Failed to clear memory: " .. tostring(delete_err)
                         end
                     end
                 end
@@ -405,7 +411,7 @@ function control_handlers.control_memory(ctx, op)
             if mem_item.type and mem_item.text then
                 local memory_id, err = ctx.writer:add_session_context(mem_item.type, mem_item.text)
                 if not memory_id then
-                    success = false
+                    return nil, "Failed to add memory: " .. tostring(err)
                 end
             end
         end
@@ -415,13 +421,9 @@ function control_handlers.control_memory(ctx, op)
         for _, mem_id in ipairs(op.memory_operations.delete) do
             local deleted, err = ctx.writer:delete_session_context(mem_id)
             if not deleted then
-                success = false
+                return nil, "Failed to delete memory: " .. tostring(err)
             end
         end
-    end
-
-    if not success then
-        return nil, "Failed to process some memory operations"
     end
 
     return { completed = true }
