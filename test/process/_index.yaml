@@ -50,11 +50,13 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
       plugin: wippy.session.process:plugin
       session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
+      writer: wippy.session.persist:writer
     method: run_tests
 
   - name: session_handlers_test
@@ -81,6 +83,7 @@ entries:
     imports:
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
+      control_handlers: wippy.session.process:control_handlers
       message_handlers: wippy.session.process:message_handlers
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test

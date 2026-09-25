@@ -18,9 +18,8 @@ type PluginArgs = {
 
 type ActiveSession = {
     pid: any,
-    conn_pid: any?,
-    request_id: any?,
     open_notified: boolean?,
+    pending_requests: {any}?,
     created_at: time.Time,
     last_activity: time.Time?,
     terminating: boolean,
@@ -330,7 +329,72 @@ local function run(args)
         return session
     end
 
-    local function create_session(payload_data)
+    local function notify_session_opened(session_id, request_id)
+        if state.user_hub_pid then
+            process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
+                session_id = session_id,
+                active_session_ids = get_active_session_ids(),
+                request_id = request_id
+            })
+        end
+    end
+
+    local function queue_start_request(session_info, kind, payload_data)
+        session_info.pending_requests = session_info.pending_requests or {}
+        table.insert(session_info.pending_requests, { kind = kind, payload = payload_data })
+    end
+
+    local function fail_start_requests(session_info, message)
+        for _, request in ipairs(session_info.pending_requests or {}) do
+            local request_data = request.payload or {}
+            send_error(request_data.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
+                message, request_data.request_id)
+        end
+        session_info.pending_requests = {}
+    end
+
+    local function forward_request(session_info, session_id, topic_type, request_data)
+        local conn_pid = request_data.conn_pid
+        local request_id = request_data.request_id
+        if session_info.terminating then
+            send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
+                "Session is finishing", request_id)
+            return
+        end
+        if topic_type == consts.HANDLER_TYPES.MESSAGE then
+            local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.MESSAGE,
+                { conn_pid = conn_pid, data = request_data.data, request_id = request_id })
+            if send_err then
+                send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
+            end
+        elseif topic_type == consts.HANDLER_TYPES.COMMAND then
+            local cmd_data = request_data.data or {}
+            cmd_data.conn_pid = conn_pid
+            if request_id then cmd_data.request_id = request_id end
+            if cmd_data.command == consts.COMMANDS.STOP then
+                cmd_data.stop_supervised = true
+                if not session_info.stop_request_id then
+                    local generated, id_err = uuid.v7()
+                    if id_err then
+                        send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
+                        return
+                    end
+                    session_info.stop_request_id = generated
+                end
+                cmd_data.stop_request_id = session_info.stop_request_id
+                if not session_info.stop_escalation then
+                    session_info.stop_escalation = 1
+                    apply_stop_level(session_id, session_info, 1)
+                end
+            end
+            local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
+            if send_err then
+                send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
+            end
+        end
+    end
+
+    local function create_session(payload_data, is_open)
         if not payload_data then
             return nil, "Payload data is required"
         end
@@ -350,12 +414,13 @@ local function run(args)
 
         if state.active_sessions[session_id] then
             logger:debug("session already exists", { user_id = state.user_id, session_id = session_id })
-            if state.user_hub_pid and state.active_sessions[session_id].open_notified then
-                process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
-                    session_id = session_id,
-                    active_session_ids = get_active_session_ids(),
-                    request_id = payload_data.request_id
-                })
+            local session_info = state.active_sessions[session_id]
+            if is_open then
+                if session_info.open_notified then
+                    notify_session_opened(session_id, payload_data.request_id)
+                else
+                    queue_start_request(session_info, "open", payload_data)
+                end
             end
             return session_id, nil
         end
@@ -430,25 +495,31 @@ local function run(args)
                 "Failed to create session: " .. spawn_err, payload_data.request_id)
             return nil, spawn_err
         end
-
-        if session_pid then
-            local now = time.now()
-            state.active_sessions[session_id] = {
-                pid = session_pid,
-                conn_pid = payload_data.conn_pid,
-                request_id = payload_data.request_id,
-                created_at = now,
-                last_activity = now,
-                terminating = false,
-                terminate_reason = nil
-            }
-            state.session_count = state.session_count + 1
-
-            local action = create_new_session and consts.SESSION_OPS.CREATE or consts.SESSION_OPS.RECONNECT
-            logger:info("session " .. action,
-                { user_id = state.user_id, session_id = session_id, active_sessions = state.session_count })
-
+        if not session_pid then
+            local no_pid_err = "Session process did not start"
+            send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
+                no_pid_err, payload_data.request_id)
+            return nil, no_pid_err
         end
+
+        local now = time.now()
+        local pending_requests = {}
+        if is_open then
+            table.insert(pending_requests, { kind = "open", payload = payload_data })
+        end
+        state.active_sessions[session_id] = {
+            pid = session_pid,
+            pending_requests = pending_requests,
+            created_at = now,
+            last_activity = now,
+            terminating = false,
+            terminate_reason = nil
+        }
+        state.session_count = state.session_count + 1
+
+        local action = create_new_session and consts.SESSION_OPS.CREATE or consts.SESSION_OPS.RECONNECT
+        logger:info("session " .. action,
+            { user_id = state.user_id, session_id = session_id, active_sessions = state.session_count })
 
         return session_id, nil
     end
@@ -490,43 +561,13 @@ local function run(args)
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
         local request_id = payload_data.request_id
-        local function forward(session_info)
-            if session_info.terminating then
-                send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
-                    "Session is finishing", request_id)
+        local function route(session_info)
+            update_session_activity(session_id)
+            if not session_info.open_notified then
+                queue_start_request(session_info, topic_type, payload_data)
                 return
             end
-            if topic_type == consts.HANDLER_TYPES.MESSAGE then
-                local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.MESSAGE,
-                    { conn_pid = conn_pid, data = payload_data.data, request_id = request_id })
-                if send_err then
-                    send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
-                end
-            elseif topic_type == consts.HANDLER_TYPES.COMMAND then
-                local cmd_data = payload_data.data or {}
-                cmd_data.conn_pid = conn_pid
-                if request_id then cmd_data.request_id = request_id end
-                if cmd_data.command == consts.COMMANDS.STOP then
-                    cmd_data.stop_supervised = true
-                    local info = state.active_sessions[session_id]
-                    if info then
-                        if not info.stop_request_id then
-                            local generated, id_err = uuid.v7()
-                            if id_err then
-                                send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
-                                return
-                            end
-                            info.stop_request_id = generated
-                        end
-                        cmd_data.stop_request_id = info.stop_request_id
-                        if not info.stop_escalation then
-                            info.stop_escalation = 1
-                            apply_stop_level(session_id, info, 1)
-                        end
-                    end
-                end
-                process.send(session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
-            end
+            forward_request(session_info, session_id, topic_type, payload_data)
         end
 
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
@@ -559,8 +600,7 @@ local function run(args)
 
         local session_info = state.active_sessions[session_id]
         if session_info then
-            update_session_activity(session_id)
-            forward(session_info)
+            route(session_info)
         else
             -- Session ID provided but not in active sessions - try to recover
             logger:info("attempting to recover inactive session", { user_id = state.user_id, session_id = session_id })
@@ -574,8 +614,8 @@ local function run(args)
             -- Retry the message/command with the recovered session
             local recovered_session_info = state.active_sessions[created_session_id :: string]
             if recovered_session_info then
-                update_session_activity(created_session_id)
-                forward(recovered_session_info)
+                session_id = created_session_id
+                route(recovered_session_info)
             else
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session recovery failed", request_id)
@@ -631,7 +671,7 @@ local function run(args)
             if topic == consts.PLUGIN_TOPICS.OPEN then
                 local payload_data = payload:data()
                 logger:debug("handling session open", { user_id = state.user_id })
-                create_session(payload_data)
+                create_session(payload_data, true)
             elseif topic == consts.PLUGIN_TOPICS.CLOSE then
                 handle_session_close(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.MESSAGE then
@@ -690,12 +730,15 @@ local function run(args)
                 local session_info = state.active_sessions[started.session_id]
                 if session_info and session_info.pid == started.from_pid and not session_info.open_notified then
                     session_info.open_notified = true
-                    if state.user_hub_pid then
-                        process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
-                            session_id = started.session_id,
-                            active_session_ids = get_active_session_ids(),
-                            request_id = session_info.request_id
-                        })
+                    local pending_requests = session_info.pending_requests or {}
+                    session_info.pending_requests = {}
+                    for _, request in ipairs(pending_requests) do
+                        if request.kind == "open" then
+                            notify_session_opened(started.session_id, request.payload.request_id)
+                        else
+                            forward_request(session_info, started.session_id,
+                                request.kind, request.payload)
+                        end
                     end
                 end
             elseif string.sub(topic, 1, string.len(consts.TOPIC_PREFIXES.SESSION)) == consts.TOPIC_PREFIXES.SESSION then
@@ -709,9 +752,8 @@ local function run(args)
                 for session_id, session_info in pairs(state.active_sessions) do
                     if session_info.pid == event.from then
                         if event.result and event.result.status == "refused" then
-                            send_error(session_info.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
-                                "Failed to create session: " .. tostring(event.result.error or "Session start refused"),
-                                session_info.request_id)
+                            fail_start_requests(session_info,
+                                "Failed to create session: " .. tostring(event.result.error or "Session start refused"))
                             clear_stop_deadline(session_info)
                             if state.active_sessions[session_id] == session_info then
                                 state.active_sessions[session_id] = nil
@@ -723,6 +765,14 @@ local function run(args)
                                     reason = "no_active_sessions" }
                             end
                             break
+                        end
+
+                        if not session_info.open_notified then
+                            local reason = "Session exited before confirming start"
+                            if type(event.result) == "table" and event.result.error then
+                                reason = event.result.error
+                            end
+                            fail_start_requests(session_info, "Failed to create session: " .. tostring(reason))
                         end
 
                         clear_stop_deadline(session_info)

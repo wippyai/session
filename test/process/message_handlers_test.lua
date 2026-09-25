@@ -4,6 +4,7 @@ local message_handlers = require("message_handlers")
 local session_handlers = require("session_handlers")
 local command_bus = require("command_bus")
 local tool_caller = require("tool_caller")
+local control_handlers = require("control_handlers")
 
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
@@ -671,6 +672,48 @@ local function define_tests()
                 test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
                 test.contains(tostring(row.metadata.result), "tool runner failed")
             end
+        end)
+
+        it("fails the turn when persisting successful tool control effects fails", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            ctx.writer.update_meta = function() return nil, "config store unavailable" end
+            ctx.agent_ctx.set_active_tools = function() end
+
+            local continued = 0
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop(); return true end
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONFIG, control_handlers.control_config)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                continued = continued + 1
+                return { completed = true }
+            end)
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = {
+                        result = { value = "written", _control = { config = { tools = { "app:tool" } } } },
+                        tool_call = tools["function"]
+                    } }
+                end
+            }
+            bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS,
+                tool_calls = { calls[1] }, call_message_ids = ids, caller = caller,
+                validated_tools = validated, message_id = "user", agent = { id = "agent:documents" } })
+
+            local ok, err = bus:run()
+
+            test.eq(continued, 0)
+            test.is_nil(ok)
+            test.contains(tostring(err), "config store unavailable")
+            local function_row = nil
+            for _, row in ipairs(captured.stored) do
+                if row.id == ids["function"] then function_row = row end
+            end
+            test.not_nil(function_row)
+            test.eq((function_row or {}).metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq(((function_row or {}).metadata.result or {}).value, "written")
+            test.eq(((function_row or {}).metadata.control_operations or {}).config.tools[1], "app:tool")
         end)
     end)
 end

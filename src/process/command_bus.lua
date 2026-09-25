@@ -19,6 +19,7 @@ local function is_fatal_operation(op)
     return op.type == consts.OP_TYPE.AGENT_STEP
         or op.type == consts.OP_TYPE.PROCESS_TOOLS
         or op.type == consts.OP_TYPE.AGENT_CONTINUE
+        or is_control(op)
 end
 
 function command_bus.new(context)
