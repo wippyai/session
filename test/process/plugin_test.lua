@@ -25,7 +25,6 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     local spawned_init = nil :: table?
     local cancelled = 0
     local terminated = 0
-
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
             spawned_init = init
@@ -55,16 +54,116 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
             return { ok = true, channel = inbox,
                 value = plugin_message(input.topic, input.data) }
         end
-        local event = { kind = process.event.EXIT, from = session_pid }
+        local event = { kind = options.cancel_plugin and process.event.CANCEL or process.event.EXIT,
+            from = session_pid }
         event.result = exit_result
         return { ok = true, channel = events, value = event }
     end)
 
     local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = hub_pid })
+    restore_mock("channel.select")
+    restore_mock("coroutine.spawn")
+    restore_mock("process.terminate")
+    restore_mock("process.cancel")
+    restore_mock("process.send")
+    restore_mock("process.with_context")
+
     return {
         result = result, error = run_err, sent = sent, scheduled = scheduled,
         spawned_init = spawned_init, cancelled = cancelled, terminated = terminated,
         session_pid = session_pid
+    }
+end
+
+local function run_start_through_session(actor, session_id, registry, session_pid, session_behavior)
+    local sent = {}
+    local scheduled = {}
+    local spawned_init = nil :: table?
+    local session_result = nil :: any
+    local plugin_step = 0
+    local session_step = 0
+    local in_session = false
+    local plugin_inbox = { case_receive = function(self) return self end }
+    local plugin_events = { case_receive = function(self) return self end }
+    local session_inbox = { case_receive = function(self) return self end }
+    local session_events = { case_receive = function(self) return self end }
+    local bus_done = {
+        case_receive = function(self) return self end,
+        send = function() return true end,
+        receive = function() return nil end
+    }
+
+    local original_channel_new = channel.new
+
+    mock("process.with_context", function()
+        return { spawn_linked_monitored = function(_self, _id, _host, init)
+            spawned_init = init
+            in_session = true
+            local ok, result = pcall(session.run, init)
+            in_session = false
+            session_result = ok and result or { error = tostring(result) }
+            return session_pid, nil
+        end }
+    end)
+    mock("process.send", function(pid, topic, payload)
+        table.insert(sent, { pid = pid, topic = topic, payload = payload })
+        return true, nil
+    end)
+    mock("process.registry", {
+        register = function(name)
+            test.eq(name, "session." .. session_id)
+            if registry.owner then return nil, registry.duplicate_error end
+            registry.owner = session_pid
+            return true, nil
+        end
+    })
+    mock("process.inbox", function() return in_session and session_inbox or plugin_inbox end)
+    mock("process.events", function() return in_session and session_events or plugin_events end)
+    mock("channel.new", function(capacity)
+        if capacity == nil then return bus_done end
+        return original_channel_new(capacity)
+    end)
+    mock("coroutine.spawn", function(fn)
+        if not in_session then table.insert(scheduled, fn) end
+    end)
+    mock("channel.select", function()
+        if in_session then
+            session_step = session_step + 1
+            if session_behavior == "finish" then
+                if session_step == 1 then
+                    return { ok = true, channel = session_inbox,
+                        value = plugin_message(consts.TOPICS.FINISH_AND_EXIT, {}) }
+                end
+                return { ok = true, channel = bus_done, value = { error = nil } }
+            end
+            return { ok = true, channel = session_events, value = { kind = process.event.CANCEL } }
+        end
+
+        plugin_step = plugin_step + 1
+        if plugin_step == 1 then
+            return { ok = true, channel = plugin_inbox, value = plugin_message(consts.PLUGIN_TOPICS.OPEN, {
+                session_id = session_id, conn_pid = "start-caller", request_id = "start-request"
+            }) }
+        end
+        return { ok = true, channel = plugin_events, value = {
+            kind = process.event.EXIT, from = session_pid, result = session_result
+        } }
+    end)
+
+    local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = "start-hub" })
+
+    restore_mock("channel.select")
+    restore_mock("coroutine.spawn")
+    restore_mock("channel.new")
+    restore_mock("process.events")
+    restore_mock("process.inbox")
+    restore_mock("process.registry")
+    restore_mock("process.send")
+    restore_mock("process.with_context")
+
+    return {
+        result = result, error = run_err, sent = sent, scheduled = scheduled,
+        spawned_init = spawned_init, session_result = session_result
     }
 end
 
@@ -190,6 +289,120 @@ local function define_tests()
         end)
     end)
     describe("plugin exit and recovery", function()
+        it("routes input to the active session process", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Single process", consts.STATUS.IDLE)
+            local owner_pid = "single-session-owner"
+            local owner = run_plugin_lifecycle(actor, session_id, "owner-hub", {
+                { topic = consts.PLUGIN_TOPICS.MESSAGE, data = { session_id = session_id,
+                    data = { text = "owner input" }, request_id = "owner-input" } }
+            }, nil, { session_pid = owner_pid, cancel_plugin = true })
+            test.is_nil(owner.error)
+            local owner_input = nil :: any
+            for _, sent in ipairs(owner.sent) do
+                if sent.pid == owner_pid and sent.topic == consts.TOPICS.MESSAGE then
+                    owner_input = sent.payload
+                end
+            end
+            test.not_nil(owner_input)
+            test.eq(owner_input.data.text, "owner input")
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("refuses a duplicate start without changing the owner and restarts after owner exit", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Single process", consts.STATUS.RUNNING)
+            local owner_pid = "single-session-owner"
+            local pending_call = add_pending_call(session_id)
+            local registry = {
+                owner = owner_pid,
+                duplicate_error = setmetatable({
+                    kind = function() return "AlreadyExists" end
+                }, { __tostring = function() return "name already registered" end })
+            }
+            local loser = run_start_through_session(actor, session_id, registry, "single-session-loser", "cancel")
+            test.eq(loser.session_result.status, "refused")
+            test.eq(registry.owner, owner_pid)
+            test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.RUNNING)
+            test.eq(message_repo.get(pending_call).metadata.status, consts.FUNC_STATUS.PENDING)
+
+            local start_error = nil :: any
+            local owner_status_update = false
+            local closed_event = false
+            local opened_event = false
+            for _, sent in ipairs(loser.sent) do
+                if sent.pid == "start-caller" and sent.topic == consts.TOPICS.ERROR then
+                    start_error = sent.payload
+                elseif sent.pid == "start-hub" and sent.topic == consts.TOPICS.SESSION_OPENED then
+                    opened_event = true
+                elseif sent.pid == "start-hub" and sent.topic == consts.TOPIC_PREFIXES.SESSION .. session_id
+                    and sent.payload.status then
+                    owner_status_update = true
+                elseif sent.pid == "start-hub" and sent.topic == consts.TOPICS.SESSION_CLOSED then
+                    closed_event = true
+                end
+            end
+            test.not_nil(start_error)
+            test.eq(start_error.error, consts.ERROR_CODES.SESSION_SPAWN)
+            test.eq(start_error.request_id, "start-request")
+            test.contains(start_error.message, "already registered")
+            test.is_false(opened_event)
+            test.is_false(owner_status_update)
+            test.is_false(closed_event)
+            test.eq(#loser.scheduled, 0)
+
+            session_repo.update_session_meta(session_id, { status = consts.STATUS.IDLE })
+            local idle_loser = run_start_through_session(actor, session_id, registry,
+                "single-session-idle-loser", "cancel")
+            test.eq(idle_loser.session_result.status, "refused")
+            test.eq(registry.owner, owner_pid)
+            test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
+            test.eq(message_repo.get(pending_call).metadata.status, consts.FUNC_STATUS.PENDING)
+
+            local owner = run_plugin_lifecycle(actor, session_id, "owner-hub", {
+                { topic = consts.PLUGIN_TOPICS.MESSAGE, data = { session_id = session_id,
+                    data = { text = "owner input" }, request_id = "owner-input" } }
+            }, nil, { session_pid = owner_pid, cancel_plugin = true })
+            local owner_input = nil :: any
+            for _, sent in ipairs(owner.sent) do
+                if sent.pid == owner_pid and sent.topic == consts.TOPICS.MESSAGE then
+                    owner_input = sent.payload
+                end
+            end
+            test.not_nil(owner_input)
+            test.eq(owner_input.data.text, "owner input")
+
+            session_repo.update_session_meta(session_id, { status = consts.STATUS.IDLE })
+            registry.owner = nil
+            local restarted = run_start_through_session(actor, session_id, registry, "single-session-restart", "finish")
+            test.is_nil(restarted.error)
+            test.eq(restarted.session_result.status, "shutdown")
+            test.is_true(restarted.session_result.intentional_exit)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("reports non-duplicate registry failures with their actual error", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Registry error", consts.STATUS.IDLE)
+            for _, failure in ipairs({
+                { kind = "Internal", message = "registry unavailable" },
+                { kind = "AlreadyExists", message = "pid already registered" }
+            }) do
+                local registry_error = setmetatable({
+                    kind = function() return failure.kind end
+                }, { __tostring = function() return failure.message end })
+                mock("process.registry", {
+                    register = function() return nil, registry_error end
+                })
+                local ok, err = pcall(session.run, { session_id = session_id, user_id = actor:id() })
+                restore_mock("process.registry")
+                test.is_false(ok)
+                test.contains(tostring(err), failure.message)
+                test.is_false(string.find(tostring(err), "already running", 1, true) ~= nil)
+            end
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
         it("sends the initial idle update before receipt and running", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Startup order")

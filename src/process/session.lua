@@ -185,9 +185,33 @@ local function run(args: SessionArgs)
     local session_data = session_reader:state()
     local session_config = session_data.config or {}
 
+    -- A session ID has one registered process.
+    local registry_name = "session." .. args.session_id
+    local registered, register_err = process.registry.register(registry_name)
+    if not registered then
+        local registration_error = tostring(register_err or "unknown error")
+        local kind_ok, register_kind = pcall(function() return register_err:kind() end)
+        local duplicate_name = registration_error:match("name.-already registered") ~= nil
+        if kind_ok and register_kind == "AlreadyExists" and duplicate_name then
+            return { status = "refused", session_id = args.session_id, error = registration_error }
+        end
+        error("Failed to register session " .. registry_name .. ": " .. registration_error)
+    end
+
+    if args.parent_pid then
+        process.send(args.parent_pid :: string, consts.TOPICS.SESSION_OPENED, {
+            session_id = args.session_id, from_pid = process.pid()
+        })
+    end
+
     local session_writer, writer_err = writer.new(args.session_id)
     if not session_writer then
         error("Failed to create session writer: " .. writer_err)
+    end
+
+    if not args.create and session_data.status and session_data.status ~= consts.STATUS.IDLE then
+        local _, status_err = session_writer:update_meta({ status = consts.STATUS.IDLE })
+        if status_err then error("Failed to reset session status: " .. status_err) end
     end
 
     local recovered_calls = 0
@@ -323,8 +347,6 @@ local function run(args: SessionArgs)
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,
     })
-
-    process.registry.register("session." .. args.session_id)
 
     local session_state = {
         stopping = false,

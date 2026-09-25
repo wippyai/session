@@ -18,6 +18,9 @@ type PluginArgs = {
 
 type ActiveSession = {
     pid: any,
+    conn_pid: any?,
+    request_id: any?,
+    open_notified: boolean?,
     created_at: time.Time,
     last_activity: time.Time?,
     terminating: boolean,
@@ -327,40 +330,6 @@ local function run(args)
         return session
     end
 
-    local function reset_session_status_if_crashed(session_id, existing_session)
-        -- If session exists in DB but not in active sessions, it likely crashed
-        -- Reset status to IDLE to ensure clean recovery
-        if existing_session and not state.active_sessions[session_id] then
-            if needs_crash_reset(existing_session) then
-                logger:info("detected crashed session - resetting status to idle", {
-                    user_id = state.user_id,
-                    session_id = session_id,
-                    previous_status = existing_session.status
-                })
-
-                local success, err = session_repo.update_session_meta(session_id, { status = consts.STATUS.IDLE })
-                if not success then
-                    logger:warn("failed to reset session status after crash", {
-                        session_id = session_id,
-                        error = err
-                    })
-                    return false, "Failed to reset session status: " .. (err or "unknown error")
-                end
-                existing_session.status = consts.STATUS.IDLE
-
-                -- Notify hub of status reset if available
-                if state.user_hub_pid then
-                    process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
-                        type = consts.UPSTREAM_TYPES.UPDATE,
-                        session_id = session_id,
-                        status = consts.STATUS.IDLE
-                    })
-                end
-            end
-        end
-        return true, nil
-    end
-
     local function create_session(payload_data)
         if not payload_data then
             return nil, "Payload data is required"
@@ -381,7 +350,7 @@ local function run(args)
 
         if state.active_sessions[session_id] then
             logger:debug("session already exists", { user_id = state.user_id, session_id = session_id })
-            if state.user_hub_pid then
+            if state.user_hub_pid and state.active_sessions[session_id].open_notified then
                 process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
                     session_id = session_id,
                     active_session_ids = get_active_session_ids(),
@@ -395,16 +364,9 @@ local function run(args)
         local session_exists = existing_session ~= nil
         local recovery_notice = nil
 
-        -- Handle crash recovery: reset status if session exists but isn't active
         if session_exists then
             if needs_crash_reset(existing_session) then
                 recovery_notice = "The previous session stopped before completing a turn. Send a new message to continue."
-            end
-            local reset_success, reset_err = reset_session_status_if_crashed(session_id, existing_session)
-            if not reset_success then
-                send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
-                    "Failed to recover crashed session: " .. reset_err, payload_data.request_id)
-                return nil, reset_err
             end
         end
 
@@ -437,6 +399,7 @@ local function run(args)
             user_id = state.user_id,
             user_metadata = state.user_metadata,
             conn_pid = payload_data.conn_pid,
+            request_id = payload_data.request_id,
             parent_pid = process.pid()
         }
         session_init.recovery_notice = recovery_notice
@@ -472,6 +435,8 @@ local function run(args)
             local now = time.now()
             state.active_sessions[session_id] = {
                 pid = session_pid,
+                conn_pid = payload_data.conn_pid,
+                request_id = payload_data.request_id,
                 created_at = now,
                 last_activity = now,
                 terminating = false,
@@ -483,13 +448,6 @@ local function run(args)
             logger:info("session " .. action,
                 { user_id = state.user_id, session_id = session_id, active_sessions = state.session_count })
 
-            if state.user_hub_pid then
-                process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
-                    session_id = session_id,
-                    active_session_ids = get_active_session_ids(),
-                    request_id = payload_data.request_id
-                })
-            end
         end
 
         return session_id, nil
@@ -727,6 +685,19 @@ local function run(args)
                         terminate_stopped_session(deadline.session_id, session_info)
                     end
                 end
+            elseif topic == consts.TOPICS.SESSION_OPENED then
+                local started = payload:data()
+                local session_info = state.active_sessions[started.session_id]
+                if session_info and session_info.pid == started.from_pid and not session_info.open_notified then
+                    session_info.open_notified = true
+                    if state.user_hub_pid then
+                        process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
+                            session_id = started.session_id,
+                            active_session_ids = get_active_session_ids(),
+                            request_id = session_info.request_id
+                        })
+                    end
+                end
             elseif string.sub(topic, 1, string.len(consts.TOPIC_PREFIXES.SESSION)) == consts.TOPIC_PREFIXES.SESSION then
                 if state.user_hub_pid then
                     process.send(state.user_hub_pid :: string, topic, payload:data())
@@ -737,6 +708,23 @@ local function run(args)
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
                 for session_id, session_info in pairs(state.active_sessions) do
                     if session_info.pid == event.from then
+                        if event.result and event.result.status == "refused" then
+                            send_error(session_info.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
+                                "Failed to create session: " .. tostring(event.result.error or "Session start refused"),
+                                session_info.request_id)
+                            clear_stop_deadline(session_info)
+                            if state.active_sessions[session_id] == session_info then
+                                state.active_sessions[session_id] = nil
+                                state.session_count = state.session_count - 1
+                            end
+                            if state.session_count == 0 then
+                                gc_ticker:stop()
+                                return { status = "shutdown", user_id = state.user_id,
+                                    reason = "no_active_sessions" }
+                            end
+                            break
+                        end
+
                         clear_stop_deadline(session_info)
                         local err = "unexpected exit"
                         if session_info.stop_escalation and session_info.stop_escalation >= 2 then
