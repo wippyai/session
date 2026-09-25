@@ -84,9 +84,9 @@ local function fire_session_end_hook(hook_func_id, params, spawn, call)
     return true
 end
 
-local function status_after_exit(_session_info: any, result: any)
-    if result and result.intentional_exit == true and result.status == "shutdown"
-        and not result.error and not result.interrupted then
+local function status_after_exit(_session_info: any, result: any, exit_error: any)
+    if not exit_error and type(result) == "table" and result.intentional_exit == true
+        and result.status == "shutdown" and not result.error and not result.interrupted then
         return consts.STATUS.IDLE
     end
     return consts.STATUS.FAILED
@@ -103,8 +103,8 @@ local function recover_session_calls(session_id)
     return message_repo.recover_pending(session_id, anchor)
 end
 
-local function finalize_exit(session_id: string, session_info: any, result: any)
-    local target_status = status_after_exit(session_info, result)
+local function finalize_exit(session_id: string, session_info: any, result: any, exit_error: any)
+    local target_status = status_after_exit(session_info, result, exit_error)
     local recovery_err = nil
     if target_status == consts.STATUS.FAILED then
         local _, err = recover_session_calls(session_id)
@@ -765,11 +765,13 @@ local function run(args)
         elseif result.channel == events then
             local event = result.value
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
+                local exit_result = event.result and event.result.value
+                local exit_error = event.result and event.result.error
                 for session_id, session_info in pairs(state.active_sessions) do
                     if session_info.pid == event.from then
-                        if event.result and event.result.status == "refused" then
+                        if type(exit_result) == "table" and exit_result.status == "refused" then
                             fail_start_requests(session_info,
-                                "Failed to create session: " .. tostring(event.result.error or "Session start refused"))
+                                "Failed to create session: " .. tostring(exit_result.error or "Session start refused"))
                             clear_stop_deadline(session_info)
                             if state.active_sessions[session_id] == session_info then
                                 state.active_sessions[session_id] = nil
@@ -778,7 +780,7 @@ local function run(args)
                             if state.session_count == 0 then
                                 fail_inbox_requests(consts.ERROR_CODES.SESSION_SPAWN,
                                     "Failed to create session: " ..
-                                    tostring(event.result.error or "Session start refused"))
+                                    tostring(exit_result.error or "Session start refused"))
                                 gc_ticker:stop()
                                 return { status = "shutdown", user_id = state.user_id,
                                     reason = "no_active_sessions" }
@@ -788,8 +790,8 @@ local function run(args)
 
                         if not session_info.open_notified then
                             local reason = "Session exited before confirming start"
-                            if type(event.result) == "table" and event.result.error then
-                                reason = event.result.error
+                            if exit_error or (type(exit_result) == "table" and exit_result.error) then
+                                reason = exit_error or exit_result.error
                             end
                             fail_start_requests(session_info, "Failed to create session: " .. tostring(reason))
                         end
@@ -798,16 +800,16 @@ local function run(args)
                         local err = "unexpected exit"
                         if session_info.stop_escalation and session_info.stop_escalation >= 2 then
                             err = "terminated"
-                        elseif event.result and event.result.status == "shutdown" then
-                            err = event.result.interrupted and "interrupted" or "completed"
+                        elseif type(exit_result) == "table" and exit_result.status == "shutdown" then
+                            err = exit_result.interrupted and "interrupted" or "completed"
                         end
-                        if event.result and event.result.error then
-                            err = tostring(event.result.error)
+                        if exit_error or (type(exit_result) == "table" and exit_result.error) then
+                            err = tostring(exit_error or exit_result.error)
                         end
 
                         -- Update session status in database based on termination reason
                         local target_status, success, status_err, recovery_err =
-                            finalize_exit(session_id, session_info, event.result)
+                            finalize_exit(session_id, session_info, exit_result, exit_error)
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err

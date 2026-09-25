@@ -78,7 +78,10 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
         end
         local event = { kind = options.cancel_plugin and process.event.CANCEL or process.event.EXIT,
             from = session_pid }
-        event.result = exit_result
+        if exit_result then
+            event.result = exit_result.status and { value = exit_result }
+                or { error = exit_result.error }
+        end
         return { ok = true, channel = events, value = event }
     end)
 
@@ -184,7 +187,9 @@ local function run_start_through_session(actor, session_id, registry, session_pi
             return { ok = true, channel = plugin_inbox, value = table.remove(plugin_pending, 1) }
         end
         return { ok = true, channel = plugin_events, value = {
-            kind = process.event.EXIT, from = session_pid, result = session_result
+            kind = process.event.EXIT, from = session_pid,
+            result = session_result.status and { value = session_result }
+                or { error = session_result.error }
         } }
     end)
 
@@ -203,6 +208,179 @@ local function run_start_through_session(actor, session_id, registry, session_pi
         result = result, error = run_err, sent = sent, scheduled = scheduled,
         spawned_init = spawned_init, session_result = session_result
     }
+end
+
+local add_pending_call: any
+
+local function run_graceful_shutdown(actor, session_id, scenario)
+    local plugin_pid = "shutdown-plugin"
+    local session_pid = "shutdown-session"
+    local current_pid = plugin_pid
+    local sent = {}
+    local plugin_inbox = {}
+    local session_inbox = {}
+    local bus_done_values = {}
+    local session_result = nil :: any
+    local session_process = nil :: any
+    local bus_process = nil :: any
+    local session_started = false
+    local finished = false
+    local pending_call_id = nil :: string?
+    local agent_steps = 0
+    local plugin_channel = { case_receive = function(self) return self end }
+    local plugin_events = { case_receive = function(self) return self end }
+    local session_channel = { case_receive = function(self) return self end }
+    local session_events = { case_receive = function(self) return self end }
+    local bus_done = {
+        case_receive = function(self) return self end,
+        send = function(_self, value) table.insert(bus_done_values, value); return true end,
+        receive = function() return table.remove(bus_done_values, 1) end
+    }
+    local original_channel_new = channel.new
+    local original_agent_step = message_handlers.agent_step
+    local scripted = {
+        { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id } }
+    }
+    if scenario ~= "idle" then
+        table.insert(scripted, { topic = consts.PLUGIN_TOPICS.MESSAGE,
+            data = { session_id = session_id, data = { text = "completed input" },
+                request_id = "turn-request" } })
+    end
+    if scenario == "stop" then
+        table.insert(scripted, { topic = consts.PLUGIN_TOPICS.MESSAGE,
+            data = { session_id = session_id, data = { text = "held input" },
+                request_id = "held-request" } })
+        table.insert(scripted, { topic = consts.PLUGIN_TOPICS.COMMAND,
+            data = { session_id = session_id, data = { command = consts.COMMANDS.STOP },
+                request_id = "stop-request" } })
+    end
+    table.insert(scripted, { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} })
+
+    local function resume_process(thread, value)
+        current_pid = session_pid
+        local ok, err = coroutine.resume(thread, value)
+        current_pid = plugin_pid
+        if not ok then error(err) end
+    end
+
+    local function drain_session()
+        while #session_inbox > 0 and coroutine.status(session_process) == "suspended" do
+            resume_process(session_process, { ok = true, channel = session_channel,
+                value = table.remove(session_inbox, 1) })
+        end
+        if bus_process and coroutine.status(bus_process) == "suspended" then
+            resume_process(bus_process)
+        end
+        if #bus_done_values > 0 and coroutine.status(session_process) == "suspended" then
+            resume_process(session_process, { ok = true, channel = bus_done,
+                value = table.remove(bus_done_values, 1) })
+        end
+        finished = coroutine.status(session_process) == "dead"
+    end
+
+    mock("process.pid", function() return current_pid end)
+    mock("process.inbox", function()
+        return current_pid == session_pid and session_channel or plugin_channel
+    end)
+    mock("process.events", function()
+        return current_pid == session_pid and session_events or plugin_events
+    end)
+    mock("process.registry", {
+        register = function(name)
+            test.eq(name, "session." .. session_id)
+            return true
+        end
+    })
+    mock("process.send", function(pid, topic, payload)
+        table.insert(sent, { pid = pid, topic = topic, payload = payload })
+        if pid == plugin_pid then
+            table.insert(plugin_inbox, plugin_message(topic, payload))
+        elseif pid == session_pid then
+            table.insert(session_inbox, plugin_message(topic, payload))
+        end
+        return true, nil
+    end)
+    mock("process.with_context", function()
+        return { spawn_linked_monitored = function(_self, _id, _host, init)
+            session_process = coroutine.create(function()
+                current_pid = session_pid
+                local ok, result = pcall(session.run, init)
+                session_result = ok and result or { error = tostring(result) }
+                current_pid = plugin_pid
+            end)
+            resume_process(session_process)
+            return session_pid, nil
+        end }
+    end)
+    mock("channel.new", function(capacity)
+        if current_pid == session_pid and capacity == nil then return bus_done end
+        if current_pid == session_pid and capacity == 1 then
+            return {
+                send = function() return true end,
+                receive = function() return coroutine.yield() end
+            }
+        end
+        return original_channel_new(capacity)
+    end)
+    mock("coroutine.spawn", function(fn)
+        if current_pid == session_pid then bus_process = coroutine.create(fn) end
+    end)
+    message_handlers.agent_step = function()
+        agent_steps = agent_steps + 1
+        return { completed = true }
+    end
+    mock("channel.select", function(cases)
+        if cases.default then return { ok = true, default = true } end
+        if current_pid == session_pid then return coroutine.yield() end
+        if not session_started and #plugin_inbox > 0 then
+            local input = table.remove(plugin_inbox, 1)
+            session_started = input:topic() == consts.TOPICS.SESSION_OPENED
+            return { ok = true, channel = plugin_channel,
+                value = input }
+        end
+        if #scripted > 0 and scripted[1].topic == consts.PLUGIN_TOPICS.SHUTDOWN
+            and scenario ~= "idle" then
+            if scenario == "stop" and not pending_call_id then
+                pending_call_id = add_pending_call(session_id)
+            end
+            drain_session()
+        end
+        if #scripted > 0 then
+            local input = table.remove(scripted, 1)
+            return { ok = true, channel = plugin_channel,
+                value = plugin_message(input.topic, input.data) }
+        end
+        if #session_inbox > 0 and not finished then
+            drain_session()
+        end
+        if #plugin_inbox > 0 then
+            return { ok = true, channel = plugin_channel,
+                value = table.remove(plugin_inbox, 1) }
+        end
+        if finished then
+            return { ok = true, channel = plugin_events, value = {
+                kind = process.event.EXIT, from = session_pid,
+                result = { value = session_result }
+            } }
+        end
+        error("Shutdown path did not finish")
+    end)
+
+    local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = "shutdown-hub" })
+
+    message_handlers.agent_step = original_agent_step
+    restore_mock("channel.select")
+    restore_mock("coroutine.spawn")
+    restore_mock("channel.new")
+    restore_mock("process.with_context")
+    restore_mock("process.send")
+    restore_mock("process.registry")
+    restore_mock("process.events")
+    restore_mock("process.inbox")
+    restore_mock("process.pid")
+    return { result = result, error = run_err, sent = sent,
+        session_result = session_result, pending_call_id = pending_call_id,
+        agent_steps = agent_steps }
 end
 
 local function run_live_owner_through_plugin(actor, session_id, owner_pid)
@@ -364,7 +542,7 @@ local function cleanup_session_fixture(session_id, context_id)
     context_repo.delete(context_id)
 end
 
-local function add_pending_call(session_id)
+add_pending_call = function(session_id)
     local assistant_id = uuid.v7()
     local call_id = uuid.v7()
     local created, err = message_repo.create_batch(session_id, {
@@ -1229,6 +1407,46 @@ local function define_tests()
             test.is_nil(upstream_error(run, "test-hub"))
             cleanup_session_fixture(session_id, context_id)
         end)
+
+        for _, scenario in ipairs({ "idle", "completed", "stop" }) do
+            it("ends a gracefully shut down " .. scenario .. " session idle", function()
+                local actor = security.actor()
+                local session_id, context_id = create_session_fixture(actor,
+                    "Graceful shutdown " .. scenario, consts.STATUS.IDLE)
+                local run = run_graceful_shutdown(actor, session_id, scenario)
+                test.is_nil(run.error)
+                test.eq(run.session_result.status, "shutdown")
+                test.is_true(run.session_result.intentional_exit)
+                test.is_false(run.session_result.interrupted)
+                test.eq(run.agent_steps, scenario == "completed" and 1 or 0)
+                test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
+                test.is_nil(upstream_error(run, "shutdown-hub"))
+                local closed = nil
+                local stop_resolved = false
+                for _, sent in ipairs(run.sent) do
+                    if sent.topic == consts.TOPICS.SESSION_CLOSED then closed = sent.payload end
+                    if sent.topic == consts.TOPICS.STOP_RESOLVED then stop_resolved = true end
+                end
+                test.eq(closed.reason, "completed")
+                if scenario == "stop" then test.is_true(stop_resolved) end
+                local history = message_repo.list_by_session(session_id, 20)
+                local user_messages = {}
+                for _, message in ipairs(history.messages) do
+                    if message.type == consts.MSG_TYPE.USER then
+                        user_messages[message.data] = true
+                    end
+                end
+                if scenario ~= "idle" and not user_messages["completed input"] then
+                    error("missing completed input: " .. json.encode(history.messages))
+                end
+                if scenario == "stop" then test.is_true(user_messages["held input"]) end
+                if scenario == "stop" then
+                    test.eq(message_repo.get(run.pending_call_id).metadata.status,
+                        consts.FUNC_STATUS.ERROR)
+                end
+                cleanup_session_fixture(session_id, context_id)
+            end)
+        end
 
     end)
     describe("plugin on_session_end hook", function()
