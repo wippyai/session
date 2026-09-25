@@ -303,6 +303,24 @@ local function define_tests()
             test.is_nil(result.range.to_id)
         end)
 
+        test.it("rejects unknown range endpoints", function()
+            local missing_end, end_err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "range", from_id = test_data.user_message_id,
+                    to_id = "missing-message" }
+            })
+            test.is_nil(missing_end)
+            test.contains(tostring(end_err), "not found")
+
+            local missing_same, same_err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "range", from_id = "missing-message",
+                    to_id = "missing-message" }
+            })
+            test.is_nil(missing_same)
+            test.contains(tostring(same_err), "not found")
+        end)
+
         test.it("treats range without to_id as open ended", function()
             local result, err = open_binding():get_history({
                 host = { kind = "session", session_id = test_data.session_id },

@@ -7,6 +7,8 @@ local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
 local funcs = require("funcs")
+local message_repo = require("message_repo")
+local reader = require("reader")
 
 type PluginArgs = {
     user_id: string,
@@ -20,11 +22,51 @@ type ActiveSession = {
     last_activity: time.Time?,
     terminating: boolean,
     terminate_reason: string?,
+    stop_escalation: number?,
+    stop_request_id: string?,
+    stop_deadline: any?,
 }
+
+local function clear_stop_deadline(session_info)
+    local deadline = session_info.stop_deadline
+    if not deadline then return end
+    session_info.stop_deadline = nil
+    deadline.timer:stop()
+    if deadline.cancel then deadline.cancel:send(true) end
+end
+
+local function replace_stop_deadline(session_info, request_id, level, timer: any, cancel: any?)
+    if not request_id then error("Stop deadline requires a request id") end
+    clear_stop_deadline(session_info)
+    session_info.stop_request_id = request_id
+    session_info.stop_deadline = {
+        request_id = request_id, level = level, timer = timer, cancel = cancel
+    }
+end
+
+local function deadline_matches(session_info, deadline)
+    local active = session_info.stop_deadline
+    return deadline.stop_request_id ~= nil and active ~= nil
+        and session_info.pid == deadline.session_pid
+        and session_info.stop_request_id == deadline.stop_request_id
+        and active.request_id == deadline.stop_request_id
+        and session_info.stop_escalation == deadline.level
+        and active.level == deadline.level
+end
+
+local function exit_error_payload(session_id, status, reason)
+    if status ~= consts.STATUS.FAILED then return nil end
+    return {
+        type = consts.UPSTREAM_TYPES.ERROR,
+        session_id = session_id,
+        code = "recovery_incomplete",
+        message = "Session stopped before completing work (" .. tostring(reason) ..
+            "). Send a new message to continue."
+    }
+end
 
 -- Invoke the configured on_session_end hook (non-blocking).
 -- Returns true when a hook was scheduled, false when no hook is configured.
--- The spawn and call dependencies are injectable for testing.
 local function fire_session_end_hook(hook_func_id, params, spawn, call)
     if not hook_func_id or hook_func_id == "" then
         return false
@@ -38,6 +80,38 @@ local function fire_session_end_hook(hook_func_id, params, spawn, call)
     end)
 
     return true
+end
+
+local function status_after_exit(_session_info: any, result: any)
+    if result and result.intentional_exit == true and result.status == "shutdown"
+        and not result.error and not result.interrupted then
+        return consts.STATUS.IDLE
+    end
+    return consts.STATUS.FAILED
+end
+
+local function needs_crash_reset(session)
+    return session and session.status and session.status ~= consts.STATUS.IDLE
+end
+
+local function recover_session_calls(session_id)
+    local session_reader, open_err = reader.open(session_id)
+    if open_err then return nil, open_err end
+    local anchor = session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
+    return message_repo.recover_pending(session_id, anchor)
+end
+
+local function finalize_exit(session_id: string, session_info: any, result: any)
+    local target_status = status_after_exit(session_info, result)
+    local recovery_err = nil
+    if target_status == consts.STATUS.FAILED then
+        local _, err = recover_session_calls(session_id)
+        recovery_err = err
+    end
+    local success, status_err = session_repo.update_session_meta(session_id, {
+        status = target_status
+    })
+    return target_status, success, status_err, recovery_err
 end
 
 local function run(args)
@@ -62,6 +136,52 @@ local function run(args)
     local gc_ticker = time.ticker(base_config.gc_interval)
     local inbox = process.inbox()
     local events = process.events()
+
+    local function schedule_stop_deadline(session_id, session_info, level)
+        local plugin_pid = process.pid()
+        local session_pid = session_info.pid
+        local request_id = session_info.stop_request_id
+        local timer = time.timer("10s")
+        local cancel = channel.new(1)
+        replace_stop_deadline(session_info, request_id, level, timer, cancel)
+        coroutine.spawn(function()
+            local selected = channel.select({ timer:channel():case_receive(), cancel:case_receive() })
+            if selected.channel == timer:channel() then
+                process.send(plugin_pid, consts.TOPICS.STOP_DEADLINE, {
+                    session_id = session_id, session_pid = session_pid,
+                    stop_request_id = request_id, level = level
+                })
+            end
+        end)
+    end
+
+    local function cancel_stopped_session(session_id, session_info)
+        session_info.stop_escalation = 2
+        local _, cancel_err = process.cancel(session_info.pid :: string)
+        if cancel_err then
+            logger:warn("session cancellation failed", {session_id = session_id, error = cancel_err})
+        end
+        schedule_stop_deadline(session_id, session_info, 2)
+    end
+
+    local function terminate_stopped_session(session_id, session_info)
+        session_info.stop_escalation = 3
+        clear_stop_deadline(session_info)
+        local _, terminate_err = process.terminate(session_info.pid :: string)
+        if terminate_err then
+            logger:warn("session termination failed", {session_id = session_id, error = terminate_err})
+        end
+    end
+
+    local function apply_stop_level(session_id, session_info, level)
+        if level == 1 then
+            schedule_stop_deadline(session_id, session_info, 1)
+        elseif level == 2 then
+            cancel_stopped_session(session_id, session_info)
+        else
+            terminate_stopped_session(session_id, session_info)
+        end
+    end
 
     local function send_error(conn_pid, error_code, message, request_id)
         if conn_pid then
@@ -166,7 +286,7 @@ local function run(args)
             context_data = token_data.context
         end
 
-        local context, err = context_repo.create(primary_context_id, consts.CONTEXT_TYPES.SESSION,
+        local _, err = context_repo.create(primary_context_id, consts.CONTEXT_TYPES.SESSION,
             json.encode(context_data))
         if err then
             return nil, "Failed to create primary context: " .. err
@@ -211,12 +331,11 @@ local function run(args)
         -- If session exists in DB but not in active sessions, it likely crashed
         -- Reset status to IDLE to ensure clean recovery
         if existing_session and not state.active_sessions[session_id] then
-            local current_meta = existing_session.meta or {}
-            if current_meta.status and current_meta.status ~= consts.STATUS.IDLE then
+            if needs_crash_reset(existing_session) then
                 logger:info("detected crashed session - resetting status to idle", {
                     user_id = state.user_id,
                     session_id = session_id,
-                    previous_status = current_meta.status
+                    previous_status = existing_session.status
                 })
 
                 local success, err = session_repo.update_session_meta(session_id, { status = consts.STATUS.IDLE })
@@ -227,6 +346,7 @@ local function run(args)
                     })
                     return false, "Failed to reset session status: " .. (err or "unknown error")
                 end
+                existing_session.status = consts.STATUS.IDLE
 
                 -- Notify hub of status reset if available
                 if state.user_hub_pid then
@@ -241,7 +361,7 @@ local function run(args)
         return true, nil
     end
 
-    local function create_session(payload_data)
+    local function create_session(payload_data, prepare_initial_message)
         if not payload_data then
             return nil, "Payload data is required"
         end
@@ -273,9 +393,13 @@ local function run(args)
 
         local existing_session, _ = session_repo.get(session_id, state.user_id)
         local session_exists = existing_session ~= nil
+        local recovery_notice = nil
 
         -- Handle crash recovery: reset status if session exists but isn't active
         if session_exists then
+            if needs_crash_reset(existing_session) then
+                recovery_notice = "The previous session stopped before completing a turn. Send a new message to continue."
+            end
             local reset_success, reset_err = reset_session_status_if_crashed(session_id, existing_session)
             if not reset_success then
                 send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
@@ -307,6 +431,7 @@ local function run(args)
             end
         end
 
+
         local session_init = {
             session_id = session_id,
             user_id = state.user_id,
@@ -314,6 +439,11 @@ local function run(args)
             conn_pid = payload_data.conn_pid,
             parent_pid = process.pid()
         }
+        session_init.recovery_notice = recovery_notice
+        if prepare_initial_message then
+            session_init.initial_message = { data = payload_data.data,
+                request_id = payload_data.request_id, conn_pid = payload_data.conn_pid }
+        end
 
         if create_new_session then
             session_init.create = true
@@ -366,7 +496,7 @@ local function run(args)
             end
         end
 
-        return session_id, nil
+        return session_id, nil, prepare_initial_message
     end
 
     local function handle_session_close(payload_data)
@@ -377,7 +507,6 @@ local function run(args)
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
         local request_id = payload_data.request_id
-
         if type(session_id) ~= "string" or session_id == "" then
             send_error(conn_pid, consts.ERROR_CODES.INVALID_SESSION_ID,
                 "Session ID is required for closing a session", request_id)
@@ -407,15 +536,57 @@ local function run(args)
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
         local request_id = payload_data.request_id
+        local started_with_message = nil
+
+        local function forward(session_info)
+            if session_info.terminating then
+                send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
+                    "Session is finishing", request_id)
+                return
+            end
+            if topic_type == consts.HANDLER_TYPES.MESSAGE then
+                local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.MESSAGE,
+                    { conn_pid = conn_pid, data = payload_data.data, request_id = request_id })
+                if send_err then
+                    send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
+                end
+            elseif topic_type == consts.HANDLER_TYPES.COMMAND then
+                local cmd_data = payload_data.data or {}
+                cmd_data.conn_pid = conn_pid
+                if request_id then cmd_data.request_id = request_id end
+                if cmd_data.command == consts.COMMANDS.STOP then
+                    cmd_data.stop_supervised = true
+                    local info = state.active_sessions[session_id]
+                    if info then
+                        if not info.stop_request_id then
+                            local generated, id_err = uuid.v7()
+                            if id_err then
+                                send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
+                                return
+                            end
+                            info.stop_request_id = generated
+                        end
+                        cmd_data.stop_request_id = info.stop_request_id
+                        if not info.stop_escalation then
+                            info.stop_escalation = 1
+                            apply_stop_level(session_id, info, 1)
+                        end
+                    end
+                end
+                process.send(session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
+            end
+        end
 
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
 
         if not session_id and state.session_count == 0 then
-            local created_session_id, err = create_session(payload_data)
+            local created_session_id, err, initial_id = create_session(payload_data,
+                topic_type == consts.HANDLER_TYPES.MESSAGE)
             if err then
                 return
             end
             session_id = created_session_id
+            started_with_message = initial_id
         elseif not session_id then
             local most_recent_id = nil
             local most_recent_time = nil
@@ -439,25 +610,12 @@ local function run(args)
         local session_info = state.active_sessions[session_id]
         if session_info then
             update_session_activity(session_id)
-
-            if topic_type == consts.HANDLER_TYPES.MESSAGE then
-                process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
-                    conn_pid = conn_pid,
-                    data = payload_data.data,
-                    request_id = request_id
-                })
-            elseif topic_type == consts.HANDLER_TYPES.COMMAND then
-                local cmd_data = payload_data.data or {}
-                cmd_data.conn_pid = conn_pid
-                if request_id then
-                    cmd_data.request_id = request_id
-                end
-                process.send(session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
-            end
+            if not started_with_message then forward(session_info) end
         else
             -- Session ID provided but not in active sessions - try to recover
             logger:info("attempting to recover inactive session", { user_id = state.user_id, session_id = session_id })
-            local created_session_id, err = create_session(payload_data)
+            local created_session_id, err, initial_id = create_session(payload_data,
+                topic_type == consts.HANDLER_TYPES.MESSAGE)
             if err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session not found and recovery failed: " .. err, request_id)
@@ -465,24 +623,11 @@ local function run(args)
             end
 
             -- Retry the message/command with the recovered session
-            local recovered_session_info = state.active_sessions[created_session_id]
+            local recovered_session_info = state.active_sessions[created_session_id :: string]
             if recovered_session_info then
                 update_session_activity(created_session_id)
 
-                if topic_type == consts.HANDLER_TYPES.MESSAGE then
-                    process.send(recovered_session_info.pid :: string, consts.TOPICS.MESSAGE, {
-                        conn_pid = conn_pid,
-                        data = payload_data.data,
-                        request_id = request_id
-                    })
-                elseif topic_type == consts.HANDLER_TYPES.COMMAND then
-                    local cmd_data = payload_data.data or {}
-                    cmd_data.conn_pid = conn_pid
-                    if request_id then
-                        cmd_data.request_id = request_id
-                    end
-                    process.send(recovered_session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
-                end
+                if not initial_id then forward(recovered_session_info) end
             else
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session recovery failed", request_id)
@@ -557,6 +702,41 @@ local function run(args)
                     state.shutting_down = false
                     logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
                 end
+            elseif topic == consts.TOPICS.STOP_ESCALATION then
+                local stop_data = payload:data()
+                local session_info = state.active_sessions[stop_data.session_id]
+                if session_info and session_info.pid == stop_data.from_pid and
+                    stop_data.stop_request_id and
+                    (not stop_data.supervised or
+                        session_info.stop_request_id == stop_data.stop_request_id) then
+                    if not session_info.stop_escalation
+                        or session_info.stop_request_id ~= stop_data.stop_request_id then
+                        clear_stop_deadline(session_info)
+                        session_info.stop_request_id = stop_data.stop_request_id
+                        session_info.stop_escalation = 1
+                        apply_stop_level(stop_data.session_id, session_info, 1)
+                    end
+                end
+            elseif topic == consts.TOPICS.STOP_RESOLVED then
+                local resolved = payload:data()
+                local session_info = state.active_sessions[resolved.session_id]
+                if session_info and session_info.pid == resolved.from_pid and
+                    resolved.stop_request_id and
+                    session_info.stop_request_id == resolved.stop_request_id then
+                    clear_stop_deadline(session_info)
+                    session_info.stop_escalation = nil
+                    session_info.stop_request_id = nil
+                end
+            elseif topic == consts.TOPICS.STOP_DEADLINE then
+                local deadline = payload:data()
+                local session_info = state.active_sessions[deadline.session_id]
+                if session_info and deadline_matches(session_info, deadline) then
+                    if deadline.level == 1 then
+                        cancel_stopped_session(deadline.session_id, session_info)
+                    else
+                        terminate_stopped_session(deadline.session_id, session_info)
+                    end
+                end
             elseif string.sub(topic, 1, string.len(consts.TOPIC_PREFIXES.SESSION)) == consts.TOPIC_PREFIXES.SESSION then
                 if state.user_hub_pid then
                     process.send(state.user_hub_pid :: string, topic, payload:data())
@@ -567,20 +747,25 @@ local function run(args)
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
                 for session_id, session_info in pairs(state.active_sessions) do
                     if session_info.pid == event.from then
-                        local err = "terminated"
+                        clear_stop_deadline(session_info)
+                        local err = "unexpected exit"
+                        if session_info.stop_escalation and session_info.stop_escalation >= 2 then
+                            err = "terminated"
+                        elseif event.result and event.result.status == "shutdown" then
+                            err = event.result.interrupted and "interrupted" or "completed"
+                        end
                         if event.result and event.result.error then
                             err = tostring(event.result.error)
                         end
 
                         -- Update session status in database based on termination reason
-                        local target_status
-                        if event.result and event.result.error then
-                            target_status = consts.STATUS.FAILED
-                        else
-                            target_status = consts.STATUS.IDLE
+                        local target_status, success, status_err, recovery_err =
+                            finalize_exit(session_id, session_info, event.result)
+                        if recovery_err then
+                            logger:warn("failed to recover pending calls", {
+                                session_id = session_id, error = recovery_err
+                            })
                         end
-
-                        local success, status_err = session_repo.update_session_meta(session_id, { status = target_status })
                         if not success then
                             logger:warn("failed to update session status", {
                                 session_id = session_id,
@@ -609,6 +794,11 @@ local function run(args)
                         })
 
                         if state.user_hub_pid then
+                            local error_update = exit_error_payload(session_id, target_status, err)
+                            if error_update then
+                                process.send(state.user_hub_pid :: string,
+                                    consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
+                            end
                             -- Send session status update first
                             if success then
                                 process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {

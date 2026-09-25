@@ -1,5 +1,6 @@
 local test = require("test")
 local command_bus = require("command_bus")
+local consts = require("consts")
 
 -- The session asks the bus to finish (FINISH_AND_EXIT: the client disconnected, the plugin
 -- is shutting down, the session went inactive) expecting the in-flight work to wind down and
@@ -80,6 +81,163 @@ local function define_tests()
             test.eq(bus.pending_ops, 0, "an intercepted operation's next_ops must not be enqueued")
         end)
     end)
+    describe("turn boundaries", function()
+        it("keeps call intents and outcomes before held input and runs one guarded continuation", function()
+            local order = {}
+            local ctx = { held = { "user-2" } }
+            local bus = command_bus.new(ctx)
+            ctx.flush_held = function(run_agent)
+                for _, id in ipairs(ctx.held) do table.insert(order, id) end
+                ctx.held = {}
+                return run_agent and "user-2" or nil
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                bus.turn_state.steps = bus.turn_state.steps + 1
+                table.insert(order, "assistant")
+                table.insert(order, "call-1")
+                table.insert(order, "call-2")
+                return { next_ops = {{ type = consts.OP_TYPE.PROCESS_TOOLS }} }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, function()
+                table.insert(order, "result-1")
+                table.insert(order, "result-2")
+                return { next_ops = {
+                    { type = consts.OP_TYPE.CONTROL_CONTEXT },
+                    { type = consts.OP_TYPE.AGENT_CONTINUE }
+                } }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONTEXT, function()
+                table.insert(order, "control")
+                return { completed = true }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                table.insert(order, "continue-" .. tostring(bus.turn_state.steps))
+                bus:stop()
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                from_user = true, message_id = "user-1" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(table.concat(order, ","),
+                "assistant,call-1,call-2,result-1,result-2,control,user-2,continue-1")
+        end)
+
+        it("terminalizes unstarted calls when STOP arrives during the agent step", function()
+            local order = {}
+            local state_at_end = nil
+            local ctx = { held = { "held" } }
+            local bus = command_bus.new(ctx)
+            ctx.on_turn_end = function() state_at_end = bus.state end
+            ctx.flush_held = function(run_agent)
+                table.insert(order, run_agent and "held-and-run" or "held-only")
+                ctx.held = {}
+            end
+            ctx.queue_empty_callback = function() bus:stop(); return true end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                bus:request_stop()
+                return { next_ops = {
+                    { type = consts.OP_TYPE.PROCESS_TOOLS },
+                    { type = consts.OP_TYPE.AGENT_CONTINUE }
+                } }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, function(_ctx, op)
+                table.insert(order, op.cancel_only and "cancel-intents" or "execute-intents")
+                return { completed = true }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                table.insert(order, "continued")
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(table.concat(order, ","), "cancel-intents,held-only")
+            test.eq(state_at_end, "idle")
+            test.eq(bus.state, "closed")
+        end)
+
+        it("records an accepted user message when STOP precedes its dispatch", function()
+            local recorded = 0
+            local steps = 0
+            local ctx = {}
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop(); return true end
+            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, function()
+                recorded = recorded + 1
+                return { next_ops = {{ type = consts.OP_TYPE.AGENT_STEP,
+                    from_user = true, message_id = "user" }} }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                steps = steps + 1
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.HANDLE_MESSAGE, starts_turn = true })
+            bus:request_stop()
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(recorded, 1)
+            test.eq(steps, 0)
+        end)
+
+        it("applies tool outcomes and control before draining STOP", function()
+            local order = {}
+            local ctx = { held = { "held" } }
+            local bus = command_bus.new(ctx)
+            ctx.flush_held = function(run_agent)
+                table.insert(order, run_agent and "held-and-run" or "held-only")
+                ctx.held = {}
+            end
+            ctx.queue_empty_callback = function() bus:stop(); return true end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                return { next_ops = {{ type = consts.OP_TYPE.PROCESS_TOOLS }} }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, function()
+                bus:request_stop()
+                table.insert(order, "result-written")
+                return { next_ops = {
+                    { type = consts.OP_TYPE.CONTROL_CONTEXT },
+                    { type = consts.OP_TYPE.AGENT_CONTINUE }
+                } }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONTEXT, function()
+                table.insert(order, "control")
+                return { completed = true }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                table.insert(order, "continued")
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(table.concat(order, ","), "result-written,control,held-only")
+        end)
+
+        it("finishes after writing held input without an agent step", function()
+            local order = {}
+            local ctx = { held = { "held" } }
+            local bus = command_bus.new(ctx)
+            ctx.flush_held = function(run_agent)
+                table.insert(order, run_agent and "held-and-run" or "held-only")
+                ctx.held = {}
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                bus:finish()
+                return { next_ops = {{ type = consts.OP_TYPE.AGENT_CONTINUE }} }
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                table.insert(order, "continued")
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(table.concat(order, ","), "held-only")
+            test.eq(bus.state, "closed")
+        end)
+    end)
+
 end
 
 return { run_tests = test.run_cases(define_tests) }

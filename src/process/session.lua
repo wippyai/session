@@ -9,6 +9,8 @@ local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
 local agent_context = require("agent_context")
 local tools = require("tools")
+local message_repo = require("message_repo")
+local uuid = require("uuid")
 
 type SessionArgs = {
     session_id: string,
@@ -17,6 +19,8 @@ type SessionArgs = {
     parent_pid: any?,
     create: boolean?,
     start_token: string?,
+    recovery_notice: string?,
+    initial_message: any?,
 }
 
 type SessionContext = {
@@ -31,6 +35,144 @@ type SessionContext = {
     lifecycle_state: table?,
 }
 
+local function reference_artifact(ctx, op)
+    local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT, "", {
+        artifact_id = op.artifact_id
+    })
+    if err then
+        ctx.upstream:command_error(op.request_id, consts.ERROR_CODES.STORAGE_ERROR, "Failed to reference artifact")
+        return { completed = true }
+    end
+    ctx.upstream:send_message_update(message_id, "artifact", {
+        message_id = message_id, artifact_id = op.artifact_id
+    })
+    ctx.upstream:command_success(op.request_id)
+    return { completed = true }
+end
+
+local function queue_error_code(bus)
+    if bus.state == "closed" then return "SESSION_CLOSED" end
+    if bus.state == "draining_finish" then return "SESSION_FINISHING" end
+    return "SESSION_BUSY"
+end
+
+local function write_input(ctx: any, item: any)
+    local data = type(item.data) == "table" and item.data or {}
+    local msg_type = data.type
+    if msg_type ~= consts.MSG_TYPE.DEVELOPER and msg_type ~= consts.MSG_TYPE.SYSTEM then
+        msg_type = consts.MSG_TYPE.USER
+    end
+    local message_id, err = ctx.writer:add_message(msg_type, data.text or "", {
+        message_id = item.message_id, file_uuids = data.file_uuids
+    })
+    if err then return nil, err end
+    return message_id, msg_type
+end
+
+local function flush_held(ctx: any, run_agent: boolean)
+    local last_user_id = nil
+    local last_request_id = nil
+    for _, item in ipairs(ctx.held) do
+        local message_id, msg_type = write_input(ctx, item)
+        if not message_id then return nil, msg_type end
+        if msg_type == consts.MSG_TYPE.USER then
+            last_user_id = message_id
+            last_request_id = item.request_id
+        end
+    end
+    ctx.held = {}
+    return run_agent and last_user_id or nil, nil, last_request_id
+end
+
+local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any)
+    payload_data = payload_data or {}
+    if payload_data.conn_pid then ctx.upstream.conn_pid = payload_data.conn_pid end
+    if topic == consts.TOPICS.STOP or
+        (topic == consts.TOPICS.COMMAND and payload_data.command == consts.COMMANDS.STOP) then
+        local stop_request_id = payload_data.stop_request_id or bus.turn_state.stop_request_id
+        if not stop_request_id then
+            local generated, id_err = uuid.v7()
+            if id_err then return nil, id_err end
+            stop_request_id = generated
+        end
+        local requested = bus:request_stop(stop_request_id)
+        if ctx.parent_pid then
+            process.send(ctx.parent_pid :: string,
+                requested and consts.TOPICS.STOP_ESCALATION or consts.TOPICS.STOP_RESOLVED, {
+                    session_id = ctx.session_id, turn_id = requested and bus.turn_state.id or nil,
+                    stop_request_id = stop_request_id,
+                    from_pid = process.pid(), supervised = payload_data.stop_supervised == true
+                })
+        end
+        return true
+    end
+    if topic == consts.TOPICS.MESSAGE then
+        if session_state.finishing then
+            ctx.upstream:command_error(payload_data.request_id, "SESSION_FINISHING", "Session is finishing")
+            return true
+        end
+        if #ctx.held >= 256 then
+            ctx.upstream:command_error(payload_data.request_id, "SESSION_BUSY", "Deferred message buffer is full")
+            return true
+        end
+        local message_id, id_err = uuid.v7()
+        if id_err then return nil, id_err end
+        local data = type(payload_data.data) == "table" and payload_data.data or {}
+        local item = { message_id = message_id, data = data, request_id = payload_data.request_id }
+        if bus:is_turn_active() then
+            table.insert(ctx.held, item)
+        else
+            local queued, queue_err = bus:queue_op({ type = consts.OP_TYPE.HANDLE_MESSAGE,
+                message_id = message_id, data = data, request_id = payload_data.request_id,
+                starts_turn = data.type ~= consts.MSG_TYPE.DEVELOPER
+                    and data.type ~= consts.MSG_TYPE.SYSTEM })
+            if not queued then
+                ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), queue_err)
+                return true
+            end
+        end
+        if data.type ~= consts.MSG_TYPE.DEVELOPER and data.type ~= consts.MSG_TYPE.SYSTEM then
+            ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
+            local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
+            if status_err then return nil, status_err end
+            ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
+        end
+        return true
+    end
+    if topic ~= consts.TOPICS.COMMAND then return true end
+    local op = nil
+    if payload_data.command == consts.COMMANDS.CONTEXT then
+        op = { type = consts.OP_TYPE.HANDLE_CONTEXT, action = payload_data.action,
+            key = payload_data.key, data = payload_data.data, from_pid = payload_data.from_pid,
+            request_id = payload_data.request_id }
+    elseif payload_data.command == consts.COMMANDS.AGENT and payload_data.name then
+        op = { type = consts.OP_TYPE.AGENT_CHANGE, agent_id = payload_data.name,
+            request_id = payload_data.request_id }
+    elseif payload_data.command == consts.COMMANDS.MODEL and payload_data.name then
+        op = { type = consts.OP_TYPE.MODEL_CHANGE, model = payload_data.name,
+            request_id = payload_data.request_id }
+    elseif payload_data.command == consts.COMMANDS.ARTIFACT then
+        if payload_data.artifact_id then
+            op = { type = consts.OP_TYPE.REFERENCE_ARTIFACT,
+                artifact_id = payload_data.artifact_id, request_id = payload_data.request_id }
+        elseif payload_data.artifacts then
+            op = { type = consts.OP_TYPE.CONTROL_ARTIFACTS,
+                artifacts = payload_data.artifacts, request_id = payload_data.request_id }
+        else
+            ctx.upstream:command_error(payload_data.request_id, consts.ERROR_CODES.INVALID_JSON,
+                "Either artifact_id or artifacts array required")
+        end
+    end
+    if op then
+        op.user_command = true
+        local queued, queue_err = bus:queue_op(op)
+        if not queued then
+            ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), queue_err)
+        end
+    end
+    return true
+end
+
 local function run(args: SessionArgs)
     if not args or not args.user_id or not args.session_id then
         error(consts.ERR.MISSING_ARGS)
@@ -43,13 +185,18 @@ local function run(args: SessionArgs)
 
     local session_data = session_reader:state()
     local session_config = session_data.config or {}
-    if session_data.status == consts.STATUS.FAILED then
-        error("Cannot open failed session")
-    end
 
     local session_writer, writer_err = writer.new(args.session_id)
     if not session_writer then
         error("Failed to create session writer: " .. writer_err)
+    end
+
+    local recovered_calls = 0
+    if not args.create then
+        local count, recovery_err = message_repo.recover_pending(args.session_id,
+            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
+        if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
+        recovered_calls = count
     end
 
     local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
@@ -94,21 +241,27 @@ local function run(args: SessionArgs)
         upstream = session_upstream,
         config = session_config,
         agent_ctx = agent_ctx,
+        held = {},
+        parent_pid = args.parent_pid,
         lifecycle_state = {},
         queue_empty_callback = function()
-            session_writer:update_status(consts.STATUS.IDLE)
+            local _, status_err = session_writer:update_status(consts.STATUS.IDLE)
+            if status_err then return nil, status_err end
             session_upstream:update_session({ status = consts.STATUS.IDLE })
+            return true
         end
     }
 
-    local bus = command_bus.new(context)
+    context.flush_held = function(run_agent) return flush_held(context, run_agent) end
 
-    local function intercept_handler(ctx, op)
-        return {
-            completed = true,
-            intercepted = true,
-            intercepted_count = #op.intercepted_ops
-        }
+    local bus = command_bus.new(context)
+    context.on_turn_end = function(turn_id, stop_requested, stop_request_id)
+        if stop_requested and args.parent_pid then
+            process.send(args.parent_pid :: string, consts.TOPICS.STOP_RESOLVED, {
+                session_id = args.session_id, turn_id = turn_id,
+                stop_request_id = stop_request_id, from_pid = process.pid()
+            })
+        end
     end
 
     -- Mount all operation handlers
@@ -129,6 +282,7 @@ local function run(args: SessionArgs)
     bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, session_handlers.check_background_triggers)
     bus:mount_op_handler(consts.OP_TYPE.EXECUTE_FUNCTION, session_handlers.execute_function)
     bus:mount_op_handler(consts.OP_TYPE.HANDLE_CONTEXT, control_handlers.handle_context_command)
+    bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, reference_artifact)
 
     if args.create then
         session_writer:update_status(consts.STATUS.IDLE)
@@ -158,11 +312,21 @@ local function run(args: SessionArgs)
         end
     end
 
+    if args.recovery_notice or recovered_calls > 0 then
+        session_upstream:session_error("recovery_incomplete",
+            args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
+    end
+    if args.initial_message then
+        local _, input_err = route_input(context, bus, consts.TOPICS.MESSAGE,
+            args.initial_message, { finishing = false })
+        if input_err then error("Failed to queue initial message: " .. input_err) end
+    end
+
     -- Send initial session data to client
     session_upstream:update_session({
         agent = session_config.agent_id,
         model = session_config.model,
-        status = consts.STATUS.IDLE,
+        status = args.initial_message and consts.STATUS.RUNNING or consts.STATUS.IDLE,
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,
     })
@@ -172,6 +336,7 @@ local function run(args: SessionArgs)
     local session_state = {
         stopping = false,
         finishing = false,
+        interrupted = false,
         bus_done_received = false
     }
     local bus_done = channel.new()
@@ -180,8 +345,9 @@ local function run(args: SessionArgs)
         local _, bus_err = bus:run()
         if bus_err then
             logger:warn("command bus error", { error = bus_err })
+            bus:stop()
         end
-        bus_done:send(true)
+        bus_done:send({ error = bus_err })
     end)
 
     local inbox = process.inbox()
@@ -201,107 +367,21 @@ local function run(args: SessionArgs)
         if result.channel == inbox then
             local msg = result.value
             local topic = msg:topic()
-            local payload = msg:payload()
-
-            if topic == consts.TOPICS.MESSAGE then
-                local payload_data = payload:data()
-                if payload_data.conn_pid then
-                    session_upstream.conn_pid = payload_data.conn_pid
-                end
-
-                -- Reject messages if session is finishing
-                if session_state.finishing then
-                    if payload_data.request_id then
-                        session_upstream:command_error(payload_data.request_id, "SESSION_FINISHING", "Session is finishing and cannot accept new messages")
-                    end
-                else
-                    -- Context messages (developer/system) are persisted but do not run the
-                    -- agent on their own, so they must not flip the session to RUNNING; only
-                    -- a real user turn does. Matches how a turn is gated downstream.
-                    local message_data = type(payload_data.data) == "table" and payload_data.data or {}
-                    local message_type = message_data.type
-                    if message_type ~= consts.MSG_TYPE.DEVELOPER and message_type ~= consts.MSG_TYPE.SYSTEM then
-                        session_writer:update_status(consts.STATUS.RUNNING)
-                        session_upstream:update_session({ status = consts.STATUS.RUNNING })
-                    end
-
-                    bus:queue_op({
-                        type = consts.OP_TYPE.HANDLE_MESSAGE,
-                        data = payload_data.data,
-                        request_id = payload_data.request_id
-                    })
-                end
-            elseif topic == consts.TOPICS.COMMAND then
-                local payload_data = payload:data()
-                if payload_data.conn_pid then
-                    session_upstream.conn_pid = payload_data.conn_pid
-                end
-
-                if payload_data.command == consts.COMMANDS.CONTEXT then
-                    bus:queue_op({
-                        type = consts.OP_TYPE.HANDLE_CONTEXT,
-                        action = payload_data.action,
-                        key = payload_data.key,
-                        data = payload_data.data,
-                        from_pid = payload_data.from_pid,
-                        request_id = payload_data.request_id
-                    })
-                elseif payload_data.command == consts.COMMANDS.STOP then
-                    bus:intercept(intercept_handler)
-                elseif payload_data.command == consts.COMMANDS.AGENT then
-                    if payload_data.name then
-                        bus:queue_op({
-                            type = consts.OP_TYPE.AGENT_CHANGE,
-                            agent_id = payload_data.name,
-                            request_id = payload_data.request_id
-                        })
-                    end
-                elseif payload_data.command == consts.COMMANDS.MODEL then
-                    if payload_data.name then
-                        bus:queue_op({
-                            type = consts.OP_TYPE.MODEL_CHANGE,
-                            model = payload_data.name,
-                            request_id = payload_data.request_id
-                        })
-                    end
-                elseif payload_data.command == consts.COMMANDS.ARTIFACT then
-                    if payload_data.artifact_id then
-                        local message_id, err = session_writer:add_message(consts.MSG_TYPE.ARTIFACT, "", {
-                            artifact_id = payload_data.artifact_id
-                        })
-
-                        if err then
-                            session_upstream:command_error(payload_data.request_id, consts.ERROR_CODES.STORAGE_ERROR, "Failed to reference artifact")
-                        else
-                            session_upstream:send_message_update(message_id, "artifact", {
-                                message_id = message_id,
-                                artifact_id = payload_data.artifact_id
-                            })
-                            session_upstream:command_success(payload_data.request_id)
-                        end
-                    elseif payload_data.artifacts then
-                        bus:queue_op({
-                            type = consts.OP_TYPE.CONTROL_ARTIFACTS,
-                            artifacts = payload_data.artifacts,
-                            request_id = payload_data.request_id
-                        })
-                    else
-                        session_upstream:command_error(payload_data.request_id, consts.ERROR_CODES.INVALID_JSON, "Either artifact_id or artifacts array required")
-                    end
-                end
-            elseif topic == consts.TOPICS.FINISH_AND_EXIT then
+            if topic == consts.TOPICS.FINISH_AND_EXIT then
                 session_state.finishing = true
                 bus:finish()
-            elseif topic == consts.TOPICS.CONTINUE then
-                logger:debug("continue signal received", { session_id = args.session_id })
-            elseif topic == consts.TOPICS.STOP then
-                bus:intercept(intercept_handler)
+            else
+                local _, route_err = route_input(context, bus, topic, msg:payload():data(), session_state)
+                if route_err then
+                    error("Session ingress failed: " .. route_err)
+                end
             end
         elseif result.channel == events then
             local event = result.value
 
             if event.kind == process.event.CANCEL then
                 session_state.stopping = true
+                session_state.interrupted = true
                 bus:stop()
                 break
             elseif event.kind == process.event.EXIT then
@@ -311,7 +391,9 @@ local function run(args: SessionArgs)
             end
         elseif result.channel == bus_done then
             session_state.bus_done_received = true
-            if session_state.finishing then
+            if result.value.error then
+                error(result.value.error)
+            elseif session_state.finishing then
                 session_state.stopping = true
                 break
             end
@@ -333,7 +415,10 @@ local function run(args: SessionArgs)
         })
     end
 
-    return { status = "shutdown", session_id = args.session_id }
+    return { status = "shutdown", session_id = args.session_id,
+        interrupted = session_state.interrupted,
+        intentional_exit = session_state.finishing }
 end
 
-return { run = run }
+return { run = run, route_input = route_input, flush_held = flush_held,
+    reference_artifact = reference_artifact }

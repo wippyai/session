@@ -95,6 +95,7 @@ local consts = {
         INTERCEPT_EXECUTION = "intercept_execution",
 
         HANDLE_CONTEXT = "handle_context",
+        REFERENCE_ARTIFACT = "reference_artifact",
     },
 
     -- Session Commands
@@ -122,7 +123,8 @@ local consts = {
     FUNC_STATUS = {
         PENDING = "pending",
         SUCCESS = "success",
-        ERROR = "error"
+        ERROR = "error",
+        CANCELLED = "cancelled"
     },
 
     -- Session Topics for Actor Communication
@@ -135,7 +137,10 @@ local consts = {
         ERROR = "error",
         SESSION_OPENED = "session.opened",
         SESSION_CLOSED = "session.closed",
-        FINISH_AND_EXIT = "finish_and_exit"
+        FINISH_AND_EXIT = "finish_and_exit",
+        STOP_ESCALATION = "session.stop_escalation",
+        STOP_RESOLVED = "session.stop_resolved",
+        STOP_DEADLINE = "session.stop_deadline"
     },
 
     -- Upstream Update Types

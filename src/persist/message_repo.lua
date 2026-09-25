@@ -20,9 +20,63 @@ type MessageList = {
 }
 
 local message_repo = {}
+local get_db
+
+function message_repo.create_batch(session_id, rows)
+    local db, err = get_db()
+    if err then return nil, err end
+    local tx, begin_err = db:begin()
+    if begin_err then db:release(); return nil, begin_err end
+    local now = time.now():format(time.RFC3339NANO)
+    for _, row in ipairs(rows) do
+        local metadata, encode_err = json.encode(row.metadata or {})
+        if encode_err then tx:rollback(); db:release(); return nil, encode_err end
+        local _, insert_err = sql.builder.insert("messages"):set_map({
+            message_id = row.message_id, session_id = session_id, date = now,
+            type = row.type, data = row.data, metadata = metadata
+        }):run_with(tx):exec()
+        if insert_err then tx:rollback(); db:release(); return nil, insert_err end
+    end
+    local update_result, update_err = sql.builder.update("sessions"):set("last_message_date", now)
+        :where("session_id = ?", session_id):run_with(tx):exec()
+    if update_err then tx:rollback(); db:release(); return nil, update_err end
+    if update_result.rows_affected == 0 then
+        tx:rollback(); db:release(); return nil, "Session not found"
+    end
+    local _, commit_err = tx:commit()
+    if commit_err then tx:rollback(); db:release(); return nil, commit_err end
+    db:release()
+    return true
+end
+
+function message_repo.recover_pending(session_id, anchor_id)
+    local window, err
+    if anchor_id then
+        window, err = message_repo.list_after_message(session_id, anchor_id)
+    else
+        local page
+        page, err = message_repo.list_by_session(session_id)
+        window = page and page.messages
+    end
+    if err then return nil, err end
+    local recovered = 0
+    for _, row in ipairs(window or {}) do
+        if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+            or row.type == consts.MSG_TYPE.DELEGATION)
+            and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
+            local _, update_err = message_repo.update_metadata(row.message_id, {
+                status = consts.FUNC_STATUS.ERROR,
+                result = "interrupted, outcome unknown"
+            })
+            if update_err then return nil, update_err end
+            recovered = recovered + 1
+        end
+    end
+    return recovered
+end
 
 -- Get a database connection
-local function get_db()
+get_db = function()
     local DB_RESOURCE, _ = consts.get_db_resource()
 
     local db, err = sql.get(DB_RESOURCE)
@@ -240,6 +294,16 @@ function message_repo.update_metadata(message_id, metadata)
     }
 end
 
+local function anchor_date(db, session_id, message_id)
+    local rows, err = sql.builder.select("date")
+        :from("messages")
+        :where("session_id = ? AND message_id = ?", session_id, message_id)
+        :limit(1):run_with(db):query()
+    if err then return nil, err end
+    if #rows == 0 then return nil, "Message anchor not found: " .. tostring(message_id) end
+    return rows[1].date
+end
+
 -- List messages by session ID with cursor-based pagination
 function message_repo.list_by_session(session_id, limit, cursor, direction)
     if not session_id or session_id == "" then
@@ -268,18 +332,20 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
 
     -- Add cursor-based condition if cursor is provided
     if cursor and cursor ~= "" then
+        local date, anchor_err = anchor_date(db, session_id, cursor)
+        if anchor_err then db:release(); return nil, anchor_err end
         if direction == "after" then
             -- Get messages after the cursor (newer messages)
-            query = query:where("message_id > ?", cursor)
-            query = query:order_by("date ASC")
+            query = query:where("(date > ? OR (date = ? AND message_id > ?))", date, date, cursor)
+            query = query:order_by("date ASC, message_id ASC")
         else
             -- Default to "before" (older messages)
-            query = query:where("message_id < ?", cursor)
-            query = query:order_by("date DESC")
+            query = query:where("(date < ? OR (date = ? AND message_id < ?))", date, date, cursor)
+            query = query:order_by("date DESC, message_id DESC")
         end
     else
         -- No cursor, get latest messages
-        query = query:order_by("date DESC")
+        query = query:order_by("date DESC, message_id DESC")
     end
 
     -- Add limit
@@ -352,21 +418,25 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
         return nil, err
     end
 
+    local date, anchor_err = anchor_date(db, session_id, after_message_id)
+    if anchor_err then db:release(); return nil, anchor_err end
+
     -- Build the SELECT query
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
-            sql.builder.expr("message_id >= ?", after_message_id)
+            sql.builder.expr("(date > ? OR (date = ? AND message_id >= ?))",
+                date, date, after_message_id)
         }))
 
     local bounded = false
     if limit ~= nil and limit > 0 then
         -- Newest rows first; flipped back to chronological order below.
         bounded = true
-        query = query:order_by("date DESC"):limit(limit)
+        query = query:order_by("date DESC, message_id DESC"):limit(limit)
     else
-        query = query:order_by("date ASC")
+        query = query:order_by("date ASC, message_id ASC")
     end
 
     -- Execute the query
@@ -423,7 +493,7 @@ function message_repo.list_by_type(session_id, msg_type, limit, offset)
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("type = ?", msg_type)
         }))
-        :order_by("date DESC")
+        :order_by("date DESC, message_id DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then

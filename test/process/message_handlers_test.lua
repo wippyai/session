@@ -2,19 +2,8 @@ local test = require("test")
 local consts = require("consts")
 local message_handlers = require("message_handlers")
 local session_handlers = require("session_handlers")
-
--- A turn is a chain of agent_step -> process_tools -> agent_continue -> agent_step ... that
--- runs for as long as the model keeps calling tools. The token-threshold checkpoint is the
--- only mechanism that compacts the conversation, so its trigger check has to run on EVERY
--- step that reports usage, including the continuation steps. If it only runs on the step
--- that answers the user's message, a long tool loop never checkpoints no matter how far
--- past the threshold the prompt grows (observed 2026-09-21: prompt at 176k tokens against a
--- 100k threshold for 10.5 hours, zero checkpoints, because every step was an agent_continue).
---
--- The check has to be queued ahead of the tool round, so that the checkpoint it schedules
--- lands before the next agent step reads the prompt, and a mid-turn checkpoint has to anchor
--- on the step's own assistant message rather than on the turn's user message, otherwise the
--- whole (long) turn stays in the window and nothing is compacted.
+local command_bus = require("command_bus")
+local tool_caller = require("tool_caller")
 
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
@@ -56,6 +45,8 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         stored = {} :: { any },
         assistant_ids = {} :: { string },
         session_errors = {} :: { any },
+        response_batches = {} :: { any },
+        message_errors = {} :: { any },
     }
 
     local empty_query = {
@@ -97,14 +88,37 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
                 end
                 return id, nil
             end,
+            add_response = function(self, content, metadata, calls)
+                table.insert(captured.response_batches, {content = content, calls = calls})
+                local assistant_id = self:add_message(consts.MSG_TYPE.ASSISTANT, content, metadata)
+                local ids = {}
+                for _, call in ipairs(calls) do
+                    ids[call.id] = self:add_message(consts.MSG_TYPE.FUNCTION, call.arguments, {
+                        call_id = call.id,
+                        function_name = call.name,
+                        status = consts.FUNC_STATUS.PENDING
+                    })
+                end
+                return assistant_id, ids, nil
+            end,
             update_meta = function(_self, _updates) return true end,
-            update_message_meta = function(_self, _id, _meta) return true end,
+            update_message_meta = function(_self, id, meta)
+                for _, row in ipairs(captured.stored) do
+                    if row.id == id then
+                        for key, value in pairs(meta) do row.metadata[key] = value end
+                        return true
+                    end
+                end
+                return nil, "message not found"
+            end,
         },
         upstream = {
             response_beginning = function() end,
             send_message_update = function() end,
             invalidate_message = function() end,
-            message_error = function() end,
+            message_error = function(_self, id, code, message)
+                table.insert(captured.message_errors, { id = id, code = code, message = message })
+            end,
             update_session = function() end,
             session_error = function(_self, code, message)
                 table.insert(captured.session_errors, { code = code, message = message })
@@ -157,6 +171,171 @@ local function round(report: any, args: any?): any
 end
 
 local function define_tests()
+    describe("duplicate model call ids", function()
+        local function rejects_response(agent, expanded_calls)
+            local ctx, captured = mock_ctx(agent)
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(self, calls)
+                        self.last_tool_calls = expanded_calls or calls
+                        local first = self.last_tool_calls[1]
+                        return { [first.id] = {valid = true, name = first.name, args = {},
+                            registry_id = first.registry_id} }, nil
+                    end
+                }
+            end
+            local ok, result, err = pcall(user_step, ctx)
+            tool_caller.new = original_new
+
+            test.is_true(ok, tostring(result))
+            test.is_nil(result)
+            test.contains(tostring(err), "Duplicate tool call ID")
+            test.eq(#captured.response_batches, 0)
+            test.eq(#captured.assistant_ids, 0)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
+            test.eq(#captured.message_errors, 1)
+            test.eq(captured.message_errors[1].code, consts.ERROR_CODES.AGENT_ERROR)
+            test.contains(captured.message_errors[1].message, "Duplicate tool call ID")
+        end
+
+        it("rejects duplicate ids returned by the model before persistence", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return { result = "answer", tool_calls = {
+                    { id = "same-id", name = "first", arguments = "{}", registry_id = "app:first" },
+                    { id = "same-id", name = "second", arguments = "{}", registry_id = "app:second" }
+                } }
+            end
+            rejects_response(agent)
+        end)
+
+        it("rejects a wrapper expansion that reuses a model call id", function()
+            local agent = fake_agent(nil)
+            agent.tool_wrappers = {{ id = "test-wrapper" }}
+            local original = agent.step
+            agent.step = function(self, builder, options)
+                local result = original(self, builder, options)
+                result.tool_calls[1].id = "same-id"
+                return result
+            end
+            rejects_response(agent, {
+                { id = "same-id", name = "pack_document", arguments = "{}", registry_id = "app:pack_document" },
+                { id = "same-id", name = "wrapped_tool", arguments = "{}", registry_id = "app:wrapped_tool" }
+            })
+        end)
+
+        it("surfaces strict wrapper validation errors without storing pending intents", function()
+            local agent = fake_agent(nil)
+            agent.tool_wrappers = {{ id = "strict-wrapper" }}
+            local ctx, captured = mock_ctx(agent)
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(self)
+                        self.last_tool_calls = {}
+                        return nil, "strict wrapper rejected call"
+                    end
+                }
+            end
+
+            local result, err = user_step(ctx)
+
+            tool_caller.new = original_new
+            test.is_nil(result)
+            test.contains(tostring(err), "strict wrapper rejected call")
+            test.eq(#captured.message_errors, 1)
+            test.eq(captured.message_errors[1].code, consts.ERROR_CODES.AGENT_ERROR)
+            test.contains(captured.message_errors[1].message, "strict wrapper rejected call")
+            test.eq(#captured.response_batches, 0)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
+            test.eq(#captured.assistant_ids, 0)
+        end)
+    end)
+
+    describe("wrapped tool call persistence", function()
+        it("classifies function, private, and delegation intents before execution", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return { result = "", tool_calls = {
+                    { id = "public", name = "one", arguments = "{}", registry_id = "app:one" },
+                    { id = "private", name = "two", arguments = "{}", registry_id = "app:two" },
+                    { id = "delegation", name = "three", arguments = "{}", registry_id = "app:delegate" }
+                } }
+            end
+            local ctx, captured = mock_ctx(agent, { delegation_func_id = "app:delegate" })
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(_self, calls)
+                        return {
+                            public = { valid = true, registry_id = calls[1].registry_id },
+                            private = { valid = true, registry_id = calls[2].registry_id,
+                                meta = { private = true } },
+                            delegation = { valid = true, registry_id = calls[3].registry_id }
+                        }, nil
+                    end
+                }
+            end
+            local step, step_err = user_step(ctx)
+            tool_caller.new = original_new
+            test.is_nil(step_err)
+            test.not_nil(step)
+            local calls = captured.response_batches[1].calls
+            test.eq(calls[1].type, consts.MSG_TYPE.FUNCTION)
+            test.eq(calls[2].type, consts.MSG_TYPE.PRIVATE_FUNCTION)
+            test.eq(calls[3].type, consts.MSG_TYPE.DELEGATION)
+        end)
+
+        it("stores every wrapped call with the assistant before execution", function()
+            local agent = fake_agent(nil)
+            agent.tool_wrappers = {{id = "test-wrapper"}}
+            local ctx, captured = mock_ctx(agent)
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_strategy = function() end,
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(self, calls)
+                        self.last_tool_calls = {calls[1], {
+                            id = "wrapped-call", name = "wrapped_tool", arguments = "{}",
+                            registry_id = "app:wrapped_tool"
+                        }}
+                        return {
+                            ["call-1"] = {valid = true, name = calls[1].name, args = {},
+                                registry_id = calls[1].registry_id},
+                            ["wrapped-call"] = {valid = true, name = "wrapped_tool", args = {},
+                                registry_id = "app:wrapped_tool"}
+                        }, nil
+                    end,
+                    execute = function(_self, _context, validated)
+                        return {
+                            ["call-1"] = {result = "first", tool_call = validated["call-1"]},
+                            ["wrapped-call"] = {result = "second", tool_call = validated["wrapped-call"]}
+                        }
+                    end
+                }
+            end
+            local step, step_err = user_step(ctx)
+            test.is_nil(step_err)
+            test.eq(#captured.response_batches, 1)
+            test.eq(#captured.response_batches[1].calls, 2)
+            local op = find_op(step.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+            test.not_nil(op)
+            local processed, process_err = message_handlers.process_tools(ctx, op)
+            tool_caller.new = original_new
+            test.is_nil(process_err)
+            test.not_nil(processed)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 2)
+        end)
+    end)
     describe("checkpoint trigger inside a tool loop", function()
         it("queues the background trigger check on the first step of a user turn, anchored on the user's message", function()
             local ctx = mock_ctx(fake_agent(PROMPT_TOKENS_OVER_THRESHOLD))
@@ -246,6 +425,27 @@ local function define_tests()
     end)
 
     describe("turn loop guards", function()
+        it("records cancellation for every call when stop arrives during the model step", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return { result = "", tool_calls = {
+                    { id = "call-1", name = "one", arguments = "{}", registry_id = "app:one" },
+                    { id = "call-2", name = "two", arguments = "{}", registry_id = "app:two" }
+                } }
+            end
+            local ctx, captured = mock_ctx(agent)
+            ctx.coordinator = { stop_requested = function() return true end }
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.is_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
+            test.eq(#calls, 2)
+            for _, call in ipairs(calls) do
+                test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
+            end
+        end)
+
         it("stops the turn once the agent steps exceed max_turn_iterations", function()
             local ctx, captured = mock_ctx(fake_agent(1000), { max_turn_iterations = 3 })
 
@@ -356,6 +556,121 @@ local function define_tests()
             test.eq(message_handlers.note_tool_round(ctx, b), 2, "the same call must match whatever the key order")
             test.eq(message_handlers.note_tool_round(ctx, failing), 3)
             test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
+        end)
+    end)
+
+    describe("stop during tool execution", function()
+        it("records the returned result and ends the turn before another agent step", function()
+            local steps = 0
+            local agent = fake_agent(nil)
+            local original_step = agent.step
+            agent.step = function(self, builder, options)
+                steps = steps + 1
+                return original_step(self, builder, options)
+            end
+            local ctx, captured = mock_ctx(agent)
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop() end
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_strategy = function() end,
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(_self, calls)
+                        return { [calls[1].id] = {
+                            valid = true, name = calls[1].name, args = {},
+                            registry_id = calls[1].registry_id
+                        } }, nil
+                    end,
+                    execute = function(_self, _context, validated)
+                        bus:request_stop()
+                        return { ["call-1"] = { result = "done", tool_call = validated["call-1"] } }
+                    end
+                }
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, message_handlers.agent_step)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, message_handlers.agent_continue)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                message_id = "msg-user", request_id = "req-1", from_user = true })
+            local ok, err = bus:run()
+            tool_caller.new = original_new
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps, 1)
+            local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
+            test.eq(#calls, 1)
+            test.eq(calls[1].metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq(calls[1].metadata.result, "done")
+        end)
+    end)
+
+    describe("committed call outcomes", function()
+        local function call_fixture()
+            local ctx, captured = mock_ctx(fake_agent(nil), {
+                delegation_func_id = "app:delegate"
+            })
+            local calls = {
+                { id = "function", name = "one", registry_id = "app:one", arguments = "{}" },
+                { id = "private", name = "two", registry_id = "app:two", arguments = "{}" },
+                { id = "delegation", name = "three", registry_id = "app:delegate", arguments = "{}" }
+            }
+            local ids = {}
+            ids.function_call = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
+                status = consts.FUNC_STATUS.PENDING })
+            ids.private_call = ctx.writer:add_message(consts.MSG_TYPE.PRIVATE_FUNCTION, "{}", {
+                status = consts.FUNC_STATUS.PENDING })
+            ids.delegation_call = ctx.writer:add_message(consts.MSG_TYPE.DELEGATION, "{}", {
+                status = consts.FUNC_STATUS.PENDING })
+            local mapped = { ["function"] = ids.function_call,
+                ["private"] = ids.private_call, ["delegation"] = ids.delegation_call }
+            local validated = {
+                ["function"] = { valid = true, name = "one", args = {}, registry_id = "app:one" },
+                ["private"] = { valid = true, name = "two", args = {}, registry_id = "app:two",
+                    meta = { private = true } },
+                ["delegation"] = { valid = true, name = "three", args = {}, registry_id = "app:delegate" }
+            }
+            return ctx, captured, calls, mapped, validated
+        end
+
+        it("marks omitted private and delegation results as errors", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = { result = "done", tool_call = tools["function"] } }
+                end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = calls, call_message_ids = ids,
+                caller = caller, validated_tools = validated,
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq((captured.stored[1] :: any).metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq((captured.stored[2] :: any).metadata.status, consts.FUNC_STATUS.ERROR)
+            test.eq((captured.stored[3] :: any).metadata.status, consts.FUNC_STATUS.ERROR)
+        end)
+
+        it("marks every intent as error when execution throws", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local caller = {
+                set_strategy = function() end,
+                execute = function() error("tool runner failed") end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = calls, call_message_ids = ids,
+                caller = caller, validated_tools = validated,
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+            for _, row in ipairs(captured.stored) do
+                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(row.metadata.result), "tool runner failed")
+            end
         end)
     end)
 end

@@ -3,6 +3,20 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: session_test
+    kind: function.lua
+    meta:
+      name: Session ingress routing
+      type: test
+      suite: session
+    source: file://session_test.lua
+    imports:
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      message_handlers: wippy.session.process:message_handlers
+      command_bus: wippy.session.process:command_bus
+      test: wippy.test:test
+    method: run_tests
   - name: control_handlers_test
     kind: function.lua
     meta:
@@ -19,12 +33,13 @@ entries:
   - name: plugin_test
     kind: function.lua
     meta:
-      name: Session end lifecycle hook
+      name: Plugin routing and recovery
       type: test
       suite: session
-      comment: Unit tests for the on_session_end lifecycle hook firing
+      comment: Tests session routing, exit recovery, and end hooks
     source: file://plugin_test.lua
     modules:
+      - security
       - time
       - json
       - uuid
@@ -33,10 +48,12 @@ entries:
     imports:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
       plugin: wippy.session.process:plugin
+      session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo
-      start_tokens: wippy.session:start_tokens
       test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
     method: run_tests
 
   - name: session_handlers_test
@@ -55,16 +72,18 @@ entries:
   - name: message_handlers_test
     kind: function.lua
     meta:
-      name: Checkpoint trigger in a tool loop
+      name: Message handling and tool rounds
       type: test
       suite: session
-      comment: The token-threshold checkpoint check must be scheduled on continuation steps of a tool loop, not only on the step that answers the user
+      comment: Tests tool persistence, stops, and checkpoints
     source: file://message_handlers_test.lua
     imports:
+      command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       message_handlers: wippy.session.process:message_handlers
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
+      tool_caller: wippy.agent.tools:caller
     method: run_tests
 
   - name: command_bus_test
@@ -75,7 +94,10 @@ entries:
       suite: session
       comment: finish() and intercept() must stop a self-perpetuating chain of operations once the in-flight one completes
     source: file://command_bus_test.lua
+    modules:
+      - time
     imports:
       command_bus: wippy.session.process:command_bus
+      consts: wippy.session:consts
       test: wippy.test:test
     method: run_tests
