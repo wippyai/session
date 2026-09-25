@@ -205,7 +205,9 @@ function command_bus:fail(err, held_already_flushed)
     end
     self:stop()
     if #failures > 0 then
-        return nil, tostring(err) .. "; settlement failed: " .. table.concat(failures, "; ")
+        local detail = table.concat(failures, "; ")
+        if err then return nil, tostring(err) .. "; settlement failed: " .. detail end
+        return nil, "Settlement failed: " .. detail
     end
     return nil, err
 end

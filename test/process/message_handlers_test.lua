@@ -426,9 +426,9 @@ local function define_tests()
     end)
 
     describe("turn loop guards", function()
-        it("fails when either turn-limit notice cannot be stored", function()
+        it("sends the turn-limit event when either notice write fails", function()
             for _, failed_type in ipairs({ consts.MSG_TYPE.SYSTEM, consts.MSG_TYPE.DEVELOPER }) do
-                local ctx = mock_ctx(fake_agent(1000), { max_turn_iterations = 1 })
+                local ctx, captured = mock_ctx(fake_agent(1000), { max_turn_iterations = 1 })
                 local original_add = ctx.writer.add_message
                 user_step(ctx)
                 ctx.writer.add_message = function(self, kind, content, metadata)
@@ -436,12 +436,13 @@ local function define_tests()
                     return original_add(self, kind, content, metadata)
                 end
                 local result, err = continue_step(ctx)
-                test.is_nil(result)
-                test.contains(tostring(err), "turn notice disk unavailable")
+                test.is_nil(err)
+                test.eq(result.stopped, "max_iterations")
+                test.eq(captured.session_errors[1].code, "turn_limit_reached")
             end
         end)
 
-        it("fails when a truncation notice cannot be stored", function()
+        it("continues after a truncation notice write fails", function()
             local agent = fake_agent(nil)
             agent.step = function() return { result = "", truncated = true, tool_calls = {} } end
             local ctx = mock_ctx(agent)
@@ -449,23 +450,29 @@ local function define_tests()
 
             local result, err = user_step(ctx)
 
-            test.is_nil(result)
-            test.contains(tostring(err), "truncation disk unavailable")
+            test.is_nil(err)
+            test.eq(result.next_ops[1].type, consts.OP_TYPE.AGENT_STEP)
         end)
 
-        it("fails when a memory prompt cannot be stored", function()
+        it("continues tool work when a memory prompt cannot be stored", function()
             local agent = fake_agent(nil)
             agent.step = function()
-                return { result = "", tool_calls = {},
+                return { result = "", tool_calls = {{ id = "call-1", name = "pack_document",
+                    arguments = "{}", registry_id = "app:pack_document" }},
                     memory_prompt = { content = "remember this" } }
             end
-            local ctx = mock_ctx(agent)
-            ctx.writer.add_message = function() return nil, "memory disk unavailable" end
+            local ctx, captured = mock_ctx(agent)
+            local original_add = ctx.writer.add_message
+            ctx.writer.add_message = function(self, kind, content, metadata)
+                if kind == consts.MSG_TYPE.DEVELOPER then return nil, "memory disk unavailable" end
+                return original_add(self, kind, content, metadata)
+            end
 
             local result, err = user_step(ctx)
 
-            test.is_nil(result)
-            test.contains(tostring(err), "memory disk unavailable")
+            test.is_nil(err)
+            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 1)
         end)
 
         it("records cancellation for every call when stop arrives during the model step", function()

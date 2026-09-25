@@ -251,12 +251,10 @@ function control_handlers.control_artifacts(ctx, op)
                     })
                 end
 
-                local system_id, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM,
-                    "Artifact created: " .. artifact_data.title, {
+                ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
                     system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
                     artifact_id = artifact_id
                 })
-                if not system_id then return nil, "Failed to store artifact announcement: " .. tostring(system_err) end
 
                 ctx.upstream:update_session({
                     artifact_added = artifact_id
@@ -283,12 +281,10 @@ function control_handlers.control_artifacts(ctx, op)
 
     if #instructions > 0 then
         local instruction_text = table.concat(instructions, "\n\n")
-        local instruction_id, instruction_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
-            instruction_text, {
+        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, instruction_text, {
             system_action = "artifact_instructions",
             created_artifacts = created_artifacts
         })
-        if not instruction_id then return nil, "Failed to store artifact instructions: " .. tostring(instruction_err) end
     end
 
     return {
@@ -546,18 +542,14 @@ function control_handlers.control_config(ctx, op)
             end
 
             local change_message = string.format("Configuration changed (%s)", table.concat(change_parts, ", "))
-            local system_id, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM,
-                change_message, {
+            ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, change_message, {
                 system_action = "config_change",
                 previous_agent = previous_agent,
                 new_agent = agent_changed and current_config.agent_id or nil,
                 previous_model = previous_model,
                 new_model = current_config.model
             })
-            if not system_id then return nil, "Failed to store config change: " .. tostring(system_err) end
-            local developer_id, developer_err = ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
-                change_message)
-            if not developer_id then return nil, "Failed to store config change: " .. tostring(developer_err) end
+            ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, change_message)
         end
     end
 

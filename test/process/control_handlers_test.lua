@@ -104,7 +104,7 @@ local function define_tests()
     end)
 
     describe("artifact control failures", function()
-        it("fails when an artifact announcement or instruction write fails", function()
+        it("continues when an artifact announcement or instruction write fails", function()
             for _, failed_type in ipairs({ consts.MSG_TYPE.SYSTEM, consts.MSG_TYPE.DEVELOPER }) do
                 local updates = 0
                 local ctx = {
@@ -123,9 +123,9 @@ local function define_tests()
                 local result, err = control_handlers.control_artifacts(ctx, {
                     artifacts = {{ title = "example", content = "text", instructions = true }}
                 })
-                test.is_nil(result)
-                test.contains(tostring(err), "announcement disk unavailable")
-                if failed_type == consts.MSG_TYPE.SYSTEM then test.eq(updates, 0) end
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(updates, 1)
             end
         end)
 
@@ -208,7 +208,7 @@ local function define_tests()
     end)
 
     describe("control_config trait and tool overlays", function()
-        it("fails when a configuration announcement is not stored", function()
+        it("continues when a configuration announcement is not stored", function()
             for _, failed_type in ipairs({ consts.MSG_TYPE.SYSTEM, consts.MSG_TYPE.DEVELOPER }) do
                 local ctx = mock_ctx()
                 ctx.writer.add_message = function(_self, kind)
@@ -217,8 +217,8 @@ local function define_tests()
                 end
                 local result, err = control_handlers.control_config(ctx,
                     { config_changes = { agent = "agent:writer" } })
-                test.is_nil(result)
-                test.contains(tostring(err), "config message disk unavailable")
+                test.is_nil(err)
+                test.is_true(result.completed)
             end
         end)
 

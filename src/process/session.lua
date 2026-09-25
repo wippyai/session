@@ -92,6 +92,10 @@ local function flush_held(ctx: any, run_agent: boolean)
     return run_agent and last_user_id or nil, nil, last_request_id
 end
 
+local function settle_exit(bus: any, err: any)
+    return bus:fail(err)
+end
+
 local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any)
     payload_data = payload_data or {}
     if payload_data.conn_pid then ctx.upstream.conn_pid = payload_data.conn_pid end
@@ -126,22 +130,25 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         local message_id, id_err = uuid.v7()
         if id_err then return nil, id_err end
         local data = type(payload_data.data) == "table" and payload_data.data or {}
+        local is_user = data.type ~= consts.MSG_TYPE.DEVELOPER
+            and data.type ~= consts.MSG_TYPE.SYSTEM
+        if is_user then
+            local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
+            if status_err then return nil, status_err end
+        end
         local item = { message_id = message_id, data = data, request_id = payload_data.request_id }
         if bus:is_turn_active() then
             table.insert(ctx.held, item)
         else
             local queued, queue_err = bus:queue_op({ type = consts.OP_TYPE.HANDLE_MESSAGE,
                 message_id = message_id, data = data, request_id = payload_data.request_id,
-                starts_turn = data.type ~= consts.MSG_TYPE.DEVELOPER
-                    and data.type ~= consts.MSG_TYPE.SYSTEM })
+                starts_turn = is_user })
             if not queued then
                 ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), queue_err)
                 return true
             end
         end
-        if data.type ~= consts.MSG_TYPE.DEVELOPER and data.type ~= consts.MSG_TYPE.SYSTEM then
-            local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
-            if status_err then return nil, status_err end
+        if is_user then
             ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
             ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
         end
@@ -375,6 +382,7 @@ local function run(args: SessionArgs)
 
     local inbox = process.inbox()
     local events = process.events()
+    local exit_err = nil :: string?
 
     if args.parent_pid then
         process.send(args.parent_pid :: string, consts.TOPICS.SESSION_OPENED, {
@@ -402,7 +410,8 @@ local function run(args: SessionArgs)
             else
                 local _, route_err = route_input(context, bus, topic, msg:payload():data(), session_state)
                 if route_err then
-                    error("Session ingress failed: " .. route_err)
+                    exit_err = "Session ingress failed: " .. route_err
+                    break
                 end
             end
         elseif result.channel == events then
@@ -411,7 +420,6 @@ local function run(args: SessionArgs)
             if event.kind == process.event.CANCEL then
                 session_state.stopping = true
                 session_state.interrupted = true
-                bus:stop()
                 break
             elseif event.kind == process.event.EXIT then
                 logger:debug("child process exited", { from = event.from })
@@ -421,7 +429,8 @@ local function run(args: SessionArgs)
         elseif result.channel == bus_done then
             session_state.bus_done_received = true
             if result.value.error then
-                error(result.value.error)
+                exit_err = result.value.error
+                break
             elseif session_state.finishing then
                 session_state.stopping = true
                 break
@@ -429,9 +438,13 @@ local function run(args: SessionArgs)
         end
     end
 
+    local _, settle_err = settle_exit(bus, exit_err)
+
     if not session_state.bus_done_received then
         bus_done:receive()
     end
+
+    if settle_err then error(settle_err) end
 
     local _, lifecycle_err = message_handlers.deactivate_current_agent(context, "session_finished", {
         state = "completed",
@@ -450,4 +463,5 @@ local function run(args: SessionArgs)
 end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
+    settle_exit = settle_exit,
     reference_artifact = reference_artifact }

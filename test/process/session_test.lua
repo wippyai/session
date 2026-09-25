@@ -34,6 +34,7 @@ local function fixture()
             update_session = function() end
         }
     }
+    ctx.flush_held = function(run_agent) return session.flush_held(ctx, run_agent) end
     return ctx, command_bus.new(ctx), saved, received, errors, successes
 end
 
@@ -109,6 +110,43 @@ local function define_tests()
             test.eq(err, "status disk unavailable")
             test.eq(#received, 0)
             test.eq(#saved, 0)
+        end)
+
+        it("settles earlier received input when a later status write fails", function()
+            local ctx, bus, saved, received = fixture()
+            bus.state = "running"
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "earlier" }, request_id = "earlier" }, {})
+            ctx.writer.update_status = function() return nil, "status disk unavailable" end
+
+            local _, ingress_err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "later" }, request_id = "later" }, {})
+            local _, exit_err = session.settle_exit(bus, ingress_err)
+
+            test.eq(#received, 1)
+            test.eq(#saved, 1)
+            test.eq(saved[1].message_id, received[1].id)
+            test.eq(saved[1].content, "earlier")
+            test.eq(#ctx.held, 0)
+            test.contains(tostring(exit_err), "status disk unavailable")
+        end)
+
+        it("settles received input on cancellation without an agent step", function()
+            local ctx, bus, saved, received = fixture()
+            bus.state = "running"
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "cancelled turn" }, request_id = "request-1" }, {})
+
+            local _, exit_err = session.settle_exit(bus, nil)
+
+            test.is_nil(exit_err)
+            test.eq(bus.state, "closed")
+            test.eq(#received, 1)
+            test.eq(#saved, 1)
+            test.eq(saved[1].message_id, received[1].id)
+            test.eq(saved[1].content, "cancelled turn")
+            test.eq(#ctx.held, 0)
+            test.eq(#bus.ops, 0)
         end)
 
         it("rejects a full held buffer and still accepts STOP", function()
