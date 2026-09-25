@@ -361,7 +361,7 @@ local function run(args)
         return true, nil
     end
 
-    local function create_session(payload_data, prepare_initial_message)
+    local function create_session(payload_data)
         if not payload_data then
             return nil, "Payload data is required"
         end
@@ -440,10 +440,6 @@ local function run(args)
             parent_pid = process.pid()
         }
         session_init.recovery_notice = recovery_notice
-        if prepare_initial_message then
-            session_init.initial_message = { data = payload_data.data,
-                request_id = payload_data.request_id, conn_pid = payload_data.conn_pid }
-        end
 
         if create_new_session then
             session_init.create = true
@@ -496,7 +492,7 @@ local function run(args)
             end
         end
 
-        return session_id, nil, prepare_initial_message
+        return session_id, nil
     end
 
     local function handle_session_close(payload_data)
@@ -536,8 +532,6 @@ local function run(args)
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
         local request_id = payload_data.request_id
-        local started_with_message = nil
-
         local function forward(session_info)
             if session_info.terminating then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
@@ -580,13 +574,11 @@ local function run(args)
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
 
         if not session_id and state.session_count == 0 then
-            local created_session_id, err, initial_id = create_session(payload_data,
-                topic_type == consts.HANDLER_TYPES.MESSAGE)
+            local created_session_id, err = create_session(payload_data)
             if err then
                 return
             end
             session_id = created_session_id
-            started_with_message = initial_id
         elseif not session_id then
             local most_recent_id = nil
             local most_recent_time = nil
@@ -610,12 +602,11 @@ local function run(args)
         local session_info = state.active_sessions[session_id]
         if session_info then
             update_session_activity(session_id)
-            if not started_with_message then forward(session_info) end
+            forward(session_info)
         else
             -- Session ID provided but not in active sessions - try to recover
             logger:info("attempting to recover inactive session", { user_id = state.user_id, session_id = session_id })
-            local created_session_id, err, initial_id = create_session(payload_data,
-                topic_type == consts.HANDLER_TYPES.MESSAGE)
+            local created_session_id, err = create_session(payload_data)
             if err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session not found and recovery failed: " .. err, request_id)
@@ -626,8 +617,7 @@ local function run(args)
             local recovered_session_info = state.active_sessions[created_session_id :: string]
             if recovered_session_info then
                 update_session_activity(created_session_id)
-
-                if not initial_id then forward(recovered_session_info) end
+                forward(recovered_session_info)
             else
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session recovery failed", request_id)

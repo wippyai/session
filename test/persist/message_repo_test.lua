@@ -26,6 +26,36 @@ local function define_tests()
             test_data.user_id = actor:id()
         end
 
+        local function recover_after_written_result(call_type)
+            local session_writer, writer_err = writer.new(test_data.session_id)
+            test.is_nil(writer_err)
+            local assistant_id, call_ids, response_err = session_writer:add_response("thinking", {}, {
+                { id = "written", name = "first", arguments = "{}", type = call_type },
+                { id = "unfinished", name = "second", arguments = "{}", type = call_type }
+            })
+            test.is_nil(response_err)
+            test.not_nil(assistant_id)
+            test.not_nil(call_ids)
+            local _, result_err = session_writer:update_message_meta(call_ids.written, {
+                status = consts.FUNC_STATUS.SUCCESS, result = "written result"
+            })
+            test.is_nil(result_err)
+
+            local recovered, recovery_err = message_repo.recover_pending(test_data.session_id)
+            test.is_nil(recovery_err)
+            test.eq(recovered, 1)
+            local written = message_repo.get(call_ids.written)
+            test.eq(written.metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq(written.metadata.result, "written result")
+            local unfinished = message_repo.get(call_ids.unfinished)
+            test.eq(unfinished.metadata.status, consts.FUNC_STATUS.ERROR)
+            test.eq(unfinished.metadata.result, "interrupted, outcome unknown")
+
+            message_repo.delete(assistant_id)
+            message_repo.delete(call_ids.written)
+            message_repo.delete(call_ids.unfinished)
+        end
+
         -- Setup test environment before all tests
         before_all(function()
             wait_for_boot.run()
@@ -134,6 +164,18 @@ local function define_tests()
             message_repo.delete(assistant_id)
             message_repo.delete(first_id)
             message_repo.delete(second_id)
+        end)
+
+        it("keeps a written function result when recovery interrupts unfinished calls", function()
+            recover_after_written_result(consts.MSG_TYPE.FUNCTION)
+        end)
+
+        it("keeps a written private function result when recovery interrupts unfinished calls", function()
+            recover_after_written_result(consts.MSG_TYPE.PRIVATE_FUNCTION)
+        end)
+
+        it("keeps a written delegation result when recovery interrupts unfinished calls", function()
+            recover_after_written_result(consts.MSG_TYPE.DELEGATION)
         end)
 
         it("rejects duplicate response call ids before writing any response rows", function()

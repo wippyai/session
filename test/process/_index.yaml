@@ -15,6 +15,7 @@ entries:
       session: wippy.session.process:session
       message_handlers: wippy.session.process:message_handlers
       command_bus: wippy.session.process:command_bus
+      control_handlers: wippy.session.process:control_handlers
       test: wippy.test:test
     method: run_tests
   - name: control_handlers_test
@@ -96,8 +97,16 @@ entries:
     source: file://command_bus_test.lua
     modules:
       - time
+      - uuid
+      - security
     imports:
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      reader: wippy.session.persist:reader
+      session: wippy.session.process:session
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+      writer: wippy.session.persist:writer
       test: wippy.test:test
     method: run_tests

@@ -1,6 +1,14 @@
 local test = require("test")
 local command_bus = require("command_bus")
 local consts = require("consts")
+local context_repo = require("context_repo")
+local reader = require("reader")
+local security = require("security")
+local session = require("session")
+local session_repo = require("session_repo")
+local uuid = require("uuid")
+local wait_for_boot = require("wait_for_boot")
+local writer = require("writer")
 
 -- The session asks the bus to finish (FINISH_AND_EXIT: the client disconnected, the plugin
 -- is shutting down, the session went inactive) expecting the in-flight work to wind down and
@@ -14,6 +22,18 @@ local consts = require("consts")
 -- finishing bus must stop feeding it, exactly the way an intercept (STOP) already does.
 
 local SAFETY_VALVE = 5
+
+local function create_persisted_fixture(): (string, string)
+    wait_for_boot.run()
+    local actor = security.actor()
+    local session_id = uuid.v7()
+    local context_id = uuid.v7()
+    local _, context_err = context_repo.create(context_id, "primary", "{}")
+    test.is_nil(context_err)
+    local _, session_err = session_repo.create(session_id, actor:id(), context_id, "Boundary", "test")
+    test.is_nil(session_err)
+    return session_id, context_id
+end
 
 -- Runs a "loop" op that re-queues itself through next_ops on a fresh bus. `on_call(n, bus)`
 -- runs before each op's result is produced and returns true once it has signalled the bus.
@@ -82,45 +102,113 @@ local function define_tests()
         end)
     end)
     describe("turn boundaries", function()
-        it("keeps call intents and outcomes before held input and runs one guarded continuation", function()
-            local order = {}
-            local ctx = { held = { "user-2" } }
+        it("persists assistant, call results, and held input in boundary order", function()
+            local session_id, context_id = create_persisted_fixture()
+            local session_writer, writer_err = writer.new(session_id)
+            test.is_nil(writer_err)
+            if not session_writer then error("Failed to open persisted test writer") end
+            local held_id = uuid.v7()
+            local ctx = { writer = session_writer, held = {{
+                message_id = held_id, data = { text = "held user message" }
+            }} }
             local bus = command_bus.new(ctx)
-            ctx.flush_held = function(run_agent)
-                for _, id in ipairs(ctx.held) do table.insert(order, id) end
-                ctx.held = {}
-                return run_agent and "user-2" or nil
-            end
-            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
-                bus.turn_state.steps = bus.turn_state.steps + 1
-                table.insert(order, "assistant")
-                table.insert(order, "call-1")
-                table.insert(order, "call-2")
+            local assistant_id = nil :: string?
+            local call_ids = nil :: any
+            ctx.flush_held = function(run_agent) return session.flush_held(ctx, run_agent) end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function(_ctx, op)
+                if op.message_id == held_id then
+                    bus:stop()
+                    return { completed = true }
+                end
+                local stored_assistant_id, stored_call_ids, response_err = session_writer:add_response("thinking", {}, {
+                    { id = "function-call", name = "lookup", arguments = "{}",
+                        registry_id = "app:lookup", type = consts.MSG_TYPE.FUNCTION },
+                    { id = "private-call", name = "secret", arguments = "{}",
+                        registry_id = "app:secret", type = consts.MSG_TYPE.PRIVATE_FUNCTION },
+                    { id = "delegation-call", name = "delegate", arguments = "{}",
+                        registry_id = "app:delegate", type = consts.MSG_TYPE.DELEGATION }
+                })
+                test.is_nil(response_err)
+                assistant_id = stored_assistant_id
+                call_ids = stored_call_ids
                 return { next_ops = {{ type = consts.OP_TYPE.PROCESS_TOOLS }} }
             end)
             bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, function()
-                table.insert(order, "result-1")
-                table.insert(order, "result-2")
-                return { next_ops = {
-                    { type = consts.OP_TYPE.CONTROL_CONTEXT },
-                    { type = consts.OP_TYPE.AGENT_CONTINUE }
-                } }
-            end)
-            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONTEXT, function()
-                table.insert(order, "control")
-                return { completed = true }
-            end)
-            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
-                table.insert(order, "continue-" .. tostring(bus.turn_state.steps))
-                bus:stop()
+                for call_id, result in pairs({
+                ["function-call"] = "function result",
+                ["private-call"] = "private result",
+                ["delegation-call"] = "delegation result"
+                }) do
+                    local _, result_err = session_writer:update_message_meta(call_ids[call_id], {
+                        status = consts.FUNC_STATUS.SUCCESS, result = result
+                    })
+                    test.is_nil(result_err)
+                end
                 return { completed = true }
             end)
             bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
-                from_user = true, message_id = "user-1" })
-            local _, err = bus:run()
-            test.is_nil(err)
-            test.eq(table.concat(order, ","),
-                "assistant,call-1,call-2,result-1,result-2,control,user-2,continue-1")
+                message_id = "first-user", from_user = true })
+
+            local ok, run_err = bus:run()
+
+            test.is_nil(run_err)
+            test.is_true(ok)
+
+            local session_reader, reader_err = reader.open(session_id)
+            test.is_nil(reader_err)
+            local history, history_err = session_reader:messages():all()
+            test.is_nil(history_err)
+            test.eq(#history, 5)
+            test.eq(history[1].message_id, assistant_id)
+            test.eq(history[1].type, consts.MSG_TYPE.ASSISTANT)
+            test.eq(history[2].type, consts.MSG_TYPE.FUNCTION)
+            test.eq(history[2].metadata.result, "function result")
+            test.eq(history[3].type, consts.MSG_TYPE.PRIVATE_FUNCTION)
+            test.eq(history[3].metadata.result, "private result")
+            test.eq(history[4].type, consts.MSG_TYPE.DELEGATION)
+            test.eq(history[4].metadata.result, "delegation result")
+            test.eq(history[5].message_id, held_id)
+            test.eq(history[5].type, consts.MSG_TYPE.USER)
+            test.eq(history[5].data, "held user message")
+
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+        end)
+
+        it("rejects queued user commands with the existing finishing code", function()
+            local errors = {} :: {any}
+            local bus = command_bus.new({ upstream = {
+                command_error = function(_self, request_id, code, message)
+                    table.insert(errors, { request_id = request_id, code = code, message = message })
+                end
+            } })
+            bus:queue_op({ type = "user-command", request_id = "queued", user_command = true })
+
+            bus:stop()
+
+            test.eq(#errors, 1)
+            test.eq(errors[1].request_id, "queued")
+            test.eq(errors[1].code, "SESSION_FINISHING")
+        end)
+
+        it("keeps agent work failures fatal without reporting them as command errors", function()
+            local errors = {} :: {any}
+            local bus = command_bus.new({ upstream = {
+                command_error = function(_self, request_id, code, message)
+                    table.insert(errors, { request_id = request_id, code = code, message = message })
+                end
+            } })
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                return nil, "agent step failed"
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                message_id = "user-message", request_id = "agent-request", from_user = true })
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.eq(err, "agent step failed")
+            test.eq(#errors, 0)
         end)
 
         it("terminalizes unstarted calls when STOP arrives during the agent step", function()

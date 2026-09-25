@@ -190,7 +190,72 @@ local function define_tests()
         end)
     end)
     describe("plugin exit and recovery", function()
-        it("passes the first message directly to the session and forwards later messages", function()
+        it("sends the initial idle update before receipt and running", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Startup order")
+            local hub_pid = "startup-order-hub"
+            local sent = {}
+            local inbox = { case_receive = function(self) return self end }
+            local events = { case_receive = function(self) return self end }
+            local bus_done = {
+                case_receive = function(self) return self end,
+                send = function() return true end,
+                receive = function() return nil end
+            }
+            local original_inbox = process.inbox
+            local original_events = process.events
+            local original_send = process.send
+            local original_channel_new = channel.new
+            local original_channel_select = channel.select
+            local original_spawn = coroutine.spawn
+            local selection = 0
+
+            mock("process.inbox", function() return inbox end)
+            mock("process.events", function() return events end)
+            mock("channel.new", function(capacity)
+                if capacity == nil then return bus_done end
+                return original_channel_new(capacity)
+            end)
+            mock("coroutine.spawn", function(_fn) end)
+            mock("process.send", function(pid, topic, payload)
+                if pid == hub_pid then table.insert(sent, { topic = topic, payload = payload }) end
+                return true, nil
+            end)
+            mock("channel.select", function()
+                selection = selection + 1
+                if selection == 1 then
+                    return { ok = true, channel = inbox, value = plugin_message(consts.TOPICS.MESSAGE, {
+                        data = { text = "first" }, request_id = "first"
+                    }) }
+                end
+                return { ok = true, channel = events, value = { kind = process.event.CANCEL } }
+            end)
+
+            local ok, result = pcall(session.run, { session_id = session_id, user_id = actor:id(),
+                parent_pid = hub_pid, create = true })
+            mock("process.inbox", original_inbox)
+            mock("process.events", original_events)
+            mock("process.send", original_send)
+            mock("channel.new", original_channel_new)
+            mock("channel.select", original_channel_select)
+            mock("coroutine.spawn", original_spawn)
+
+            test.is_true(ok, tostring(result))
+            test.eq(result.status, "shutdown")
+            local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
+            local order = {}
+            for _, event in ipairs(sent) do
+                if event.topic == session_topic and event.payload.status then
+                    table.insert(order, event.payload.status)
+                elseif event.payload.type == consts.UPSTREAM_TYPES.RECEIVED then
+                    table.insert(order, "received")
+                end
+            end
+            test.eq(table.concat(order, ","), "idle,received,running")
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("forwards the first input after creating a new session", function()
             local actor = security.actor()
             local first_id, first_context = create_session_fixture(actor, "Initial input")
             local initial = run_plugin_lifecycle(actor, first_id, nil, {
@@ -198,8 +263,16 @@ local function define_tests()
                     data = { session_id = first_id, data = { text = "first" }, request_id = "first" } }
             }, { status = "shutdown", intentional_exit = true }, { open = false })
             test.is_nil(initial.error)
-            test.eq(initial.spawned_init.initial_message.data.text, "first")
-            test.eq(initial.spawned_init.initial_message.request_id, "first")
+            test.is_nil(initial.spawned_init.initial_message)
+            local first_message = nil :: any
+            for _, sent in ipairs(initial.sent) do
+                if sent.pid == initial.session_pid and sent.topic == consts.TOPICS.MESSAGE then
+                    first_message = sent.payload
+                end
+            end
+            test.not_nil(first_message)
+            test.eq(first_message.data.text, "first")
+            test.eq(first_message.request_id, "first")
 
             local second_id, second_context = create_session_fixture(actor, "Later input")
             local forwarded = run_plugin_lifecycle(actor, second_id, nil, {
@@ -357,7 +430,15 @@ local function define_tests()
             }, { status = "shutdown", intentional_exit = true }, { open = false })
             test.is_nil(restarted.error)
             test.not_nil(restarted.spawned_init.recovery_notice)
-            test.eq(restarted.spawned_init.initial_message.data.text, "continue")
+            test.is_nil(restarted.spawned_init.initial_message)
+            local forwarded = nil :: any
+            for _, sent in ipairs(restarted.sent) do
+                if sent.pid == restarted.session_pid and sent.topic == consts.TOPICS.MESSAGE then
+                    forwarded = sent.payload
+                end
+            end
+            test.not_nil(forwarded)
+            test.eq(forwarded.data.text, "continue")
             cleanup_session_fixture(session_id, context_id)
         end)
 

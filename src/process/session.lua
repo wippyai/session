@@ -20,7 +20,6 @@ type SessionArgs = {
     create: boolean?,
     start_token: string?,
     recovery_notice: string?,
-    initial_message: any?,
 }
 
 type SessionContext = {
@@ -51,7 +50,7 @@ local function reference_artifact(ctx, op)
 end
 
 local function queue_error_code(bus)
-    if bus.state == "closed" then return "SESSION_CLOSED" end
+    if bus.state == "closed" then return "SESSION_FINISHING" end
     if bus.state == "draining_finish" then return "SESSION_FINISHING" end
     return "SESSION_BUSY"
 end
@@ -316,17 +315,11 @@ local function run(args: SessionArgs)
         session_upstream:session_error("recovery_incomplete",
             args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
     end
-    if args.initial_message then
-        local _, input_err = route_input(context, bus, consts.TOPICS.MESSAGE,
-            args.initial_message, { finishing = false })
-        if input_err then error("Failed to queue initial message: " .. input_err) end
-    end
-
     -- Send initial session data to client
     session_upstream:update_session({
         agent = session_config.agent_id,
         model = session_config.model,
-        status = args.initial_message and consts.STATUS.RUNNING or consts.STATUS.IDLE,
+        status = consts.STATUS.IDLE,
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,
     })

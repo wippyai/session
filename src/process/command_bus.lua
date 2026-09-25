@@ -15,6 +15,12 @@ local function reject_user_command(self, op, code, message)
     self.context.upstream:command_error(op.request_id, code, message)
 end
 
+local function is_fatal_operation(op)
+    return op.type == consts.OP_TYPE.AGENT_STEP
+        or op.type == consts.OP_TYPE.PROCESS_TOOLS
+        or op.type == consts.OP_TYPE.AGENT_CONTINUE
+end
+
 function command_bus.new(context)
     local self = setmetatable({}, command_bus)
     self.context = context
@@ -95,10 +101,10 @@ end
 
 function command_bus:stop()
     for _, op in ipairs(self.ops) do
-        reject_user_command(self, op, "SESSION_CLOSED", "Session is closed")
+        reject_user_command(self, op, "SESSION_FINISHING", "Session is finishing")
     end
     for _, op in ipairs(self.settle_ops) do
-        reject_user_command(self, op, "SESSION_CLOSED", "Session is closed")
+        reject_user_command(self, op, "SESSION_FINISHING", "Session is finishing")
     end
     self.state = "closed"
     self.ops = {}
@@ -114,12 +120,25 @@ end
 
 function command_bus:process_operation(op)
     local handler = self.handlers[op.type]
-    if not handler then return nil, "No handler for operation: " .. tostring(op.type) end
-    local result, err = handler(self.context, op)
-    if err and self.context.upstream and op.request_id then
-        self.context.upstream:command_error(op.request_id, "HANDLER_ERROR", err)
+    if not handler then
+        local err = "No handler for operation: " .. tostring(op.type)
+        if not op.user_command then return nil, err end
+        reject_user_command(self, op, "HANDLER_ERROR", err)
+        return { error_handled = true, error_message = err }
     end
-    return result, err
+    local result, err = handler(self.context, op)
+    if err then
+        if op.user_command then
+            reject_user_command(self, op, "HANDLER_ERROR", err)
+            return { error_handled = true, error_message = err }
+        end
+        if is_fatal_operation(op) then return nil, err end
+        if op.type == consts.OP_TYPE.HANDLE_MESSAGE and self.context.upstream then
+            self.context.upstream:message_error(op.message_id, consts.ERROR_CODES.STORAGE_ERROR, err)
+        end
+        return { error_handled = true, error_message = err }
+    end
+    return result, nil
 end
 
 function command_bus:admitted(op)
@@ -206,7 +225,7 @@ function command_bus:run()
                 if err then return nil, err end
                 self:enqueue_result(result)
             elseif op.user_command then
-                local code = self.state == "closed" and "SESSION_CLOSED" or "SESSION_STOPPING"
+                local code = self.state == "closed" and "SESSION_FINISHING" or "SESSION_STOPPING"
                 reject_user_command(self, op, code, "Session no longer accepts this command")
             end
         elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then

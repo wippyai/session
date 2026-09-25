@@ -3,6 +3,7 @@ local consts = require("consts")
 local session = require("session")
 local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
+local control_handlers = require("control_handlers")
 
 local function fixture()
     local saved = {} :: {any}
@@ -158,7 +159,43 @@ local function define_tests()
             test.eq(successes[2], "artifact-request")
         end)
 
-        it("replies with a closed-session command error when lifecycle rejects a command", function()
+        it("keeps the session available after an invalid command and answers the next message", function()
+            local ctx, bus, _, _, errors = fixture()
+            local answered = nil :: string?
+            ctx.upstream.send_message_update = function(_self, message_id, update_type, payload)
+                if update_type == consts.UPSTREAM_TYPES.CONTENT then
+                    answered = message_id
+                    test.eq(payload.content, "answer")
+                end
+            end
+            bus:mount_op_handler(consts.OP_TYPE.HANDLE_CONTEXT, control_handlers.handle_context_command)
+            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function(_ctx, op)
+                test.eq(bus.state, "running")
+                ctx.upstream:send_message_update(op.message_id, consts.UPSTREAM_TYPES.CONTENT,
+                    { content = "answer" })
+                bus:stop()
+                return { completed = true }
+            end)
+
+            session.route_input(ctx, bus, consts.TOPICS.COMMAND, {
+                command = consts.COMMANDS.CONTEXT, action = "invalid", request_id = "bad-context"
+            }, {})
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE, {
+                data = { text = "next" }, request_id = "next-message"
+            }, {})
+
+            local ok, err = bus:run()
+
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(#errors, 1)
+            test.eq(errors[1].id, "bad-context")
+            test.eq(errors[1].code, "HANDLER_ERROR")
+            test.not_nil(answered)
+        end)
+
+        it("replies with the finishing code when lifecycle rejects a command", function()
             local ctx, bus, _, _, errors = fixture()
             bus:stop()
 
@@ -169,7 +206,7 @@ local function define_tests()
             test.is_true(ok)
             test.eq(#errors, 1)
             test.eq(errors[1].id, "closed-request")
-            test.eq(errors[1].code, "SESSION_CLOSED")
+            test.eq(errors[1].code, "SESSION_FINISHING")
             test.contains(errors[1].message, "closed")
         end)
 
