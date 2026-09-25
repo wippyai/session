@@ -341,6 +341,11 @@ local function run(args)
 
     local function queue_start_request(session_info, kind, payload_data)
         session_info.pending_requests = session_info.pending_requests or {}
+        if #session_info.pending_requests >= 256 then
+            send_error(payload_data.conn_pid, "SESSION_BUSY",
+                "Pending startup request buffer is full", payload_data.request_id)
+            return
+        end
         table.insert(session_info.pending_requests, { kind = kind, payload = payload_data })
     end
 
@@ -387,23 +392,20 @@ local function run(args)
             if request_id then cmd_data.request_id = request_id end
             if cmd_data.command == consts.COMMANDS.STOP then
                 cmd_data.stop_supervised = true
-                if not session_info.stop_request_id then
-                    local generated, id_err = uuid.v7()
-                    if id_err then
-                        send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
-                        return
-                    end
-                    session_info.stop_request_id = generated
+                local generated, id_err = uuid.v7()
+                if id_err then
+                    send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
+                    return
                 end
-                cmd_data.stop_request_id = session_info.stop_request_id
-                if not session_info.stop_escalation then
-                    session_info.stop_escalation = 1
-                    apply_stop_level(session_id, session_info, 1)
-                end
+                cmd_data.stop_request_id = generated
             end
             local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
             if send_err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
+            elseif cmd_data.command == consts.COMMANDS.STOP then
+                session_info.stop_request_id = cmd_data.stop_request_id
+                session_info.stop_escalation = 1
+                apply_stop_level(session_id, session_info, 1)
             end
         end
     end

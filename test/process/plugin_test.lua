@@ -41,6 +41,7 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
             if options.confirm_start ~= false then
                 table.insert(inputs, { topic = consts.TOPICS.SESSION_OPENED,
                     data = { session_id = init.session_id, from_pid = session_pid } })
+                for _, input in ipairs(options.after_open or {}) do table.insert(inputs, input) end
             end
             return session_pid, nil
         end }
@@ -72,7 +73,8 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
             local input = inputs[step]
             table.insert(trace, { kind = "input", topic = input.topic })
             return { ok = true, channel = inbox,
-                value = plugin_message(input.topic, input.data) }
+                value = plugin_message(input.topic,
+                    type(input.data) == "function" and input.data(sent) or input.data) }
         end
         local event = { kind = options.cancel_plugin and process.event.CANCEL or process.event.EXIT,
             from = session_pid }
@@ -996,6 +998,75 @@ local function define_tests()
             test.is_nil(run.error)
             test.eq(run.cancelled, 0)
             test.eq(run.terminated, 0)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("keeps a later stop armed when an earlier resolution arrives", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Overlapping stops", "running")
+            local stop_ids = {}
+            local function stop_id(sent, ordinal)
+                local count = 0
+                for _, item in ipairs(sent) do
+                    if item.topic == consts.TOPICS.COMMAND
+                        and item.payload.command == consts.COMMANDS.STOP then
+                        count = count + 1
+                        if count == ordinal then return item.payload.stop_request_id end
+                    end
+                end
+                return nil
+            end
+            local after_open = {
+                { topic = consts.PLUGIN_TOPICS.COMMAND,
+                    data = { session_id = session_id, data = { command = consts.COMMANDS.STOP } } },
+                { topic = consts.PLUGIN_TOPICS.COMMAND,
+                    data = { session_id = session_id, data = { command = consts.COMMANDS.STOP } } },
+                { topic = consts.TOPICS.STOP_ESCALATION, data = function(sent)
+                    stop_ids[1], stop_ids[2] = stop_id(sent, 1), stop_id(sent, 2)
+                    return { session_id = session_id, from_pid = "plugin-lifecycle-session",
+                        stop_request_id = stop_ids[2], supervised = true }
+                end },
+                { topic = consts.TOPICS.STOP_RESOLVED, data = function()
+                    return { session_id = session_id, from_pid = "plugin-lifecycle-session",
+                        stop_request_id = stop_ids[1] }
+                end },
+                { topic = consts.TOPICS.STOP_DEADLINE, data = function()
+                    return { session_id = session_id, session_pid = "plugin-lifecycle-session",
+                        stop_request_id = stop_ids[2], level = 1 }
+                end }
+            }
+            local run = run_plugin_lifecycle(actor, session_id, nil, {}, { error = "cancelled" },
+                { after_open = after_open })
+            test.is_nil(run.error)
+            test.not_nil(stop_ids[1])
+            test.not_nil(stop_ids[2])
+            test.is_false(stop_ids[1] == stop_ids[2])
+            test.eq(run.cancelled, 1)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("rejects startup requests after the 256 pending slots fill", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Startup queue", "running")
+            local requests = {}
+            for index = 1, 256 do
+                table.insert(requests, { topic = consts.PLUGIN_TOPICS.MESSAGE,
+                    data = { session_id = session_id, conn_pid = "queue-caller",
+                        request_id = "queued-" .. index, data = { text = "waiting" } } })
+            end
+            local run = run_plugin_lifecycle(actor, session_id, nil, requests,
+                { status = "shutdown", intentional_exit = true }, { confirm_start = false })
+            local full_error = nil
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.TOPICS.ERROR and sent.payload.request_id == "queued-256" then
+                    full_error = sent
+                end
+            end
+            test.is_nil(run.error)
+            test.not_nil(full_error)
+            test.eq(full_error.pid, "queue-caller")
+            test.eq(full_error.payload.error, "SESSION_BUSY")
+            test.contains(string.lower(full_error.payload.message), "full")
             cleanup_session_fixture(session_id, context_id)
         end)
 

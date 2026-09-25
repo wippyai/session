@@ -760,9 +760,58 @@ local function define_tests()
                 if row.id == ids["function"] then function_row = row end
             end
             test.not_nil(function_row)
-            test.eq((function_row or {}).metadata.status, consts.FUNC_STATUS.SUCCESS)
-            test.eq(((function_row or {}).metadata.result or {}).value, "written")
+            test.eq((function_row or {}).metadata.status, consts.FUNC_STATUS.ERROR)
+            test.contains(tostring((function_row or {}).metadata.result), "config store unavailable")
             test.eq(((function_row or {}).metadata.control_operations or {}).config.tools[1], "app:tool")
+        end)
+
+        it("applies the first call's effect before a later result write fails", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local applied = nil :: any
+            local continued = 0
+            ctx.agent_ctx.set_active_tools = function() end
+            ctx.writer.update_meta = function(_self, updates)
+                applied = updates.config
+                return true
+            end
+            local original_update = ctx.writer.update_message_meta
+            ctx.writer.update_message_meta = function(self, id, meta)
+                if id == ids["private"] and meta.status == consts.FUNC_STATUS.SUCCESS then
+                    return nil, "second result write failed"
+                end
+                return original_update(self, id, meta)
+            end
+            local bus = command_bus.new(ctx)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONFIG, control_handlers.control_config)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                continued = continued + 1
+                return { completed = true }
+            end)
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return {
+                        ["function"] = { result = { value = "first",
+                            _control = { config = { tools = { "app:tool" } } } },
+                            tool_call = tools["function"] },
+                        ["private"] = { result = "second", tool_call = tools["private"] }
+                    }
+                end
+            }
+            bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS,
+                tool_calls = { calls[1], calls[2] }, call_message_ids = ids, caller = caller,
+                validated_tools = validated, message_id = "user", agent = { id = "agent:documents" } })
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.contains(tostring(err), "second result write failed")
+            test.eq((captured.stored[1] :: any).metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq(((captured.stored[1] :: any).metadata.result or {}).value, "first")
+            test.eq((applied or {}).active_tools[1], "app:tool")
+            test.eq((captured.stored[2] :: any).metadata.status, consts.FUNC_STATUS.ERROR)
+            test.eq(continued, 0)
         end)
     end)
 end

@@ -70,6 +70,7 @@ entries:
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      control_handlers: wippy.session.process:control_handlers
 
   # wippy.session.process:session
   - name: session
