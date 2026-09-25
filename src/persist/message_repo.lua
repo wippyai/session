@@ -50,26 +50,39 @@ function message_repo.create_batch(session_id, rows)
 end
 
 function message_repo.recover_pending(session_id, anchor_id)
-    local window, err
-    if anchor_id then
-        window, err = message_repo.list_after_message(session_id, anchor_id)
-    else
-        local page
-        page, err = message_repo.list_by_session(session_id)
-        window = page and page.messages
-    end
-    if err then return nil, err end
     local recovered = 0
-    for _, row in ipairs(window or {}) do
-        if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
-            or row.type == consts.MSG_TYPE.DELEGATION)
-            and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
-            local _, update_err = message_repo.update_metadata(row.message_id, {
-                status = consts.FUNC_STATUS.ERROR,
-                result = "interrupted, outcome unknown"
-            })
-            if update_err then return nil, update_err end
-            recovered = recovered + 1
+    local function recover_rows(rows)
+        for _, row in ipairs(rows or {}) do
+            if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+                or row.type == consts.MSG_TYPE.DELEGATION)
+                and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
+                local _, update_err = message_repo.update_metadata(row.message_id, {
+                    status = consts.FUNC_STATUS.ERROR,
+                    result = "interrupted, outcome unknown"
+                })
+                if update_err then return nil, update_err end
+                recovered = recovered + 1
+            end
+        end
+        return true
+    end
+
+    if anchor_id then
+        local window, err = message_repo.list_after_message(session_id, anchor_id)
+        if err then return nil, err end
+        if not window then return nil, "Failed to list messages for recovery" end
+        local _, recovery_err = recover_rows(window)
+        if recovery_err then return nil, recovery_err end
+    else
+        local cursor = nil
+        while true do
+            local page, err = message_repo.list_by_session(session_id, 500, cursor, "before")
+            if err then return nil, err end
+            if not page then return nil, "Failed to list messages for recovery" end
+            local _, recovery_err = recover_rows(page.messages)
+            if recovery_err then return nil, recovery_err end
+            if not page.has_more then break end
+            cursor = page.next_cursor
         end
     end
     return recovered

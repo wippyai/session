@@ -110,6 +110,7 @@ function control_handlers.control_artifacts(ctx, op)
 
     for _, artifact_data in ipairs(op.artifacts) do
         if artifact_data.title and (artifact_data.content or artifact_data.page_id) then
+            local stored = false
             local artifact_id, err = uuid.v7()
             if err then
                 return nil, "Failed to generate artifact ID: " .. err
@@ -144,6 +145,11 @@ function control_handlers.control_artifacts(ctx, op)
                         display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.STANDALONE
                     }
                 )
+
+                if not success then
+                    return nil, "Failed to create artifact: " .. tostring(create_err)
+                end
+                stored = true
 
                 if success then
                     table.insert(created_artifacts, {
@@ -187,6 +193,11 @@ function control_handlers.control_artifacts(ctx, op)
                     }
                 )
 
+                if not success then
+                    return nil, "Failed to create artifact: " .. tostring(create_err)
+                end
+                stored = true
+
                 if success then
                     table.insert(created_artifacts, {
                         artifact_id = artifact_id,
@@ -215,7 +226,7 @@ function control_handlers.control_artifacts(ctx, op)
                 end
             end
 
-            if #created_artifacts > 0 then
+            if stored then
                 -- ⚠️ DO NOT REVERT unless you know exactly what you are doing. ⚠️
                 -- Chat front-ends render a standalone artifact card from a message
                 -- with type='artifact' + metadata.artifact_id. Without the line

@@ -1,5 +1,7 @@
 local test = require("test")
 local control_handlers = require("control_handlers")
+local command_bus = require("command_bus")
+local consts = require("consts")
 
 -- Builds a ctx whose agent_ctx records the declarative overlay calls. control_config
 -- reads session state for the agent/model path; a traits/tools-only directive leaves
@@ -54,6 +56,56 @@ local function mock_ctx()
 end
 
 local function define_tests()
+    describe("artifact control failures", function()
+        it("ends the turn on a failed second artifact without referencing it", function()
+            local stored = {}
+            local messages = {}
+            local updates = {} :: {any}
+            local ctx = {
+                writer = {
+                    create_artifact = function(_self, id)
+                        if #stored == 1 then return nil, "disk unavailable" end
+                        table.insert(stored, id)
+                        return true
+                    end,
+                    add_message = function(_self, kind, content, metadata)
+                        table.insert(messages, { kind = kind, content = content, metadata = metadata })
+                        return "message-" .. tostring(#messages)
+                    end
+                },
+                upstream = {
+                    send_message_update = function(_self, _id, _kind, payload)
+                        table.insert(updates, payload)
+                    end,
+                    update_session = function() end
+                }
+            }
+            local bus = command_bus.new(ctx)
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_ARTIFACTS,
+                control_handlers.control_artifacts)
+            bus:mount_op_handler("after_artifacts", function()
+                bus:stop()
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.CONTROL_ARTIFACTS, artifacts = {
+                { title = "stored", content = "one", instructions = false },
+                { title = "missing", content = "two", instructions = false }
+            } })
+            bus:queue_op({ type = "after_artifacts" })
+
+            local ok, err = bus:run()
+
+            test.is_nil(ok)
+            test.contains(tostring(err), "disk unavailable")
+            test.eq(#stored, 1)
+            test.eq(#updates, 1)
+            test.eq(updates[1].artifact_id, stored[1])
+            for _, message in ipairs(messages) do
+                test.eq(message.metadata.artifact_id, stored[1])
+            end
+        end)
+    end)
+
     describe("control_config trait and tool overlays", function()
         it("applies active traits declared in config", function()
             local ctx, captured = mock_ctx()

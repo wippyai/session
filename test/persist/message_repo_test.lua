@@ -254,6 +254,26 @@ local function define_tests()
             test.eq(recovered, 130)
         end)
 
+        it("recovers a pending call older than the first 500 rows without a checkpoint", function()
+            local rows = {}
+            local pending_id = uuid.v7()
+            table.insert(rows, { message_id = pending_id, type = consts.MSG_TYPE.FUNCTION,
+                data = "{}", metadata = { status = consts.FUNC_STATUS.PENDING } })
+            for index = 1, 510 do
+                table.insert(rows, { message_id = uuid.v7(), type = consts.MSG_TYPE.USER,
+                    data = "row " .. tostring(index), metadata = {} })
+            end
+            local created, create_err = message_repo.create_batch(test_data.session_id, rows)
+            test.is_nil(create_err)
+            test.is_true(created)
+            local recovered, recovery_err = message_repo.recover_pending(test_data.session_id)
+            local pending = message_repo.get(pending_id)
+            for _, row in ipairs(rows) do message_repo.delete(row.message_id) end
+            test.is_nil(recovery_err)
+            test.eq(recovered, 1)
+            test.eq(pending.metadata.status, consts.FUNC_STATUS.ERROR)
+        end)
+
         it("recovers only pending calls in the inclusive checkpoint window", function()
             local before_id = uuid.v7()
             local anchor_id = uuid.v7()

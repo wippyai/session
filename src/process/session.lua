@@ -198,12 +198,6 @@ local function run(args: SessionArgs)
         error("Failed to register session " .. registry_name .. ": " .. registration_error)
     end
 
-    if args.parent_pid then
-        process.send(args.parent_pid :: string, consts.TOPICS.SESSION_OPENED, {
-            session_id = args.session_id, from_pid = process.pid()
-        })
-    end
-
     local session_writer, writer_err = writer.new(args.session_id)
     if not session_writer then
         error("Failed to create session writer: " .. writer_err)
@@ -367,6 +361,12 @@ local function run(args: SessionArgs)
 
     local inbox = process.inbox()
     local events = process.events()
+
+    if args.parent_pid then
+        process.send(args.parent_pid :: string, consts.TOPICS.SESSION_OPENED, {
+            session_id = args.session_id, from_pid = process.pid()
+        })
+    end
 
     while not session_state.stopping do
         local result = channel.select({

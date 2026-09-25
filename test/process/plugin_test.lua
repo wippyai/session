@@ -11,6 +11,7 @@ local context_repo = require("context_repo")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local wait_for_boot = require("wait_for_boot")
+local start_tokens = require("start_tokens")
 
 local function plugin_message(topic, data)
     return {
@@ -56,7 +57,16 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     local inbox = process.inbox()
     local events = process.events()
     local step = 0
-    mock("channel.select", function()
+    mock("channel.select", function(cases)
+        if cases.default then
+            local pending_queue = (options.pending_on_exit or {}) :: {any}
+            local pending = table.remove(pending_queue, 1)
+            if pending then
+                return { ok = true, channel = inbox,
+                    value = plugin_message(pending.topic, pending.data) }
+            end
+            return { ok = true, default = true }
+        end
         step = step + 1
         if step <= #inputs then
             local input = inputs[step]
@@ -85,12 +95,14 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     }
 end
 
-local function run_start_through_session(actor, session_id, registry, session_pid, session_behavior)
+local function run_start_through_session(actor, session_id, registry, session_pid, session_behavior, options)
+    options = options or {}
     local sent = {}
     local scheduled = {}
     local spawned_init = nil :: table?
     local session_result = nil :: any
     local plugin_step = 0
+    local plugin_pending = {}
     local session_step = 0
     local in_session = false
     local plugin_inbox = { case_receive = function(self) return self end }
@@ -117,6 +129,9 @@ local function run_start_through_session(actor, session_id, registry, session_pi
     end)
     mock("process.send", function(pid, topic, payload)
         table.insert(sent, { pid = pid, topic = topic, payload = payload })
+        if topic == consts.TOPICS.SESSION_OPENED and pid == spawned_init.parent_pid then
+            table.insert(plugin_pending, plugin_message(topic, payload))
+        end
         return true, nil
     end)
     mock("process.registry", {
@@ -124,6 +139,7 @@ local function run_start_through_session(actor, session_id, registry, session_pi
             test.eq(name, "session." .. session_id)
             if registry.owner then return nil, registry.duplicate_error end
             registry.owner = session_pid
+            if options.on_register then options.on_register() end
             return true, nil
         end
     })
@@ -136,7 +152,8 @@ local function run_start_through_session(actor, session_id, registry, session_pi
     mock("coroutine.spawn", function(fn)
         if not in_session then table.insert(scheduled, fn) end
     end)
-    mock("channel.select", function()
+    mock("channel.select", function(cases)
+        if cases.default then return { ok = true, default = true } end
         if in_session then
             session_step = session_step + 1
             if session_behavior == "finish" then
@@ -154,6 +171,14 @@ local function run_start_through_session(actor, session_id, registry, session_pi
             return { ok = true, channel = plugin_inbox, value = plugin_message(consts.PLUGIN_TOPICS.OPEN, {
                 session_id = session_id, conn_pid = "start-caller", request_id = "start-request"
             }) }
+        end
+        if options.pending_after_start and #options.pending_after_start > 0 then
+            local pending = table.remove(options.pending_after_start, 1)
+            return { ok = true, channel = plugin_inbox,
+                value = plugin_message(pending.topic, pending.data) }
+        end
+        if #plugin_pending > 0 then
+            return { ok = true, channel = plugin_inbox, value = table.remove(plugin_pending, 1) }
         end
         return { ok = true, channel = plugin_events, value = {
             kind = process.event.EXIT, from = session_pid, result = session_result
@@ -443,6 +468,126 @@ local function define_tests()
         end)
     end)
     describe("plugin exit and recovery", function()
+        it("answers requests already in the inbox when the last start is refused", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Inbox refusal")
+            local pending = {
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id,
+                    conn_pid = "queued-open-caller", request_id = "queued-open" } },
+                { topic = consts.PLUGIN_TOPICS.MESSAGE, data = { session_id = session_id,
+                    conn_pid = "queued-message-caller", request_id = "queued-message",
+                    data = { text = "waiting" } } }
+            }
+            local run = run_plugin_lifecycle(actor, session_id, nil, {},
+                { status = "refused", error = "duplicate session" }, {
+                    confirm_start = false, pending_on_exit = pending,
+                    open_data = { session_id = session_id,
+                        conn_pid = "first-caller", request_id = "first-open" }
+                })
+            local errors = {}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.TOPICS.ERROR then errors[sent.payload.request_id] = sent end
+            end
+            test.eq(errors["first-open"].pid, "first-caller")
+            test.eq(errors["queued-open"].pid, "queued-open-caller")
+            test.eq(errors["queued-message"].pid, "queued-message-caller")
+            test.eq(#pending, 0)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("answers requests already in the inbox when the last session exits", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Inbox exit")
+            local pending = {
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id,
+                    conn_pid = "exit-open-caller", request_id = "exit-open" } },
+                { topic = consts.PLUGIN_TOPICS.MESSAGE, data = { session_id = session_id,
+                    conn_pid = "exit-message-caller", request_id = "exit-message",
+                    data = { text = "waiting" } } }
+            }
+            local run = run_plugin_lifecycle(actor, session_id, nil, {},
+                { status = "shutdown", intentional_exit = true }, {
+                    pending_on_exit = pending,
+                    open_data = { session_id = session_id,
+                        conn_pid = "first-caller", request_id = "first-open" }
+                })
+            local errors = {}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.TOPICS.ERROR then errors[sent.payload.request_id] = sent end
+            end
+            test.eq(errors["exit-open"].pid, "exit-open-caller")
+            test.eq(errors["exit-message"].pid, "exit-message-caller")
+            test.eq(#pending, 0)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("confirms a session started by a message and reports its generated ID", function()
+            local actor = security.actor()
+            local token, token_err = start_tokens.pack({ agent = "test:agent" })
+            test.is_nil(token_err)
+            local run = run_plugin_lifecycle(actor, "unused", "message-start-hub", {
+                { topic = consts.PLUGIN_TOPICS.MESSAGE, data = {
+                    conn_pid = "message-start-caller", request_id = "message-start",
+                    start_token = token, data = { text = "hello" }
+                } }
+            }, { status = "shutdown", intentional_exit = true }, { open = false })
+            local opened = nil :: any
+            for _, sent in ipairs(run.sent) do
+                if sent.pid == "message-start-hub" and sent.topic == consts.TOPICS.SESSION_OPENED then
+                    opened = sent.payload
+                end
+            end
+            test.not_nil(opened)
+            test.eq(opened.request_id, "message-start")
+            test.eq(opened.session_id, run.spawned_init.session_id)
+            test.eq(opened.active_session_ids[1], opened.session_id)
+            local stored = session_repo.get(opened.session_id, actor:id())
+            test.not_nil(stored)
+            session_repo.delete(opened.session_id)
+            context_repo.delete(stored.primary_context_id)
+        end)
+
+        it("does not confirm failed initialization and rejects queued requests", function()
+            local actor = security.actor()
+            for _, failure in ipairs({ "writer", "recovery" }) do
+                local session_id, context_id = create_session_fixture(actor, "Start failure")
+                if failure == "recovery" then
+                    local session_writer, writer_err = writer.new(session_id)
+                    test.is_nil(writer_err)
+                    local set_ok, set_err = session_writer:set_context(
+                        consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, uuid.v7())
+                    test.is_nil(set_err)
+                    test.is_true(set_ok)
+                end
+                local run = run_start_through_session(actor, session_id, {}, "failed-start-" .. failure,
+                    "cancel", { pending_after_start = {
+                        { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id,
+                            conn_pid = "second-open-caller", request_id = "second-open" } },
+                        { topic = consts.PLUGIN_TOPICS.MESSAGE, data = { session_id = session_id,
+                            conn_pid = "waiting-caller", request_id = "waiting-message",
+                            data = { text = "waiting" } } }
+                    }, on_register = failure == "writer" and function()
+                        session_repo.delete(session_id)
+                    end or nil })
+                local errors = {}
+                for _, sent in ipairs(run.sent) do
+                    if sent.topic == consts.TOPICS.SESSION_OPENED then
+                        error("Failed initialization announced SESSION_OPENED")
+                    end
+                    if sent.topic == consts.TOPICS.ERROR then errors[sent.payload.request_id] = sent end
+                end
+                test.not_nil(errors["start-request"])
+                test.not_nil(errors["second-open"])
+                test.not_nil(errors["waiting-message"])
+                test.eq(errors["start-request"].pid, "start-caller")
+                test.eq(errors["second-open"].pid, "second-open-caller")
+                test.eq(errors["waiting-message"].pid, "waiting-caller")
+                test.contains(errors["start-request"].payload.message,
+                    failure == "writer" and "Failed to create session writer"
+                        or "Failed to recover pending calls")
+                cleanup_session_fixture(session_id, context_id)
+            end
+        end)
         it("answers every request queued before a refused start and never forwards to that pid", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Refused start", consts.STATUS.IDLE)

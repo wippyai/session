@@ -353,6 +353,20 @@ local function run(args)
         session_info.pending_requests = {}
     end
 
+    local function fail_inbox_requests(code, message)
+        while true do
+            local selected = channel.select({ inbox:case_receive(), default = true })
+            if not selected.ok or selected.channel ~= inbox then return end
+            local request = selected.value
+            local topic = request:topic()
+            if topic == consts.PLUGIN_TOPICS.OPEN or topic == consts.PLUGIN_TOPICS.MESSAGE
+                or topic == consts.PLUGIN_TOPICS.COMMAND or topic == consts.PLUGIN_TOPICS.CLOSE then
+                local payload_data = request:payload():data() or {}
+                send_error(payload_data.conn_pid, code, message, payload_data.request_id)
+            end
+        end
+    end
+
     local function forward_request(session_info, session_id, topic_type, request_data)
         local conn_pid = request_data.conn_pid
         local request_id = request_data.request_id
@@ -573,7 +587,7 @@ local function run(args)
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
 
         if not session_id and state.session_count == 0 then
-            local created_session_id, err = create_session(payload_data)
+            local created_session_id, err = create_session(payload_data, true)
             if err then
                 return
             end
@@ -760,6 +774,9 @@ local function run(args)
                                 state.session_count = state.session_count - 1
                             end
                             if state.session_count == 0 then
+                                fail_inbox_requests(consts.ERROR_CODES.SESSION_SPAWN,
+                                    "Failed to create session: " ..
+                                    tostring(event.result.error or "Session start refused"))
                                 gc_ticker:stop()
                                 return { status = "shutdown", user_id = state.user_id,
                                     reason = "no_active_sessions" }
@@ -845,6 +862,8 @@ local function run(args)
                         end
 
                         if state.session_count == 0 then
+                            fail_inbox_requests(consts.ERROR_CODES.SESSION_NOT_FOUND,
+                                "Session exited: " .. err)
                             gc_ticker:stop()
                             logger:info("plugin shutting down - no active sessions", { user_id = state.user_id })
                             return { status = "shutdown", user_id = state.user_id, reason = "no_active_sessions" }
