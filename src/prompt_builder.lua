@@ -212,6 +212,21 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
+    -- A ROLLING BREAKPOINT ON THE HISTORY TAIL.
+    --
+    -- The prompt is rebuilt from the message rows on every agent step, and the only
+    -- markers were the context memories and the last checkpoint. Everything after the
+    -- checkpoint -- every tool call and result of the current turn -- was therefore sent
+    -- uncached on every step. Marking the end of the history lets a supported provider
+    -- reuse the unchanged prefix on the next step. The new suffix is a cache write;
+    -- changed or expired prefixes can still miss.
+    --
+    -- Provider mappers deduplicate and cap breakpoints while reserving a slot for the
+    -- latest eligible history boundary. Providers without explicit caching ignore markers.
+    if cache_markers and #messages > 0 then
+        builder:add_cache_marker("history_tail")
+    end
+
     return builder, nil
 end
 

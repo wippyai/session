@@ -396,6 +396,79 @@ local function define_tests()
             end)
         end)
 
+        describe("history tail cache marker", function()
+            local function turn()
+                return {
+                    { message_id = "msg-1", type = consts.MSG_TYPE.USER, data = "question", metadata = {} },
+                    {
+                        message_id = "msg-2",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ q = "x" }),
+                        metadata = { function_name = "search", call_id = "call-1", status = consts.FUNC_STATUS.SUCCESS, result = "hits" }
+                    }
+                }
+            end
+
+            it("ends the prompt with a cache marker so the next step reads the history from cache", function()
+                local builder, err = prompt_builder.build(turn(), {}, {}, { include_contexts = false, include_files = false })
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.eq(built[#built].role, "cache_marker")
+                test.eq(built[#built].marker_id, "history_tail")
+                test.eq(built[#built - 1].role, "function_result")
+            end)
+
+            it("keeps the previous history prefix stable when a new message is appended", function()
+                local first_builder, first_err = prompt_builder.build(turn(), {}, {}, {
+                    include_contexts = false, include_files = false
+                })
+                test.is_nil(first_err)
+                local first = first_builder:get_messages()
+
+                local next_turn = turn()
+                next_turn[#next_turn + 1] = {
+                    message_id = "msg-3", type = consts.MSG_TYPE.ASSISTANT,
+                    data = "I found the answer", metadata = {}
+                }
+                local second_builder, second_err = prompt_builder.build(next_turn, {}, {}, {
+                    include_contexts = false, include_files = false
+                })
+                test.is_nil(second_err)
+                local second = second_builder:get_messages()
+
+                for i = 1, #first - 1 do
+                    test.eq(second[i].role, first[i].role)
+                    if first[i].role == "function_call" then
+                        test.eq(second[i].function_call.id, first[i].function_call.id)
+                        test.eq(second[i].function_call.name, first[i].function_call.name)
+                    else
+                        test.eq(second[i].content[1].text, first[i].content[1].text)
+                    end
+                end
+                test.eq(second[#second - 1].role, "assistant")
+                test.eq(second[#second].marker_id, "history_tail")
+            end)
+
+            it("adds no marker when cache_markers is false", function()
+                local builder, err = prompt_builder.build(turn(), {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false
+                })
+
+                test.is_nil(err)
+                for _, m in ipairs(builder:get_messages()) do
+                    test.neq(m.role, "cache_marker")
+                end
+            end)
+
+            it("adds no marker to an empty history", function()
+                local builder, err = prompt_builder.build({}, {}, {}, { include_contexts = false, include_files = false })
+
+                test.is_nil(err)
+                test.eq(#builder:get_messages(), 0)
+            end)
+        end)
+
         describe("build with nil messages", function()
             it("should return error when messages is nil", function()
                 local builder, err = prompt_builder.build(nil, {}, {})
@@ -539,7 +612,7 @@ local function define_tests()
                     { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "please pack", metadata = {} },
                     { message_id = "asst-1", type = consts.MSG_TYPE.ASSISTANT, data = "on it", metadata = {} },
                 }
-                local builder, err = prompt_builder.from_session(mock_reader(window, "user-1"))
+                local builder, err = prompt_builder.from_session(mock_reader(window, "user-1"), { cache_markers = false })
 
                 test.is_nil(err)
                 local built = builder:get_messages()
