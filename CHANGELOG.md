@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/wippyai/session/compare/v0.5.0...v0.6.0) (2026-09-26)
+
+
+### Features
+
+* **prompt:** cache the conversation history with a rolling history_tail marker ([#39](https://github.com/wippyai/session/issues/39)) ([7ef1613](https://github.com/wippyai/session/commit/7ef1613b4bb60f362daa61cc11d23ce7a6b9a568))
+
 ## [0.5.0](https://github.com/wippyai/session/compare/v0.4.1...v0.5.0) (2026-09-23)
 
 
