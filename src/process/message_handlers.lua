@@ -278,7 +278,7 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
         end
     })
     if err then
-        return transition.activation, err
+        return (transition.activation :: table?), err
     end
 
     return transition.activation or { applied = 0, skipped = 0 }, nil
