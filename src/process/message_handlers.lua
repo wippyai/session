@@ -5,6 +5,7 @@ local prompt_builder = require("prompt_builder")
 local tool_caller = require("tool_caller")
 local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
+local lifecycle_controller = require("lifecycle_controller")
 
 type SessionContext = {
     session_id: string,
@@ -36,6 +37,7 @@ type ToolWrapperExecutionContext = {
 }
 
 local message_handlers = {}
+message_handlers._lifecycle_runtime = nil
 
 local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
 local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
@@ -138,7 +140,7 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
         run_context = run_context_ref(ctx, agent_ref, host),
     } :: LifecyclePayload
 
-    return lifecycle_runtime.apply(agent.bindings, payload)
+    return (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
 end
 
 local function append_lifecycle_messages(builder: any, result: table?)
@@ -195,63 +197,91 @@ function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: 
         state.active_agent_id = nil
         state.active_model = nil
         state.active_agent = nil
+        state.active_revision = nil
+        state.active_variant = nil
         return { applied = 0, skipped = 0 }, nil
     end
 
-    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, agent, {
-        reason = reason or REASON.SESSION_FINISHED,
-        outcome = outcome or {
-            state = OUTCOME.COMPLETED,
-            reason = reason or REASON.SESSION_FINISHED
-        }
+    local transition, err = lifecycle_controller.deactivate(state, {
+        fallback = state.active_agent == nil and {
+            id = state.active_agent_id,
+            model = state.active_model,
+            agent = agent,
+            variant = state.active_variant
+        } or nil,
+        payload = function(_phase, _descriptor)
+            return {
+                reason = reason or REASON.SESSION_FINISHED,
+                outcome = outcome or {
+                    state = OUTCOME.COMPLETED,
+                    reason = reason or REASON.SESSION_FINISHED
+                }
+            }
+        end,
+        dispatch = function(active_agent, phase, payload)
+            return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
+        end
     })
-
-    if not err then
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-    end
-
-    return result, err
+    return transition.deactivation or { applied = 0, skipped = 0 }, err
 end
 
 local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: table?): (table?, string?)
     ctx.lifecycle_state = ctx.lifecycle_state or {}
     local state = ctx.lifecycle_state
     local agent_ref = agent_ref_from(ctx, agent)
-    local same_agent = state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model
-
-    if same_agent then
-        state.active_agent = agent
-        return { applied = 0, skipped = 0 }, nil
-    end
-
-    if state.active_agent_id then
-        local _, deactivate_err = message_handlers.deactivate_current_agent(ctx, REASON.AGENT_SWITCH, {
-            state = OUTCOME.CONTINUES,
-            reason = REASON.AGENT_SWITCH
-        })
-        if deactivate_err then
-            return nil, deactivate_err
+    local fallback_agent = nil
+    if state.active_agent_id and not state.active_agent then
+        fallback_agent = current_agent(ctx)
+        if not fallback_agent and state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model then
+            fallback_agent = agent
+        end
+        if not fallback_agent then
+            state.active_agent_id = nil
+            state.active_model = nil
+            state.active_revision = nil
+            state.active_variant = nil
         end
     end
-
-    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.ACTIVATE, agent, {
-        reason = "agent_loaded",
-        refs = refs,
-        outcome = {
-            state = OUTCOME.CONTINUES,
-            reason = "agent_loaded"
-        }
+    local transition, err = lifecycle_controller.activate(state, {
+        id = agent_ref.id,
+        model = agent_ref.model,
+        agent = agent,
+        variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+    }, {
+        fallback = fallback_agent and {
+            id = state.active_agent_id,
+            model = state.active_model,
+            agent = fallback_agent,
+            variant = state.active_variant
+        } or nil,
+        payload = function(phase, _descriptor)
+            if phase == lifecycle_runtime.PHASE.DEACTIVATE then
+                return {
+                    reason = REASON.AGENT_SWITCH,
+                    outcome = {
+                        state = OUTCOME.CONTINUES,
+                        reason = REASON.AGENT_SWITCH
+                    }
+                }
+            end
+            return {
+                reason = "agent_loaded",
+                refs = refs,
+                outcome = {
+                    state = OUTCOME.CONTINUES,
+                    reason = "agent_loaded"
+                }
+            }
+        end,
+        dispatch = function(active_agent, phase, payload)
+            return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
+        end
     })
     if err then
-        return result, err
+        return transition.activation, err
     end
 
-    state.active_agent_id = agent_ref.id
-    state.active_model = agent_ref.model
-    state.active_agent = agent
-    return result, nil
+    return transition.activation or { applied = 0, skipped = 0 }, nil
 end
 
 local function outcome_from_agent_result(result: any): table

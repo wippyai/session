@@ -358,6 +358,166 @@ local function define_tests()
             test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
         end)
     end)
+
+    describe("agent lifecycle transitions", function()
+        after_each(function()
+            message_handlers._lifecycle_runtime = nil
+        end)
+
+        local function lifecycle_agent(id: string, binding: string): any
+            local agent = fake_agent(nil)
+            agent.id = id
+            agent.bindings = { lifecycle = { { binding = binding } } }
+            return agent
+        end
+
+        local function lifecycle_context(first: any): (any, {any}, any)
+            local ctx = mock_ctx(first)
+            local active = first
+            local transitions = {}
+            local rejected_phase = nil
+
+            ctx.agent_ctx.load_agent = function() return active, nil end
+            ctx.agent_ctx.get_current_agent = function() return active end
+            message_handlers._lifecycle_runtime = {
+                apply = function(bindings, payload)
+                    if payload.phase == "activate" or payload.phase == "deactivate" then
+                        transitions[#transitions + 1] = {
+                            phase = payload.phase,
+                            agent_id = payload.agent.id,
+                            binding = bindings.lifecycle[1].binding,
+                            reason = payload.reason,
+                        }
+                    end
+                    if payload.phase == rejected_phase then
+                        return nil, "strict lifecycle failure"
+                    end
+                    return { applied = 1, messages = {} }, nil
+                end
+            }
+
+            return ctx, transitions, {
+                set_agent = function(agent) active = agent end,
+                reject = function(phase) rejected_phase = phase end,
+            }
+        end
+
+        it("refreshes an unchanged agent and deactivates once when the session finishes", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx, transitions = lifecycle_context(first)
+            local finish: any = (message_handlers :: any).deactivate_current_agent
+
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(select(2, user_step(ctx)))
+            test.eq(#transitions, 1)
+            test.eq(transitions[1].phase, "activate")
+
+            local _, finish_err = finish(ctx, "session_finished")
+            test.is_nil(finish_err)
+            test.eq(#transitions, 2)
+            test.eq(transitions[2].phase, "deactivate")
+            test.eq(transitions[2].reason, "session_finished")
+            finish(ctx, "session_finished")
+            test.eq(#transitions, 2)
+        end)
+
+        it("deactivates the old agent before activating a switched agent", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+
+            test.eq(#transitions, 3)
+            test.eq(transitions[1].binding, "binding:one")
+            test.eq(transitions[2].phase, "deactivate")
+            test.eq(transitions[2].binding, "binding:one")
+            test.eq(transitions[2].reason, "agent_switch")
+            test.eq(transitions[3].phase, "activate")
+            test.eq(transitions[3].binding, "binding:two")
+        end)
+
+        it("recovers the active agent for a switch when only its ID was retained", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.active_agent = nil
+            ctx.agent_ctx.get_current_agent = function() return first end
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+
+            test.eq(#transitions, 3)
+            test.eq(transitions[2].phase, "deactivate")
+            test.eq(transitions[2].binding, "binding:one")
+            test.eq(transitions[3].phase, "activate")
+            test.eq(transitions[3].binding, "binding:two")
+        end)
+
+        it("refreshes the same agent when its stored object is missing and lookup is unavailable", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx, transitions = lifecycle_context(first)
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.active_agent = nil
+            ctx.agent_ctx.get_current_agent = function() return nil end
+            local loads = 0
+            ctx.agent_ctx.load_agent = function()
+                loads = loads + 1
+                if loads == 1 then return first, nil end
+                return nil, "old agent unavailable"
+            end
+
+            test.is_nil(select(2, user_step(ctx)))
+            test.eq(#transitions, 1)
+            test.eq(ctx.lifecycle_state.active_agent, first)
+        end)
+
+        it("switches lifecycle bindings when the trait overlay changes under the same agent", function()
+            local first = lifecycle_agent("agent:one", "binding:first_trait")
+            local second = lifecycle_agent("agent:one", "binding:second_trait")
+            local ctx, transitions, controls = lifecycle_context(first)
+            ctx.agent_ctx.active_traits = { "trait:first" }
+
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            ctx.agent_ctx.active_traits = { "trait:second" }
+            test.is_nil(select(2, user_step(ctx)))
+
+            test.eq(#transitions, 3)
+            test.eq(transitions[2].phase, "deactivate")
+            test.eq(transitions[2].binding, "binding:first_trait")
+            test.eq(transitions[3].phase, "activate")
+            test.eq(transitions[3].binding, "binding:second_trait")
+
+            ctx.agent_ctx.active_traits = { "trait:second" }
+            test.is_nil(select(2, user_step(ctx)))
+            test.eq(#transitions, 3)
+        end)
+
+        it("keeps the old agent active when strict deactivation fails", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            controls.reject("deactivate")
+            ctx.config.agent_id = second.id
+
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.eq(err, "strict lifecycle failure")
+            test.eq(#transitions, 2)
+            test.eq(ctx.lifecycle_state.active_agent_id, first.id)
+            test.eq(ctx.lifecycle_state.active_agent, first)
+        end)
+    end)
 end
 
 return { run_tests = test.run_cases(define_tests) }

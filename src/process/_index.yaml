@@ -65,6 +65,7 @@ entries:
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
       tool_caller: wippy.agent.tools:caller
+      lifecycle_controller: wippy.agent:lifecycle_controller
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
 
