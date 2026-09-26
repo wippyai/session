@@ -3,6 +3,20 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: lifecycle_behavior_test
+    kind: function.lua
+    meta:
+      name: Published agent behavior compatibility
+      type: test
+      suite: session
+      comment: Registry trait behaviors must compile into lifecycle and checkpoint bindings.
+    source: file://lifecycle_behavior_test.lua
+    imports:
+      compiler: wippy.agent.compiler:compiler
+      traits: wippy.agent.discovery:traits
+      test: wippy.test:test
+    method: run_tests
+
   - name: control_handlers_test
     kind: function.lua
     meta:
