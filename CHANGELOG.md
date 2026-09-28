@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.2](https://github.com/wippyai/session/compare/v0.6.1...v0.6.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* announce SESSION_OPENED before the first upstream event ([#44](https://github.com/wippyai/session/issues/44)) ([15e9da3](https://github.com/wippyai/session/commit/15e9da3264e7ebe15c1fe4ae00e2367bdc33f403))
+* **process:** send message_received after the message is persisted ([#45](https://github.com/wippyai/session/issues/45)) ([4fded17](https://github.com/wippyai/session/commit/4fded17e60373a13a5d9fefc6f05cca7133f4f9c))
+
 ## [0.6.1](https://github.com/wippyai/session/compare/v0.6.0...v0.6.1) (2026-09-28)
 
 
