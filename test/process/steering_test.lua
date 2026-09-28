@@ -102,10 +102,9 @@ local function fixture(rows)
             update_message_meta = function() return true end,
         },
         upstream = {
-            message_received = function() events[#events + 1] = "received" end,
-            command_success = function(_, request_id, data)
-                ctx.ack = { request_id = request_id, data = data }
-                events[#events + 1] = "ack"
+            message_received = function(_, message_id, text, files, input, request_id)
+                ctx.ack = { request_id = request_id, data = { message_id = message_id, text = text, file_uuids = files, input = input } }
+                events[#events + 1] = "received"
             end,
             command_error = function(_, _, code) ctx.rejection = code end,
             send_message_update = function(_, _, kind) events[#events + 1] = kind end,
@@ -127,7 +126,7 @@ local function define_tests()
             test.eq(events[1], "admit")
             test.eq(events[2], "session")
             test.eq(events[3], "received")
-            test.eq(events[4], "ack")
+            test.is_nil(events[4])
             test.eq(ctx.status, "running")
             test.eq(ctx.admission.status, "running")
             test.eq(ctx.ack.data.message_id, rows[1].message_id)
@@ -310,7 +309,7 @@ local function define_tests()
             test.eq(rows[2].metadata.input.state, "pending")
             test.eq(events[#events], "stop")
             for _, event in ipairs(events) do
-                test.is_false(event == "input_state")
+                test.is_false(event == "update")
                 test.is_false(event == "model")
             end
         end)
@@ -325,7 +324,7 @@ local function define_tests()
             test.not_nil(result)
             test.eq(rows[1].metadata.input.state, "applied")
             test.eq(ctx.expected_revision, 0)
-            test.contains(table.concat(events, ","), "input_state")
+            test.contains(table.concat(events, ","), "update")
             test.contains(table.concat(events, ","), "model")
         end)
 

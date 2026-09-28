@@ -1,4 +1,6 @@
 local test = require("test")
+local sql = require("sql")
+local consts = require("consts")
 local uuid = require("uuid")
 local security = require("security")
 local contract = require("contract")
@@ -118,9 +120,22 @@ local function define_tests()
 
         it("preserves malformed steering rows and fails the scan visibly", function()
             local id = uuid.v7()
-            test.not_nil(message_repo.create(id, session_b, "user", "bad metadata", {
+            local rejected, validation_err = message_repo.create(id, session_b, "user", "bad metadata", {
                 input = { state = "unknown" },
-            }))
+            })
+            test.is_nil(rejected)
+            test.not_nil(validation_err)
+            test.not_nil(message_repo.create(id, session_b, "user", "bad metadata", {}))
+            -- Simulate an existing corrupt row without passing through admission.
+            local resource = consts.get_db_resource()
+            local db, db_err = sql.get(resource)
+            test.is_nil(db_err)
+            local result, write_err = sql.builder.update("messages")
+                :set("metadata", '{"input":{"state":"unknown"}}')
+                :where("message_id = ?", id):run_with(db):exec()
+            db:release()
+            test.is_nil(write_err)
+            test.eq(result.rows_affected, 1)
             local pending, err = message_repo.list_pending_inputs(session_b)
             test.is_nil(pending)
             test.contains(err, "Malformed steering metadata")

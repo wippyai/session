@@ -83,12 +83,12 @@ function input_policy.snapshot(ctx, candidate, agent)
     return next_snapshot(ctx, candidate, agent)
 end
 
-local function announce(ctx, interaction)
+local function announce(ctx, interaction, request_id)
     ctx.interaction = interaction
     ctx.input_policy_revision = interaction.revision
     if ctx.upstream then
         pcall(function()
-            ctx.upstream:update_session({ status = ctx.status, interaction = interaction })
+            ctx.upstream:update_session({ status = ctx.status, interaction = interaction, request_id = request_id })
         end)
     end
 end

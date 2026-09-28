@@ -119,8 +119,9 @@ entries:
       type: test
       suite: session
     source: file://steering_persistence_test.lua
-    modules: [uuid, security, contract]
+    modules: [uuid, security, contract, sql]
     imports:
+      consts: wippy.session:consts
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo

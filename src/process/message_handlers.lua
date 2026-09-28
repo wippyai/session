@@ -1,6 +1,7 @@
 local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
+local input_metadata = require("input_metadata")
 local prompt_builder = require("prompt_builder")
 local tool_caller = require("tool_caller")
 local output = require("output")
@@ -343,11 +344,7 @@ local function prepare_pending_inputs(ctx, new_user_id)
     for _, message in ipairs(messages) do
         local input = message.metadata and message.metadata.input
         if input ~= nil then
-            if message.type ~= consts.MSG_TYPE.USER or type(input) ~= "table"
-                or (input.state ~= "pending" and input.state ~= "applied")
-                or (input.state == "pending" and input.after_message_id ~= nil)
-                or (input.after_message_id ~= nil and (type(input.after_message_id) ~= "string"
-                    or input.after_message_id == "")) then
+            if not input_metadata.validate(message) then
                 return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
             end
             if input.state == "pending" then pending[#pending + 1] = message end
@@ -381,7 +378,7 @@ end
 
 local function publish_applied_inputs(ctx, updates)
     for _, update in ipairs(updates) do
-        ctx.upstream:send_message_update(update.message_id, "input_state", {
+        ctx.upstream:send_message_update(update.message_id, consts.UPSTREAM_TYPES.UPDATE, {
             message_id = update.message_id, input = update.metadata.input,
         })
     end
@@ -602,10 +599,7 @@ function message_handlers.handle_message(ctx, op)
         return nil, err or "Failed to persist input"
     end
 
-    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input)
-    if op.request_id then ctx.upstream:command_success(op.request_id, {
-        message_id = message_id, input = input,
-    }) end
+    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id)
     return {
         message_id = message_id, completed = active,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,

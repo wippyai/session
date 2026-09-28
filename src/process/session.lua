@@ -51,7 +51,9 @@ end
 
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
-        if request_id then session_upstream:command_success(request_id, { stopped = true }) end
+        if request_id then session_upstream:update_session({
+            request_id = request_id, status = context.status, interaction = context.interaction,
+        }) end
         return true
     end
     local running = context.status == consts.STATUS.RUNNING
@@ -99,9 +101,8 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
     end
     context.stop_requested = true
     context.turn_state = candidate_state
-    input_policy.accept_committed(context, interaction)
+    input_policy.accept_committed(context, interaction, request_id)
     if stop_gate then stop_gate:send({ success = true }) end
-    if request_id then session_upstream:command_success(request_id, { stopped = true }) end
     return true
 end
 
@@ -425,7 +426,7 @@ local function run(args: SessionArgs)
                                 message_id = message_id,
                                 artifact_id = payload_data.artifact_id
                             })
-                            session_upstream:command_success(payload_data.request_id)
+                            session_upstream:update_session({ request_id = payload_data.request_id })
                         end
                     elseif payload_data.artifacts then
                         bus:queue_op({

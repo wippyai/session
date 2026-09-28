@@ -2,6 +2,7 @@ local sql = require("sql")
 local json = require("json")
 local time = require("time")
 local consts = require("consts")
+local input_metadata = require("input_metadata")
 
 type Message = {
     message_id: string,
@@ -34,6 +35,8 @@ end
 
 -- Create a new message
 function message_repo.create(message_id, session_id, msg_type, data, metadata)
+    local valid, validation_err = input_metadata.validate({ type = msg_type, metadata = metadata })
+    if not valid then return nil, validation_err end
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
@@ -142,6 +145,8 @@ end
 -- Create the first user message of a turn together with the RUNNING session
 -- state. A failed write leaves neither half committed.
 function message_repo.admit(message_id, session_id, msg_type, data, metadata, session_updates)
+    local valid, validation_err = input_metadata.validate({ type = msg_type, metadata = metadata })
+    if not valid then return nil, validation_err end
     if not message_id or message_id == "" then return nil, "Message ID is required" end
     if not session_id or session_id == "" then return nil, "Session ID is required" end
     if not msg_type or msg_type == "" then return nil, "Message type is required" end
@@ -288,10 +293,8 @@ function message_repo.list_pending_inputs(session_id)
     for _, message in ipairs(result or {}) do
         local metadata = message.metadata
         local input = type(metadata) == "table" and metadata.input
-        if message.type == consts.MSG_TYPE.USER and input ~= nil then
-            if type(input) ~= "table" or (input.state ~= "pending" and input.state ~= "applied")
-                or (input.state == "pending" and input.after_message_id ~= nil)
-                or (input.after_message_id ~= nil and (type(input.after_message_id) ~= "string" or input.after_message_id == "")) then
+        if input ~= nil then
+            if not input_metadata.validate(message) then
                 return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
             end
             if input.state == "pending" then pending[#pending + 1] = message end
@@ -331,9 +334,8 @@ function message_repo.apply_inputs(session_id, updates, expected_revision)
     end
     for _, update in ipairs(updates) do
         local next_input = type(update.metadata) == "table" and update.metadata.input
-        if type(next_input) ~= "table" or next_input.state ~= "applied"
-            or (next_input.after_message_id ~= nil and (type(next_input.after_message_id) ~= "string"
-                or next_input.after_message_id == "")) then
+        if not input_metadata.validate({ type = consts.MSG_TYPE.USER, metadata = update.metadata })
+            or type(next_input) ~= "table" or next_input.state ~= "applied" then
             return abort("Invalid applied input metadata")
         end
         local rows, read_err = sql.builder.select("metadata"):from("messages")
@@ -341,7 +343,8 @@ function message_repo.apply_inputs(session_id, updates, expected_revision)
         if read_err or not rows or #rows ~= 1 then return abort(read_err or "Pending message not found in session") end
         local metadata, decode_err = json.decode(tostring(rows[1].metadata or ""))
         if decode_err then return abort(decode_err) end
-        if type(metadata) ~= "table" or type(metadata.input) ~= "table" or metadata.input.state ~= "pending" then
+        if not input_metadata.validate({ type = consts.MSG_TYPE.USER, metadata = metadata })
+            or type(metadata) ~= "table" or type(metadata.input) ~= "table" or metadata.input.state ~= "pending" then
             return abort("Input is no longer pending")
         end
         for key, value in pairs(update.metadata) do metadata[key] = value end

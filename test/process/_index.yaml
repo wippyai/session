@@ -92,6 +92,18 @@ entries:
       test: wippy.test:test
     method: run_tests
 
+  - name: upstream_test
+    kind: function.lua
+    meta:
+      name: Session response protocol
+      type: test
+      suite: session
+    source: file://upstream_test.lua
+    imports:
+      upstream: wippy.session.process:upstream
+      test: wippy.test:test
+    method: run_tests
+
   - name: input_policy_test
     kind: function.lua
     meta:

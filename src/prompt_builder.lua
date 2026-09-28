@@ -1,6 +1,7 @@
 local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
+local input_metadata = require("input_metadata")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -12,27 +13,6 @@ type BuildOptions = {
 local prompt_builder = {
     _prompt = require("prompt")
 }
-
-local function validate_input_metadata(message): (boolean, string?)
-    local metadata = message.metadata
-    if type(metadata) ~= "table" or metadata.input == nil then return true end
-    if message.type ~= consts.MSG_TYPE.USER then
-        return false, "Steering metadata is only valid on user messages"
-    end
-    local input = metadata.input
-    if type(input) ~= "table" then return false, "Steering metadata must be a table" end
-    if input.state ~= "pending" and input.state ~= "applied" then
-        return false, "Steering state must be pending or applied"
-    end
-    local anchor = input.after_message_id
-    if input.state == "pending" and anchor ~= nil then
-        return false, "Pending steering input cannot have an anchor"
-    end
-    if anchor ~= nil and (type(anchor) ~= "string" or anchor == "") then
-        return false, "Steering anchor must be a non-empty string"
-    end
-    return true
-end
 
 -- The session-owned, optional file-provider contract. An application that stores
 -- uploads binds it (e.g. an uploads module) so the session can resolve a file_uuid to
@@ -126,7 +106,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     local builder = prompt_builder._prompt.new()
 
     for _, msg in ipairs(messages) do
-        local valid, validation_err = validate_input_metadata(msg)
+        local valid, validation_err = input_metadata.validate(msg)
         if not valid then
             return nil, "Malformed steering metadata on message " .. tostring(msg.message_id)
                 .. ": " .. tostring(validation_err)

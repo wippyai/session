@@ -258,7 +258,7 @@ local function run(args)
         return true, nil
     end
 
-    local function create_session(payload_data)
+    local function create_session(payload_data, implicit)
         if not payload_data then
             return nil, "Payload data is required"
         end
@@ -282,7 +282,7 @@ local function run(args)
                 process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
                     session_id = session_id,
                     active_session_ids = get_active_session_ids(),
-                    request_id = payload_data.request_id
+                    request_id = not implicit and payload_data.request_id or nil
                 })
             end
             return session_id, nil
@@ -378,7 +378,7 @@ local function run(args)
                 process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_OPENED, {
                     session_id = session_id,
                     active_session_ids = get_active_session_ids(),
-                    request_id = payload_data.request_id
+                    request_id = not implicit and payload_data.request_id or nil
                 })
             end
         end
@@ -428,7 +428,7 @@ local function run(args)
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
 
         if not session_id and state.session_count == 0 then
-            local created_session_id, err = create_session(payload_data)
+            local created_session_id, err = create_session(payload_data, true)
             if err then
                 return
             end
@@ -474,7 +474,7 @@ local function run(args)
         else
             -- Session ID provided but not in active sessions - try to recover
             logger:info("attempting to recover inactive session", { user_id = state.user_id, session_id = session_id })
-            local created_session_id, err = create_session(payload_data)
+            local created_session_id, err = create_session(payload_data, true)
             if err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session not found and recovery failed: " .. err, request_id)

@@ -57,6 +57,7 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
+      input_metadata: wippy.session:input_metadata
 
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo

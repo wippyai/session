@@ -27,12 +27,16 @@ local function fixture(write_error, rollback_error)
             end,
         },
         upstream = {
-            update_session = function() events[#events + 1] = "session" end,
+            update_session = function(_, data)
+                events[#events + 1] = data.request_id and ("ack:" .. data.request_id) or "session"
+            end,
         },
     }
     local commands = {
-        command_success = function(_, request_id)
-            events[#events + 1] = "ack:" .. request_id
+        update_session = function(_, data)
+            test.eq(data.status, ctx.status)
+            test.eq(data.interaction, ctx.interaction)
+            events[#events + 1] = "ack:" .. data.request_id
         end,
         command_error = function(_, request_id, code)
             events[#events + 1] = "error:" .. request_id .. ":" .. code
@@ -54,8 +58,8 @@ local function define_tests()
             test.is_nil(err)
             test.is_true(ok)
             test.eq(events[1], "write")
-            test.eq(events[2], "session")
-            test.eq(events[3], "ack:stop-1")
+            test.eq(events[2], "ack:stop-1")
+            test.eq(#events, 2)
             test.is_true(ctx.stop_requested)
             test.is_nil(ctx.turn_state.input_policy)
             test.is_false(ctx.interaction.can_send)
@@ -97,8 +101,8 @@ local function define_tests()
             test.is_nil(err)
             test.is_true(ok)
             test.eq(events[1], "stop-write")
-            test.eq(events[2], "session")
-            test.eq(events[3], "ack:stop-race")
+            test.eq(events[2], "ack:stop-race")
+            test.eq(#events, 2)
             test.is_true((batch[1] :: any).restored)
             test.is_true(ctx.stop_requested)
         end)

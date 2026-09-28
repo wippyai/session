@@ -67,6 +67,7 @@ entries:
       consts: wippy.session:consts
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
+      input_metadata: wippy.session:input_metadata
       tool_caller: wippy.agent.tools:caller
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
