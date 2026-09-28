@@ -702,6 +702,30 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
+        it("announces SESSION_OPENED before the first upstream event", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Opened first")
+            local run = run_start_through_session(actor, session_id, {}, "opened-first", "cancel")
+            test.is_nil(run.error)
+            local parent_pid = run.spawned_init.parent_pid
+            local opened_at = nil
+            local first_upstream_at = nil
+            for index, sent in ipairs(run.sent) do
+                if sent.pid == parent_pid then
+                    if sent.topic == consts.TOPICS.SESSION_OPENED then
+                        opened_at = opened_at or index
+                    elseif string.sub(sent.topic, 1, #consts.TOPIC_PREFIXES.SESSION)
+                        == consts.TOPIC_PREFIXES.SESSION then
+                        first_upstream_at = first_upstream_at or index
+                    end
+                end
+            end
+            test.not_nil(opened_at)
+            test.not_nil(first_upstream_at)
+            test.is_true(opened_at < first_upstream_at)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
         it("confirms a session started by a message and reports its generated ID", function()
             local actor = security.actor()
             local token, token_err = start_tokens.pack({ agent = "test:agent" })

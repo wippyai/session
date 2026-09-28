@@ -350,19 +350,6 @@ local function run(args: SessionArgs)
         end
     end
 
-    if args.recovery_notice or recovered_calls > 0 then
-        session_upstream:session_error("recovery_incomplete",
-            args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
-    end
-    -- Send initial session data to client
-    session_upstream:update_session({
-        agent = session_config.agent_id,
-        model = session_config.model,
-        status = consts.STATUS.IDLE,
-        last_message_date = session_data.last_message_date,
-        public_meta = session_data.public_meta,
-    })
-
     local session_state = {
         stopping = false,
         finishing = false,
@@ -389,6 +376,19 @@ local function run(args: SessionArgs)
             session_id = args.session_id, from_pid = process.pid()
         })
     end
+
+    if args.recovery_notice or recovered_calls > 0 then
+        session_upstream:session_error("recovery_incomplete",
+            args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
+    end
+
+    session_upstream:update_session({
+        agent = session_config.agent_id,
+        model = session_config.model,
+        status = consts.STATUS.IDLE,
+        last_message_date = session_data.last_message_date,
+        public_meta = session_data.public_meta,
+    })
 
     while not session_state.stopping do
         local result = channel.select({
