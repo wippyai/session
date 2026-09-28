@@ -22,7 +22,11 @@ local function fixture()
         },
         upstream = {
             message_received = function(_self, id, text)
-                table.insert(received, { id = id, text = text })
+                local stored = false
+                for _, row in ipairs(saved) do
+                    if row.message_id == id then stored = true end
+                end
+                table.insert(received, { id = id, text = text, stored = stored })
             end,
             send_message_update = function() end,
             command_success = function(_self, id)
@@ -40,7 +44,7 @@ end
 
 local function define_tests()
     describe("session input routing", function()
-        it("announces held input immediately and writes it in arrival order at the boundary", function()
+        it("announces held input only once it is written, in arrival order at the boundary", function()
             local ctx, bus, saved, received = fixture()
             bus.state = "running"
             local first = { data = { text = "first" }, request_id = "request-1" }
@@ -49,17 +53,42 @@ local function define_tests()
             test.is_nil(err)
             test.is_true(ok)
             session.route_input(ctx, bus, consts.TOPICS.MESSAGE, second, {})
-            test.eq(#received, 2)
+            test.eq(#received, 0)
             test.eq(#saved, 0)
             test.eq(#ctx.held, 2)
             local last_id, flush_err, request_id = session.flush_held(ctx, true)
             test.is_nil(flush_err)
+            test.eq(#received, 2)
             test.eq(last_id, received[2].id)
             test.eq(request_id, "request-2")
             test.eq(saved[1].message_id, received[1].id)
             test.eq(saved[2].message_id, received[2].id)
+            test.is_true(received[1].stored)
+            test.is_true(received[2].stored)
             test.eq(saved[1].content, "first")
             test.eq(saved[2].content, "second")
+        end)
+
+        it("announces a queued message only after it is persisted", function()
+            local ctx, bus, saved, received = fixture()
+            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                bus:stop()
+                return { completed = true }
+            end)
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "first" }, request_id = "request-1" }, {})
+            test.eq(#received, 0)
+            test.eq(#saved, 0)
+
+            local ok, err = bus:run()
+
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(#saved, 1)
+            test.eq(#received, 1)
+            test.eq(received[1].id, saved[1].message_id)
+            test.is_true(received[1].stored)
         end)
 
         it("holds a second input while the first start is still queued", function()
@@ -71,7 +100,8 @@ local function define_tests()
             test.eq(#bus.ops, 1)
             test.eq(#ctx.held, 1)
             test.eq(#saved, 0)
-            test.eq(received[2].id, (ctx.held[1] :: any).message_id)
+            test.eq(#received, 0)
+            test.eq((bus.ops[1] :: any).message_id ~= (ctx.held[1] :: any).message_id, true)
         end)
 
         it("persists a received queued message when an earlier control fails", function()

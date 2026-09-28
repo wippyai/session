@@ -55,25 +55,12 @@ local function queue_error_code(bus)
     return "SESSION_BUSY"
 end
 
-local function write_input(ctx: any, item: any)
-    local data = type(item.data) == "table" and item.data or {}
-    local msg_type = data.type
-    if msg_type ~= consts.MSG_TYPE.DEVELOPER and msg_type ~= consts.MSG_TYPE.SYSTEM then
-        msg_type = consts.MSG_TYPE.USER
-    end
-    local message_id, err = ctx.writer:add_message(msg_type, data.text or "", {
-        message_id = item.message_id, file_uuids = data.file_uuids
-    })
-    if err then return nil, err end
-    return message_id, msg_type
-end
-
 local function flush_held(ctx: any, run_agent: boolean)
     local last_user_id = nil
     local last_request_id = nil
     while #ctx.held > 0 do
         local item = ctx.held[1]
-        local message_id, msg_type = write_input(ctx, item)
+        local message_id, msg_type = message_handlers.write_input(ctx, item)
         if not message_id then
             if ctx.upstream then
                 for _, pending in ipairs(ctx.held) do
@@ -139,6 +126,9 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         local item = { message_id = message_id, data = data, request_id = payload_data.request_id }
         if bus:is_turn_active() then
             table.insert(ctx.held, item)
+            if is_user then
+                ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
+            end
         else
             local queued, queue_err = bus:queue_op({ type = consts.OP_TYPE.HANDLE_MESSAGE,
                 message_id = message_id, data = data, request_id = payload_data.request_id,
@@ -147,10 +137,6 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
                 ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), queue_err)
                 return true
             end
-        end
-        if is_user then
-            ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
-            ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
         end
         return true
     end

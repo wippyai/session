@@ -438,17 +438,30 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
-function message_handlers.handle_message(ctx, op)
-    local data = type(op.data) == "table" and op.data or {}
+-- Persists one input message and announces a user message as received once it is stored.
+function message_handlers.write_input(ctx, item)
+    local data = type(item.data) == "table" and item.data or {}
     local msg_type = data.type
     if msg_type ~= consts.MSG_TYPE.DEVELOPER and msg_type ~= consts.MSG_TYPE.SYSTEM then
         msg_type = consts.MSG_TYPE.USER
     end
     local message_id, err = ctx.writer:add_message(msg_type, data.text or "", {
-        message_id = op.message_id, file_uuids = data.file_uuids
+        message_id = item.message_id, file_uuids = data.file_uuids
     })
     if err then return nil, err end
+    if msg_type == consts.MSG_TYPE.USER and ctx.upstream then
+        ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
+    end
+    return message_id, msg_type
+end
+
+function message_handlers.handle_message(ctx, op)
+    local message_id, msg_type = message_handlers.write_input(ctx, op)
+    if not message_id then return nil, msg_type end
     if msg_type == consts.MSG_TYPE.USER then
+        if ctx.upstream then
+            ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
+        end
         return { message_id = message_id, next_ops = {{
             type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
             request_id = op.request_id, from_user = true
