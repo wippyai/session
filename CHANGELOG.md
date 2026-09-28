@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/wippyai/session/compare/v0.6.0...v0.6.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **process:** keep user input out of an in-flight agent turn and make stop escalate ([#38](https://github.com/wippyai/session/issues/38)) ([e45d2cd](https://github.com/wippyai/session/commit/e45d2cd67cce1fba9fb7f8cd845cd386e6891e35))
+
 ## [0.6.0](https://github.com/wippyai/session/compare/v0.5.0...v0.6.0) (2026-09-26)
 
 
