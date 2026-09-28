@@ -212,7 +212,8 @@ local function define_tests()
 
             local result, err = session_handlers.check_background_triggers(ctx, {
                 tokens = {
-                    prompt_tokens = 200
+                    prompt_tokens = 200,
+                    context_tokens = 200
                 },
                 message_id = "msg-1",
                 checkpoint_bindings = {
@@ -361,7 +362,7 @@ local function define_tests()
             }
 
             local result, err = session_handlers.check_background_triggers(ctx, {
-                tokens = { prompt_tokens = 200 },
+                tokens = { prompt_tokens = 200, context_tokens = 200 },
                 message_id = "msg-user",
                 checkpoint_anchor_id = "msg-assistant-7",
             })
@@ -374,12 +375,70 @@ local function define_tests()
 
             -- Callers that pass only message_id keep anchoring on it.
             local legacy, legacy_err = session_handlers.check_background_triggers(ctx, {
-                tokens = { prompt_tokens = 200 },
+                tokens = { prompt_tokens = 200, context_tokens = 200 },
                 message_id = "msg-user",
             })
             test.is_nil(legacy_err)
             test.eq(legacy.next_ops[1].checkpoint_id, "msg-user")
             test.eq(legacy.next_ops[1].message_id, "msg-user")
+        end)
+
+        it("triggers on the full context size, not the uncached prompt_tokens alone", function()
+            local ctx = {
+                config = {
+                    token_checkpoint_threshold = 100000,
+                    checkpoint_function_id = "fallback:checkpoint",
+                    title_function_id = nil,
+                },
+                reader = {
+                    state = function() return { title = "", meta = {} } end,
+                    messages = function() return { count = function() return 0 end } end,
+                    get_context = function() return nil end,
+                }
+            }
+
+            -- Claude-style report: caching means prompt_tokens is only the handful of
+            -- uncached tokens, while context_tokens carries the real, full prompt size.
+            local result, err = session_handlers.check_background_triggers(ctx, {
+                tokens = {
+                    prompt_tokens = 20,
+                    cache_read_tokens = 150000,
+                    context_tokens = 150040,
+                },
+                message_id = "msg-1",
+            })
+
+            test.is_nil(err)
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].type, "create_checkpoint")
+            test.eq(result.next_ops[1].trigger_tokens, 150040)
+        end)
+
+        it("does not trigger when the full context size is below the threshold", function()
+            local ctx = {
+                config = {
+                    token_checkpoint_threshold = 100000,
+                    checkpoint_function_id = "fallback:checkpoint",
+                    title_function_id = nil,
+                },
+                reader = {
+                    state = function() return { title = "", meta = {} } end,
+                    messages = function() return { count = function() return 0 end } end,
+                    get_context = function() return nil end,
+                }
+            }
+
+            local result, err = session_handlers.check_background_triggers(ctx, {
+                tokens = {
+                    prompt_tokens = 20,
+                    cache_read_tokens = 500,
+                    context_tokens = 520,
+                },
+                message_id = "msg-1",
+            })
+
+            test.is_nil(err)
+            test.is_true(result.skipped)
         end)
 
         it("refreshes the reader once the new anchor is recorded, so the next prompt starts from it", function()

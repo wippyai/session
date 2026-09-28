@@ -22,7 +22,8 @@ local function fake_agent(prompt_tokens: number?): any
                 tokens = {
                     prompt_tokens = prompt_tokens,
                     completion_tokens = 84,
-                    total_tokens = prompt_tokens + 84
+                    total_tokens = prompt_tokens + 84,
+                    context_tokens = prompt_tokens
                 }
             end
             return {
