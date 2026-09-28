@@ -9,6 +9,8 @@ entries:
       comment: Operation queuing and coordination system for session processing
       description: Manages operation queues, handler mounting, and async operation processing
     source: file://command_bus.lua
+    imports:
+      consts: wippy.session:consts
 
   # wippy.session.process:upstream
   - name: upstream
@@ -65,8 +67,10 @@ entries:
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
       tool_caller: wippy.agent.tools:caller
+      tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      control_handlers: wippy.session.process:control_handlers
 
   # wippy.session.process:session
   - name: session
@@ -78,6 +82,7 @@ entries:
     source: file://session.lua
     modules:
       - logger
+      - uuid
     imports:
       consts: wippy.session:consts
       reader: wippy.session.persist:reader
@@ -89,6 +94,7 @@ entries:
       session_handlers: wippy.session.process:session_handlers
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
+      message_repo: wippy.session.persist:message_repo
     method: run
 
   # wippy.session.process:plugin
@@ -113,4 +119,6 @@ entries:
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
+      reader: wippy.session.persist:reader
+      message_repo: wippy.session.persist:message_repo
     method: run

@@ -134,6 +134,54 @@ function session_writer:add_message(msg_type, content, metadata)
     return message_id
 end
 
+function session_writer:add_response(content, metadata, calls)
+    calls = calls or {}
+    local seen_call_ids = {}
+    for _, call in ipairs(calls) do
+        if type(call.id) ~= "string" or not string.find(call.id, "%S")
+            or not call.name or call.arguments == nil then
+            return nil, nil, "Tool call ID, name, and arguments are required"
+        end
+        if seen_call_ids[call.id] then
+            return nil, nil, "Duplicate tool call ID: " .. tostring(call.id)
+        end
+        seen_call_ids[call.id] = true
+    end
+
+    local assistant_id, id_err = uuid.v7()
+    if id_err then return nil, nil, id_err end
+    local rows = {{
+        message_id = assistant_id, type = "assistant", data = content, metadata = metadata
+    }}
+    local call_ids = {}
+    for _, call in ipairs(calls) do
+        local row_id, row_err = uuid.v7()
+        if row_err then return nil, nil, row_err end
+        local arguments = call.arguments
+        if type(arguments) == "table" then
+            local encoded, encode_err = json.encode(arguments)
+            if encode_err then return nil, nil, encode_err end
+            arguments = encoded
+        end
+        call_ids[call.id] = row_id
+        table.insert(rows, {
+            message_id = row_id,
+            type = call.type,
+            data = arguments,
+            metadata = {
+                call_id = call.id,
+                function_name = call.name,
+                registry_id = call.registry_id,
+                status = "pending",
+                provider_metadata = call.provider_metadata
+            }
+        })
+    end
+    local _, err = session_writer._message_repo.create_batch(self.session_id, rows)
+    if err then return nil, nil, err end
+    return assistant_id, call_ids, nil
+end
+
 function session_writer:update_message_meta(message_id, metadata)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"

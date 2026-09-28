@@ -64,6 +64,7 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
+      writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
