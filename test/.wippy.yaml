@@ -1,4 +1,4 @@
 version: "1.0"
 workspace:
   replacements:
-    wippy/session: ..
+    wippy/session: ../src

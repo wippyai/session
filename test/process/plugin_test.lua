@@ -20,6 +20,11 @@ local function plugin_message(topic, data)
     }
 end
 
+-- The plugin registers its own name at start; registry mocks pass it through.
+local function is_plugin_name(name)
+    return string.sub(name, 1, #consts.REGISTRY.PLUGIN) == consts.REGISTRY.PLUGIN
+end
+
 local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_result, options)
     options = options or {}
     local session_pid = options.session_pid or "plugin-lifecycle-session"
@@ -142,6 +147,7 @@ local function run_start_through_session(actor, session_id, registry, session_pi
     end)
     mock("process.registry", {
         register = function(name)
+            if is_plugin_name(name) then return true, nil end
             test.eq(name, "session." .. session_id)
             if registry.owner then return nil, registry.duplicate_error end
             registry.owner = session_pid
@@ -287,6 +293,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
     end)
     mock("process.registry", {
         register = function(name)
+            if is_plugin_name(name) then return true end
             test.eq(name, "session." .. session_id)
             return true
         end
@@ -418,6 +425,7 @@ local function run_live_owner_through_plugin(actor, session_id, owner_pid)
     end)
     mock("process.registry", {
         register = function(name)
+            if is_plugin_name(name) then return true, nil end
             test.eq(name, "session." .. session_id)
             if owner_registry.owner then
                 return nil, setmetatable({ kind = function() return "AlreadyExists" end }, {
@@ -1123,6 +1131,52 @@ local function define_tests()
             test.eq(message.request_id, "second")
             cleanup_session_fixture(first_id, first_context)
             cleanup_session_fixture(second_id, second_context)
+        end)
+
+        it("starts a stopped session for a form answer without a client connection", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Wake stopped", consts.STATUS.IDLE)
+            local run = run_plugin_lifecycle(actor, session_id, "wake-hub", {
+                { topic = consts.PLUGIN_TOPICS.WAKE, data = { session_id = session_id, message_id = "answer-1" } }
+            }, { status = "shutdown", intentional_exit = true }, { open = false })
+            test.is_nil(run.error)
+            test.not_nil(run.spawned_init)
+            test.eq(run.spawned_init.session_id, session_id)
+            test.is_nil(run.spawned_init.conn_pid)
+            test.is_nil(run.spawned_init.create)
+            for _, sent in ipairs(run.sent) do
+                test.is_false(sent.pid == "wake-hub" and sent.topic == consts.TOPICS.ERROR)
+            end
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("passes a form answer wake to a running session", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Wake running", consts.STATUS.IDLE)
+            local run = run_plugin_lifecycle(actor, session_id, "wake-hub", {}, nil, {
+                cancel_plugin = true,
+                after_open = {
+                    { topic = consts.PLUGIN_TOPICS.WAKE, data = { session_id = session_id, message_id = "answer-2" } }
+                },
+            })
+            test.is_nil(run.error)
+            local forwarded = nil :: any
+            for _, sent in ipairs(run.sent) do
+                if sent.pid == run.session_pid and sent.topic == consts.TOPICS.FORM_ANSWER then forwarded = sent.payload end
+            end
+            test.not_nil(forwarded)
+            test.eq(forwarded.message_id, "answer-2")
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("ignores a wake for a session this user does not have", function()
+            local actor = security.actor()
+            local unknown_id = uuid.v7()
+            local run = run_plugin_lifecycle(actor, unknown_id, "wake-hub", {
+                { topic = consts.PLUGIN_TOPICS.WAKE, data = { session_id = unknown_id, message_id = "answer-3" } }
+            }, nil, { open = false, cancel_plugin = true })
+            test.is_nil(run.error)
+            test.is_nil(run.spawned_init)
         end)
 
         it("surfaces cancellation as failure and permits restart", function()

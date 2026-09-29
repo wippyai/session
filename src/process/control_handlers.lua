@@ -3,6 +3,9 @@ local uuid = require("uuid")
 local consts = require("consts")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
+local tx = require("tx")
+local definition = require("definition")
+local form_artifact = require("form_artifact")
 
 type ArtifactData = {
     id: string?,
@@ -102,6 +105,130 @@ function control_handlers.context_delete(ctx, op)
     }
 end
 
+-- Stores one new artifact and the chat rows that come with it: the artifact
+-- row, the standalone artifact message (instructions == false) and the
+-- "Artifact created" system row. Shared by control_artifacts and
+-- control_forms so both create artifacts the same way.
+--
+-- opts.artifact_id - use this id instead of minting one
+-- opts.tx          - write every row on this caller-supplied transaction
+--
+-- Returns a record { artifact_id, title, kind, message_id?, message_date?,
+-- instruction? }. Nothing is sent upstream here: call announce_artifact with
+-- the record once the writes are durable (after commit when opts.tx is used).
+function control_handlers.store_artifact(ctx, artifact_data, opts)
+    opts = opts or {}
+    local write_opts = opts.tx and { tx = opts.tx } or nil
+
+    local artifact_id = opts.artifact_id
+    if not artifact_id then
+        local id_err
+        artifact_id, id_err = uuid.v7()
+        if id_err then
+            return nil, "Failed to generate artifact ID: " .. id_err
+        end
+    end
+
+    local kind, content, meta, instruction_template
+    if artifact_data.type == consts.ARTIFACT_TYPES.VIEW_REF then
+        if not artifact_data.page_id then
+            return nil, "Page ID is required for view_ref artifacts"
+        end
+
+        content = "{}"
+        if artifact_data.params then
+            local encoded, encode_err = json.encode(artifact_data.params)
+            if encode_err then
+                return nil, "Failed to encode artifact params: " .. encode_err
+            end
+            content = encoded
+        end
+
+        kind = consts.ARTIFACT_TYPES.VIEW_REF
+        meta = {
+            content_type = artifact_data.content_type or consts.CONTENT_TYPES.HTML,
+            description = artifact_data.description,
+            preview = artifact_data.preview,
+            icon = artifact_data.icon,
+            status = artifact_data.status or consts.ARTIFACT_STATUS.IDLE,
+            page_id = artifact_data.page_id,
+            display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.STANDALONE
+        }
+        instruction_template = consts.ARTIFACT_INSTRUCTIONS.VIEW_REF_TEMPLATE
+    else
+        kind = artifact_data.type or consts.ARTIFACT_TYPES.INLINE
+        content = artifact_data.content or ""
+        meta = {
+            content_type = artifact_data.content_type or consts.CONTENT_TYPES.MARKDOWN,
+            description = artifact_data.description,
+            preview = artifact_data.preview,
+            icon = artifact_data.icon,
+            status = artifact_data.status or consts.ARTIFACT_STATUS.IDLE,
+            display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.INLINE
+        }
+        instruction_template = consts.ARTIFACT_INSTRUCTIONS.WITH_PREVIEW_TEMPLATE
+    end
+
+    local success, create_err = ctx.writer:create_artifact(
+        artifact_id, kind, artifact_data.title, content, meta, write_opts)
+    if not success then
+        return nil, "Failed to create artifact: " .. tostring(create_err)
+    end
+
+    local record = { artifact_id = artifact_id, title = artifact_data.title, kind = kind }
+
+    if artifact_data.instructions ~= false then
+        if artifact_data.preview and artifact_data.preview ~= "" then
+            record.instruction = string.format(instruction_template,
+                artifact_data.title, artifact_id, artifact_data.preview)
+        else
+            record.instruction = string.format(consts.ARTIFACT_INSTRUCTIONS.REFERENCE_TEMPLATE,
+                artifact_data.title, artifact_id)
+        end
+    end
+
+    -- ⚠️ DO NOT REVERT unless you know exactly what you are doing. ⚠️
+    -- Chat front-ends render a standalone artifact card from a message
+    -- with type='artifact' + metadata.artifact_id. Without the line
+    -- below, standalone artifacts (instructions=false) never render in
+    -- the chat thread — only the SYSTEM/artifact_created message was
+    -- emitted, which front-ends do not render.
+    --
+    -- Gate to STANDALONE only: inline artifacts (instructions=true) are
+    -- rendered via the <artifact id="…"/> tag the agent embeds in its
+    -- reply (see the instructions block above). Emitting an artifact
+    -- message here for the inline case too would render it TWICE.
+    if artifact_data.instructions == false then
+        local message_id, message_err, stored_row: any = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT,
+            artifact_data.title, { artifact_id = artifact_id }, write_opts)
+        if message_err then
+            return nil, "Failed to store standalone artifact message: " .. message_err
+        end
+        record.message_id = message_id
+        record.message_date = type(stored_row) == "table" and stored_row.date or nil
+    end
+
+    ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
+        system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
+        artifact_id = artifact_id
+    }, write_opts)
+
+    return record, nil
+end
+
+-- Tells connected clients about an artifact stored by store_artifact.
+function control_handlers.announce_artifact(ctx, record)
+    if record.message_id then
+        ctx.upstream:send_message_update(record.message_id, "artifact", {
+            message_id = record.message_id,
+            artifact_id = record.artifact_id
+        })
+    end
+    ctx.upstream:update_session({
+        artifact_added = record.artifact_id
+    })
+end
+
 function control_handlers.control_artifacts(ctx, op)
     if not op.artifacts or #op.artifacts == 0 then
         return nil, "No artifacts provided"
@@ -112,156 +239,19 @@ function control_handlers.control_artifacts(ctx, op)
 
     for _, artifact_data in ipairs(op.artifacts) do
         if artifact_data.title and (artifact_data.content or artifact_data.page_id) then
-            local stored = false
-            local artifact_id, err = uuid.v7()
-            if err then
-                return nil, "Failed to generate artifact ID: " .. err
+            local record, store_err = control_handlers.store_artifact(ctx, artifact_data)
+            if not record then
+                return nil, store_err
             end
-
-            if artifact_data.type == consts.ARTIFACT_TYPES.VIEW_REF then
-                if not artifact_data.page_id then
-                    return nil, "Page ID is required for view_ref artifacts"
-                end
-
-                local content_for_db = "{}"
-                if artifact_data.params then
-                    local encoded, encode_err = json.encode(artifact_data.params)
-                    if encode_err then
-                        return nil, "Failed to encode artifact params: " .. encode_err
-                    end
-                    content_for_db = encoded
-                end
-
-                local success, create_err = ctx.writer:create_artifact(
-                    artifact_id,
-                    consts.ARTIFACT_TYPES.VIEW_REF,
-                    artifact_data.title,
-                    content_for_db,
-                    {
-                        content_type = artifact_data.content_type or consts.CONTENT_TYPES.HTML,
-                        description = artifact_data.description,
-                        preview = artifact_data.preview,
-                        icon = artifact_data.icon,
-                        status = artifact_data.status or consts.ARTIFACT_STATUS.IDLE,
-                        page_id = artifact_data.page_id,
-                        display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.STANDALONE
-                    }
-                )
-
-                if not success then
-                    return nil, "Failed to create artifact: " .. tostring(create_err)
-                end
-                stored = true
-
-                if success then
-                    table.insert(created_artifacts, {
-                        artifact_id = artifact_id,
-                        title = artifact_data.title,
-                        kind = consts.ARTIFACT_TYPES.VIEW_REF
-                    })
-
-                    if artifact_data.instructions ~= false then
-                        local instruction_text
-                        if artifact_data.preview and artifact_data.preview ~= "" then
-                            instruction_text = string.format(
-                                consts.ARTIFACT_INSTRUCTIONS.VIEW_REF_TEMPLATE,
-                                artifact_data.title,
-                                artifact_id,
-                                artifact_data.preview
-                            )
-                        else
-                            instruction_text = string.format(
-                                consts.ARTIFACT_INSTRUCTIONS.REFERENCE_TEMPLATE,
-                                artifact_data.title,
-                                artifact_id
-                            )
-                        end
-                        table.insert(instructions, instruction_text)
-                    end
-                end
-            else
-                local success, create_err = ctx.writer:create_artifact(
-                    artifact_id,
-                    artifact_data.type or consts.ARTIFACT_TYPES.INLINE,
-                    artifact_data.title,
-                    artifact_data.content or "",
-                    {
-                        content_type = artifact_data.content_type or consts.CONTENT_TYPES.MARKDOWN,
-                        description = artifact_data.description,
-                        preview = artifact_data.preview,
-                        icon = artifact_data.icon,
-                        status = artifact_data.status or consts.ARTIFACT_STATUS.IDLE,
-                        display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.INLINE
-                    }
-                )
-
-                if not success then
-                    return nil, "Failed to create artifact: " .. tostring(create_err)
-                end
-                stored = true
-
-                if success then
-                    table.insert(created_artifacts, {
-                        artifact_id = artifact_id,
-                        title = artifact_data.title,
-                        kind = artifact_data.type or consts.ARTIFACT_TYPES.INLINE
-                    })
-
-                    if artifact_data.instructions ~= false then
-                        local instruction_text
-                        if artifact_data.preview and artifact_data.preview ~= "" then
-                            instruction_text = string.format(
-                                consts.ARTIFACT_INSTRUCTIONS.WITH_PREVIEW_TEMPLATE,
-                                artifact_data.title,
-                                artifact_id,
-                                artifact_data.preview
-                            )
-                        else
-                            instruction_text = string.format(
-                                consts.ARTIFACT_INSTRUCTIONS.REFERENCE_TEMPLATE,
-                                artifact_data.title,
-                                artifact_id
-                            )
-                        end
-                        table.insert(instructions, instruction_text)
-                    end
-                end
+            table.insert(created_artifacts, {
+                artifact_id = record.artifact_id,
+                title = record.title,
+                kind = record.kind
+            })
+            if record.instruction then
+                table.insert(instructions, record.instruction)
             end
-
-            if stored then
-                -- ⚠️ DO NOT REVERT unless you know exactly what you are doing. ⚠️
-                -- Chat front-ends render a standalone artifact card from a message
-                -- with type='artifact' + metadata.artifact_id. Without the line
-                -- below, standalone artifacts (instructions=false) never render in
-                -- the chat thread — only the SYSTEM/artifact_created message was
-                -- emitted, which front-ends do not render.
-                --
-                -- Gate to STANDALONE only: inline artifacts (instructions=true) are
-                -- rendered via the <artifact id="…"/> tag the agent embeds in its
-                -- reply (see the instructions block above). Emitting an artifact
-                -- message here for the inline case too would render it TWICE.
-                if artifact_data.instructions == false then
-                    local message_id, message_err = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT, artifact_data.title, {
-                        artifact_id = artifact_id
-                    })
-                    if message_err then
-                        return nil, "Failed to store standalone artifact message: " .. message_err
-                    end
-                    ctx.upstream:send_message_update(message_id, "artifact", {
-                        message_id = message_id,
-                        artifact_id = artifact_id
-                    })
-                end
-
-                ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
-                    system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
-                    artifact_id = artifact_id
-                })
-
-                ctx.upstream:update_session({
-                    artifact_added = artifact_id
-                })
-            end
+            control_handlers.announce_artifact(ctx, record)
         elseif artifact_data.id then
             -- meta_patch (not a whole-meta replace): a full replace here would wipe
             -- keys this directive doesn't know about (display_type, page_id, preview,
@@ -304,6 +294,105 @@ function control_handlers.control_artifacts(ctx, op)
         completed = true,
         created_artifacts = created_artifacts
     }
+end
+
+-- The `_control.forms` effect of the ask_user tool (wippy.session.forms).
+--
+-- op: { forms = { { artifact_id, definition } }, turn_id, call_id,
+--       tool_message_id } - process_tools adds the trusted bindings; the
+--       tool supplies only the minted artifact id and the definition.
+--
+-- The definition is validated again here (the server does not trust the
+-- tool output). One form per bus turn: a second attempt in the same turn is
+-- rejected before anything is written. The artifact, its standalone chat
+-- message, the system row and meta.session_form (origin binding, with the
+-- artifact message's date as created_cursor) are written in one transaction,
+-- so a failure leaves no form behind. Success asks process_tools to end the
+-- turn instead of running another agent step.
+local ARTIFACT_ID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+
+-- A refused request is not an error of the session: control_forms returns
+-- { completed = true, rejected = "<code>: <message>" } and process_tools
+-- turns only that call into a tool error. Storage failures stay errors
+-- (nil, err) and fail the turn as for every other effect.
+local function reject(code, message)
+    return { completed = true, rejected = code .. ": " .. message }
+end
+
+function control_handlers.control_forms(ctx, op)
+    if type(op.forms) ~= "table" or #op.forms == 0 then
+        return reject("invalid_request", "No form was provided.")
+    end
+    if #op.forms > 1 then
+        return reject("one_form_per_turn", "Ask at most one form per turn.")
+    end
+    if type(op.turn_id) ~= "string" or op.turn_id == "" then
+        return reject("no_turn", "A form can only be created during an agent turn.")
+    end
+
+    local created_artifacts = {}
+    for _, item in ipairs(op.forms) do
+        if type(item) ~= "table" then
+            return reject("invalid_request", "Invalid form operation.")
+        end
+        local def, def_errors = definition.normalize(item.definition)
+        if not def then
+            return reject("invalid_definition", "Invalid form definition:\n" .. definition.format_errors(def_errors))
+        end
+        if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, ARTIFACT_ID_PATTERN) then
+            return reject("invalid_request", "Form artifact id is missing or invalid.")
+        end
+        if ctx.form_turn_id == op.turn_id then
+            return reject("one_form_per_turn",
+                "This turn already asked the user with a form. No second form was created; "
+                    .. "wait for the answer to the first one.")
+        end
+
+        local content, content_err = form_artifact.build_content(def, form_artifact.STATE.ACTIVE)
+        if not content then return nil, content_err end
+
+        local record, create_err = tx.run(function(dbtx)
+            local stored, store_err = control_handlers.store_artifact(ctx, {
+                type = consts.ARTIFACT_TYPES.INLINE,
+                title = def.title,
+                content = content,
+                content_type = consts.CONTENT_TYPES.JSON,
+                display_type = consts.ARTIFACT_DISPLAY.INLINE,
+                status = consts.ARTIFACT_STATUS.ACTIVE,
+                instructions = false,
+            }, { tx = dbtx, artifact_id = item.artifact_id })
+            if not stored then return nil, store_err end
+            if not stored.message_date then
+                return nil, "Form artifact message date is unknown"
+            end
+
+            local _, meta_err = artifact_repo.update(stored.artifact_id, {
+                meta_patch = {
+                    [form_artifact.META_KEY] = form_artifact.new_meta({
+                        turn_id = op.turn_id,
+                        call_id = op.call_id,
+                        tool_message_id = op.tool_message_id,
+                        created_cursor = stored.message_date,
+                    }),
+                },
+            }, { tx = dbtx })
+            if meta_err then return nil, "Failed to bind form origin: " .. tostring(meta_err) end
+            return stored
+        end)
+        if not record then
+            return nil, "Failed to create form: " .. tostring(create_err)
+        end
+
+        ctx.form_turn_id = op.turn_id
+        control_handlers.announce_artifact(ctx, record)
+        table.insert(created_artifacts, {
+            artifact_id = record.artifact_id,
+            title = record.title,
+            kind = record.kind
+        })
+    end
+
+    return { completed = true, end_turn = true, created_artifacts = created_artifacts }
 end
 
 function control_handlers.control_context(ctx, op)

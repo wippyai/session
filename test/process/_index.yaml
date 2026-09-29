@@ -41,6 +41,37 @@ entries:
       wait_for_boot: app:wait_for_boot
     method: run_tests
 
+  - name: forms_test
+    kind: function.lua
+    meta:
+      name: Session forms in the session process
+      type: test
+      suite: session
+      comment: Form creation through ask_user and process_tools (origin binding, one form per turn, end of turn, failure row rewrite) and admission of accepted answers (idle, during a turn, scans) on the real database
+    source: file://forms_test.lua
+    modules:
+      - json
+      - sql
+      - uuid
+      - funcs
+      - security
+    imports:
+      consts: wippy.session:consts
+      command_bus: wippy.session.process:command_bus
+      message_handlers: wippy.session.process:message_handlers
+      session: wippy.session.process:session
+      state_service: wippy.session.forms:state_service
+      prompt_builder: wippy.session:prompt_builder
+      artifact_repo: wippy.session.persist:artifact_repo
+      message_repo: wippy.session.persist:message_repo
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
   - name: plugin_test
     kind: function.lua
     meta:

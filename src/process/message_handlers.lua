@@ -7,6 +7,7 @@ local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
+local message_repo = require("message_repo")
 
 type SessionContext = {
     session_id: string,
@@ -470,6 +471,58 @@ function message_handlers.handle_message(ctx, op)
     return { message_id = message_id, completed = true }
 end
 
+-- FORM ANSWER ADMISSION
+--
+-- The state API commits a form answer as a user row marked
+-- metadata.session_form.pending and wakes the session. The row is not
+-- written here again: admission re-dates it to the end of the history, clears
+-- the marker (both in message_repo.admit_pending_answer) and starts a turn
+-- for it. Until then prompt_builder leaves the row out, so a running turn
+-- never sees an answer that arrived after it started.
+local ADMIT_SCAN_LIMIT = 50
+
+-- Admits every pending answer of the session in history order (acceptance
+-- order), bounded. The durable rows, not the wake-ups, decide what is
+-- admitted, so a missed wake-up is recovered by the next scan and a repeated
+-- one is a no-op. Returns the id of the last admitted row (nil when none) and
+-- the first error; rows left pending stay for the next scan.
+function message_handlers.admit_answers(ctx)
+    ctx.pending_answers = {}
+    local pending, list_err = message_repo.list_pending_answers(ctx.session_id, ADMIT_SCAN_LIMIT)
+    if list_err then return nil, list_err end
+
+    local last_id = nil
+    for _, row in ipairs(pending or {}) do
+        local admitted, admit_err = message_repo.admit_pending_answer(ctx.session_id, row.message_id)
+        if admit_err then return last_id, admit_err end
+        if admitted then
+            last_id = admitted.message_id
+            if ctx.upstream then
+                ctx.upstream:message_received(admitted.message_id, admitted.data or "")
+            end
+        end
+    end
+    return last_id, nil
+end
+
+-- ADMIT_ANSWER operation: queued while the bus is idle (wake-up or startup
+-- scan). Admits pending answers and starts one turn for the latest.
+function message_handlers.admit_answer(ctx, op)
+    local last_id, err = message_handlers.admit_answers(ctx)
+    if not last_id then
+        if err then return nil, err end
+        return { completed = true }
+    end
+    local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
+    if status_err then return nil, status_err end
+    if ctx.upstream then
+        ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
+    end
+    return { message_id = last_id, next_ops = {{
+        type = consts.OP_TYPE.AGENT_STEP, message_id = last_id, from_user = true
+    }} }
+end
+
 function message_handlers.agent_step(ctx, op)
     local builder, err = prompt_builder.from_session(ctx.reader)
     if not builder then
@@ -910,6 +963,9 @@ function message_handlers.process_tools(ctx, op)
     end
 
     local next_ops = {}
+    -- Set by an effect that finishes the turn (a created form): the calls are
+    -- settled as usual, but no continuation step is queued.
+    local end_turn = false
     local function fail_remaining(start_index, reason)
         local failure = tostring(reason)
         for index = start_index, #op.tool_calls do
@@ -968,20 +1024,38 @@ function message_handlers.process_tools(ctx, op)
                     tool_result._control = nil
                 end
 
-                local _, update_err = ctx.writer:update_message_meta(message_id, {
+                local settled = {
                     result = tool_result,
                     status = consts.FUNC_STATUS.SUCCESS,
                     function_name = result_data.tool_call.name,
                     call_id = call_id,
                     registry_id = result_data.tool_call.registry_id
-                })
-                if update_err then return fail_remaining(index, update_err) end
+                }
+                -- A call with control effects is settled only after its
+                -- effects commit, so a crash in between leaves the call
+                -- pending for recovery instead of claiming work that never
+                -- happened (e.g. "form created" with no form stored).
+                if not control then
+                    local _, update_err = ctx.writer:update_message_meta(message_id, settled)
+                    if update_err then return fail_remaining(index, update_err) end
+                end
 
+                local rejected = nil
                 if control then
                     local effects = {}
                     if control.artifacts and #control.artifacts > 0 then
                         table.insert(effects, { control_handlers.control_artifacts,
                             { artifacts = control.artifacts } })
+                    end
+                    if type(control.forms) == "table" and #control.forms > 0 then
+                        -- Trusted bindings come from the session, not the tool.
+                        local turn = ctx.turn_state
+                        table.insert(effects, { control_handlers.control_forms, {
+                            forms = control.forms,
+                            turn_id = (type(turn) == "table" and turn.id) or op.message_id,
+                            call_id = call_id,
+                            tool_message_id = message_id,
+                        } })
                     end
                     if control.context then
                         table.insert(effects, { control_handlers.control_context,
@@ -1001,10 +1075,35 @@ function message_handlers.process_tools(ctx, op)
                             local reason = ran and (effect_err or "Control effect failed") or applied
                             return fail_remaining(index, reason)
                         end
+                        if type(applied) == "table" and type(applied.rejected) == "string" then
+                            -- The effect refused the request without writing anything (e.g. a
+                            -- second form in one turn). Only this call becomes a tool error; the
+                            -- round and the turn go on so the agent can react to it.
+                            rejected = applied.rejected
+                        elseif type(applied) == "table" and applied.end_turn then
+                            end_turn = true
+                        end
                     end
                 end
 
-                if not is_delegation and not is_private then
+                if rejected then
+                    settled.result = rejected
+                    settled.status = consts.FUNC_STATUS.ERROR
+                end
+                if control then
+                    local _, settle_err = ctx.writer:update_message_meta(message_id, settled)
+                    if settle_err then return fail_remaining(index, settle_err) end
+                end
+
+                if rejected then
+                    if not is_delegation and not is_private then
+                        ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+                            call_id = call_id,
+                            function_name = result_data.tool_call.name,
+                            error = "Function execution failed"
+                        })
+                    end
+                elseif not is_delegation and not is_private then
                     ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
                         call_id = call_id,
                         function_name = result_data.tool_call.name
@@ -1016,7 +1115,7 @@ function message_handlers.process_tools(ctx, op)
 
     message_handlers.note_tool_round(ctx, results)
 
-    if #op.tool_calls > 0 then
+    if #op.tool_calls > 0 and not end_turn then
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,

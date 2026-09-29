@@ -101,6 +101,11 @@ function prompt_builder.build(messages, contexts, session_meta, options)
 
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
+        elseif msg.type == consts.MSG_TYPE.USER
+            and type(metadata.session_form) == "table" and metadata.session_form.pending == true then
+            -- A form answer accepted while a turn was running. It is committed
+            -- but not yet admitted: the session admits it after the turn ends
+            -- (moving it to the end of the history), so it stays out until then.
         elseif msg.type == consts.MSG_TYPE.USER then
             builder:add_user(msg.data :: string)
 

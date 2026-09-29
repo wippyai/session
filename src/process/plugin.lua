@@ -135,6 +135,16 @@ local function run(args)
 
     process.set_options({ trap_links = true })
 
+    -- Named so the form state API can wake a stopped session without going
+    -- through the relay hub, which would make the HTTP handler the session's
+    -- client connection. Without the name a wake is lost and the answer is
+    -- admitted on the next session start.
+    local plugin_name = consts.REGISTRY.PLUGIN .. state.user_id
+    local named, name_err = process.registry.register(plugin_name)
+    if not named then
+        logger:warn("session plugin registry name unavailable", { user_id = state.user_id, error = tostring(name_err) })
+    end
+
     local gc_ticker = time.ticker(base_config.gc_interval)
     local inbox = process.inbox()
     local events = process.events()
@@ -639,6 +649,32 @@ local function run(args)
         end
     end
 
+    -- A form answer was accepted for one of this user's sessions. A running
+    -- session gets the answer id; a stopped one is started with no client
+    -- connection and admits its pending answers on start. An unknown or
+    -- foreign session is ignored: create_session only reopens sessions this
+    -- user owns and never creates one without a start token.
+    local function handle_wake(payload_data)
+        if type(payload_data) ~= "table" or type(payload_data.session_id) ~= "string"
+            or payload_data.session_id == "" or state.shutting_down then
+            return
+        end
+        local session_id: string = payload_data.session_id
+        local session_info = state.active_sessions[session_id]
+        if session_info then
+            if not session_info.terminating and type(payload_data.message_id) == "string" then
+                process.send(session_info.pid :: string, consts.TOPICS.FORM_ANSWER,
+                    { message_id = payload_data.message_id })
+            end
+            return
+        end
+        local _, err = create_session({ session_id = session_id })
+        if err then
+            logger:warn("form answer wake could not start the session",
+                { user_id = state.user_id, session_id = session_id, error = tostring(err) })
+        end
+    end
+
     local function check_inactive_sessions()
         local now = time.now()
         local inactivity_duration, _ = time.parse_duration(consts.TIMEOUTS.SESSION_INACTIVITY)
@@ -701,6 +737,8 @@ local function run(args)
                 for session_id, session_info in pairs(state.active_sessions) do
                     graceful_terminate_session(session_id, session_info, "shutdown")
                 end
+            elseif topic == consts.PLUGIN_TOPICS.WAKE then
+                handle_wake(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
                     state.shutting_down = false

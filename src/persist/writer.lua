@@ -97,7 +97,10 @@ end
 
 -- MESSAGE OPERATIONS
 
-function session_writer:add_message(msg_type, content, metadata)
+-- Returns the message id. opts.tx (optional) writes on a caller-supplied
+-- transaction; the stored row ({ message_id, date, ... }) is the third return
+-- value for callers that need its date.
+function session_writer:add_message(msg_type, content, metadata, opts)
     if not msg_type or msg_type == "" then
         return nil, "Message type is required"
     end
@@ -126,12 +129,12 @@ function session_writer:add_message(msg_type, content, metadata)
         end
     end
 
-    local result, err = session_writer._message_repo.create(message_id, self.session_id, msg_type, content, metadata)
+    local result, err = session_writer._message_repo.create(message_id, self.session_id, msg_type, content, metadata, opts)
     if err then
         return nil, "Failed to create message: " .. err
     end
 
-    return message_id
+    return message_id, nil, result
 end
 
 function session_writer:add_response(content, metadata, calls)
@@ -252,7 +255,8 @@ end
 
 -- ARTIFACT OPERATIONS
 
-function session_writer:create_artifact(artifact_id, kind, title, content, meta)
+-- opts.tx (optional): write on a caller-supplied transaction.
+function session_writer:create_artifact(artifact_id, kind, title, content, meta, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
     end
@@ -261,7 +265,7 @@ function session_writer:create_artifact(artifact_id, kind, title, content, meta)
         return nil, "Artifact kind is required"
     end
 
-    local result, err = session_writer._artifact_repo.create(artifact_id, self.session_id, kind, title, content, meta)
+    local result, err = session_writer._artifact_repo.create(artifact_id, self.session_id, kind, title, content, meta, opts)
     if err then
         return nil, "Failed to create artifact: " .. err
     end

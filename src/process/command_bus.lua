@@ -218,6 +218,12 @@ function command_bus:end_turn()
     local was_draining = self.state == "draining_stop" or self.state == "draining_finish"
     local last_id, err, request_id = self:flush_held(not was_draining)
     if err then return nil, err end
+    -- Form answers accepted during the turn are admitted after the held typed
+    -- input, so they follow it in the history; one step then answers both.
+    if self.context.admit_answers then
+        local answer_id = self.context.admit_answers(not was_draining)
+        if answer_id then last_id = answer_id end
+    end
     local draining = self.state == "draining_stop" or self.state == "draining_finish"
     local settle_ops = self.settle_ops
     self.settle_ops = {}

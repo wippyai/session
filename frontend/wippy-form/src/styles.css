@@ -1,0 +1,9 @@
+@import "@wippy-fe/theme/theme-config.css";
+@import 'tailwind.css';
+
+/* Never overflow the chat column; long labels/descriptions must wrap. */
+:host,
+[data-wippy-theme-root] {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}

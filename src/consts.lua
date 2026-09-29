@@ -46,6 +46,13 @@ local consts = {
         SESSION_ID = "wippy.session.process:session",
     },
 
+    -- Process registry name prefixes: "session.<session_id>" for a running
+    -- session, "session_plugin.<user_id>" for the user's session plugin.
+    REGISTRY = {
+        SESSION = "session.",
+        PLUGIN = "session_plugin.",
+    },
+
     -- Plugin Topics
     PLUGIN_TOPICS = {
         OPEN = "open",
@@ -53,7 +60,9 @@ local consts = {
         MESSAGE = "message",
         COMMAND = "command",
         SHUTDOWN = "shutdown",
-        RESUME = "resume"
+        RESUME = "resume",
+        -- Server-side: start a stopped session so it admits a pending form answer.
+        WAKE = "wake"
     },
 
     -- Session Status Constants
@@ -96,6 +105,9 @@ local consts = {
 
         HANDLE_CONTEXT = "handle_context",
         REFERENCE_ARTIFACT = "reference_artifact",
+
+        -- Admits accepted form answers (already stored, pending) and starts a turn
+        ADMIT_ANSWER = "admit_answer",
     },
 
     -- Session Commands
@@ -140,7 +152,9 @@ local consts = {
         FINISH_AND_EXIT = "finish_and_exit",
         STOP_ESCALATION = "session.stop_escalation",
         STOP_RESOLVED = "session.stop_resolved",
-        STOP_DEADLINE = "session.stop_deadline"
+        STOP_DEADLINE = "session.stop_deadline",
+        -- Wake-up from the form state API: { message_id } of a committed answer
+        FORM_ANSWER = "form_answer"
     },
 
     -- Upstream Update Types

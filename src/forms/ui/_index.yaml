@@ -1,0 +1,59 @@
+version: "1.0"
+namespace: wippy.session.forms.ui
+
+# Serves the built `wippy-form` web component (frontend/wippy-form/, built by
+# `make build-ui` into dist/ alongside this file) as a view.component. Package
+# metadata (title, props, events) lives in frontend/wippy-form/package.json's
+# `wippy` block and flows through dist/wippy-meta.json (the vite plugin emits
+# it) — this YAML carries only deploy-aware routing, per
+# web_components.spec.md § "Package metadata: source of truth". `directory`
+# below is relative to the MODULE root, not this file's directory. The module
+# root is `src/`: published packs put src/ contents at the root, and local
+# workspace replacements (test/.wippy.yaml, the demo workspace config) point at
+# src/ so the loader does not scan frontend/wippy-form/node_modules.
+
+entries:
+  # wippy.session.forms.ui:ui_server
+  - name: ui_server
+    kind: ns.requirement
+    meta:
+      description: HTTP server the wippy-form web component bundle is served from.
+    default: "app:gateway"
+    targets:
+      - entry: wippy.session.forms.ui:ui_static
+        path: .meta.server
+
+  # wippy.session.forms.ui:ui_fs
+  - name: ui_fs
+    kind: fs.directory
+    meta:
+      comment: Built wippy-form bundle (frontend/wippy-form/, built into src/forms/ui/dist/ by `make build-ui`).
+    base: module
+    directory: forms/ui/dist
+
+  # wippy.session.forms.ui:ui_static
+  - name: ui_static
+    kind: http.static
+    meta:
+      comment: Serves the wippy-form bundle at /wippy-session-forms.
+      server: app:gateway
+    fs: wippy.session.forms.ui:ui_fs
+    options:
+      mime_types:
+        .css: text/css
+        .js: application/javascript
+        .map: application/json
+    path: /wippy-session-forms
+
+  # wippy.session.forms.ui:wippy_form_view
+  - name: wippy_form_view
+    kind: registry.entry
+    meta:
+      type: view.component
+      title: Session Form
+      description: Renders a session ask_user form (single/multiple choice with Other) and submits the answer back to the owning session.
+      tag_name: wippy-form
+      auto_register: true
+      announced: true
+      base_path: wippy-session-forms
+      entry_point: index.js

@@ -79,6 +79,27 @@ local function flush_held(ctx: any, run_agent: boolean)
     return run_agent and last_user_id or nil, nil, last_request_id
 end
 
+-- end_turn hook: admits the form answers that arrived during the turn (and
+-- any the scan finds). Returns the latest admitted id when the next turn
+-- should run for it. While draining a stop or finish no turn follows, so the
+-- rows stay pending for the next end_turn or startup scan instead of being
+-- marked delivered unanswered. A storage failure is logged, not fatal: the
+-- rows stay pending and the next scan admits them.
+local function admit_answers_at_turn_end(ctx: any, run_agent: boolean)
+    if not run_agent then return nil end
+    local last_id, err = message_handlers.admit_answers(ctx)
+    if err then
+        logger:warn("form answer admission failed", { session_id = ctx.session_id, error = tostring(err) })
+    end
+    if not last_id then return nil end
+    local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
+    if status_err then
+        logger:warn("session status update failed", { session_id = ctx.session_id, error = tostring(status_err) })
+    end
+    if ctx.upstream then ctx.upstream:update_session({ status = consts.STATUS.RUNNING }) end
+    return last_id
+end
+
 local function settle_exit(bus: any, err: any)
     return bus:fail(err)
 end
@@ -140,6 +161,24 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         end
         return true
     end
+    if topic == consts.TOPICS.FORM_ANSWER then
+        -- The answer row is already committed and marked pending, so nothing
+        -- here needs to be durable: a dropped wake-up is recovered by the
+        -- end_turn and startup scans. Never admitted mid-turn: the running
+        -- turn must not see an answer that arrived after it started.
+        local message_id = payload_data.message_id
+        if type(message_id) ~= "string" or message_id == "" then return true end
+        if session_state.finishing then return true end
+        if bus:is_turn_active() then
+            if #ctx.pending_answers < 256 then
+                table.insert(ctx.pending_answers, message_id)
+            end
+        else
+            bus:queue_op({ type = consts.OP_TYPE.ADMIT_ANSWER,
+                message_id = message_id, starts_turn = true })
+        end
+        return true
+    end
     if topic ~= consts.TOPICS.COMMAND then return true end
     local op = nil
     if payload_data.command == consts.COMMANDS.CONTEXT then
@@ -188,7 +227,7 @@ local function run(args: SessionArgs)
     local session_config = session_data.config or {}
 
     -- A session ID has one registered process.
-    local registry_name = "session." .. args.session_id
+    local registry_name = consts.REGISTRY.SESSION .. args.session_id
     local registered, register_err = process.registry.register(registry_name)
     if not registered then
         local registration_error = tostring(register_err or "unknown error")
@@ -261,6 +300,7 @@ local function run(args: SessionArgs)
         config = session_config,
         agent_ctx = agent_ctx,
         held = {},
+        pending_answers = {},
         parent_pid = args.parent_pid,
         lifecycle_state = {},
         queue_empty_callback = function()
@@ -272,6 +312,7 @@ local function run(args: SessionArgs)
     }
 
     context.flush_held = function(run_agent) return flush_held(context, run_agent) end
+    context.admit_answers = function(run_agent) return admit_answers_at_turn_end(context, run_agent) end
     context.settle_intents = function()
         return message_repo.recover_pending(args.session_id,
             session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
@@ -306,6 +347,19 @@ local function run(args: SessionArgs)
     bus:mount_op_handler(consts.OP_TYPE.EXECUTE_FUNCTION, session_handlers.execute_function)
     bus:mount_op_handler(consts.OP_TYPE.HANDLE_CONTEXT, control_handlers.handle_context_command)
     bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, reference_artifact)
+    bus:mount_op_handler(consts.OP_TYPE.ADMIT_ANSWER, message_handlers.admit_answer)
+
+    -- Form answers accepted while no session process was running (or whose
+    -- wake-up was lost) are admitted first, in acceptance order.
+    if not args.create then
+        local pending, pending_err = message_repo.list_pending_answers(args.session_id, 1)
+        if pending_err then
+            logger:warn("pending form answer scan failed", { session_id = args.session_id, error = pending_err })
+        elseif pending and #pending > 0 then
+            bus:queue_op({ type = consts.OP_TYPE.ADMIT_ANSWER,
+                message_id = pending[1].message_id, starts_turn = true })
+        end
+    end
 
     if args.create then
         local status_ok, status_err = session_writer:update_status(consts.STATUS.IDLE)
@@ -450,4 +504,5 @@ end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
     settle_exit = settle_exit,
+    admit_answers_at_turn_end = admit_answers_at_turn_end,
     reference_artifact = reference_artifact }

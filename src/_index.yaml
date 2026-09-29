@@ -27,6 +27,14 @@ entries:
         path: .meta.router
       - entry: wippy.session.api:get_artifact_content.endpoint
         path: .meta.router
+      - entry: wippy.session.api:get_artifact_state
+        path: .meta.router
+      - entry: wippy.session.api:get_artifact_state.endpoint
+        path: .meta.router
+      - entry: wippy.session.api:submit_artifact_state
+        path: .meta.router
+      - entry: wippy.session.api:submit_artifact_state.endpoint
+        path: .meta.router
       - entry: wippy.session.api:get_session
         path: .meta.router
       - entry: wippy.session.api:get_session.endpoint

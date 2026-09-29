@@ -51,6 +51,9 @@ entries:
       consts: wippy.session:consts
       artifact_repo: wippy.session.persist:artifact_repo
       artifact_events: wippy.session.persist:artifact_events
+      tx: wippy.session.persist:tx
+      definition: wippy.session.forms:definition
+      form_artifact: wippy.session.forms:form_artifact
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -73,6 +76,7 @@ entries:
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
       control_handlers: wippy.session.process:control_handlers
+      message_repo: wippy.session.persist:message_repo
 
   # wippy.session.process:session
   - name: session

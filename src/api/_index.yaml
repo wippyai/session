@@ -85,6 +85,58 @@ entries:
     func: get_artifact_content
     path: /artifact/{id}/content
 
+  # wippy.session.api:get_artifact_state
+  - name: get_artifact_state
+    kind: function.lua
+    meta:
+      comment: Returns the state of a session form artifact (definition, status, staleness, accepted answer, delivery)
+      router: app:api
+    source: file://artifact_state.lua
+    modules:
+      - http
+      - security
+    imports:
+      state_service: wippy.session.forms:state_service
+    method: get
+    pool:
+      size: 4
+
+  # wippy.session.api:get_artifact_state.endpoint
+  - name: get_artifact_state.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Session form state endpoint
+      router: app:api
+    method: GET
+    func: get_artifact_state
+    path: /artifact/{id}/state
+
+  # wippy.session.api:submit_artifact_state
+  - name: submit_artifact_state
+    kind: function.lua
+    meta:
+      comment: Accepts a session form answer atomically (artifact becomes idle, answer stored as a user message)
+      router: app:api
+    source: file://artifact_state.lua
+    modules:
+      - http
+      - security
+    imports:
+      state_service: wippy.session.forms:state_service
+    method: post
+    pool:
+      size: 4
+
+  # wippy.session.api:submit_artifact_state.endpoint
+  - name: submit_artifact_state.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Session form answer submission endpoint
+      router: app:api
+    method: POST
+    func: submit_artifact_state
+    path: /artifact/{id}/state
+
   # wippy.session.api:get_session
   - name: get_session
     kind: function.lua

@@ -37,8 +37,26 @@ local function get_db()
     return db
 end
 
--- Create a new artifact
-function artifact_repo.create(artifact_id, session_id, kind, title, content, meta)
+-- Runs fn(conn) on opts.tx when the caller supplies a transaction (no
+-- acquire/release), otherwise on a pooled connection released afterwards.
+local function with_connection(opts, fn)
+    if opts and opts.tx then
+        return fn(opts.tx)
+    end
+    local db, err = get_db()
+    if err then
+        return nil, err
+    end
+    local result, fn_err = fn(db)
+    db:release()
+    return result, fn_err
+end
+
+-- Create a new artifact.
+--
+-- opts.tx (optional): run the session lookup and the insert on this
+-- caller-supplied transaction; do not acquire or release a connection.
+function artifact_repo.create(artifact_id, session_id, kind, title, content, meta, opts)
     session_id = session_id or nil
 
     if not artifact_id or artifact_id == "" then
@@ -68,56 +86,49 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
         end
     end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
-
-    if session_id and session_id ~= "" then
-        local check_query = sql.builder.select("session_id", "user_id")
-            :from("sessions")
-            :where("session_id = ?", session_id)
-
-        local check_executor = check_query:run_with(db)
-        local sessions, err = check_executor:query()
-
-        if err then
-            db:release()
-            return nil, "Failed to check if session exists: " .. err
-        end
-
-        if #sessions == 0 then
-            db:release()
-            return nil, "Session not found"
-        end
-
-        user_id = sessions[1].user_id
-    else
-        user_id = actor:id()
-    end
-
     local now = time.now():format(time.RFC3339)
 
-    local insert_query = sql.builder.insert("artifacts")
-        :set_map({
-            artifact_id = artifact_id,
-            session_id = session_id,
-            user_id = user_id,
-            kind = kind,
-            title = title or "",
-            content = content or "",
-            meta = meta_json or sql.as.null(),
-            created_at = now,
-            updated_at = now
-        })
+    local _, write_err = with_connection(opts, function(conn)
+        if session_id and session_id ~= "" then
+            local check_query = sql.builder.select("session_id", "user_id")
+                :from("sessions")
+                :where("session_id = ?", session_id)
 
-    local insert_executor = insert_query:run_with(db)
-    local result, err = insert_executor:exec()
+            local sessions, err = check_query:run_with(conn):query()
+            if err then
+                return nil, "Failed to check if session exists: " .. err
+            end
 
-    db:release()
+            if #sessions == 0 then
+                return nil, "Session not found"
+            end
 
-    if err then
-        return nil, "Failed to create artifact: " .. err
+            user_id = sessions[1].user_id
+        else
+            user_id = actor:id()
+        end
+
+        local insert_query = sql.builder.insert("artifacts")
+            :set_map({
+                artifact_id = artifact_id,
+                session_id = session_id,
+                user_id = user_id,
+                kind = kind,
+                title = title or "",
+                content = content or "",
+                meta = meta_json or sql.as.null(),
+                created_at = now,
+                updated_at = now
+            })
+
+        local _, err = insert_query:run_with(conn):exec()
+        if err then
+            return nil, "Failed to create artifact: " .. err
+        end
+        return true
+    end)
+    if write_err then
+        return nil, write_err
     end
 
     return {
@@ -131,15 +142,12 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
     }
 end
 
--- Get an artifact by ID
-function artifact_repo.get(artifact_id)
+-- Get an artifact by ID.
+--
+-- opts.tx (optional): read on this caller-supplied transaction.
+function artifact_repo.get(artifact_id, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
-    end
-
-    local db, err = get_db()
-    if err then
-        return nil, err
     end
 
     -- Build the SELECT query
@@ -149,13 +157,16 @@ function artifact_repo.get(artifact_id)
         :limit(1)
 
     -- Execute the query
-    local executor = query:run_with(db)
-    local artifacts, err = executor:query()
-
-    db:release()
+    local artifacts: any, err = with_connection(opts, function(conn)
+        local rows, query_err = query:run_with(conn):query()
+        if query_err then
+            return nil, "Failed to get artifact: " .. query_err
+        end
+        return rows
+    end)
 
     if err then
-        return nil, "Failed to get artifact: " .. err
+        return nil, err
     end
 
     if #artifacts == 0 then

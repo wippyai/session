@@ -645,6 +645,154 @@ function message_repo.delete(message_id)
     return { deleted = true }
 end
 
+-- SESSION FORM ANSWERS
+--
+-- An accepted form answer is committed as a user row whose
+-- metadata.session_form.pending is true (see wippy.session.forms). The row
+-- stays out of prompts until the session process admits it; admission moves
+-- the row to the end of the history and clears the marker.
+
+local PENDING_ANSWER_PATTERN = '%"pending":true%'
+
+local function decode_metadata(row)
+    if type(row.metadata) == "string" and row.metadata ~= "" then
+        local decoded, decode_err = json.decode(row.metadata :: string)
+        if not decode_err then row.metadata = decoded end
+    end
+    if type(row.metadata) ~= "table" then row.metadata = {} end
+    return row
+end
+
+local function is_pending_answer(row)
+    local form = type(row.metadata) == "table" and row.metadata.session_form or nil
+    return row.type == consts.MSG_TYPE.USER and type(form) == "table" and form.pending == true
+end
+
+-- Pending answer rows of a session in history order, at most `limit`.
+function message_repo.list_pending_answers(session_id, limit)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    local db, err = get_db()
+    if err then return nil, err end
+
+    local rows, query_err = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+        :from("messages")
+        :where(sql.builder.and_({
+            sql.builder.expr("session_id = ?", session_id),
+            sql.builder.expr("type = ?", consts.MSG_TYPE.USER),
+            sql.builder.expr("metadata LIKE ?", PENDING_ANSWER_PATTERN)
+        }))
+        :order_by("date ASC, message_id ASC")
+        :limit(limit or 50)
+        :run_with(db):query()
+    db:release()
+    if query_err then return nil, "Failed to list pending answers: " .. query_err end
+
+    local pending = {}
+    for _, row in ipairs(rows) do
+        decode_metadata(row)
+        if is_pending_answer(row) then table.insert(pending, row) end
+    end
+    return pending
+end
+
+-- Admits one pending answer row in a single transaction: the row gets a date
+-- after everything already in the session (message_date.next of the
+-- session's last_message_date), its pending marker is cleared, and the
+-- session's last_message_date follows. Returns the admitted row, or nil
+-- without an error when the row is not a pending answer of this session
+-- (already admitted, or foreign), so a repeated admission is a no-op.
+function message_repo.admit_pending_answer(session_id, message_id)
+    if not session_id or session_id == "" then return nil, "Session ID is required" end
+    if not message_id or message_id == "" then return nil, "Message ID is required" end
+
+    local result, err = tx.run(function(dbtx)
+        local rows, select_err = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+            :from("messages")
+            :where("message_id = ?", message_id)
+            :limit(1):run_with(dbtx):query()
+        if select_err then return nil, "Failed to read answer: " .. select_err end
+        if #rows == 0 then return false end
+        local row = decode_metadata(rows[1])
+        if row.session_id ~= session_id or not is_pending_answer(row) then return false end
+
+        local session_rows, session_err = sql.builder.select("last_message_date")
+            :from("sessions")
+            :where("session_id = ?", session_id)
+            :limit(1):run_with(dbtx):query()
+        if session_err then return nil, "Failed to read session last message date: " .. session_err end
+        if #session_rows == 0 then return nil, "Session not found" end
+
+        local date = message_date.next(session_rows[1].last_message_date)
+        row.metadata.session_form.pending = nil
+        local metadata_json, encode_err = json.encode(row.metadata)
+        if encode_err then return nil, "Failed to encode metadata: " .. encode_err end
+
+        local _, update_err = sql.builder.update("messages")
+            :set("date", date)
+            :set("metadata", metadata_json)
+            :where("message_id = ?", message_id)
+            :run_with(dbtx):exec()
+        if update_err then return nil, "Failed to admit answer: " .. update_err end
+
+        local _, session_update_err = sql.builder.update("sessions")
+            :set("last_message_date", date)
+            :where("session_id = ?", session_id)
+            :run_with(dbtx):exec()
+        if session_update_err then
+            return nil, "Failed to update session last message date: " .. session_update_err
+        end
+
+        row.date = date
+        return row
+    end)
+    if err then return nil, err end
+    if not result then return nil, nil end
+    return result
+end
+
+-- Whether a user row other than an answer to `exclude_artifact_id` was
+-- stored after `after_date` - the "conversation moved on" test for a form.
+-- opts.tx: run on a caller-supplied transaction.
+function message_repo.has_user_input_after(session_id, after_date, exclude_artifact_id, opts)
+    if not session_id or session_id == "" then return nil, "Session ID is required" end
+    if not after_date or after_date == "" then return nil, "Date is required" end
+
+    local conn = opts and opts.tx
+    local db = nil
+    if not conn then
+        local get_err
+        db, get_err = get_db()
+        if get_err then return nil, get_err end
+        conn = db
+    end
+
+    -- A form has at most one answer row, so two rows are enough to find one
+    -- that is not it.
+    local rows, query_err = sql.builder.select("message_id", "metadata")
+        :from("messages")
+        :where(sql.builder.and_({
+            sql.builder.expr("session_id = ?", session_id),
+            sql.builder.expr("type = ?", consts.MSG_TYPE.USER),
+            sql.builder.expr("date > ?", after_date)
+        }))
+        :order_by("date ASC, message_id ASC")
+        :limit(2)
+        :run_with(conn):query()
+    if db then db:release() end
+    if query_err then return nil, "Failed to check later user input: " .. query_err end
+
+    for _, row in ipairs(rows) do
+        decode_metadata(row)
+        local form = row.metadata.session_form
+        if not (type(form) == "table" and exclude_artifact_id and form.artifact_id == exclude_artifact_id) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Count messages in a session
 function message_repo.count_by_session(session_id)
     if not session_id or session_id == "" then

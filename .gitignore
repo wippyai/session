@@ -9,6 +9,7 @@
 # Dependency directories
 /node_modules
 /vendor
+/frontend/*/node_modules
 
 # Binaries for programs and plugins
 *.exe
