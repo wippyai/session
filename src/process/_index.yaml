@@ -49,6 +49,8 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
+      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_events: wippy.session.persist:artifact_events
 
   # wippy.session.process:message_handlers
   - name: message_handlers

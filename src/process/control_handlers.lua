@@ -1,6 +1,8 @@
 local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
+local artifact_repo = require("artifact_repo")
+local artifact_events = require("artifact_events")
 
 type ArtifactData = {
     id: string?,
@@ -261,10 +263,13 @@ function control_handlers.control_artifacts(ctx, op)
                 })
             end
         elseif artifact_data.id then
+            -- meta_patch (not a whole-meta replace): a full replace here would wipe
+            -- keys this directive doesn't know about (display_type, page_id, preview,
+            -- ...), since it only ever carries these four fields.
             local updates = {
                 title = artifact_data.title,
                 content = artifact_data.content,
-                meta = {
+                meta_patch = {
                     content_type = artifact_data.content_type,
                     description = artifact_data.description,
                     icon = artifact_data.icon,
@@ -272,9 +277,17 @@ function control_handlers.control_artifacts(ctx, op)
                 }
             }
 
-            local success, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
-            if not success then
+            local update_result, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
+            if not update_result then
                 return nil, "Failed to update artifact: " .. tostring(update_err)
+            end
+
+            -- Publish only after the write has committed, and read the merged row
+            -- back rather than reconstructing it from the request payload (the
+            -- meta_patch merge happened server-side, inside the repo).
+            local updated_artifact, get_err = artifact_repo.get(artifact_data.id)
+            if not get_err and updated_artifact then
+                artifact_events.publish_updated(updated_artifact)
             end
         end
     end

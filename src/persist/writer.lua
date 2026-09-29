@@ -269,7 +269,7 @@ function session_writer:create_artifact(artifact_id, kind, title, content, meta)
     return artifact_id
 end
 
-function session_writer:update_artifact(artifact_id, updates)
+function session_writer:update_artifact(artifact_id, updates, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
     end
@@ -278,6 +278,9 @@ function session_writer:update_artifact(artifact_id, updates)
         return nil, "Updates must be a table"
     end
 
+    -- Session ownership check stays unconditional, even when opts carries a
+    -- caller-supplied transaction: this ensures a writer can only ever touch
+    -- artifacts belonging to its own session.
     local artifact, err = session_writer._artifact_repo.get(artifact_id)
     if err then
         return nil, "Failed to get artifact: " .. err
@@ -291,12 +294,12 @@ function session_writer:update_artifact(artifact_id, updates)
         return nil, "Artifact belongs to different session"
     end
 
-    local result, err = session_writer._artifact_repo.update(artifact_id, updates)
+    local result, err = session_writer._artifact_repo.update(artifact_id, updates, opts)
     if err then
         return nil, "Failed to update artifact: " .. err
     end
 
-    return true
+    return result
 end
 
 -- PRIMARY CONTEXT OPERATIONS (JSON key-value storage)

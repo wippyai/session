@@ -2,6 +2,7 @@ local sql = require("sql")
 local json = require("json")
 local time = require("time")
 local consts = require("consts")
+local tx = require("tx")
 
 type Session = {
     session_id: string,
@@ -409,87 +410,52 @@ function session_repo.delete(session_id)
         return nil, "Session ID is required"
     end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
+    local result, err = tx.run(function(dbtx)
+        -- Delete artifacts first
+        local artifacts_delete_query = sql.builder.delete("artifacts")
+            :where("session_id = ?", session_id)
 
-    -- Begin transaction
-    local tx, err = db:begin()
-    if err then
-        db:release()
-        return nil, "Failed to begin transaction: " .. err
-    end
+        local _, artifacts_err = artifacts_delete_query:run_with(dbtx):exec()
+        if artifacts_err then
+            return nil, "Failed to delete session artifacts: " .. artifacts_err
+        end
 
-    -- Delete artifacts first
-    local artifacts_delete_query = sql.builder.delete("artifacts")
-        :where("session_id = ?", session_id)
+        -- Delete session contexts
+        local contexts_delete_query = sql.builder.delete("session_contexts")
+            :where("session_id = ?", session_id)
 
-    local artifacts_delete_executor = artifacts_delete_query:run_with(tx)
-    local result, err = artifacts_delete_executor:exec()
+        local _, contexts_err = contexts_delete_query:run_with(dbtx):exec()
+        if contexts_err then
+            return nil, "Failed to delete session contexts: " .. contexts_err
+        end
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session artifacts: " .. err
-    end
+        -- Delete messages
+        local msg_delete_query = sql.builder.delete("messages")
+            :where("session_id = ?", session_id)
 
-    -- Delete session contexts
-    local contexts_delete_query = sql.builder.delete("session_contexts")
-        :where("session_id = ?", session_id)
+        local _, msg_err = msg_delete_query:run_with(dbtx):exec()
+        if msg_err then
+            return nil, "Failed to delete session messages: " .. msg_err
+        end
 
-    local contexts_delete_executor = contexts_delete_query:run_with(tx)
-    result, err = contexts_delete_executor:exec()
+        -- Delete the session
+        local session_delete_query = sql.builder.delete("sessions")
+            :where("session_id = ?", session_id)
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session contexts: " .. err
-    end
+        local session_result, session_err = session_delete_query:run_with(dbtx):exec()
+        if session_err then
+            return nil, "Failed to delete session: " .. session_err
+        end
 
-    -- Delete messages
-    local msg_delete_query = sql.builder.delete("messages")
-        :where("session_id = ?", session_id)
+        if session_result.rows_affected == 0 then
+            return nil, "Session not found"
+        end
 
-    local msg_delete_executor = msg_delete_query:run_with(tx)
-    result, err = msg_delete_executor:exec()
+        return { deleted = true }
+    end)
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session messages: " .. err
-    end
-
-    -- Delete the session
-    local session_delete_query = sql.builder.delete("sessions")
-        :where("session_id = ?", session_id)
-
-    local session_delete_executor = session_delete_query:run_with(tx)
-    result, err = session_delete_executor:exec()
-
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session: " .. err
-    end
-
-    if result.rows_affected == 0 then
-        tx:rollback()
-        db:release()
-        return nil, "Session not found"
-    end
-
-    -- Commit transaction
-    local success, err = tx:commit()
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to commit transaction: " .. err
-    end
-
-    db:release()
-
-    return { deleted = true }
+    if err then return nil, err end
+    return result
 end
 
 return session_repo

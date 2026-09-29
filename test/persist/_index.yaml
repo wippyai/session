@@ -64,6 +64,7 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
+      message_date: wippy.session.persist:message_date
       writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
@@ -109,6 +110,43 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: artifact_events_test
+    kind: function.lua
+    meta:
+      name: Artifact event publisher
+      type: test
+      suite: session
+      comment: Publisher addresses the owner's hub (never the caller), drops silently without one, and is a no-op for a nil/ownerless artifact
+    source: file://artifact_events_test.lua
+    imports:
+      artifact_events: wippy.session.persist:artifact_events
+      test: wippy.test:test
+    method: run
+
+  - name: shared_transaction_test
+    kind: function.lua
+    meta:
+      name: Shared transaction (artifact update + message create)
+      type: test
+      suite: session
+      comment: Product-level replacement for the deleted P0-11 SQL transaction probe - commit, rollback, and mid-transaction failure across a caller-supplied tx
+    source: file://shared_transaction_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      message_repo: wippy.session.persist:message_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run

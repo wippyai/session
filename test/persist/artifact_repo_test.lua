@@ -400,6 +400,198 @@ local function define_tests()
                 { session_a, session_b })
             db:release()
         end)
+
+        describe("update: meta_patch, meta_remove, expected_version, content_version", function()
+            local function fresh_artifact(kind: string?, meta: {[string]: any}?)
+                local id = uuid.v7()
+                local db_resource, _ = consts.get_db_resource()
+                local db, db_err = sql.get(db_resource)
+                if db_err then error("Failed to connect to database: " .. db_err) end
+                insert_artifact(db, id, test_data.session_id, test_data.user_id,
+                    kind or "static", "Patch Target", "v1", meta)
+                db:release()
+                return id
+            end
+
+            it("meta_patch sets keys without wiping unrelated ones", function()
+                local id = fresh_artifact("static", {
+                    display_type = "standalone",
+                    page_id = "page-1",
+                    preview = "a preview",
+                })
+
+                local result, err = artifact_repo.update(id, {
+                    meta_patch = { status = "active", icon = "star" }
+                })
+                test.is_nil(err)
+                test.not_nil(result)
+                assert(result)
+                test.is_true(result.updated)
+
+                local artifact, get_err = artifact_repo.get(id)
+                test.is_nil(get_err)
+                test.eq(artifact.meta.status, "active")
+                test.eq(artifact.meta.icon, "star")
+                -- Untouched by this patch - must survive.
+                test.eq(artifact.meta.display_type, "standalone")
+                test.eq(artifact.meta.page_id, "page-1")
+                test.eq(artifact.meta.preview, "a preview")
+            end)
+
+            it("meta_remove deletes only the named keys", function()
+                local id = fresh_artifact("static", {
+                    display_type = "standalone",
+                    status = "active",
+                    icon = "star",
+                })
+
+                local result, err = artifact_repo.update(id, {
+                    meta_remove = { "status", "icon" }
+                })
+                test.is_nil(err)
+                test.not_nil(result)
+
+                local artifact, get_err = artifact_repo.get(id)
+                test.is_nil(get_err)
+                test.is_nil(artifact.meta.status)
+                test.is_nil(artifact.meta.icon)
+                test.eq(artifact.meta.display_type, "standalone")
+            end)
+
+            it("rejects meta combined with meta_patch or meta_remove", function()
+                local id = fresh_artifact("static", {})
+
+                local result, err = artifact_repo.update(id, {
+                    meta = { status = "active" },
+                    meta_patch = { icon = "star" }
+                })
+                test.is_nil(result)
+                test.contains(tostring(err), "Cannot combine meta")
+            end)
+
+            it("bumps content_version only when content changes", function()
+                local id = fresh_artifact("static", { status = "idle" })
+
+                local title_result, title_err = artifact_repo.update(id, { title = "Renamed" })
+                test.is_nil(title_err)
+                assert(title_result)
+                test.eq(title_result.content_version, 1)
+
+                local meta_result, meta_err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                test.is_nil(meta_err)
+                assert(meta_result)
+                test.eq(meta_result.content_version, 1)
+
+                local content_result, content_err = artifact_repo.update(id, { content = "v2" })
+                test.is_nil(content_err)
+                assert(content_result)
+                test.eq(content_result.content_version, 2)
+
+                local artifact, get_err = artifact_repo.get(id)
+                test.is_nil(get_err)
+                test.eq(artifact.content_version, 2)
+                test.eq(artifact.title, "Renamed")
+                test.eq(artifact.meta.status, "active")
+            end)
+
+            it("a stale expected_version is reported as CONFLICT with current_version", function()
+                local id = fresh_artifact("static", {})
+
+                -- Advances content_version to 2.
+                local bumped, bump_err = artifact_repo.update(id, { content = "v2" })
+                test.is_nil(bump_err)
+                assert(bumped)
+                test.eq(bumped.content_version, 2)
+
+                -- Still claims version 1 - stale.
+                local result, err = artifact_repo.update(id, { content = "v3" }, { expected_version = 1 })
+                test.is_nil(result)
+                test.not_nil(err)
+                local conflict_err = err :: any
+                test.eq(conflict_err:kind(), errors.CONFLICT)
+                local details = conflict_err:details()
+                test.eq(details.current_version, 2)
+
+                -- The right version succeeds.
+                local ok, ok_err = artifact_repo.update(id, { content = "v3" }, { expected_version = 2 })
+                test.is_nil(ok_err)
+                assert(ok)
+                test.eq(ok.content_version, 3)
+            end)
+
+            it("a missing artifact is reported as NOT_FOUND", function()
+                local result, err = artifact_repo.update(uuid.v7(), { title = "x" })
+                test.is_nil(result)
+                test.not_nil(err)
+                local not_found_err = err :: any
+                test.eq(not_found_err:kind(), errors.NOT_FOUND)
+            end)
+
+            it("list_by_session, list_by_kind, and list_by_user all surface content_version", function()
+                local id = fresh_artifact("static", {})
+                local bumped, bump_err = artifact_repo.update(id, { content = "v2" })
+                test.is_nil(bump_err)
+                assert(bumped)
+
+                local by_session, session_err = artifact_repo.list_by_session(test_data.session_id)
+                test.is_nil(session_err)
+                local found_session = nil
+                for _, artifact in ipairs(by_session) do
+                    if artifact.artifact_id == id then found_session = artifact end
+                end
+                test.not_nil(found_session)
+                assert(found_session)
+                test.eq(found_session.content_version, 2)
+
+                local by_kind, kind_err = artifact_repo.list_by_kind(test_data.session_id, "static")
+                test.is_nil(kind_err)
+                local found_kind = nil
+                for _, artifact in ipairs(by_kind) do
+                    if artifact.artifact_id == id then found_kind = artifact end
+                end
+                test.not_nil(found_kind)
+                assert(found_kind)
+                test.eq(found_kind.content_version, 2)
+
+                local by_user, user_err = artifact_repo.list_by_user(test_data.user_id, test_data.session_id, 50, nil)
+                test.is_nil(user_err)
+                assert(by_user)
+                local found_user = nil
+                for _, artifact in ipairs(by_user.artifacts) do
+                    if artifact.artifact_id == id then found_user = artifact end
+                end
+                test.not_nil(found_user)
+                assert(found_user)
+                test.eq(found_user.content_version, 2)
+            end)
+
+            it("meta_patch keeps working for inline and view_ref artifacts", function()
+                local inline_id = fresh_artifact("inline", { display_type = "inline" })
+                local inline_result, inline_err = artifact_repo.update(inline_id, {
+                    meta_patch = { status = "active" }
+                })
+                test.is_nil(inline_err)
+                assert(inline_result)
+                local inline_artifact, inline_get_err = artifact_repo.get(inline_id)
+                test.is_nil(inline_get_err)
+                test.eq(inline_artifact.meta.status, "active")
+                test.eq(inline_artifact.meta.display_type, "inline")
+
+                local view_ref_id = fresh_artifact("view_ref", {
+                    page_id = "page-42", display_type = "standalone"
+                })
+                local view_ref_result, view_ref_err = artifact_repo.update(view_ref_id, {
+                    meta_patch = { preview = "a preview" }
+                })
+                test.is_nil(view_ref_err)
+                assert(view_ref_result)
+                local view_ref_artifact, view_ref_get_err = artifact_repo.get(view_ref_id)
+                test.is_nil(view_ref_get_err)
+                test.eq(view_ref_artifact.meta.preview, "a preview")
+                test.eq(view_ref_artifact.meta.page_id, "page-42")
+                test.eq(view_ref_artifact.meta.display_type, "standalone")
+            end)
+        end)
     end)
 end
 

@@ -24,13 +24,21 @@ entries:
       name: Control config overlays
       type: test
       suite: session
-      comment: Unit tests for control_config trait/tool overlay routing
+      comment: Unit tests for control_config trait/tool overlay routing, plus a real-DB artifact meta_patch/publish test
     source: file://control_handlers_test.lua
+    modules:
+      - uuid
+      - security
     imports:
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       control_handlers: wippy.session.process:control_handlers
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      writer: wippy.session.persist:writer
       test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
     method: run_tests
 
   - name: plugin_test

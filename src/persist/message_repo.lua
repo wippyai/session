@@ -1,7 +1,8 @@
 local sql = require("sql")
 local json = require("json")
-local time = require("time")
 local consts = require("consts")
+local tx = require("tx")
+local message_date = require("message_date")
 
 type Message = {
     message_id: string,
@@ -23,30 +24,43 @@ local message_repo = {}
 local get_db
 
 function message_repo.create_batch(session_id, rows)
-    local db, err = get_db()
+    local result, err = tx.run(function(dbtx)
+        local session_rows, select_err = sql.builder.select("last_message_date")
+            :from("sessions")
+            :where("session_id = ?", session_id)
+            :limit(1):run_with(dbtx):query()
+        if select_err then return nil, select_err end
+        if #session_rows == 0 then return nil, "Session not found" end
+
+        -- Assign strictly increasing dates in array order, chaining each
+        -- row's date into the next so a whole batch written inside one
+        -- clock tick still sorts in insertion order.
+        local last_date = session_rows[1].last_message_date
+        for _, row in ipairs(rows) do
+            local metadata, encode_err = json.encode(row.metadata or {})
+            if encode_err then return nil, encode_err end
+            local date = message_date.next(last_date)
+            local _, insert_err = sql.builder.insert("messages"):set_map({
+                message_id = row.message_id, session_id = session_id, date = date,
+                type = row.type, data = row.data, metadata = metadata
+            }):run_with(dbtx):exec()
+            if insert_err then return nil, insert_err end
+            last_date = date
+        end
+
+        if #rows == 0 then return true end
+
+        local update_result, update_err = sql.builder.update("sessions"):set("last_message_date", last_date)
+            :where("session_id = ?", session_id):run_with(dbtx):exec()
+        if update_err then return nil, update_err end
+        if update_result.rows_affected == 0 then
+            return nil, "Session not found"
+        end
+        return true
+    end)
+
     if err then return nil, err end
-    local tx, begin_err = db:begin()
-    if begin_err then db:release(); return nil, begin_err end
-    local now = time.now():format(time.RFC3339NANO)
-    for _, row in ipairs(rows) do
-        local metadata, encode_err = json.encode(row.metadata or {})
-        if encode_err then tx:rollback(); db:release(); return nil, encode_err end
-        local _, insert_err = sql.builder.insert("messages"):set_map({
-            message_id = row.message_id, session_id = session_id, date = now,
-            type = row.type, data = row.data, metadata = metadata
-        }):run_with(tx):exec()
-        if insert_err then tx:rollback(); db:release(); return nil, insert_err end
-    end
-    local update_result, update_err = sql.builder.update("sessions"):set("last_message_date", now)
-        :where("session_id = ?", session_id):run_with(tx):exec()
-    if update_err then tx:rollback(); db:release(); return nil, update_err end
-    if update_result.rows_affected == 0 then
-        tx:rollback(); db:release(); return nil, "Session not found"
-    end
-    local _, commit_err = tx:commit()
-    if commit_err then tx:rollback(); db:release(); return nil, commit_err end
-    db:release()
-    return true
+    return result
 end
 
 function message_repo.recover_pending(session_id, anchor_id)
@@ -99,8 +113,13 @@ get_db = function()
     return db
 end
 
--- Create a new message
-function message_repo.create(message_id, session_id, msg_type, data, metadata)
+-- Create a new message.
+--
+-- opts.tx (optional): run the insert and the sessions.last_message_date
+-- update on this caller-supplied transaction; do not begin, commit or
+-- release. Lets a caller combine message creation with other writes (e.g. an
+-- artifact update) atomically.
+function message_repo.create(message_id, session_id, msg_type, data, metadata, opts)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
@@ -131,79 +150,69 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata)
         end
     end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
+    local function do_create(dbtx)
+        -- Read the session's current last_message_date inside this
+        -- transaction so the new row's date can be made strictly greater
+        -- than it, even when several writes land in the same clock tick.
+        local session_rows, select_err = sql.builder.select("last_message_date")
+            :from("sessions")
+            :where("session_id = ?", session_id)
+            :limit(1):run_with(dbtx):query()
+        if select_err then
+            return nil, "Failed to read session last message date: " .. select_err
+        end
+        if #session_rows == 0 then
+            return nil, "Session not found"
+        end
 
-    -- Begin transaction
-    local tx, err = db:begin()
-    if err then
-        db:release()
-        return nil, "Failed to begin transaction: " .. err
-    end
+        local date = message_date.next(session_rows[1].last_message_date)
 
-    local now = time.now():format(time.RFC3339NANO)
+        -- Build the INSERT query
+        local insert_query = sql.builder.insert("messages")
+            :set_map({
+                message_id = message_id,
+                session_id = session_id,
+                date = date,
+                type = msg_type,
+                data = data,
+                metadata = metadata_json or sql.as.null()
+            })
 
-    -- Build the INSERT query
-    local insert_query = sql.builder.insert("messages")
-        :set_map({
+        -- Execute the query within transaction
+        local _, insert_err = insert_query:run_with(dbtx):exec()
+        if insert_err then
+            return nil, "Failed to create message: " .. insert_err
+        end
+
+        -- Build the UPDATE query for session's last message date
+        local update_query = sql.builder.update("sessions")
+            :set("last_message_date", date)
+            :where("session_id = ?", session_id)
+
+        -- Execute the update within transaction
+        local update_result, update_err = update_query:run_with(dbtx):exec()
+        if update_err then
+            return nil, "Failed to update session last message date: " .. update_err
+        end
+
+        -- Check if session was found
+        if update_result.rows_affected == 0 then
+            return nil, "Session not found"
+        end
+
+        return {
             message_id = message_id,
             session_id = session_id,
-            date = now,
-            type = msg_type,
-            data = data,
-            metadata = metadata_json or sql.as.null()
-        })
-
-    -- Execute the query within transaction
-    local insert_executor = insert_query:run_with(tx)
-    local result, err = insert_executor:exec()
-
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to create message: " .. err
+            date = date,
+            type = msg_type
+        }
     end
 
-    -- Build the UPDATE query for session's last message date
-    local update_query = sql.builder.update("sessions")
-        :set("last_message_date", now)
-        :where("session_id = ?", session_id)
-
-    -- Execute the update within transaction
-    local update_executor = update_query:run_with(tx)
-    local result, err = update_executor:exec()
-
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to update session last message date: " .. err
+    if opts and opts.tx then
+        return do_create(opts.tx)
     end
 
-    -- Check if session was found
-    if result.rows_affected == 0 then
-        tx:rollback()
-        db:release()
-        return nil, "Session not found"
-    end
-
-    -- Commit transaction
-    local success, err = tx:commit()
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to commit transaction: " .. err
-    end
-
-    db:release()
-
-    return {
-        message_id = message_id,
-        session_id = session_id,
-        date = now,
-        type = msg_type
-    }
+    return tx.run(do_create)
 end
 
 -- Get a message by ID

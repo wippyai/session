@@ -3,6 +3,7 @@ local json = require("json")
 local time = require("time")
 local consts = require("consts")
 local security = require("security")
+local tx = require("tx")
 
 type Artifact = {
     artifact_id: string,
@@ -174,8 +175,26 @@ function artifact_repo.get(artifact_id)
     return artifact
 end
 
--- Update artifact
-function artifact_repo.update(artifact_id, updates)
+-- Update artifact.
+--
+-- opts (optional):
+--   tx               - run on this caller-supplied transaction; no own
+--                       begin/commit/release. Lets a caller combine this
+--                       update with other writes atomically.
+--   expected_version  - require content_version to still equal this value
+--                       (adds "AND content_version = ?"); a mismatch or a
+--                       deleted row is reported as CONFLICT/NOT_FOUND.
+--
+-- updates.meta replaces the whole meta object, as before. updates.meta_patch
+-- (table) sets individual keys and updates.meta_remove (list of keys)
+-- deletes individual keys, both read-merge-write against the current meta on
+-- the same connection/transaction. meta may not be combined with
+-- meta_patch/meta_remove.
+--
+-- Returns { artifact_id, updated = true, content_version } on success, read
+-- back on the same connection so the caller always has the value it produced
+-- (not a value a concurrent writer could have since moved past).
+function artifact_repo.update(artifact_id, updates, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
     end
@@ -184,91 +203,155 @@ function artifact_repo.update(artifact_id, updates)
         return nil, "Updates must be a table"
     end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
+    if updates.meta ~= nil and (updates.meta_patch ~= nil or updates.meta_remove ~= nil) then
+        return nil, "Cannot combine meta with meta_patch or meta_remove"
     end
 
-    -- Check if artifact exists
-    local check_query = sql.builder.select("artifact_id")
-        :from("artifacts")
-        :where("artifact_id = ?", artifact_id)
+    opts = opts or {}
 
-    local check_executor = check_query:run_with(db)
-    local artifacts, err = check_executor:query()
+    local function run_update(conn)
+        -- Resolve the meta value to write: a plain encode for a full replace,
+        -- or a read-merge-write against the current row for a patch/remove.
+        local meta_value = nil
 
-    if err then
-        db:release()
-        return nil, "Failed to check if artifact exists: " .. err
-    end
+        if updates.meta ~= nil then
+            if type(updates.meta) == "table" then
+                local encoded, encode_err = json.encode(updates.meta)
+                if encode_err then
+                    return nil, "Failed to encode meta: " .. encode_err
+                end
+                meta_value = encoded
+            else
+                meta_value = updates.meta
+            end
+        elseif updates.meta_patch ~= nil or updates.meta_remove ~= nil then
+            local current_query = sql.builder.select("meta")
+                :from("artifacts")
+                :where("artifact_id = ?", artifact_id)
+                :limit(1)
+            local current_rows, current_err = current_query:run_with(conn):query()
+            if current_err then
+                return nil, "Failed to read current meta: " .. current_err
+            end
 
-    if #artifacts == 0 then
-        db:release()
-        return nil, "Artifact not found"
-    end
+            local current_meta = {}
+            if #current_rows > 0 and current_rows[1].meta and current_rows[1].meta ~= "" then
+                local decoded, decode_err = json.decode(current_rows[1].meta :: string)
+                if not decode_err and type(decoded) == "table" then
+                    current_meta = decoded
+                end
+            end
 
-    -- Convert meta to JSON if it's a table
-    local meta_value = updates.meta
-    if meta_value and type(meta_value) == "table" then
-        local encoded, err = json.encode(meta_value)
-        if err then
-            db:release()
-            return nil, "Failed to encode meta: " .. err
+            if updates.meta_patch then
+                for k, v in pairs(updates.meta_patch) do
+                    current_meta[k] = v
+                end
+            end
+            if updates.meta_remove then
+                for _, k in ipairs(updates.meta_remove) do
+                    current_meta[k] = nil
+                end
+            end
+
+            local encoded, encode_err = json.encode(current_meta)
+            if encode_err then
+                return nil, "Failed to encode meta: " .. encode_err
+            end
+            meta_value = encoded
         end
-        meta_value = encoded
+
+        -- Build the update query
+        local update_query = sql.builder.update("artifacts")
+
+        if updates.kind ~= nil then
+            update_query = update_query:set("kind", updates.kind)
+        end
+
+        if updates.title ~= nil then
+            update_query = update_query:set("title", updates.title)
+        end
+
+        if updates.content ~= nil then
+            update_query = update_query:set("content", updates.content)
+            -- Bumped here as well as in update_content, because this is the path the session
+            -- flow actually uses: control_handlers -> writer:update_artifact -> update().
+            -- Bumped only when the content changes; a title or meta edit is not a new version
+            -- of the content and must not invalidate a cached body.
+            update_query = update_query:set("content_version", sql.builder.expr("content_version + 1"))
+        end
+
+        if meta_value ~= nil then
+            update_query = update_query:set("meta", meta_value)
+        end
+
+        -- Always update the updated_at timestamp
+        update_query = update_query:set("updated_at", time.now():format(time.RFC3339))
+
+        -- Add where clause - the conditional update is the CAS winner check
+        -- when a caller supplies expected_version.
+        local where_filters = { sql.builder.expr("artifact_id = ?", artifact_id) }
+        if opts.expected_version ~= nil then
+            table.insert(where_filters, sql.builder.expr("content_version = ?", opts.expected_version))
+        end
+        update_query = update_query:where(sql.builder.and_(where_filters))
+
+        -- Execute the query
+        local result, exec_err = update_query:run_with(conn):exec()
+        if exec_err then
+            return nil, "Failed to update artifact: " .. exec_err
+        end
+
+        if result.rows_affected == 0 then
+            -- No pre-check SELECT: read once, here, only to tell NOT_FOUND
+            -- from a stale expected_version (CONFLICT).
+            local state_query = sql.builder.select("artifact_id", "content_version")
+                :from("artifacts")
+                :where("artifact_id = ?", artifact_id)
+                :limit(1)
+            local state_rows, state_err = state_query:run_with(conn):query()
+            if state_err then
+                return nil, "Failed to verify artifact state: " .. state_err
+            end
+
+            if #state_rows == 0 then
+                return nil, errors.new({
+                    kind = errors.NOT_FOUND,
+                    message = "Artifact not found",
+                    details = { artifact_id = artifact_id },
+                })
+            end
+
+            return nil, errors.new({
+                kind = errors.CONFLICT,
+                message = "Artifact was modified by another update",
+                details = { artifact_id = artifact_id, current_version = state_rows[1].content_version },
+            })
+        end
+
+        local final_query = sql.builder.select("content_version")
+            :from("artifacts")
+            :where("artifact_id = ?", artifact_id)
+            :limit(1)
+        local final_rows, final_err = final_query:run_with(conn):query()
+        if final_err then
+            return nil, "Failed to read updated artifact: " .. final_err
+        end
+
+        return {
+            artifact_id = artifact_id,
+            updated = true,
+            content_version = final_rows[1].content_version,
+        }
     end
 
-    -- Build the update query
-    local update_query = sql.builder.update("artifacts")
-
-    -- Add fields to update
-    local updated = false
-
-    if updates.kind ~= nil then
-        update_query = update_query:set("kind", updates.kind)
-        updated = true
+    if opts.tx then
+        return run_update(opts.tx)
     end
 
-    if updates.title ~= nil then
-        update_query = update_query:set("title", updates.title)
-        updated = true
-    end
-
-    if updates.content ~= nil then
-        update_query = update_query:set("content", updates.content)
-        -- Bumped here as well as in update_content, because this is the path the session
-        -- flow actually uses: control_handlers -> writer:update_artifact -> update().
-        -- Bumped only when the content changes; a title or meta edit is not a new version
-        -- of the content and must not invalidate a cached body.
-        update_query = update_query:set("content_version", sql.builder.expr("content_version + 1"))
-        updated = true
-    end
-
-    if meta_value ~= nil then
-        update_query = update_query:set("meta", meta_value)
-        updated = true
-    end
-
-    -- Always update the updated_at timestamp
-    update_query = update_query:set("updated_at", time.now():format(time.RFC3339))
-
-    -- Add where clause
-    update_query = update_query:where("artifact_id = ?", artifact_id)
-
-    -- Execute the query
-    local update_executor = update_query:run_with(db)
-    local result, err = update_executor:exec()
-
-    db:release()
-
-    if err then
-        return nil, "Failed to update artifact: " .. err
-    end
-
-    return {
-        artifact_id = artifact_id,
-        updated = true
-    }
+    -- Own transaction: the meta read-merge-write, the conditional UPDATE and the
+    -- version read-back must be atomic, or a concurrent writer could lose a meta
+    -- key or make this call report a version it did not produce.
+    return tx.run(run_update)
 end
 
 -- List artifacts by session ID
@@ -283,7 +366,7 @@ function artifact_repo.list_by_session(session_id, limit, offset)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "meta", "created_at", "updated_at")
+    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "meta", "created_at", "updated_at", "content_version")
         :from("artifacts")
         :where("session_id = ?", session_id)
         :order_by("created_at DESC")
@@ -374,7 +457,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
     end
 
     local query = sql.builder.select(
-            "artifact_id", "session_id", "kind", "title", "meta", "created_at", "updated_at"
+            "artifact_id", "session_id", "kind", "title", "meta", "created_at", "updated_at", "content_version"
         )
         :from("artifacts")
         :where(sql.builder.and_(filters))
@@ -415,7 +498,7 @@ function artifact_repo.list_by_kind(session_id, kind, limit, offset)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "meta", "created_at", "updated_at")
+    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "meta", "created_at", "updated_at", "content_version")
         :from("artifacts")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
@@ -488,7 +571,9 @@ function artifact_repo.get_content(artifact_id)
     return results[1].content
 end
 
--- Update artifact content
+-- Update artifact content. Thin delegation to update() (content_version is
+-- bumped inside the same UPDATE as before, and now read back on the same
+-- connection as part of update()'s own result - see its comment).
 function artifact_repo.update_content(artifact_id, content)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
@@ -498,59 +583,7 @@ function artifact_repo.update_content(artifact_id, content)
         return nil, "Content is required"
     end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
-
-    -- Check if artifact exists
-    local check_query = sql.builder.select("artifact_id")
-        :from("artifacts")
-        :where("artifact_id = ?", artifact_id)
-
-    local check_executor = check_query:run_with(db)
-    local artifacts, err = check_executor:query()
-
-    if err then
-        db:release()
-        return nil, "Failed to check if artifact exists: " .. err
-    end
-
-    if #artifacts == 0 then
-        db:release()
-        return nil, "Artifact not found"
-    end
-
-    -- Build the UPDATE query
-    -- content_version is bumped inside the same UPDATE rather than read, incremented and
-    -- written back: two concurrent writers doing read-then-write would both observe the
-    -- same value and one bump would be lost.
-    local update_query = sql.builder.update("artifacts")
-        :set("content", content)
-        :set("updated_at", time.now():format(time.RFC3339))
-        :set("content_version", sql.builder.expr("content_version + 1"))
-        :where("artifact_id = ?", artifact_id)
-
-    -- Execute the query
-    local update_executor = update_query:run_with(db)
-    local result, err = update_executor:exec()
-
-    db:release()
-
-    if err then
-        return nil, "Failed to update artifact content: " .. err
-    end
-
-    -- Deliberately not returning the new content_version. Reading it back here would be a
-    -- second statement on a fresh connection, so a concurrent writer could bump between the
-    -- UPDATE and the read and this call would report a version it did not produce. It would
-    -- also re-read the whole row including the content BLOB just to obtain an integer, which
-    -- is why list_by_session omits that column too. Callers that need the value read it from
-    -- the artifact endpoint, which is authoritative.
-    return {
-        artifact_id = artifact_id,
-        updated = true
-    }
+    return artifact_repo.update(artifact_id, { content = content })
 end
 
 -- Delete an artifact

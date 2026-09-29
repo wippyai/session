@@ -3,6 +3,7 @@ local test = require("test")
 local uuid = require("uuid")
 local json = require("json")
 local message_repo = require("message_repo")
+local message_date = require("message_date")
 local writer = require("writer")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
@@ -703,6 +704,111 @@ local function define_tests()
             local result, err = message_repo.delete("")
             test.is_nil(result)
             test.contains(tostring(err), "Message ID is required")
+        end)
+
+        it("formats message_date.now() with a 9-digit fraction, and orders instants 50ms apart correctly", function()
+            local fixed_pattern = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%d%d%d%d%d%d%d[Z%+%-]"
+            local now = message_date.now()
+            test.not_nil(now:match(fixed_pattern))
+
+            -- Two instants 50ms apart inside the same second: with a fixed
+            -- 9-digit fraction and a "Z" offset, text order matches time
+            -- order. The old trimmed, offset-bearing format could disagree
+            -- here on a UTC host (e.g. "...05.1Z" sorting after "...05.15Z").
+            local earlier = time.date(2026, 1, 1, 0, 0, 0, 100000000, time.utc):format(message_date.LAYOUT)
+            local later = time.date(2026, 1, 1, 0, 0, 0, 150000000, time.utc):format(message_date.LAYOUT)
+            test.is_true(earlier < later)
+
+            -- next() with no prior date returns the fixed-width format too.
+            local first = message_date.next(nil)
+            test.not_nil(first:match(fixed_pattern))
+
+            -- A legacy row (trimmed fraction, same offset) sorts before the
+            -- value next() returns for it, as text.
+            local legacy = time.date(2026, 1, 1, 0, 0, 5, 150000000, time.utc):format(time.RFC3339NANO)
+            local after_legacy = message_date.next(legacy)
+            test.is_true(legacy < after_legacy)
+
+            -- next() never returns a date that is not strictly greater than
+            -- the one it was given, even when called back-to-back (same
+            -- clock tick).
+            local second = message_date.next(first)
+            test.is_true(second > first)
+        end)
+
+        it("keeps 100 rapid create() calls in one session in strict insertion order", function()
+            local context_id = uuid.v7()
+            local session_id = uuid.v7()
+            context_repo.create(context_id, "primary", "{}")
+            session_repo.create(session_id, test_data.user_id, context_id, "Rapid create order", "test")
+
+            local ids = {}
+            for i = 1, 100 do
+                local message_id = uuid.v7()
+                table.insert(ids, message_id)
+                local created, create_err = message_repo.create(
+                    message_id, session_id, consts.MSG_TYPE.USER, "row " .. tostring(i))
+                test.is_nil(create_err)
+                test.not_nil(created)
+            end
+
+            local listed, list_err = message_repo.list_by_session(session_id, 200)
+            test.is_nil(list_err)
+            test.eq(#listed.messages, 100)
+            for i, id in ipairs(ids) do
+                test.eq(listed.messages[i].message_id, id)
+            end
+
+            -- Dates must be strictly increasing, not just tied and saved by
+            -- message_id ordering.
+            for i = 2, #listed.messages do
+                test.is_true(listed.messages[i].date > listed.messages[i - 1].date)
+            end
+
+            for _, id in ipairs(ids) do message_repo.delete(id) end
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+        end)
+
+        it("lists create_batch rows in array order, and after an earlier row written in the same tick", function()
+            local context_id = uuid.v7()
+            local session_id = uuid.v7()
+            context_repo.create(context_id, "primary", "{}")
+            session_repo.create(session_id, test_data.user_id, context_id, "Batch order", "test")
+
+            local first_id = uuid.v7()
+            local created, create_err = message_repo.create(
+                first_id, session_id, consts.MSG_TYPE.USER, "written first")
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local batch_ids = {}
+            local rows = {}
+            for i = 1, 20 do
+                local message_id = uuid.v7()
+                table.insert(batch_ids, message_id)
+                table.insert(rows, { message_id = message_id, type = consts.MSG_TYPE.USER,
+                    data = "batch row " .. tostring(i), metadata = {} })
+            end
+            local batch_ok, batch_err = message_repo.create_batch(session_id, rows)
+            test.is_nil(batch_err)
+            test.is_true(batch_ok)
+
+            local listed, list_err = message_repo.list_by_session(session_id, 200)
+            test.is_nil(list_err)
+            test.eq(#listed.messages, 21)
+            test.eq(listed.messages[1].message_id, first_id)
+            for i, id in ipairs(batch_ids) do
+                test.eq(listed.messages[i + 1].message_id, id)
+            end
+            for i = 2, #listed.messages do
+                test.is_true(listed.messages[i].date > listed.messages[i - 1].date)
+            end
+
+            message_repo.delete(first_id)
+            for _, id in ipairs(batch_ids) do message_repo.delete(id) end
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
         end)
     end)
 end

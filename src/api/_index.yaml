@@ -37,10 +37,10 @@ entries:
     source: file://get_artifact.lua
     modules:
       - http
-      - json
       - security
     imports:
       artifact_repo: wippy.session.persist:artifact_repo
+      artifact_projection: wippy.session.persist:artifact_projection
       session_repo: wippy.session.persist:session_repo
     method: handler
     pool:

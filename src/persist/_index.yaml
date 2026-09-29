@@ -2,6 +2,46 @@ version: "1.0"
 namespace: wippy.session.persist
 
 entries:
+  # wippy.session.persist:tx
+  - name: tx
+    kind: library.lua
+    meta:
+      comment: Shared transaction helper for the persist layer (begin/pcall/commit-or-rollback/release)
+    source: file://tx.lua
+    modules:
+      - sql
+    imports:
+      consts: wippy.session:consts
+
+  # wippy.session.persist:message_date
+  - name: message_date
+    kind: library.lua
+    meta:
+      comment: Produces fixed-width UTC message dates so text order equals time order, with strictly-increasing per-session fallback
+    source: file://message_date.lua
+    modules:
+      - time
+
+  # wippy.session.persist:artifact_projection
+  - name: artifact_projection
+    kind: library.lua
+    meta:
+      comment: Shapes the metadata-response view of an artifact row, shared by the GET endpoint and the event publisher
+    source: file://artifact_projection.lua
+    modules:
+      - json
+    imports:
+      consts: wippy.session:consts
+
+  # wippy.session.persist:artifact_events
+  - name: artifact_events
+    kind: library.lua
+    meta:
+      comment: Publishes artifact-updated events to the owning user's relay hub
+    source: file://artifact_events.lua
+    imports:
+      artifact_projection: wippy.session.persist:artifact_projection
+
   # wippy.session.persist:writer
   - name: writer
     kind: library.lua
@@ -32,6 +72,7 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
+      tx: wippy.session.persist:tx
 
   # wippy.session.persist:context_repo
   - name: context_repo
@@ -54,9 +95,10 @@ entries:
     modules:
       - sql
       - json
-      - time
     imports:
       consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      message_date: wippy.session.persist:message_date
 
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo
@@ -83,6 +125,7 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
+      tx: wippy.session.persist:tx
 
   # wippy.session.persist:reader
   - name: reader
