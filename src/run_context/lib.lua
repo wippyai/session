@@ -2,6 +2,7 @@ local json = require("json")
 local consts = require("consts")
 local session = require("session")
 local prompt_builder = require("prompt_builder")
+local message_repo = require("message_repo")
 
 local M = {}
 
@@ -83,6 +84,18 @@ local function query_messages(reader, sel)
     end
 
     if mode == "range" then
+        if sel.from_id ~= nil and (type(sel.from_id) ~= "string" or sel.from_id == "") then
+            return nil, "selector.from_id must be a message id"
+        end
+        if sel.to_id ~= nil and (type(sel.to_id) ~= "string" or sel.to_id == "") then
+            return nil, "selector.to_id must be a message id"
+        end
+        if type(sel.to_id) == "string" and sel.to_id ~= "" then
+            local endpoint, endpoint_err = message_repo.get(sel.to_id)
+            if endpoint_err or not endpoint or endpoint.session_id ~= reader.session_id then
+                return nil, "Range end message not found: " .. sel.to_id
+            end
+        end
         if type(sel.from_id) == "string" and sel.from_id ~= ""
            and type(sel.to_id) == "string" and sel.to_id ~= ""
            and sel.from_id == sel.to_id then
@@ -100,12 +113,15 @@ local function query_messages(reader, sel)
             return messages, nil
         end
         local out = {}
+        local reached_end = false
         for _, msg in ipairs(messages or {}) do
             out[#out + 1] = msg
             if msg.message_id == sel.to_id then
+                reached_end = true
                 break
             end
         end
+        if not reached_end then return nil, "Range end is outside the selected window" end
         return out, nil
     end
 

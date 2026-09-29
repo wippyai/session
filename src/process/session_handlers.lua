@@ -405,7 +405,7 @@ function session_handlers.create_checkpoint(ctx, op)
         checkpoint_tokens = result.tokens or {}
     })
 
-    local meta_success, meta_err = ctx.writer:update_meta({ meta = current_meta })
+    local meta_success, meta_err = ctx.writer:update_meta({ meta = { checkpoints = current_meta.checkpoints } })
     if not meta_success then
         return nil, "Failed to update checkpoint meta: " .. (meta_err or "unknown error")
     end

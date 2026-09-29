@@ -58,6 +58,20 @@ local function fixture(rows)
                 events[#events + 1] = "write"
                 return id
             end,
+            add_response = function(_, content, metadata, calls)
+                if ctx.write_error then return nil, nil, ctx.write_error end
+                local id = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, content, metadata)
+                local call_ids = {}
+                for _, call in ipairs(calls or {}) do
+                    call_ids[call.id] = ctx.writer:add_message(call.type or consts.MSG_TYPE.FUNCTION,
+                        call.arguments or "{}", {
+                            call_id = call.id, function_name = call.name,
+                            registry_id = call.registry_id, provider_metadata = call.provider_metadata,
+                            status = consts.FUNC_STATUS.PENDING,
+                        })
+                end
+                return id, call_ids, nil
+            end,
             admit_message = function(_, kind, text, meta, updates)
                 if ctx.admit_error then return nil, ctx.admit_error end
                 local id = "server-" .. tostring(#rows + 1)
@@ -99,7 +113,16 @@ local function fixture(rows)
                 if ctx.handoff_during_apply then ctx.turn_state.handoff = true end
                 return true
             end,
-            update_message_meta = function() return true end,
+            update_message_meta = function(_, id, updates)
+                for _, row in ipairs(rows) do
+                    if row.message_id == id then
+                        row.metadata = row.metadata or {}
+                        for key, value in pairs(updates) do row.metadata[key] = value end
+                        return true
+                    end
+                end
+                return nil, "Fixture message not found"
+            end,
         },
         upstream = {
             message_received = function(_, message_id, text, files, input, request_id)
@@ -124,13 +147,36 @@ local function define_tests()
             local result, err = handlers.handle_message(ctx, { data = { text = "start" }, request_id = "request-1" })
             test.is_nil(err)
             test.eq(events[1], "admit")
-            test.eq(events[2], "session")
-            test.eq(events[3], "received")
+            test.eq(events[2], "received")
+            test.eq(events[3], "session")
             test.is_nil(events[4])
             test.eq(ctx.status, "running")
             test.eq(ctx.admission.status, "running")
             test.eq(ctx.ack.data.message_id, rows[1].message_id)
-            test.is_nil((result :: any).next_ops[1].request_id)
+            test.eq((result :: any).next_ops[1].request_id, "request-1")
+        end)
+
+        it("does not replace committed interaction with cached token metadata", function()
+            local ctx = fixture()
+            local durable: any = { interaction = { can_send = true, revision = 12 } }
+            ctx.interaction = durable.interaction
+            ctx.reader.state = function()
+                return { meta = { interaction = { can_send = false, revision = 9 },
+                    tokens = { total_tokens = 5 } }, config = ctx.config }
+            end
+            ctx.writer.update_meta = function(_, updates)
+                for key, value in pairs(updates.meta or {}) do durable[key] = value end
+                return true
+            end
+            ctx.current_agent.step = function()
+                return { result = "answer", tool_calls = {}, tokens = { total_tokens = 3 } }
+            end
+            local result, err = handlers.agent_step(ctx, { message_id = "start", from_user = true })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(durable.interaction.revision, 12)
+            test.is_true(durable.interaction.can_send)
+            test.eq(durable.tokens.total_tokens, 8)
         end)
 
         it("does not acknowledge or mutate state when admission fails", function()
@@ -340,18 +386,24 @@ local function define_tests()
             test.eq(#events, 0)
         end)
 
-        it("cancels queued old-agent tools after handoff", function()
-            local ctx, rows = fixture()
+        it("cancels the persisted old-agent intent after handoff without duplicating it", function()
+            local call = { message_id = "call-message", date = "2026-01-02T00:00:00Z",
+                type = consts.MSG_TYPE.FUNCTION, data = "{}",
+                metadata = { call_id = "old-call", status = consts.FUNC_STATUS.PENDING } }
+            local ctx, rows = fixture({ call })
             ctx.turn_state = { active = true, handoff = true }
             local result, err = handlers.process_tools(ctx, {
                 tool_calls = { { id = "old-call", name = "lookup", arguments = "{}" } },
+                call_message_ids = { ["old-call"] = "call-message" },
+                cancel_only = true,
             })
             test.is_nil(err)
             test.not_nil(result)
             test.eq(#result.next_ops, 0)
-            test.eq(rows[1].type, consts.MSG_TYPE.PRIVATE_FUNCTION)
+            test.eq(#rows, 1)
+            test.eq(rows[1].type, consts.MSG_TYPE.FUNCTION)
             test.eq(rows[1].metadata.call_id, "old-call")
-            test.eq(rows[1].metadata.status, consts.FUNC_STATUS.ERROR)
+            test.eq(rows[1].metadata.status, consts.FUNC_STATUS.CANCELLED)
         end)
 
         it("does not commit completion state when its write fails", function()

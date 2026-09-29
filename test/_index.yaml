@@ -79,6 +79,8 @@ entries:
         value: app:env_storage
       - name: default_host
         value: app:processes
+      - name: on_session_end_func_id
+        value: app:end_hook_capture
 
   - name: dep.wippy.bootloader
     kind: ns.dependency
@@ -159,6 +161,19 @@ entries:
     groups:
       - test_group
 
+  - name: end_hook_capture
+    kind: function.lua
+    meta:
+      comment: Records the plugin's session end payload for lifecycle tests
+    source: file://process/end_hook_capture.lua
+    modules:
+      - json
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      message_repo: wippy.session.persist:message_repo
+    method: run
+
   # Suites for src/*.lua
   - name: prompt_builder_test
     kind: function.lua
@@ -171,6 +186,7 @@ entries:
     modules:
       - json
     imports:
+      claude_mapper: wippy.llm.claude:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
@@ -228,7 +244,6 @@ entries:
       - json
       - security
       - sql
-      - time
       - uuid
     imports:
       consts: wippy.session:consts
