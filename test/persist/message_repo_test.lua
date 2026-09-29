@@ -344,14 +344,27 @@ local function define_tests()
                 "held", { message_id = held_id })
             test.is_nil(held_err)
             test.eq(stored_id, held_id)
+            -- Give the held write a later timestamp explicitly. Fast Windows writes
+            -- can share a clock tick, where the documented ID tiebreaker applies.
+            local resource = consts.get_db_resource()
+            local db, db_err = sql.get(resource)
+            if not db then error(db_err) end
+            local _, date_err = db:execute(
+                "UPDATE messages SET date = $1 WHERE message_id = $2 OR message_id = $3",
+                { "2100-01-01T00:00:00Z", assistant_id, call_id })
+            local _, held_date_err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2",
+                { "2100-01-01T00:00:01Z", held_id })
+            db:release()
+            test.is_nil(date_err)
+            test.is_nil(held_date_err)
             local window, window_err = message_repo.list_after_message(test_data.session_id, assistant_id)
+            message_repo.delete(assistant_id)
+            message_repo.delete(call_id)
+            message_repo.delete(held_id)
             test.is_nil(window_err)
             test.eq(window[#window - 2].message_id, assistant_id)
             test.eq(window[#window - 1].message_id, call_id)
             test.eq(window[#window].message_id, held_id)
-            message_repo.delete(assistant_id)
-            message_repo.delete(call_id)
-            message_repo.delete(held_id)
         end)
 
         it("should create a message with binary data and metadata", function()

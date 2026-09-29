@@ -21,6 +21,7 @@ entries:
     source: file://upstream.lua
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:session_handlers
   - name: session_handlers
@@ -36,6 +37,7 @@ entries:
       consts: wippy.session:consts
       tool_caller: wippy.agent.tools:caller
       checkpoint_runtime: wippy.agent:checkpoint_runtime
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:control_handlers
   - name: control_handlers
@@ -49,6 +51,7 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -66,11 +69,20 @@ entries:
       consts: wippy.session:consts
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
+      input_metadata: wippy.session:input_metadata
       tool_caller: wippy.agent.tools:caller
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      input_policy: wippy.session.process:input_policy
       control_handlers: wippy.session.process:control_handlers
+
+  - name: input_policy
+    kind: library.lua
+    meta:
+      comment: Session-owned input admission and interaction policy resolver
+    source: file://input_policy.lua
+    modules: [json]
 
   # wippy.session.process:session
   - name: session
@@ -94,6 +106,7 @@ entries:
       session_handlers: wippy.session.process:session_handlers
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
+      input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
     method: run
 
@@ -119,6 +132,7 @@ entries:
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
+      input_policy: wippy.session.process:input_policy
       reader: wippy.session.persist:reader
       message_repo: wippy.session.persist:message_repo
     method: run

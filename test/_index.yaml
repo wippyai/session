@@ -253,3 +253,34 @@ entries:
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run_tests
+
+  - name: steering_first_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Steering first fixture
+    model: gpt-4o
+    prompt: Test only.
+    traits: [wippy.session.traits:steering, wippy.session.traits:input_control]
+
+  - name: control_first_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Control first fixture
+    model: gpt-4o
+    prompt: Test only.
+    traits: [wippy.session.traits:input_control, wippy.session.traits:steering]
+
+  - name: steering_traits_test
+    kind: function.lua
+    meta:
+      name: Session trait compilation
+      type: test
+      suite: session
+    source: file://steering_traits_test.lua
+    imports:
+      agent_context: wippy.agent:context
+      input_policy: wippy.session.process:input_policy
+      test: wippy.test:test
+    method: run_tests

@@ -15,6 +15,51 @@
 
 </div>
 
+## Session steering
+
+Sessions block new messages during an active turn by default. Add the
+`wippy.session.traits:steering` agent trait to accept steering, or set the
+persistent session override:
+
+```yaml
+config:
+  input_policy:
+    while_running: steer
+```
+
+The effective policy uses the temporary turn override, then the session
+override, then the active agent's `agent_options.session_input.while_running`,
+then `block`. Stop remains controlled by session status.
+
+The optional `wippy.session.traits:input_control` trait supplies the
+`set_session_input_policy` tool. The tool accepts `block`, `steer`, or
+`inherit`. Turn scope is the default, and session scope persists the change.
+The tool is bound to its calling session. The session validates and persists a
+change before reporting tool success. Temporary overrides clear on completion,
+Stop, failure, recovery, and agent handoff.
+
+The server generates the canonical message ID. A request ID correlates the
+command response. The session saves a message before acknowledging it. There
+is no automatic retry or client message deduplication. If acknowledgement is
+lost, a manual resend can create a duplicate.
+
+Accepted steering is pending until the current response and its tool batch
+finish. The next model request includes it after those results in persisted
+message order, within the same turn. Stop prevents the next continuation at
+the operation boundary. Unused steering remains pending after Stop or recovery
+and is included when the user starts another turn.
+
+REST session responses and WebSocket session updates expose
+`interaction.can_send` and `interaction.revision`. Clients use session status
+for Stop, keep explicit false values, and ignore older revisions. Servers
+without `interaction` retain legacy status behavior. Steering metadata uses
+`input.state` with `pending` or `applied`, plus `input.after_message_id` after
+application. The messages endpoint returns `pending_inputs` independently of
+history pagination.
+
+On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
+when Wippy is not on PATH. The test target clears only its own test database.
+
 ## Artifacts
 
 An artifact is generated content that outlives the message that produced it. A

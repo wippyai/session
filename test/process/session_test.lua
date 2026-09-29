@@ -5,19 +5,25 @@ local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
 local control_handlers = require("control_handlers")
 
-local function fixture()
+local function fixture(): (any, any, {any}, {any}, {any}, {any})
     local saved = {} :: {any}
     local received = {} :: {any}
     local errors = {} :: {any}
     local successes = {} :: {any}
-    local ctx = {
-        session_id = "session-1", held = {},
+    local ctx: any = {
+        session_id = "session-1", held = {}, status = consts.STATUS.IDLE,
+        config = { input_policy = { while_running = "steer" } },
         writer = {
             add_message = function(_self, msg_type, content, metadata)
-                table.insert(saved, { type = msg_type, content = content,
-                    message_id = metadata.message_id })
-                return metadata.message_id
+                local id = metadata.message_id or ("server-" .. tostring(#saved + 1))
+                table.insert(saved, { type = msg_type, content = content, metadata = metadata,
+                    message_id = id })
+                return id
             end,
+            admit_message = function(self, msg_type, content, metadata, updates)
+                return self:add_message(msg_type, content, metadata)
+            end,
+            update_meta = function() return true end,
             update_status = function() return true end
         },
         upstream = {
@@ -29,13 +35,13 @@ local function fixture()
                 table.insert(received, { id = id, text = text, stored = stored })
             end,
             send_message_update = function() end,
-            command_success = function(_self, id)
-                table.insert(successes, id)
-            end,
+
             command_error = function(_self, id, code, message)
                 table.insert(errors, { id = id, code = code, message = message })
             end,
-            update_session = function() end
+            update_session = function(_self, update)
+                if update.request_id then table.insert(successes, update.request_id) end
+            end
         }
     }
     ctx.flush_held = function(run_agent) return session.flush_held(ctx, run_agent) end
@@ -44,158 +50,166 @@ end
 
 local function define_tests()
     describe("session input routing", function()
-        it("announces held input only once it is written, in arrival order at the boundary", function()
+        it("persists and acknowledges steering while keeping one active turn", function()
             local ctx, bus, saved, received = fixture()
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
             bus.state = "running"
-            local first = { data = { text = "first" }, request_id = "request-1" }
-            local second = { data = { text = "second" }, request_id = "request-2" }
-            local ok, err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE, first, {})
-            test.is_nil(err)
-            test.is_true(ok)
-            session.route_input(ctx, bus, consts.TOPICS.MESSAGE, second, {})
-            test.eq(#received, 0)
-            test.eq(#saved, 0)
-            test.eq(#ctx.held, 2)
-            local last_id, flush_err, request_id = session.flush_held(ctx, true)
-            test.is_nil(flush_err)
+            for index = 1, 2 do
+                local ok, err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                    { data = { text = "steer-" .. index }, request_id = "request-" .. index }, {})
+                test.is_nil(err)
+                test.is_true(ok)
+            end
+            test.eq(#saved, 2)
             test.eq(#received, 2)
-            test.eq(last_id, received[2].id)
-            test.eq(request_id, "request-2")
-            test.eq(saved[1].message_id, received[1].id)
-            test.eq(saved[2].message_id, received[2].id)
             test.is_true(received[1].stored)
             test.is_true(received[2].stored)
-            test.eq(saved[1].content, "first")
-            test.eq(saved[2].content, "second")
+            test.eq(saved[1].metadata.input.state, "pending")
+            test.eq(saved[2].metadata.input.state, "pending")
+            test.eq(#ctx.held, 0)
+            test.eq(#bus.ops, 0)
         end)
 
-        it("announces a queued message only after it is persisted", function()
+        it("admits idle input before scheduling its model step", function()
             local ctx, bus, saved, received = fixture()
-            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
-            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
-                bus:stop()
-                return { completed = true }
-            end)
             session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
                 { data = { text = "first" }, request_id = "request-1" }, {})
-            test.eq(#received, 0)
-            test.eq(#saved, 0)
-
-            local ok, err = bus:run()
-
-            test.is_nil(err)
-            test.is_true(ok)
             test.eq(#saved, 1)
             test.eq(#received, 1)
-            test.eq(received[1].id, saved[1].message_id)
             test.is_true(received[1].stored)
+            test.is_nil(saved[1].metadata.input)
+            test.eq(ctx.status, consts.STATUS.RUNNING)
+            test.eq(#bus.ops, 1)
+            test.eq(bus.ops[1].message_id, saved[1].message_id)
         end)
 
-        it("holds a second input while the first start is still queued", function()
+        it("accepts the second input as pending while the first step is still queued", function()
             local ctx, bus, saved, received = fixture()
             session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
                 { data = { text = "first" }, request_id = "request-1" }, {})
             session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
                 { data = { text = "second" }, request_id = "request-2" }, {})
             test.eq(#bus.ops, 1)
-            test.eq(#ctx.held, 1)
-            test.eq(#saved, 0)
-            test.eq(#received, 0)
-            test.eq((bus.ops[1] :: any).message_id ~= (ctx.held[1] :: any).message_id, true)
+            test.eq(#ctx.held, 0)
+            test.eq(#saved, 2)
+            test.eq(#received, 2)
+            test.eq(saved[2].metadata.input.state, "pending")
         end)
 
-        it("persists a received queued message when an earlier control fails", function()
+        it("rejects blocked input without persisting or acknowledging it", function()
+            local ctx, bus, saved, received, errors = fixture()
+            ctx.config.input_policy.while_running = "block"
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            bus.state = "running"
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "blocked" }, request_id = "blocked-request" }, {})
+            test.eq(#saved, 0)
+            test.eq(#received, 0)
+            test.eq((errors :: any)[1].id, "blocked-request")
+            test.eq((errors :: any)[1].code, "INPUT_BLOCKED")
+        end)
+
+        it("keeps an admitted message durable when an earlier control fails", function()
             local ctx, bus, saved, received = fixture()
-            local steps = 0
             bus:mount_op_handler(consts.OP_TYPE.CONTROL_ARTIFACTS, function()
                 return nil, "control failed"
             end)
-            bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
-            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
-                steps = steps + 1
-                return { completed = true }
-            end)
             bus:queue_op({ type = consts.OP_TYPE.CONTROL_ARTIFACTS })
             session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
-                { data = { text = "queued" }, request_id = "queued" }, {})
-
+                { data = { text = "accepted" }, request_id = "accepted-request" }, {})
             local ok, err = bus:run()
-
             test.is_nil(ok)
             test.eq(err, "control failed")
             test.eq(#saved, 1)
             test.eq(saved[1].message_id, received[1].id)
-            test.eq(saved[1].content, "queued")
-            test.eq(steps, 0)
         end)
 
-        it("does not acknowledge input when the running status write fails", function()
-            local ctx, bus, saved, received = fixture()
-            ctx.writer.update_status = function() return nil, "status disk unavailable" end
-
-            local ok, err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
-                { data = { text = "not received" } }, {})
-
-            test.is_nil(ok)
-            test.eq(err, "status disk unavailable")
-            test.eq(#received, 0)
-            test.eq(#saved, 0)
-        end)
-
-        it("settles earlier received input when a later status write fails", function()
-            local ctx, bus, saved, received = fixture()
-            bus.state = "running"
-            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
-                { data = { text = "earlier" }, request_id = "earlier" }, {})
-            ctx.writer.update_status = function() return nil, "status disk unavailable" end
-
-            local _, ingress_err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
-                { data = { text = "later" }, request_id = "later" }, {})
-            local _, exit_err = session.settle_exit(bus, ingress_err)
-
-            test.eq(#received, 1)
-            test.eq(#saved, 1)
-            test.eq(saved[1].message_id, received[1].id)
-            test.eq(saved[1].content, "earlier")
-            test.eq(#ctx.held, 0)
-            test.contains(tostring(exit_err), "status disk unavailable")
-        end)
-
-        it("settles received input on cancellation without an agent step", function()
-            local ctx, bus, saved, received = fixture()
-            bus.state = "running"
-            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
-                { data = { text = "cancelled turn" }, request_id = "request-1" }, {})
-
-            local _, exit_err = session.settle_exit(bus, nil)
-
-            test.is_nil(exit_err)
-            test.eq(bus.state, "closed")
-            test.eq(#received, 1)
-            test.eq(#saved, 1)
-            test.eq(saved[1].message_id, received[1].id)
-            test.eq(saved[1].content, "cancelled turn")
-            test.eq(#ctx.held, 0)
-            test.eq(#bus.ops, 0)
-        end)
-
-        it("rejects a full held buffer and still accepts STOP", function()
+        it("keeps the session idle after atomic admission fails", function()
             local ctx, bus, saved, received, errors = fixture()
-            bus.state = "running"
-            for index = 1, 256 do
-                ctx.held[index] = { message_id = tostring(index), data = { text = "held" } }
-            end
-            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
-                { data = { text = "overflow" }, request_id = "overflow" }, {})
-            test.eq(#ctx.held, 256)
-            test.eq(#received, 0)
+            ctx.writer.admit_message = function() return nil, "disk unavailable" end
+            local ok, err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "not accepted" }, request_id = "failed-request" }, {})
+            test.is_true(ok)
+            test.is_nil(err)
+            test.eq(ctx.status, consts.STATUS.IDLE)
             test.eq(#saved, 0)
-            test.eq(errors[1].id, "overflow")
-            test.contains(errors[1].message, "full")
-            local stopped, stop_err = session.route_input(ctx, bus, consts.TOPICS.STOP, {}, {})
-            test.is_nil(stop_err)
-            test.is_true(stopped)
+            test.eq(#received, 0)
+            test.eq(#bus.ops, 0)
+            test.eq((errors :: any)[1].id, "failed-request")
+            test.eq((errors :: any)[1].code, consts.ERROR_CODES.STORAGE_ERROR)
+        end)
+
+        it("retains pending input after Stop and rejects later sends", function()
+            local ctx, bus, saved, received, errors = fixture()
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            bus.state = "running"
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "accepted" }, request_id = "accepted" }, {})
+            session.route_input(ctx, bus, consts.TOPICS.STOP, { request_id = "stop" }, {})
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "too late" }, request_id = "late" }, {})
+            test.eq(#saved, 1)
+            test.eq(saved[1].metadata.input.state, "pending")
+            test.eq(#received, 1)
             test.eq(bus.state, "draining_stop")
+            test.eq((errors :: any)[1].id, "late")
+        end)
+
+        it("does not stop the active turn when Stop persistence fails", function()
+            local ctx, bus, _, _, errors, successes = fixture()
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            bus.state = "running"
+            ctx.writer.update_meta = function() return nil, "stop disk failure" end
+            session.route_input(ctx, bus, consts.TOPICS.STOP, { request_id = "stop" }, {})
+            test.eq((bus :: any).state, "running")
+            test.is_nil(ctx.stop_requested)
+            test.eq(#successes, 0)
+            test.eq((errors :: any)[1].id, "stop")
+        end)
+
+        it("keeps a shared Stop identity valid when an earlier persistence attempt fails", function()
+            local ctx, bus = fixture()
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            ctx.parent_pid = "supervisor"
+            bus.state = "running"
+            local signals = {} :: {any}
+            mock("process.send", function(_, topic, payload)
+                signals[#signals + 1] = { topic = topic, payload = payload }
+                return true
+            end)
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+            session.route_input(ctx, bus, consts.TOPICS.STOP,
+                { request_id = "first", stop_request_id = "shared", stop_supervised = true }, {})
+            ctx.writer.update_meta = function() return true end
+            session.route_input(ctx, bus, consts.TOPICS.STOP,
+                { request_id = "second", stop_request_id = "shared", stop_supervised = true }, {})
+            restore_mock("process.send")
+            test.eq(#signals, 1)
+            test.eq(signals[1].topic, consts.TOPICS.STOP_ESCALATION)
+            test.eq(signals[1].payload.stop_request_id, "shared")
+            test.eq(bus.state, "draining_stop")
+        end)
+
+        it("holds internal context input until the response boundary", function()
+            local ctx, bus, saved, received = fixture()
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            bus.state = "running"
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { type = consts.MSG_TYPE.DEVELOPER, text = "internal context" } }, {})
+            test.eq(#saved, 0)
+            test.eq(#ctx.held, 1)
+            local last_id, err = session.flush_held(ctx, true)
+            test.is_nil(err)
+            test.is_nil(last_id)
+            test.eq(#saved, 1)
+            test.eq(saved[1].type, consts.MSG_TYPE.DEVELOPER)
+            test.eq(#received, 0)
         end)
 
         it("writes held input without an agent step on finish", function()
@@ -232,7 +246,7 @@ local function define_tests()
             test.eq(#saved, 1)
             test.eq(saved[1].message_id, "held-1")
             test.eq(#ctx.held, 2)
-            test.eq(errors[1].id, "held-2")
+            test.eq((errors :: any)[1].id, "held-2")
             test.eq(errors[2].id, "held-3")
             ctx.writer.add_message = original_add
             local _, retry_err = session.flush_held(ctx, false)
@@ -259,7 +273,7 @@ local function define_tests()
             local order = {}
             ctx.on_turn_end = function() table.insert(order, "settled") end
             ctx.queue_empty_callback = function()
-                bus:stop()
+                command_bus.stop(bus)
                 return true
             end
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
@@ -271,7 +285,7 @@ local function define_tests()
                 session.route_input(ctx, bus, consts.TOPICS.COMMAND,
                     { command = consts.COMMANDS.ARTIFACT, artifact_id = "artifact-1",
                         request_id = "artifact-request" }, {})
-                bus:request_stop("stop-request")
+                command_bus.request_stop(bus, "stop-request")
                 return { next_ops = {{ type = consts.OP_TYPE.AGENT_CONTINUE }} }
             end)
             bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
@@ -280,7 +294,7 @@ local function define_tests()
             end)
             bus:mount_op_handler(consts.OP_TYPE.AGENT_CHANGE, function(_ctx, op)
                 table.insert(order, "agent-change")
-                ctx.upstream:command_success(op.request_id)
+                ctx.upstream:update_session({ request_id = op.request_id })
                 return { completed = true }
             end)
             bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, function(_ctx, op)
@@ -310,10 +324,10 @@ local function define_tests()
             bus:mount_op_handler(consts.OP_TYPE.HANDLE_CONTEXT, control_handlers.handle_context_command)
             bus:mount_op_handler(consts.OP_TYPE.HANDLE_MESSAGE, message_handlers.handle_message)
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function(_ctx, op)
-                test.eq(bus.state, "running")
+                test.eq((bus :: any).state, "running")
                 ctx.upstream:send_message_update(op.message_id, consts.UPSTREAM_TYPES.CONTENT,
                     { content = "answer" })
-                bus:stop()
+                command_bus.stop(bus)
                 return { completed = true }
             end)
 
@@ -329,14 +343,14 @@ local function define_tests()
             test.is_nil(err)
             test.is_true(ok)
             test.eq(#errors, 1)
-            test.eq(errors[1].id, "bad-context")
-            test.eq(errors[1].code, "HANDLER_ERROR")
+            test.eq((errors :: any)[1].id, "bad-context")
+            test.eq((errors :: any)[1].code, "HANDLER_ERROR")
             test.not_nil(answered)
         end)
 
         it("replies with the finishing code when lifecycle rejects a command", function()
             local ctx, bus, _, _, errors = fixture()
-            bus:stop()
+            command_bus.stop(bus)
 
             local ok, err = session.route_input(ctx, bus, consts.TOPICS.COMMAND,
                 { command = consts.COMMANDS.AGENT, name = "agent:next", request_id = "closed-request" }, {})
@@ -344,9 +358,9 @@ local function define_tests()
             test.is_nil(err)
             test.is_true(ok)
             test.eq(#errors, 1)
-            test.eq(errors[1].id, "closed-request")
-            test.eq(errors[1].code, "SESSION_FINISHING")
-            test.contains(errors[1].message, "closed")
+            test.eq((errors :: any)[1].id, "closed-request")
+            test.eq((errors :: any)[1].code, "SESSION_FINISHING")
+            test.contains((errors :: any)[1].message, "closed")
         end)
 
         it("reports artifact storage failure and keeps the command bus available", function()
@@ -356,7 +370,7 @@ local function define_tests()
             bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, session.reference_artifact)
             bus:mount_op_handler("after_artifact_failure", function()
                 progressed = true
-                bus:stop()
+                command_bus.stop(bus)
                 return { completed = true }
             end)
             bus:queue_op({ type = consts.OP_TYPE.REFERENCE_ARTIFACT,
@@ -369,19 +383,19 @@ local function define_tests()
             test.is_true(ok)
             test.is_true(progressed)
             test.eq(#errors, 1)
-            test.eq(errors[1].id, "artifact-request")
-            test.eq(errors[1].code, consts.ERROR_CODES.STORAGE_ERROR)
-            test.eq(errors[1].message, "Failed to reference artifact")
+            test.eq((errors :: any)[1].id, "artifact-request")
+            test.eq((errors :: any)[1].code, consts.ERROR_CODES.STORAGE_ERROR)
+            test.eq((errors :: any)[1].message, "Failed to reference artifact")
         end)
 
-        it("writes a received id before starting user work", function()
+        it("uses a server message id before starting user work", function()
             local ctx, _, saved = fixture()
             local result, err = message_handlers.handle_message(ctx, {
                 message_id = "announced-id", data = { text = "hello" }, request_id = "request-1"
             })
             test.is_nil(err)
-            test.eq(saved[1].message_id, "announced-id")
-            test.eq(result.next_ops[1].message_id, "announced-id")
+            test.eq(saved[1].message_id, "server-1")
+            test.eq((result :: any).next_ops[1].message_id, saved[1].message_id)
         end)
     end)
 end

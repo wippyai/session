@@ -3,6 +3,18 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: stop_control_test
+    kind: function.lua
+    meta:
+      name: Stop persistence boundary
+      type: test
+      suite: session
+    source: file://stop_control_test.lua
+    imports:
+      session: wippy.session.process:session
+      test: wippy.test:test
+    method: run_tests
+
   - name: session_test
     kind: function.lua
     meta:
@@ -116,5 +128,44 @@ entries:
       session_repo: wippy.session.persist:session_repo
       wait_for_boot: app:wait_for_boot
       writer: wippy.session.persist:writer
+      test: wippy.test:test
+    method: run_tests
+
+  - name: upstream_test
+    kind: function.lua
+    meta:
+      name: Session response protocol
+      type: test
+      suite: session
+    source: file://upstream_test.lua
+    imports:
+      upstream: wippy.session.process:upstream
+      test: wippy.test:test
+    method: run_tests
+
+  - name: input_policy_test
+    kind: function.lua
+    meta:
+      name: Session input policy
+      type: test
+      suite: session
+    source: file://input_policy_test.lua
+    imports:
+      input_policy: wippy.session.process:input_policy
+      test: wippy.test:test
+    method: run_tests
+
+  - name: steering_test
+    kind: function.lua
+    meta:
+      name: Session steering lifecycle
+      type: test
+      suite: session
+    source: file://steering_test.lua
+    imports:
+      consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
+      message_handlers: wippy.session.process:message_handlers
+      prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
     method: run_tests

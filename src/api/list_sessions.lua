@@ -59,6 +59,7 @@ local function handler()
     end
 
     for i, session in ipairs(sessions) do
+        session.interaction = session.meta and session.meta.interaction
         session.current_agent = ""
         session.current_model = ""
 

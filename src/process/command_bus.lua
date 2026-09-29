@@ -129,6 +129,7 @@ function command_bus:process_operation(op)
     end
     local result, err = handler(self.context, op)
     if err then
+        if self.context.operation_error_callback then self.context.operation_error_callback(op, err) end
         if op.user_command then
             reject_user_command(self, op, "HANDLER_ERROR", err)
             return { error_handled = true, error_message = err }
@@ -139,6 +140,7 @@ function command_bus:process_operation(op)
         end
         return { error_handled = true, error_message = err }
     end
+
     return result, nil
 end
 
@@ -271,7 +273,12 @@ function command_bus:run()
                 reject_user_command(self, op, code, "Session no longer accepts this command")
             end
         elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then
-            local _, err = self:end_turn()
+            local completed, err
+            if self.context.turn_boundary_callback then
+                completed, err = self.context.turn_boundary_callback()
+            else
+                completed, err = self:end_turn()
+            end
             if err then return self:fail(err, true) end
         else
             if self.context.queue_empty_callback then
