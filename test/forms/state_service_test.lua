@@ -241,8 +241,8 @@ local function define_tests()
             test.not_nil(body.submitted_at)
             test.eq(body.delivery, "pending")
 
-            local admitted = message_handlers.admit_answers(ctx)
-            test.eq(admitted, accepted.answer_message_id)
+            local admitted: any = message_handlers.admit_in_order(ctx, nil)
+            test.eq(admitted[#admitted].message_id, accepted.answer_message_id)
             local _, stopped = get(artifact_id)
             test.eq(stopped.delivery, "interrupted", "admitted, no reply, session not running")
 
@@ -270,7 +270,7 @@ local function define_tests()
             local second = new_form(ctx)
             -- The first answer, accepted before the second form existed, is
             -- admitted now and lands after the second form in the history.
-            test.eq(message_handlers.admit_answers(ctx) ~= nil, true)
+            test.eq(#message_handlers.admit_in_order(ctx, nil), 1)
             local _, before = get(second)
             test.eq(before.stale, false, "an answer accepted earlier does not make a later form stale")
             ctx.writer:add_message(consts.MSG_TYPE.USER, "Something else")
@@ -565,7 +565,7 @@ local function define_tests()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             local _, accepted = post(artifact_id, answer())
-            message_handlers.admit_answers(ctx)
+            message_handlers.admit_in_order(ctx, nil)
             state_service._lookup_session = function() return nil end
 
             -- A tool call alone is not a reply: the turn stopped or crashed after it.
@@ -592,7 +592,7 @@ local function define_tests()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             post(artifact_id, answer())
-            message_handlers.admit_answers(ctx)
+            message_handlers.admit_in_order(ctx, nil)
             local original_get = session_repo.get
             session_repo.get = function(session_id, owner)
                 -- The ownership check passes; the delivery lookup fails.

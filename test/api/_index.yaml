@@ -3,16 +3,16 @@ namespace: app.api
 
 # Suites for src/api/.
 entries:
-  - name: artifact_state_test
+  - name: request_body_test
     kind: function.lua
     meta:
-      name: Artifact state HTTP adapter
+      name: JSON request bodies
       type: test
       suite: session
-      comment: Content-Type gate and capped stream read (the parts of src/api/artifact_state.lua that are genuinely HTTP-layer, not form-layer)
-    source: file://artifact_state_test.lua
+      comment: Content-Type gate and capped stream read of the form state POST endpoint
+    source: file://request_body_test.lua
     imports:
-      artifact_state: wippy.session.api:artifact_state
+      request_body: wippy.session.api:request_body
       test: wippy.test:test
     method: run
 
@@ -34,8 +34,7 @@ entries:
       consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
-      get_artifact: wippy.session.api:get_artifact_module
-      get_artifact_content: wippy.session.api:get_artifact_content_module
+      artifact_access: wippy.session.api:artifact_access
       wait_for_boot: app:wait_for_boot
       test: wippy.test:test
     method: run

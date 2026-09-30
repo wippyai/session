@@ -1,12 +1,8 @@
 local test = require("test")
-local artifact_state = require("artifact_state")
+local request_body = require("request_body")
 
--- The two pieces of src/api/artifact_state.lua that are genuinely HTTP-layer
--- (Content-Type, raw body streaming) rather than form-layer, tested as pure
--- functions: get()/post() themselves need a live http.request()/response()
--- context that a unit test cannot construct, so the module exposes them as
--- _is_json_content_type/_read_capped_stream test seams (see the module's
--- header comment).
+-- The Content-Type gate and the capped body read the form state POST
+-- endpoint runs before the form service sees a body.
 
 -- A minimal fake of the stream object req:stream() returns: `chunks` is fed
 -- out one at a time by :read(), then nil (EOF). read_calls counts calls so
@@ -31,26 +27,26 @@ end
 local function define_tests()
     describe("is_json_content_type", function()
         it("accepts application/json with or without a charset parameter", function()
-            test.is_true(artifact_state._is_json_content_type("application/json"))
-            test.is_true(artifact_state._is_json_content_type("application/json; charset=utf-8"))
-            test.is_true(artifact_state._is_json_content_type("application/json;charset=utf-8"))
-            test.is_true(artifact_state._is_json_content_type("  application/json  "))
-            test.is_true(artifact_state._is_json_content_type("APPLICATION/JSON"))
+            test.is_true(request_body.is_json_content_type("application/json"))
+            test.is_true(request_body.is_json_content_type("application/json; charset=utf-8"))
+            test.is_true(request_body.is_json_content_type("application/json;charset=utf-8"))
+            test.is_true(request_body.is_json_content_type("  application/json  "))
+            test.is_true(request_body.is_json_content_type("APPLICATION/JSON"))
         end)
 
         it("refuses everything else, including no header at all", function()
-            test.is_false(artifact_state._is_json_content_type(nil))
-            test.is_false(artifact_state._is_json_content_type(""))
-            test.is_false(artifact_state._is_json_content_type("text/plain"))
-            test.is_false(artifact_state._is_json_content_type("application/json-patch+json"))
-            test.is_false(artifact_state._is_json_content_type("multipart/form-data; boundary=x"))
+            test.is_false(request_body.is_json_content_type(nil))
+            test.is_false(request_body.is_json_content_type(""))
+            test.is_false(request_body.is_json_content_type("text/plain"))
+            test.is_false(request_body.is_json_content_type("application/json-patch+json"))
+            test.is_false(request_body.is_json_content_type("multipart/form-data; boundary=x"))
         end)
     end)
 
     describe("read_capped_stream", function()
         it("concatenates chunks up to the limit and closes the stream", function()
             local stream = fake_stream({ "abc", "def", "gh" })
-            local body, err = artifact_state._read_capped_stream(stream, 100)
+            local body, err = request_body.read_capped_stream(stream, 100)
             test.is_nil(err)
             test.eq(body, "abcdefgh")
             test.is_true(stream.was_closed())
@@ -64,7 +60,7 @@ local function define_tests()
                 read = function() read_calls = read_calls + 1 return string.rep("x", 1000), nil end,
                 close = function() end,
             }
-            local body, err = artifact_state._read_capped_stream(stream, 2500)
+            local body, err = request_body.read_capped_stream(stream, 2500)
             test.is_nil(body)
             test.eq(err, "too_large")
             -- 3 chunks of 1000 bytes exceed the 2500 cap; a 4th would not
@@ -77,19 +73,19 @@ local function define_tests()
                 read = function() return nil, "boom" end,
                 close = function() end,
             }
-            local body, err = artifact_state._read_capped_stream(stream, 100)
+            local body, err = request_body.read_capped_stream(stream, 100)
             test.is_nil(body)
             test.eq(err, "boom")
         end)
 
         it("accepts an exactly-at-limit body and rejects one byte more", function()
             local at_limit = fake_stream({ string.rep("x", 10) })
-            local body, err = artifact_state._read_capped_stream(at_limit, 10)
+            local body, err = request_body.read_capped_stream(at_limit, 10)
             test.is_nil(err)
             test.eq(#body, 10)
 
             local over_limit = fake_stream({ string.rep("x", 11) })
-            local over_body, over_err = artifact_state._read_capped_stream(over_limit, 10)
+            local over_body, over_err = request_body.read_capped_stream(over_limit, 10)
             test.is_nil(over_body)
             test.eq(over_err, "too_large")
         end)

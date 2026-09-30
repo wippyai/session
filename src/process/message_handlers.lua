@@ -985,15 +985,6 @@ function message_handlers.admit_in_order(ctx, through_id)
     return admitted, nil
 end
 
--- Admits the session's pending answers in acceptance order, bounded.
--- Returns the id of the last admitted row (nil when none), the first error
--- and the admitted rows.
-function message_handlers.admit_answers(ctx, _opts)
-    local admitted, err = message_handlers.admit_in_order(ctx, nil)
-    local last = admitted[#admitted]
-    return last and last.message_id or nil, err, admitted
-end
-
 -- The latest admitted answer a turn should answer (not one of a stopped turn).
 function message_handlers.turn_answer(rows)
     for index = #rows, 1, -1 do

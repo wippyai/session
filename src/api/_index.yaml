@@ -32,29 +32,22 @@ entries:
   - name: artifact_access
     kind: library.lua
     meta:
-      comment: Refusal of the artifact endpoints; a foreign or missing artifact is one generic 404
+      comment: Request handling of the artifact endpoints; a foreign or missing artifact is one generic 404
     source: file://artifact_access.lua
     modules:
       - http
+      - json
     imports:
       artifact_repo: wippy.session.persist:artifact_repo
+      artifact_projection: wippy.session.persist:artifact_projection
+      renderer: wippy.views:renderer
 
-  # wippy.session.api:get_artifact_module
-  # Whole-module import of the same source as get_artifact below, for tests:
-  # a function.lua entry's require() gives the bound `method` function, not
-  # the table, so the _serve test seam needs a library.lua registration.
-  - name: get_artifact_module
+  # wippy.session.api:request_body
+  - name: request_body
     kind: library.lua
     meta:
-      comment: Test-only whole-module import of get_artifact.lua
-    source: file://get_artifact.lua
-    modules:
-      - http
-      - security
-    imports:
-      artifact_access: wippy.session.api:artifact_access
-      artifact_projection: wippy.session.persist:artifact_projection
-      artifact_repo: wippy.session.persist:artifact_repo
+      comment: JSON request bodies of the API endpoints (Content-Type gate, capped body read)
+    source: file://request_body.lua
 
   # wippy.session.api:get_artifact
   - name: get_artifact
@@ -68,8 +61,6 @@ entries:
       - security
     imports:
       artifact_access: wippy.session.api:artifact_access
-      artifact_projection: wippy.session.persist:artifact_projection
-      artifact_repo: wippy.session.persist:artifact_repo
     method: handler
     pool:
       size: 4
@@ -84,23 +75,6 @@ entries:
     func: get_artifact
     path: /artifact/{id}
 
-  # wippy.session.api:get_artifact_content_module
-  # Whole-module import of get_artifact_content.lua, for the same reason as
-  # get_artifact_module above.
-  - name: get_artifact_content_module
-    kind: library.lua
-    meta:
-      comment: Test-only whole-module import of get_artifact_content.lua
-    source: file://get_artifact_content.lua
-    modules:
-      - http
-      - json
-      - security
-    imports:
-      artifact_access: wippy.session.api:artifact_access
-      artifact_repo: wippy.session.persist:artifact_repo
-      renderer: wippy.views:renderer
-
   # wippy.session.api:get_artifact_content
   - name: get_artifact_content
     kind: function.lua
@@ -110,12 +84,9 @@ entries:
     source: file://get_artifact_content.lua
     modules:
       - http
-      - json
       - security
     imports:
       artifact_access: wippy.session.api:artifact_access
-      artifact_repo: wippy.session.persist:artifact_repo
-      renderer: wippy.views:renderer
     method: handler
     pool:
       size: 4
@@ -130,23 +101,6 @@ entries:
     func: get_artifact_content
     path: /artifact/{id}/content
 
-  # wippy.session.api:artifact_state
-  # Whole-module import of the same source as get_artifact_state and
-  # submit_artifact_state below, for tests: a function.lua entry's require()
-  # gives the bound `method` function, not the table, so the Content-Type
-  # and capped-read helpers (test seams _is_json_content_type,
-  # _read_capped_stream) need a library.lua registration to be reachable.
-  - name: artifact_state
-    kind: library.lua
-    meta:
-      comment: Test-only whole-module import of artifact_state.lua
-    source: file://artifact_state.lua
-    modules:
-      - http
-      - security
-    imports:
-      state_service: wippy.session.forms:state_service
-
   # wippy.session.api:get_artifact_state
   - name: get_artifact_state
     kind: function.lua
@@ -158,6 +112,7 @@ entries:
       - http
       - security
     imports:
+      request_body: wippy.session.api:request_body
       state_service: wippy.session.forms:state_service
     method: get
     pool:
@@ -184,6 +139,7 @@ entries:
       - http
       - security
     imports:
+      request_body: wippy.session.api:request_body
       state_service: wippy.session.forms:state_service
     method: post
     pool:
