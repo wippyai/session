@@ -1,8 +1,12 @@
 import type { WippyElementConfig, WippyPropsSchema } from '@wippy-fe/webcomponent-core'
 import { define, WippyElement } from '@wippy-fe/webcomponent-core'
 import pkg from '../package.json'
-import { HIDDEN_HOST_CSS } from './lib/hidden-css'
 import { parseFormAnswersRecord } from './lib/parse-record'
+// The entire styling contract for this element: hide it, unconditionally.
+// It has no visible UI, so there are no other rules — no tokens, no parts,
+// no theme-dependent colors. See README.md "Styling API". Same `?inline`
+// import the sibling `wippy-form` package uses for its own styles.css.
+import HIDDEN_HOST_CSS from './styles.css?inline'
 
 /**
  * `<wippy-form-answers>` — an invisible carrier for the raw JSON answer
@@ -29,6 +33,13 @@ import { parseFormAnswersRecord } from './lib/parse-record'
  *
  * One prop (`record`), no events, no host API calls, no network access.
  * The only public surface is the read-only `answerRecord` getter.
+ *
+ * Extends `WippyElement` (not a lighter base) because every `view.component`
+ * module is required to — it is the only base class `@wippy-fe/webcomponent-core`
+ * exports, and it is what wires up `static get wippyConfig()`/lifecycle. A
+ * side effect of that base is subscribing to host `@theme` broadcasts on
+ * connect even though this element renders nothing and has no use for them;
+ * `hostCssKeys: []` below only skips CSS loading, not that subscription.
  */
 export class WippyFormAnswersElement extends WippyElement {
   static get wippyConfig(): WippyElementConfig {
@@ -54,8 +65,8 @@ export class WippyFormAnswersElement extends WippyElement {
    * Deliberately NOT named `record`: the Host's chat compiles message HTML
    * as a Vue template, and Vue assigns a prop on a custom element as a DOM
    * property whenever the element has one by that name (`key in el`). A
-   * `record` getter swallowed the value, so the attribute was never set
-   * (seen live 2026-09-30). The element must not own a `record` property.
+   * `record` getter swallows the value, so the attribute is never set. The
+   * element must not own a `record` property.
    */
   get answerRecord(): Record<string, unknown> | null {
     return parseFormAnswersRecord(this.getAttribute('record'))

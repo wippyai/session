@@ -7,17 +7,14 @@ export default defineConfig({
     wippyComponentPlugin(),
   ],
   css: {
-    // This package has no CSS files today (the one hiding rule is a plain
-    // TS string in src/lib/hidden-css.ts — see its own comment for why:
-    // an unrelated Vite/Vitest text-asset-import quirk, not this). Kept
-    // as a guard for if a CSS file is ever added back: Vite's PostCSS
-    // config auto-detection walks UP from any CSS file through every
-    // parent directory until it finds one, which unscoped reaches the
-    // gen-2-chat repo root's own postcss.config.js (tailwindcss +
-    // autoprefixer, configured for that repo's own FE, not this package)
-    // — confirmed reachable (its "content option missing" Tailwind
-    // warning appears without this override). An inline empty config
-    // stops that upward search here instead of silently inheriting it.
+    // src/styles.css is one plain `:host { display: none; }` rule — no
+    // PostCSS features used. Vite's PostCSS config auto-detection walks UP
+    // from any CSS file through every parent directory until it finds one,
+    // which unscoped reaches the gen-2-chat repo root's own
+    // postcss.config.js (tailwindcss + autoprefixer, configured for that
+    // repo's own FE, not this package) — confirmed reachable (its "content
+    // option missing" Tailwind warning appears without this override). An
+    // inline empty config stops that upward search here.
     postcss: {
       plugins: [],
     },

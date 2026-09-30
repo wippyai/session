@@ -20,5 +20,14 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
     globals: false,
+    // Vitest stubs CSS imports (incl. `?raw`/`?inline`) to an empty string
+    // by default (`css: false`) — `vite build` always resolves the real
+    // text regardless (verified: the production bundle contains the actual
+    // rule), so this only matters for `index.test.ts`'s assertion on the
+    // injected `:host { display: none }` rule. Same fix as the sibling
+    // `wippy-form` package's `vitest.config.ts`, scoped to this one import.
+    css: {
+      include: [/styles\.css\?inline$/],
+    },
   },
 })
