@@ -462,10 +462,35 @@ local function define_tests()
             test.eq(answers.other.other, "Line one\tand\nline two")
         end)
 
-        it("treats invisible-only Other text as blank", function()
-            -- U+200B ZERO WIDTH SPACE either side of ordinary whitespace.
-            test.eq(field_code({ single = "Courier", other = { other = "  \226\128\139  " }, must = { "a" } },
-                "other"), "blank")
+        -- The form component trims Other text and notes with JavaScript's
+        -- String.prototype.trim, so the server removes exactly the same
+        -- characters: Unicode spaces (U+00A0, U+2003, U+3000...), U+FEFF and
+        -- line terminators (U+2028), but not U+200B ZERO WIDTH SPACE.
+        local NBSP, EM, IDEO, BOM = "\194\160", "\226\128\131", "\227\128\128", "\239\187\191"
+        local ZWSP, LS, OGHAM = "\226\128\139", "\226\128\168", "\225\154\128"
+
+        it("trims Other text with the characters JavaScript trim removes", function()
+            local answers, field_errors = check({ single = "Courier",
+                other = { other = NBSP .. EM .. " Drone " .. IDEO .. BOM .. LS }, must = { "a" } })
+            test.is_nil(field_errors)
+            test.eq(answers.other.other, "Drone")
+            test.eq(field_code({ single = "Courier", other = { other = NBSP .. EM .. IDEO .. BOM .. OGHAM .. " \t" },
+                must = { "a" } }, "other"), "blank")
+        end)
+
+        it("keeps a lone U+200B as Other text, as JavaScript trim does", function()
+            local answers, field_errors = check({ single = "Courier", other = { other = "  " .. ZWSP .. "  " },
+                must = { "a" } })
+            test.is_nil(field_errors)
+            test.eq(answers.other.other, ZWSP)
+        end)
+
+        it("trims notes with the characters JavaScript trim removes", function()
+            local answers = check({ single = { value = "Courier", note = IDEO .. " Ring twice " .. NBSP .. BOM },
+                many = { { value = "b", note = EM .. BOM .. LS } }, must = { { value = "a", note = ZWSP } } })
+            test.eq(answers.single.note, "Ring twice")
+            test.eq(answers.many[1], "b", "a note of trimmed characters only is no note")
+            test.eq(answers.must[1].note, ZWSP, "U+200B is not trimmed")
         end)
 
         it("finishes fast on a pathological whitespace run instead of hanging (H3)", function()
