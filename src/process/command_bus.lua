@@ -146,6 +146,7 @@ function command_bus:process_operation(op)
         return result, nil
     end
     if err then
+        if self.context.operation_error_callback then self.context.operation_error_callback(op, err) end
         if op.user_command then
             reject_user_command(self, op, "HANDLER_ERROR", err)
             return { error_handled = true, error_message = err }
@@ -156,6 +157,7 @@ function command_bus:process_operation(op)
         end
         return { error_handled = true, error_message = err }
     end
+
     return result, nil
 end
 
@@ -304,13 +306,24 @@ function command_bus:run()
                 reject_user_command(self, op, code, "Session no longer accepts this command")
             end
         elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then
-            local _, err = self:end_turn()
+            local completed, err
+            if self.context.turn_boundary_callback then
+                completed, err = self.context.turn_boundary_callback()
+            else
+                completed, err = self:end_turn()
+            end
             if err then return self:fail(err, true) end
         elseif self:has_held() then
-            -- An operation that was to start a turn (an answer admission or
-            -- a message) wrote nothing or failed, so input held behind it
-            -- was never settled: settle it now as at the end of a turn.
-            local _, err = self:end_turn()
+            -- Input was held for a turn that never ran (the operation that
+            -- was to start it wrote nothing or failed): settle it now as at
+            -- the end of a turn, through the session inbox when it owns
+            -- the turn boundary.
+            local _, err
+            if self.context.turn_boundary_callback then
+                _, err = self.context.turn_boundary_callback()
+            else
+                _, err = self:end_turn()
+            end
             if err then return self:fail(err, true) end
         else
             if self.context.queue_empty_callback then

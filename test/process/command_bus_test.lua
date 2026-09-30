@@ -113,6 +113,8 @@ local function define_tests()
             local steps = 0
             local function context(current_writer)
                 local ctx = { session_id = session_id, writer = current_writer, held = {},
+                    status = consts.STATUS.IDLE,
+                    config = { input_policy = { while_running = "steer" } },
                     upstream = {
                         message_received = function(_self, id, text)
                             table.insert(received, { id = id, text = text })
@@ -187,21 +189,19 @@ local function define_tests()
         it("persists assistant, call results, and held input in boundary order", function()
             local session_id, context_id = create_persisted_fixture()
             local session_writer, writer_err = writer.new(session_id)
-            test.is_nil(writer_err)
+            test.is_nil(writer_err, 'writer_err at response/context boundary')
             if not session_writer then error("Failed to open persisted test writer") end
             local held_id = uuid.v7()
             local ctx = { writer = session_writer, held = {{
-                message_id = held_id, data = { text = "held user message" }
+                message_id = held_id, data = { type = consts.MSG_TYPE.DEVELOPER, text = "held context message" }
             }} }
             local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop(); return true end
             local assistant_id = nil :: string?
             local call_ids = nil :: any
             ctx.flush_held = function(run_agent) return session.flush_held(ctx, run_agent) end
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function(_ctx, op)
-                if op.message_id == held_id then
-                    bus:stop()
-                    return { completed = true }
-                end
+
                 local stored_assistant_id, stored_call_ids, response_err = session_writer:add_response("thinking", {}, {
                     { id = "function-call", name = "lookup", arguments = "{}",
                         registry_id = "app:lookup", type = consts.MSG_TYPE.FUNCTION },
@@ -210,7 +210,7 @@ local function define_tests()
                     { id = "delegation-call", name = "delegate", arguments = "{}",
                         registry_id = "app:delegate", type = consts.MSG_TYPE.DELEGATION }
                 })
-                test.is_nil(response_err)
+                test.is_nil(response_err, 'response_err at response/context boundary')
                 assistant_id = stored_assistant_id
                 call_ids = stored_call_ids
                 return { next_ops = {{ type = consts.OP_TYPE.PROCESS_TOOLS }} }
@@ -224,7 +224,7 @@ local function define_tests()
                     local _, result_err = session_writer:update_message_meta(call_ids[call_id], {
                         status = consts.FUNC_STATUS.SUCCESS, result = result
                     })
-                    test.is_nil(result_err)
+                    test.is_nil(result_err, 'result_err at response/context boundary')
                 end
                 return { completed = true }
             end)
@@ -233,13 +233,13 @@ local function define_tests()
 
             local ok, run_err = bus:run()
 
-            test.is_nil(run_err)
+            test.is_nil(run_err, 'run_err at response/context boundary')
             test.is_true(ok)
 
             local session_reader, reader_err = reader.open(session_id)
-            test.is_nil(reader_err)
+            test.is_nil(reader_err, 'reader_err at response/context boundary')
             local history, history_err = session_reader:messages():all()
-            test.is_nil(history_err)
+            test.is_nil(history_err, 'history_err at response/context boundary')
             test.eq(#history, 5)
             test.eq(history[1].message_id, assistant_id)
             test.eq(history[1].type, consts.MSG_TYPE.ASSISTANT)
@@ -250,8 +250,8 @@ local function define_tests()
             test.eq(history[4].type, consts.MSG_TYPE.DELEGATION)
             test.eq(history[4].metadata.result, "delegation result")
             test.eq(history[5].message_id, held_id)
-            test.eq(history[5].type, consts.MSG_TYPE.USER)
-            test.eq(history[5].data, "held user message")
+            test.eq(history[5].type, consts.MSG_TYPE.DEVELOPER)
+            test.eq(history[5].data, "held context message")
 
             session_repo.delete(session_id)
             context_repo.delete(context_id)

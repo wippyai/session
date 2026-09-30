@@ -1,6 +1,8 @@
 local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
+local input_metadata = require("input_metadata")
+local input_policy = require("input_policy")
 local prompt_builder = require("prompt_builder")
 local tool_caller = require("tool_caller")
 local output = require("output")
@@ -23,6 +25,14 @@ type SessionContext = {
     queue_empty_callback: any?,
     lifecycle_state: table?,
     turn_state: table?,
+    stop_requested: boolean?,
+    status: string?,
+    current_agent: any?,
+    request_input_policy: any?,
+    turn_generation: number?,
+    interaction: any?,
+    stop_commit_channel: any?,
+    input_apply_batch: any?,
 }
 
 type ToolWrapperHostRef = {
@@ -41,7 +51,10 @@ type ToolWrapperExecutionContext = {
     run_context: table?,
 }
 
-local message_handlers = {}
+local message_handlers = {
+    _prompt_builder = nil :: any,
+    _lifecycle_runtime = nil :: any,
+}
 
 local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
 local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
@@ -128,7 +141,7 @@ local function persist_token_usage(ctx: any, tokens: any)
             current_meta.tokens[token_key] = (current_meta.tokens[token_key] or 0) + token_value
         end
     end
-    local _, err = ctx.writer:update_meta({ meta = current_meta })
+    local _, err = ctx.writer:update_meta({ meta = { tokens = current_meta.tokens } })
     if err then return nil, err end
     return true
 end
@@ -159,7 +172,7 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
         run_context = run_context_ref(ctx, agent_ref, host),
     } :: LifecyclePayload
 
-    return lifecycle_runtime.apply(agent.bindings, payload)
+    return (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
 end
 
 local function append_lifecycle_messages(builder: any, result: table?)
@@ -343,7 +356,245 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.repeated_calls = 0
     state.last_round = nil
     state.last_round_tools = nil
+    state.active = true
     return state
+end
+
+local function is_turn_blocked(ctx: any): boolean
+    local state = ctx.turn_state
+    return ctx.stop_requested == true
+        or (ctx.coordinator and ctx.coordinator:stop_requested())
+        or (state and (state.failed or state.handoff)) or false
+end
+
+local function all_messages(ctx)
+    local session_reader = ctx.reader
+    if session_reader and type(session_reader.list_all_messages) == "function" then
+        return session_reader:list_all_messages()
+    end
+    if session_reader and type(session_reader.messages) == "function" then
+        return session_reader:messages():all()
+    end
+    return message_repo.list_all_by_session(ctx.session_id)
+end
+
+-- STEERING AND FORM ANSWERS
+--
+-- Typed input during a running turn follows the session input policy: it is
+-- refused, or stored at once as a pending steering row that the next step of
+-- the turn applies (upstream steering). A form answer is not typed input and
+-- is never steered into a running turn: it stays a pending answer row until
+-- the session admits it (FORM ANSWER ADMISSION below). Both rows are dated
+-- when they are accepted (message_date), so the store's row order is the
+-- order the user sent them in, and the two keep that order:
+--   - a step applies steering rows only up to the first pending answer; the
+--     rows after it wait with the answer (prepare_pending_inputs);
+--   - admitting an answer first applies the steering rows accepted before
+--     it, so they stay ahead of it in the prompt (admit_in_order);
+--   - the turn that follows admitted answers starts at the latest steering
+--     row still pending after them, or at the latest answer
+--     (turn_start_after).
+-- A steering row is never anchored to a pending answer: admission moves the
+-- answer to the end of the history, and the steering row would move with it.
+-- Applying a steering row changes only its metadata, never its date, so it
+-- does not change which forms are stale (message_repo.has_user_input_after
+-- counts it from when it was accepted).
+
+-- One pass over the session's rows in store order: the pending steering
+-- rows (sorted by date, then id), the anchor for applying them (the last row
+-- that is neither steering input, a pending answer nor `start_id`), the
+-- position and row of the first pending answer, and the position of
+-- `start_id` when it is an ordinary row.
+local function scan_inputs(ctx, start_id)
+    local messages, read_err = all_messages(ctx)
+    if not messages then return nil, read_err or "Failed to read pending inputs" end
+    local scan = { pending = {} :: {any}, anchor_id = nil :: any, first_answer = nil :: number?,
+        answer = nil :: any, start = nil :: number? }
+    for index, message in ipairs(messages) do
+        local metadata = type(message.metadata) == "table" and message.metadata or nil
+        local input = metadata and metadata.input
+        if input ~= nil then
+            if not input_metadata.validate(message) then
+                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
+            end
+            if input.state == "pending" then table.insert(scan.pending, { row = message, index = index }) end
+        elseif message_repo.is_pending_answer(message) then
+            if not scan.first_answer then
+                scan.first_answer = index
+                scan.answer = message
+            end
+        elseif message.message_id ~= start_id then
+            scan.anchor_id = message.message_id
+        else
+            scan.start = index
+        end
+    end
+    table.sort(scan.pending, function(a, b)
+        if a.row.date ~= b.row.date then return tostring(a.row.date or "") < tostring(b.row.date or "") end
+        return tostring(a.row.message_id) < tostring(b.row.message_id)
+    end)
+    return scan, nil
+end
+
+-- The applied-state updates for the steering rows due now: those accepted
+-- before the first pending form answer. A row accepted before `start_id`
+-- (the ordinary row that starts the turn: a typed message or an admitted
+-- answer) goes before it, as upstream does for input left from a stopped
+-- turn; a row accepted after it goes after it.
+local function steering_updates(scan, start_id)
+    local updates = {}
+    for _, entry in ipairs(scan.pending) do
+        if not scan.first_answer or entry.index < scan.first_answer then
+            local anchor = scan.anchor_id
+            if scan.start and entry.index > scan.start then anchor = start_id end
+            table.insert(updates, {
+                message_id = entry.row.message_id,
+                metadata = { input = { state = "applied", after_message_id = anchor } },
+            })
+        end
+    end
+    return updates
+end
+
+local function prepare_pending_inputs(ctx, new_user_id)
+    local scan, err = scan_inputs(ctx, new_user_id)
+    if not scan then return nil, err end
+    return steering_updates(scan, new_user_id)
+end
+
+local function persist_pending_inputs(ctx, updates, expected_revision)
+    if #updates == 0 then return 0 end
+    if type(ctx.writer.apply_inputs) ~= "function" then
+        return nil, "Session writer does not support atomic input application"
+    end
+    local ok, err = ctx.writer:apply_inputs(updates, expected_revision)
+    if not ok then return nil, err end
+    return #updates
+end
+
+local function publish_applied_inputs(ctx, updates)
+    for _, update in ipairs(updates) do
+        ctx.upstream:send_message_update(update.message_id, consts.UPSTREAM_TYPES.UPDATE, {
+            message_id = update.message_id, input = update.metadata.input,
+        })
+    end
+    return #updates
+end
+
+local function commit_pending_inputs(ctx, updates)
+    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
+    local count, err = persist_pending_inputs(ctx, updates, expected_revision)
+    if not count then return nil, err end
+    publish_applied_inputs(ctx, updates)
+    return count
+end
+
+function message_handlers.apply_pending_inputs(ctx, new_user_id)
+    local updates, err = prepare_pending_inputs(ctx, new_user_id)
+    if not updates then return nil, err end
+    return commit_pending_inputs(ctx, updates)
+end
+
+-- Whether the current turn ended by creating a form (control_forms keys its
+-- one-form-per-turn marker by the same turn id). D11: such a turn takes no
+-- further step; steering that is still pending starts the next turn instead
+-- (session.flush_held).
+function message_handlers.ended_by_form(ctx): boolean
+    local state = ctx.turn_state
+    if type(state) ~= "table" or ctx.form_turn_id == nil then return false end
+    return ctx.form_turn_id == (state.id or state.message_id)
+end
+
+-- Completes the current turn: the turn state goes inactive and the session
+-- idle (failed and finishing stay as they are), persisted with the new
+-- interaction before it is announced. Returns true, or nil and an error.
+function message_handlers.complete_turn(ctx)
+    local state = ctx.turn_state
+    local candidate_state = nil
+    if state then
+        candidate_state = {}
+        for key, value in pairs(state) do candidate_state[key] = value end
+        candidate_state.active = false
+        candidate_state.input_policy = nil
+        -- A failed runtime must remain failed at the queue-empty boundary. The
+        -- previous code cleared this marker and persisted idle, allowing a
+        -- failed control operation to look recoverable without an explicit
+        -- recovery path.
+        local failed = ctx.status == consts.STATUS.FAILED
+        candidate_state.failed = failed and true or nil
+        candidate_state.handoff = nil
+        candidate_state.stopped = nil
+    end
+    local target_status
+    if ctx.status == consts.STATUS.FAILED then
+        target_status = consts.STATUS.FAILED
+    else
+        target_status = ctx.status ~= "finishing" and consts.STATUS.IDLE or ctx.status
+    end
+    local candidate = {
+        config = ctx.config,
+        turn_state = candidate_state,
+        status = target_status,
+        stop_requested = ctx.stop_requested,
+        current_agent = current_agent(ctx),
+        input_policy_revision = ctx.input_policy_revision,
+        interaction = ctx.interaction,
+    }
+    local interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+    local ok, err = ctx.writer:update_meta({ status = target_status, meta = { interaction = interaction } })
+    if not ok then
+        return nil, err or "Failed to persist turn completion"
+    end
+    ctx.turn_state = candidate_state
+    ctx.status = target_status
+    input_policy.accept_committed(ctx, interaction)
+    return true
+end
+
+-- Called only by the session inbox after its command bus becomes empty. The
+-- turn continues while steering is due (accepted before any pending form
+-- answer), unless it ended by creating a form.
+function message_handlers.finish_turn(ctx)
+    local state = ctx.turn_state
+    if state and state.active and not is_turn_blocked(ctx) and not message_handlers.ended_by_form(ctx) then
+        local updates, err = prepare_pending_inputs(ctx, nil)
+        if not updates then return nil, err or "Failed to read pending input" end
+        if #updates > 0 then
+            return { completed = false, next_ops = { {
+                type = consts.OP_TYPE.AGENT_STEP, message_id = state.message_id,
+                request_id = state.request_id, from_user = false,
+            } } }
+        end
+    end
+    local completed, complete_err = message_handlers.complete_turn(ctx)
+    if not completed then return nil, complete_err end
+    return { completed = true, next_ops = {} }
+end
+
+-- Starts a turn at `message_id` (a row that is already stored) the way an
+-- idle typed message does in handle_message: the running status and the
+-- new interaction are persisted first, then the turn state follows. Used for
+-- turns that answer form answers or steering left after a form.
+function message_handlers.start_turn(ctx, message_id)
+    local next_turn = { active = true, steps = 0, repeated_calls = 0, message_id = message_id }
+    local candidate = {
+        config = ctx.config,
+        turn_state = next_turn,
+        status = consts.STATUS.RUNNING,
+        stop_requested = false,
+        current_agent = current_agent(ctx),
+        input_policy_revision = ctx.input_policy_revision,
+        interaction = ctx.interaction,
+    }
+    local interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+    local ok, err = ctx.writer:update_meta({ status = consts.STATUS.RUNNING, meta = { interaction = interaction } })
+    if not ok then return nil, err or "Failed to persist turn start" end
+    ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
+    ctx.turn_state = next_turn
+    ctx.stop_requested = false
+    ctx.status = consts.STATUS.RUNNING
+    input_policy.accept_committed(ctx, interaction)
+    return true
 end
 
 -- Deterministic rendering of a tool call's arguments, so two rounds compare equal regardless
@@ -404,6 +655,8 @@ function message_handlers.note_tool_round(ctx: SessionContext, results: any): nu
 end
 
 local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table, reason: string, detail: string): table
+    state.failed = true
+    input_policy.clear_turn(ctx)
     local notice = "Turn stopped: " .. detail
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, notice, {
         system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
@@ -505,49 +758,88 @@ local function no_turn_follows(ctx)
     return state == "draining_stop" or state == "draining_finish" or state == "closed"
 end
 
--- Ids of form answers whose wake-up is held behind input received earlier:
--- they are admitted in their own place in the held queue (session.flush_held).
-local function held_answer_ids(ctx)
-    local ids = {}
-    for _, item in ipairs(type(ctx.held) == "table" and ctx.held or {}) do
-        if type(item) == "table" and type(item.answer_id) == "string" then ids[item.answer_id] = true end
-    end
-    return ids
-end
-
 function message_handlers.handle_message(ctx, op)
-    -- Form answers accepted before this message go first: a lost wake-up
-    -- must not let a later typed message overtake them in the history.
-    -- Answers whose wake-up came after this message wait in the held queue,
-    -- and a finishing session leaves them all pending for its next start.
     local data = type(op.data) == "table" and op.data or {}
-    if data.type ~= consts.MSG_TYPE.DEVELOPER and data.type ~= consts.MSG_TYPE.SYSTEM
-        and not op.exiting and not finishing(ctx) then
-        local _, admit_err, admitted = message_handlers.admit_answers(ctx, { skip = held_answer_ids(ctx) })
+    if data.type == consts.MSG_TYPE.DEVELOPER or data.type == consts.MSG_TYPE.SYSTEM then
+        local message_id, write_err = message_handlers.write_input(ctx, op)
+        if not message_id then return nil, write_err end
+        return { message_id = message_id, completed = true }
+    end
+    local active = ctx.turn_state and ctx.turn_state.active == true or false
+    local interaction = input_policy.resolve(ctx, current_agent(ctx))
+    if not interaction.can_send then
+        if op.request_id then ctx.upstream:command_error(op.request_id, "INPUT_BLOCKED",
+            "Session is not accepting messages right now") end
+        return { completed = true }
+    end
+
+    local answers: {any} = {}
+    if not active and not op.exiting and not finishing(ctx) then
+        -- Form answers accepted before this message go first: a lost wake-up
+        -- must not let a later typed message overtake them in the history.
+        -- No turn starts for them here; the turn this message starts sees
+        -- them ahead of it. A finishing or exiting session leaves them
+        -- pending for its next start.
+        local admit_err
+        answers, admit_err = message_handlers.admit_in_order(ctx, nil)
         if admit_err then
             logger:warn("form answer admission before a message failed",
                 { session_id = ctx.session_id, error = tostring(admit_err) })
         end
-        -- The status already says running (set when the message arrived);
-        -- after a stop no turn follows, so the views reload once it is idle.
-        if no_turn_follows(ctx) then
-            message_handlers.defer_publish(ctx, admitted)
-        else
-            message_handlers.publish_admitted(admitted)
+    end
+
+    local text = type(data.text) == "string" and data.text or ""
+    local file_uuids = file_uuids_of(data.file_uuids)
+    local input = active and { state = "pending" } or nil
+    local metadata = { file_uuids = file_uuids }
+    if input then metadata.input = input end
+    local message_id, err
+    local committed_interaction
+    if active then
+        message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, text, metadata)
+    else
+        if type(ctx.writer.admit_message) ~= "function" then
+            return nil, "Session writer does not support atomic admission"
+        end
+        local next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        local candidate = {
+            config = ctx.config,
+            turn_state = next_turn,
+            status = consts.STATUS.RUNNING,
+            stop_requested = false,
+            current_agent = current_agent(ctx),
+            input_policy_revision = ctx.input_policy_revision,
+            interaction = ctx.interaction,
+        }
+        local next_interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+        message_id, err = ctx.writer:admit_message(consts.MSG_TYPE.USER, text, metadata, {
+            status = consts.STATUS.RUNNING,
+            meta = { interaction = next_interaction },
+        })
+        if message_id then
+            next_turn.message_id = message_id
+            ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
+            ctx.turn_state = next_turn
+            ctx.stop_requested = false
+            ctx.status = consts.STATUS.RUNNING
+            committed_interaction = next_interaction
         end
     end
-    local message_id, msg_type = message_handlers.write_input(ctx, op)
-    if not message_id then return nil, msg_type end
-    if msg_type == consts.MSG_TYPE.USER then
-        if ctx.upstream then
-            ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
-        end
-        return { message_id = message_id, next_ops = {{
-            type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
-            request_id = op.request_id, from_user = true
-        }} }
+    if not message_id then
+        -- The answers are admitted but no turn starts for them.
+        message_handlers.publish_admitted(answers)
+        return nil, err or "Failed to persist input"
     end
-    return { message_id = message_id, completed = true }
+
+    ctx.upstream:message_received(message_id, text, file_uuids, input, op.request_id)
+    if committed_interaction then input_policy.accept_committed(ctx, committed_interaction) end
+    -- After the running status, so their forms read as being answered.
+    message_handlers.publish_admitted(answers)
+    return {
+        message_id = message_id, completed = active,
+        next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
+            request_id = op.request_id, from_user = true } },
+    }
 end
 
 -- FORM ANSWER ADMISSION
@@ -557,19 +849,22 @@ end
 -- written here again: admission re-dates it to the end of the history and
 -- clears the marker (both in message_repo.admit_pending_answer). Until then
 -- prompt_builder leaves the row out, so a running turn never sees an answer
--- that arrived after it started.
+-- that arrived after it started. Answers are admitted in acceptance order,
+-- each after the steering rows accepted before it (see STEERING AND FORM
+-- ANSWERS above).
 --
 -- When an answer is admitted:
---   - idle session: at once, and a turn starts for it (admit_answer);
---   - during a turn: at the end of the turn, in arrival order with the typed
---     input held during the turn, and the next turn answers the latest
---     (session.flush_held);
+--   - idle session: at once, and a turn starts for it (admit_answer, run
+--     from the session inbox like an idle typed message);
+--   - during a turn: at the end of the turn, in arrival order with the
+--     internal messages held during the turn, and the next turn answers the
+--     latest input (session.flush_held);
 --   - the user stopped the turn: when the stop settles, with no turn; the
 --     form reads as delivered and the user continues by sending a message.
 --     Such an answer never starts a turn later, also when its admission has
 --     to be retried (ctx.stopped_answers);
---   - the session is finishing: never; it stays pending and the next session
---     start admits it and starts a turn.
+--   - the session is finishing or failed: never; it stays pending and the
+--     next session start admits it and starts a turn.
 -- Once admitted, open views of the form reload its delivery state. When a
 -- turn follows, the session status says running before they do; when none
 -- follows, they reload after the status is back to idle (publish_deferred).
@@ -604,12 +899,15 @@ end
 
 -- Tells open views of the admitted answers' forms that the delivery state
 -- changed; they reload it.
-function message_handlers.publish_admitted(rows)
-    for _, row in ipairs(rows or {}) do
-        local form = type(row.metadata) == "table" and row.metadata.session_form or nil
-        local form_artifact = type(form) == "table" and type(form.artifact_id) == "string"
-            and artifact_repo.get(form.artifact_id) or nil
-        if form_artifact then artifact_events.publish_updated(form_artifact) end
+function message_handlers.publish_admitted(rows: {any}?)
+    if not rows then return end
+    for _, row in ipairs(rows) do
+        local metadata: any = type(row) == "table" and row.metadata or nil
+        local form: any = type(metadata) == "table" and metadata.session_form or nil
+        if type(form) == "table" and type(form.artifact_id) == "string" then
+            local form_artifact = artifact_repo.get(form.artifact_id)
+            if form_artifact then artifact_events.publish_updated(form_artifact) end
+        end
     end
 end
 
@@ -625,42 +923,44 @@ function message_handlers.publish_deferred(ctx)
     message_handlers.publish_admitted(rows)
 end
 
--- Pending answer rows of the session in history (acceptance) order, bounded,
--- without those in skip.
-local function pending_rows(ctx, skip)
-    local pending, list_err = message_repo.list_pending_answers(ctx.session_id, ADMIT_SCAN_LIMIT)
-    if not pending then return nil, list_err end
-    local rows = {}
-    for _, row in ipairs(pending) do
-        if not (skip and skip[row.message_id]) then table.insert(rows, row) end
-    end
-    return rows, nil
-end
-
--- Admits the given pending rows in order. Stops when the session starts
--- finishing: the rest stay pending for the next start.
-local function admit_rows(ctx, rows)
+-- Admits pending answers in acceptance order, up to and including
+-- `through_id` (every one, bounded, when it is nil or no longer pending).
+-- Before each answer, the steering rows accepted before it are applied at
+-- the current end of the history, so the prompt keeps them ahead of it.
+-- Stops when the session starts finishing. The durable rows, not the
+-- wake-ups, decide what is admitted, so a missed wake-up is recovered by the
+-- next scan and a repeated one is a no-op. Nothing is published here (see
+-- publish_admitted). Returns the admitted rows and the first error; rows
+-- not admitted stay pending for the next scan.
+function message_handlers.admit_in_order(ctx, through_id)
     local admitted = {}
-    for _, row in ipairs(rows) do
+    for _ = 1, ADMIT_SCAN_LIMIT do
         if finishing(ctx) then break end
-        local done, err = message_handlers.admit_one(ctx, row.message_id)
+        local scan, scan_err = scan_inputs(ctx, nil)
+        if not scan then return admitted, scan_err end
+        local answer = scan.answer
+        if not answer then break end
+        local updates = steering_updates(scan, nil)
+        if #updates > 0 then
+            local _, apply_err = commit_pending_inputs(ctx, updates)
+            if apply_err then return admitted, apply_err end
+        end
+        local done, err = message_handlers.admit_one(ctx, answer.message_id)
         if err then return admitted, err end
-        if done then table.insert(admitted, done) end
+        -- Not pending any more: nothing else admits answers of this session,
+        -- so stop rather than read the same row again.
+        if not done then break end
+        table.insert(admitted, done)
+        if through_id and answer.message_id == through_id then break end
     end
     return admitted, nil
 end
 
--- Admits the session's pending answers (without opts.skip) in history order,
--- bounded. The durable rows, not the wake-ups, decide what is admitted, so a
--- missed wake-up is recovered by the next scan and a repeated one is a
--- no-op. Nothing is published here (see publish_admitted). Returns the id of
--- the last admitted row (nil when none), the first error and the admitted
--- rows; rows left pending stay for the next scan.
-function message_handlers.admit_answers(ctx, opts)
-    opts = opts or {}
-    local rows, list_err = pending_rows(ctx, opts.skip)
-    if not rows then return nil, list_err, {} end
-    local admitted, err = admit_rows(ctx, rows)
+-- Admits the session's pending answers in acceptance order, bounded.
+-- Returns the id of the last admitted row (nil when none), the first error
+-- and the admitted rows.
+function message_handlers.admit_answers(ctx, _opts)
+    local admitted, err = message_handlers.admit_in_order(ctx, nil)
     local last = admitted[#admitted]
     return last and last.message_id or nil, err, admitted
 end
@@ -673,49 +973,83 @@ function message_handlers.turn_answer(rows)
     return nil
 end
 
--- ADMIT_ANSWER operation: queued while the bus is idle (wake-up, startup
--- scan or the plugin's retry nudge). Admits pending answers and starts one
--- turn for the latest. A storage failure is logged and leaves the rows
--- pending; the plugin's periodic scan asks again.
-function message_handlers.admit_answer(ctx, op)
-    local rows, list_err = pending_rows(ctx, held_answer_ids(ctx))
-    if not rows then
+-- The row the turn after admitted answers starts at: the latest steering row
+-- still pending ahead of any pending answer (it was sent after them), or
+-- else the latest admitted answer that wants a turn. Steering rows alone
+-- start a turn only when `steering_turn` is set (the ended turn stopped at a
+-- form); otherwise that turn itself would have continued for them.
+function message_handlers.turn_start_after(ctx, admitted, steering_turn)
+    local answer_id = message_handlers.turn_answer(admitted or {})
+    if not answer_id and not steering_turn then return nil, nil end
+    local scan, err = scan_inputs(ctx, nil)
+    if not scan then return nil, err end
+    local latest = nil
+    for _, entry in ipairs(scan.pending) do
+        if not scan.first_answer or entry.index < scan.first_answer then latest = entry.row.message_id end
+    end
+    return latest or answer_id, nil
+end
+
+-- A form answer arrived (or the plugin asks the session to look for pending
+-- ones) while no turn is active. Runs from the session inbox, like an idle
+-- typed message, so a message cannot start a second turn meanwhile. Admits
+-- the pending answers and starts one turn for the latest; answers of a
+-- stopped turn start none. The running status is persisted before anything
+-- is admitted, so a failed status write leaves the rows pending for the next
+-- scan. A storage failure is logged and leaves the rows pending; the
+-- plugin's periodic scan asks again.
+function message_handlers.admit_answer(ctx, _op)
+    if finishing(ctx) or bus_state(ctx) == "closed" then return { completed = true } end
+    local pending, list_err = message_repo.list_pending_answers(ctx.session_id, ADMIT_SCAN_LIMIT)
+    if not pending then
         logger:warn("pending form answer scan failed", { session_id = ctx.session_id, error = tostring(list_err) })
         return { completed = true }
     end
-    if #rows == 0 then return { completed = true } end
+    if #pending == 0 then return { completed = true } end
 
     local wants_turn = false
     local stopped = stopped_answers(ctx)
-    for _, row in ipairs(rows) do
+    for _, row in ipairs(pending) do
         if not stopped[row.message_id] then wants_turn = true end
     end
-    if wants_turn and not no_turn_follows(ctx) then
-        -- Before admitting: each admission makes open views of the form
-        -- reload its delivery state, which must read as running by then.
-        local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
-        if status_err then
-            logger:warn("session status update failed", { session_id = ctx.session_id, error = tostring(status_err) })
+    wants_turn = wants_turn and not no_turn_follows(ctx)
+    if wants_turn then
+        local started, start_err = message_handlers.start_turn(ctx, nil)
+        if not started then
+            logger:warn("session status update failed", { session_id = ctx.session_id, error = tostring(start_err) })
             return { completed = true }
-        end
-        if ctx.upstream then
-            ctx.upstream:update_session({ status = consts.STATUS.RUNNING })
         end
     end
 
-    local admitted, admit_err = admit_rows(ctx, rows)
+    local admitted, admit_err = message_handlers.admit_in_order(ctx, nil)
     if admit_err then
         logger:warn("form answer admission failed", { session_id = ctx.session_id, error = tostring(admit_err) })
     end
-    local last_id = message_handlers.turn_answer(admitted)
-    if not last_id or no_turn_follows(ctx) then
-        -- Stopped or finishing meanwhile, or only answers of a stopped turn.
+    local start_id = nil
+    if wants_turn then
+        local start_err
+        start_id, start_err = message_handlers.turn_start_after(ctx, admitted, false)
+        if start_err then
+            logger:warn("pending input scan failed", { session_id = ctx.session_id, error = tostring(start_err) })
+        end
+    end
+    if not start_id or no_turn_follows(ctx) then
+        -- Nothing admitted for a turn (already admitted, a failed write, or
+        -- only answers of a stopped turn): back to idle.
+        if wants_turn then
+            local _, complete_err = message_handlers.complete_turn(ctx)
+            if complete_err then
+                logger:warn("session status update failed",
+                    { session_id = ctx.session_id, error = tostring(complete_err) })
+            end
+        end
         message_handlers.defer_publish(ctx, admitted)
         return { completed = true }
     end
+    ctx.turn_state.message_id = start_id
     message_handlers.publish_admitted(admitted)
-    return { message_id = last_id, next_ops = {{
-        type = consts.OP_TYPE.AGENT_STEP, message_id = last_id, from_user = true
+    return { message_id = start_id, next_ops = {{
+        type = consts.OP_TYPE.AGENT_STEP, message_id = start_id, from_user = true
     }} }
 end
 
@@ -738,7 +1072,12 @@ local function pending_form_answers(ctx)
 end
 
 function message_handlers.agent_step(ctx, op)
-    local builder, err = prompt_builder.from_session(ctx.reader)
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
+    if not input_updates then return nil, input_err end
+    local builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, {
+        input_overrides = input_updates,
+    })
     if not builder then
         return nil, "Failed to build prompt: " .. err
     end
@@ -756,7 +1095,12 @@ function message_handlers.agent_step(ctx, op)
 
     -- Loop guards (see above). Every step of the turn is counted, including the one that
     -- answers the user's message, which also starts a fresh count.
-    local state = op.from_user and begin_turn(ctx, op.message_id) or turn_state(ctx)
+    ctx.current_agent = agent
+    local state = ctx.turn_state
+    if not state or state.active == false or (op.from_user and state.message_id ~= op.message_id) then
+        state = begin_turn(ctx, op.message_id)
+    end
+    if op.from_user then state.request_id = op.request_id end
     state.steps = state.steps + 1
     local max_steps, max_repeats = loop_limits(ctx, agent)
     if max_steps > 0 and state.steps > max_steps then
@@ -776,7 +1120,7 @@ function message_handlers.agent_step(ctx, op)
 
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
-        session_context = {}
+        return nil, "Failed to load session context: " .. tostring(ctx_err)
     end
     session_context = with_agent_run_context(ctx, session_context, agent_ref_from(ctx, agent))
 
@@ -805,6 +1149,22 @@ function message_handlers.agent_step(ctx, op)
     end
     append_lifecycle_messages(builder, before_result)
 
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    ctx.input_apply_batch = input_updates
+    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
+    local _, input_apply_err = persist_pending_inputs(ctx, input_updates, expected_revision)
+    local stop_gate = ctx.stop_commit_channel
+    if stop_gate then
+        stop_gate:receive()
+        if ctx.stop_commit_channel == stop_gate then ctx.stop_commit_channel = nil end
+    end
+    ctx.input_apply_batch = nil
+    if input_apply_err then
+        if ctx.stop_requested then return { completed = true, next_ops = {} } end
+        return nil, input_apply_err
+    end
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    publish_applied_inputs(ctx, input_updates)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
@@ -859,6 +1219,9 @@ function message_handlers.agent_step(ctx, op)
         end
 
         ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, (output :: any).TRUNCATION_MSG, {})
+        if is_turn_blocked(ctx) then
+            return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
+        end
 
         return {
             message_id = op.message_id,
@@ -998,7 +1361,7 @@ function message_handlers.agent_step(ctx, op)
         assistant_message_id = stored_id
         result.call_message_ids = call_message_ids
 
-        if ctx.coordinator and ctx.coordinator:stop_requested() then
+        if is_turn_blocked(ctx) then
             for _, call in ipairs(unified_tool_calls) do
                 local _, cancel_err = ctx.writer:update_message_meta((call_message_ids :: table)[call.id], {
                     status = consts.FUNC_STATUS.CANCELLED,
@@ -1006,8 +1369,6 @@ function message_handlers.agent_step(ctx, op)
                 })
                 if cancel_err then return nil, cancel_err end
             end
-            return { message_id = op.message_id, response_id = response_id,
-                completed = true, next_ops = {} }
         end
 
         if result.result and result.result ~= "" then
@@ -1018,6 +1379,10 @@ function message_handlers.agent_step(ctx, op)
         end
     else
         ctx.upstream:invalidate_message(response_id)
+    end
+
+    if is_turn_blocked(ctx) then
+        return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
     if result.memory_prompt then
@@ -1032,7 +1397,7 @@ function message_handlers.agent_step(ctx, op)
     local user_facing_ops = {}
     local background_ops = {}
 
-    if #unified_tool_calls > 0 then
+    if #unified_tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(user_facing_ops, {
             type = consts.OP_TYPE.PROCESS_TOOLS,
             tool_calls = unified_tool_calls,
@@ -1043,7 +1408,8 @@ function message_handlers.agent_step(ctx, op)
             validation_error = validate_err,
             agent = {
                 id = agent.id,
-                model = agent.model
+                model = agent.model,
+                agent_options = agent.agent_options,
             },
             message_id = op.message_id,
             response_id = response_id,
@@ -1095,7 +1461,7 @@ function message_handlers.process_tools(ctx, op)
         return { completed = true }
     end
 
-    if op.cancel_only then
+    if op.cancel_only or is_turn_blocked(ctx) then
         for _, call in ipairs(op.tool_calls) do
             local _, err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
                 status = consts.FUNC_STATUS.CANCELLED,
@@ -1209,6 +1575,29 @@ function message_handlers.process_tools(ctx, op)
             local is_delegation = ctx.config.delegation_func_id
                 and result_data.tool_call.registry_id == ctx.config.delegation_func_id
             local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
+
+            local policy_result = result_data.result
+            if not result_data.error and not is_delegation and type(policy_result) == "table"
+                and type(policy_result._control) == "table" then
+                local control = policy_result._control
+                local request = nil
+                if type(control.config) == "table" then request = control.config.input_policy end
+                if request ~= nil then
+                    local resolved, policy_err
+                    if type(ctx.request_input_policy) == "function" then
+                        resolved, policy_err = ctx.request_input_policy(request, op.agent or current_agent(ctx))
+                    else
+                        resolved, policy_err = input_policy.apply_request(ctx, request, op.agent or current_agent(ctx))
+                    end
+                    if not resolved then
+                        result_data.error = policy_err or "Input policy change failed"
+                    else
+                        control.config.input_policy = nil
+                        if next(control.config) == nil then control.config = nil end
+                        policy_result.interaction = resolved
+                    end
+                end
+            end
 
             if result_data.error then
                 local _, update_err = ctx.writer:update_message_meta(message_id, {
@@ -1341,7 +1730,7 @@ function message_handlers.process_tools(ctx, op)
 
     message_handlers.note_tool_round(ctx, results)
 
-    if #op.tool_calls > 0 and not end_turn then
+    if #op.tool_calls > 0 and not end_turn and not is_turn_blocked(ctx) then
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,
@@ -1356,6 +1745,7 @@ function message_handlers.process_tools(ctx, op)
 end
 
 function message_handlers.agent_continue(ctx, op)
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     return message_handlers.agent_step(ctx, {
         message_id = op.message_id,
         request_id = op.request_id,

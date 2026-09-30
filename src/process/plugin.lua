@@ -6,6 +6,7 @@ local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
+local input_policy = require("input_policy")
 local funcs = require("funcs")
 local message_repo = require("message_repo")
 local reader = require("reader")
@@ -105,17 +106,24 @@ local function recover_session_calls(session_id)
     return message_repo.recover_pending(session_id, anchor)
 end
 
-local function finalize_exit(session_id: string, session_info: any, result: any, exit_error: any)
+local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
     local target_status = status_after_exit(session_info, result, exit_error)
     local recovery_err = nil
     if target_status == consts.STATUS.FAILED then
         local _, err = recover_session_calls(session_id)
         recovery_err = err
     end
+    local stored, read_err = session_repo.get(session_id, user_id)
+    if not stored then
+        return target_status, false, read_err or "Session was not found", recovery_err, nil
+    end
+    local meta = stored.meta or {}
+    local interaction = input_policy.recovery_snapshot(stored, target_status)
+    meta.interaction = interaction
     local success, status_err = session_repo.update_session_meta(session_id, {
-        status = target_status
+        status = target_status, meta = meta
     })
-    return target_status, success, status_err, recovery_err
+    return target_status, success, status_err, recovery_err, interaction
 end
 
 local function run(args)
@@ -209,6 +217,19 @@ local function run(args)
                 request_id = request_id
             })
         end
+    end
+
+    local function publish_after_commit(target_pid, topic, payload)
+        if not target_pid then return true end
+        local ok, send_err = pcall(process.send, target_pid :: string, topic, payload)
+        if not ok then
+            logger:warn("failed to publish committed session state", {
+                topic = topic,
+                error = tostring(send_err),
+            })
+            return false
+        end
+        return true
     end
 
     local function get_active_session_ids()
@@ -355,7 +376,7 @@ local function run(args)
         end
     end
 
-    local function queue_start_request(session_info, kind, payload_data)
+    local function queue_start_request(session_info: any, kind: string, payload_data: any)
         session_info.pending_requests = session_info.pending_requests or {}
         if #session_info.pending_requests >= 256 then
             send_error(payload_data.conn_pid, "SESSION_BUSY",
@@ -408,20 +429,24 @@ local function run(args)
             if request_id then cmd_data.request_id = request_id end
             if cmd_data.command == consts.COMMANDS.STOP then
                 cmd_data.stop_supervised = true
-                local generated, id_err = uuid.v7()
-                if id_err then
-                    send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
-                    return
+                local stop_request_id = session_info.stop_request_id
+                if not stop_request_id then
+                    local generated, id_err = uuid.v7()
+                    if id_err then
+                        send_error(conn_pid, consts.ERROR_CODES.SESSION_SPAWN, id_err, request_id)
+                        return
+                    end
+                    stop_request_id = generated
                 end
-                cmd_data.stop_request_id = generated
+                cmd_data.stop_request_id = stop_request_id
             end
             local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.COMMAND, cmd_data)
             if send_err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
             elseif cmd_data.command == consts.COMMANDS.STOP then
+                -- Keep the same correlation while the child commits Stop. The
+                -- escalation deadline starts only after STOP_ESCALATION arrives.
                 session_info.stop_request_id = cmd_data.stop_request_id
-                session_info.stop_escalation = 1
-                apply_stop_level(session_id, session_info, 1)
             end
         end
     end
@@ -636,7 +661,7 @@ local function run(args)
         else
             -- Session ID provided but not in active sessions - try to recover
             logger:info("attempting to recover inactive session", { user_id = state.user_id, session_id = session_id })
-            local created_session_id, err = create_session(payload_data)
+            local created_session_id, err = create_session(payload_data, true)
             if err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
                     "Session not found and recovery failed: " .. err, request_id)
@@ -740,18 +765,20 @@ local function run(args)
         state.resume_backoff[session_id] = entry
     end
 
-    -- Tells the user's clients how a session ended.
-    local function report_final_status(session_id, target_status, stored, reason)
+    -- Tells the user's clients how a session ended: the stored status and
+    -- interaction, once they are committed.
+    local function report_final_status(session_id, target_status, stored, reason, interaction)
         if not state.user_hub_pid then return end
         local error_update = exit_error_payload(session_id, target_status, reason)
         if error_update then
-            process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
+            publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
         end
         if stored then
-            process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
+            publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, {
                 type = consts.UPSTREAM_TYPES.UPDATE,
                 session_id = session_id,
-                status = target_status
+                status = target_status,
+                interaction = interaction,
             })
         end
     end
@@ -779,13 +806,13 @@ local function run(args)
                 local session_id = tostring(session.session_id)
                 if not state.active_sessions[session_id]
                     and not process.registry.lookup(consts.REGISTRY.SESSION .. session_id) then
-                    local target_status, stored, status_err, recovery_err =
-                        finalize_exit(session_id, nil, nil, "runtime stopped")
+                    local target_status, stored, status_err, recovery_err, interaction =
+                        finalize_exit(session_id, state.user_id :: string, nil, nil, "runtime stopped")
                     if recovery_err or status_err then
                         logger:warn("stale session status could not be settled", { session_id = session_id,
                             error = tostring(status_err or recovery_err) })
                     end
-                    report_final_status(session_id, target_status, stored, "runtime stopped")
+                    report_final_status(session_id, target_status, stored, "runtime stopped", interaction)
                 end
             end
             -- A cursor that does not move would read the same page forever.
@@ -974,8 +1001,8 @@ local function run(args)
                         end
 
                         -- Update session status in database based on termination reason
-                        local target_status, success, status_err, recovery_err =
-                            finalize_exit(session_id, session_info, exit_result, exit_error)
+                        local target_status, success, status_err, recovery_err, interaction =
+                            finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error)
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err
@@ -1010,9 +1037,9 @@ local function run(args)
                         })
 
                         -- Session status update first, then the closed notification
-                        report_final_status(session_id, target_status, success, err)
+                        report_final_status(session_id, target_status, success, err, interaction)
                         if state.user_hub_pid then
-                            process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_CLOSED, {
+                            publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,
                                 reason = err,
                                 active_session_ids = get_active_session_ids()

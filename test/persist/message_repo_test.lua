@@ -4,6 +4,7 @@ local uuid = require("uuid")
 local json = require("json")
 local message_repo = require("message_repo")
 local message_date = require("message_date")
+local tx = require("tx")
 local writer = require("writer")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
@@ -346,14 +347,27 @@ local function define_tests()
                 "held", { message_id = held_id })
             test.is_nil(held_err)
             test.eq(stored_id, held_id)
+            -- Give the held write a later timestamp explicitly. Fast Windows writes
+            -- can share a clock tick, where the documented ID tiebreaker applies.
+            local resource = consts.get_db_resource()
+            local db, db_err = sql.get(resource)
+            if not db then error(db_err) end
+            local _, date_err = db:execute(
+                "UPDATE messages SET date = $1 WHERE message_id = $2 OR message_id = $3",
+                { "2100-01-01T00:00:00Z", assistant_id, call_id })
+            local _, held_date_err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2",
+                { "2100-01-01T00:00:01Z", held_id })
+            db:release()
+            test.is_nil(date_err)
+            test.is_nil(held_date_err)
             local window, window_err = message_repo.list_after_message(test_data.session_id, assistant_id)
+            message_repo.delete(assistant_id)
+            message_repo.delete(call_id)
+            message_repo.delete(held_id)
             test.is_nil(window_err)
             test.eq(window[#window - 2].message_id, assistant_id)
             test.eq(window[#window - 1].message_id, call_id)
             test.eq(window[#window].message_id, held_id)
-            message_repo.delete(assistant_id)
-            message_repo.delete(call_id)
-            message_repo.delete(held_id)
         end)
 
         it("should create a message with binary data and metadata", function()
@@ -900,6 +914,36 @@ local function define_tests()
                 test.not_nil(admitted)
                 ids = ids_in_order(session_id)
                 test.eq(ids[#ids], answer_id)
+            end)
+
+            it("dates an admitted first message after a row that is ahead of the clock", function()
+                local session_id = new_session("Admission after a future row")
+                local ahead_id = uuid.v7()
+                insert_row(session_id, ahead_id, consts.MSG_TYPE.ASSISTANT, ahead_of_clock():format(message_date.LAYOUT), nil)
+
+                -- The steering admission of an idle message (message_repo.admit)
+                -- takes its date from message_date like every other writer.
+                local admitted_id = uuid.v7()
+                local row, admit_err = message_repo.admit(admitted_id, session_id, consts.MSG_TYPE.USER, "new turn", {},
+                    { status = "running", meta = { interaction = { can_send = false, revision = 1 } } })
+                test.is_nil(admit_err)
+                test.not_nil(row)
+                local ids = ids_in_order(session_id)
+                test.eq(ids[#ids - 1], ahead_id)
+                test.eq(ids[#ids], admitted_id)
+                local stored: any = session_repo.get(session_id, test_data.user_id)
+                test.eq(stored.status, "running")
+                test.eq(stored.meta.interaction.revision, 1)
+            end)
+
+            it("refuses steering writes inside tx.run that do not pass the transaction", function()
+                local session_id = new_session("Steering under a transaction")
+                local _, run_err = tx.run(function()
+                    local applied, apply_err = message_repo.apply_inputs(session_id, {}, 0)
+                    if apply_err then return nil, apply_err end
+                    return applied
+                end)
+                test.contains(tostring(run_err), "Nested tx.run")
             end)
 
             it("counts a later typed message whose client data mentions session_form", function()

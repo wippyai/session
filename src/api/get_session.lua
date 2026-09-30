@@ -3,6 +3,7 @@ local security = require("security")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local consts = require("consts")
+local input_policy = require("input_policy")
 
 local get_session = {}
 
@@ -21,6 +22,16 @@ local function reported_status(session: any): string
         return consts.STATUS.FAILED
     end
     return session.status :: string
+end
+
+-- The interaction follows the reported status. When a crashed turn is
+-- reported as failed, it reads the way the plugin's recovery will store it
+-- (input_policy.recovery_snapshot), so status and interaction never disagree.
+local function reported_interaction(session: any, stored_status: any): any
+    if session.status ~= stored_status then
+        return input_policy.recovery_snapshot(session, session.status)
+    end
+    return session.meta and session.meta.interaction
 end
 
 type GetSessionResponse = {
@@ -83,7 +94,9 @@ local function handler()
     local latest_message, _ = message_repo.get_latest(session_id)
     local message_count, _ = message_repo.count_by_session(session_id)
 
+    local stored_status = session.status
     session.status = reported_status(session)
+    session.interaction = reported_interaction(session, stored_status)
     session.current_agent = ""
     session.current_model = ""
 
@@ -112,5 +125,6 @@ end
 
 get_session.handler = handler
 get_session._reported_status = reported_status
+get_session._reported_interaction = reported_interaction
 
 return get_session

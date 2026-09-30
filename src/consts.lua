@@ -107,9 +107,6 @@ local consts = {
 
         HANDLE_CONTEXT = "handle_context",
         REFERENCE_ARTIFACT = "reference_artifact",
-
-        -- Admits accepted form answers (already stored, pending) and starts a turn
-        ADMIT_ANSWER = "admit_answer",
     },
 
     -- Session Commands
@@ -166,7 +163,6 @@ local consts = {
         RECEIVED = "received",
         RESPONSE_STARTED = "response_started",
         INVALIDATE = "invalidate",
-        COMMAND_RESPONSE = "command_response",
         CONTENT = "content",
         FUNCTION_CALL = "function_call",
         FUNCTION_SUCCESS = "function_success",

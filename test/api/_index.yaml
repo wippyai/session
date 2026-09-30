@@ -22,7 +22,7 @@ entries:
       name: Session status reporting
       type: test
       suite: session
-      comment: get_session/list_sessions report a stored running status with no registered process as failed
+      comment: get_session/list_sessions report a stored running status with no registered process as failed, with the interaction recovery will store
     source: file://session_status_test.lua
     imports:
       get_session: wippy.session.api:get_session_module

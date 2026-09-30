@@ -38,6 +38,21 @@ local function define_tests()
             test.eq(get_session._reported_status({ status = "completed", session_id = "s1" }), "completed")
             test.eq(get_session._reported_status({ status = "failed", session_id = "s1" }), "failed")
         end)
+
+        it("reports the interaction the plugin's recovery will store for a crashed turn", function()
+            -- A steering turn left running by a crash: stored as sendable.
+            local session = { status = "failed", session_id = "s1", config = {},
+                meta = { interaction = { can_send = true, revision = 4 } } }
+            local interaction: any = get_session._reported_interaction(session, "running")
+            test.is_false(interaction.can_send, "a failed session does not take input")
+            test.eq(interaction.revision, 5, "newer than the stored one")
+        end)
+
+        it("keeps the stored interaction when the status is reported as stored", function()
+            local stored = { can_send = false, revision = 7 }
+            local session = { status = "running", session_id = "s1", config = {}, meta = { interaction = stored } }
+            test.eq(get_session._reported_interaction(session, "running"), stored)
+        end)
     end)
 
     describe("list_sessions reported status", function()
@@ -64,6 +79,14 @@ local function define_tests()
         it("leaves every other status alone without even checking the registry", function()
             list_sessions._lookup_session = function() error("must not be called for a non-running status") end
             test.eq(list_sessions._reported_status({ status = "idle", session_id = "s2" }), "idle")
+        end)
+
+        it("reports a crashed turn's interaction like get_session", function()
+            local session = { status = "failed", session_id = "s2", config = {},
+                meta = { interaction = { can_send = true, revision = 2 } } }
+            local interaction: any = list_sessions._reported_interaction(session, "running")
+            test.is_false(interaction.can_send)
+            test.eq(interaction.revision, 3)
         end)
     end)
 end

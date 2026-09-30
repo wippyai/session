@@ -56,12 +56,14 @@ function session_upstream:response_beginning(response_id, message_id)
 end
 
 -- Confirm message reception
-function session_upstream:message_received(message_id, text, file_uuids)
+function session_upstream:message_received(message_id, text, file_uuids, input, request_id)
     self:send_message_update(message_id, consts.UPSTREAM_TYPES.RECEIVED, {
         message_id = message_id,
         text = text,
         timestamp = os.time(),
-        file_uuids = file_uuids
+        file_uuids = file_uuids,
+        input = input,
+        request_id = request_id
     })
 end
 
@@ -82,21 +84,15 @@ function session_upstream:invalidate_message(message_id, reason)
     })
 end
 
--- Report command success with request_id
-function session_upstream:command_success(request_id)
-    self:_send_session_update(consts.UPSTREAM_TYPES.COMMAND_RESPONSE, {
-        request_id = request_id,
-        success = true
-    })
-end
-
 -- Report command error with request_id
-function session_upstream:command_error(request_id, code, message)
-    self:_send_session_update(consts.UPSTREAM_TYPES.COMMAND_RESPONSE, {
+function session_upstream:command_error(request_id, code, message, payload)
+    payload = payload or {}
+    self:_send_session_update(consts.UPSTREAM_TYPES.ERROR, {
         request_id = request_id,
-        success = false,
         code = code,
-        message = message
+        message = message,
+        message_id = payload.message_id,
+        input = payload.input
     })
 end
 
@@ -105,7 +101,7 @@ end
 -- Send session-level update
 function session_upstream:_send_session_update(type, payload)
     local topic = self:get_session_topic()
-    local message = { type = type }
+    local message = { type = type, session_id = self.session_id }
 
     -- Merge payload fields into message
     for k, v in pairs(payload or {}) do
@@ -118,7 +114,7 @@ end
 -- Send message-level update
 function session_upstream:send_message_update(message_id, type, payload)
     local topic = self:get_message_topic(message_id)
-    local message = { type = type }
+    local message = { type = type, session_id = self.session_id }
 
     -- Merge payload fields into message
     for k, v in pairs(payload or {}) do
@@ -132,8 +128,10 @@ end
 function session_upstream:_send_message(topic, message)
     -- Send to parent process (which can relay to all connections)
     if self.parent_pid then
-        process.send(self.parent_pid :: string, topic, message)
+        local ok, err = pcall(process.send, self.parent_pid :: string, topic, message)
+        if not ok then return nil, tostring(err) end
     end
+    return true
 end
 
 return session_upstream

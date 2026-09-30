@@ -192,6 +192,14 @@ function session_reader:messages()
     return query
 end
 
+function session_reader:list_pending_inputs()
+    return session._message_repo.list_pending_inputs(self.session_id)
+end
+
+function session_reader:list_all_messages()
+    return session._message_repo.list_all_by_session(self.session_id)
+end
+
 function session_reader:artifacts()
     local query = setmetatable({}, artifact_query)
     query._session_id = self.session_id
@@ -286,6 +294,43 @@ function message_query:all()
 
     if err then
         return nil, "Failed to fetch messages: " .. err
+    end
+
+    -- Prompt queries retain pending input outside the usual history window.
+    -- Explicitly paginated/type-filtered queries keep their normal semantics.
+    -- prompt_builder hides pending input until the safe boundary.
+    if not self._type_filter and not self._limit and type(session._message_repo.list_all_by_session) == "function" then
+        local pending, pending_err = session._message_repo.list_all_by_session(self._session_id)
+        if pending_err then
+            return nil, "Failed to fetch pending inputs: " .. pending_err
+        end
+        messages = messages or {}
+        local seen, all_ids = {}, {}
+        for _, message in ipairs(messages) do
+            seen[message.message_id] = true
+        end
+        for _, message in ipairs(pending or {}) do
+            all_ids[message.message_id] = true
+        end
+        for _, message in ipairs(pending or {}) do
+            local metadata = message.metadata or {}
+            local input = metadata.input
+            local relevant = false
+            if type(input) == "table" then
+                local anchor = input.after_message_id
+                relevant = input.state == "pending"
+                    or (input.state == "applied" and (not anchor or not all_ids[anchor]
+                        or seen[anchor] or (self._after_message_id and anchor == self._after_message_id)))
+            end
+            if relevant and not seen[message.message_id] then
+                table.insert(messages, message)
+                seen[message.message_id] = true
+            end
+        end
+        table.sort(messages, function(a, b)
+            if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
+            return tostring(a.message_id) < tostring(b.message_id)
+        end)
     end
 
     return messages or {}, nil

@@ -23,9 +23,9 @@ local wait_for_boot = require("wait_for_boot")
 -- through the ask_user tool and the `_control.forms` effect in
 -- process_tools, the one-form-per-turn guard, ending the turn, the failure
 -- row rewrite (F05), and admission of accepted answers (idle, during a turn
--- in arrival order with typed input, after a stop, on finish, and by the
--- startup/end-of-turn scans), plus what the prompt and read_form show of an
--- answer that is not admitted yet.
+-- in acceptance order with steered typed input, after a stop, on finish,
+-- and by the startup/end-of-turn scans), plus what the prompt and read_form
+-- show of an answer that is not admitted yet.
 
 local TOOL_ID = "wippy.session.forms:ask_user_tool"
 
@@ -77,12 +77,13 @@ local function define_tests()
             local session_reader, reader_err = reader.open(session_id)
             test.is_nil(reader_err)
             local events = { received = {} :: {any}, updates = {} :: {any}, artifacts = {} :: {any} }
-            local ctx = {
+            local ctx: any = {
                 session_id = session_id,
                 user_id = user_id,
                 writer = session_writer,
                 reader = session_reader,
                 config = {},
+                status = consts.STATUS.IDLE,
                 held = {},
                 turn_state = { id = "turn-" .. uuid.v7(), steps = 0, repeated_calls = 0 },
                 upstream = {
@@ -144,15 +145,64 @@ local function define_tests()
             return command_bus.new(ctx)
         end
 
-        -- A typed message arriving while a turn runs; returns its message id.
+        -- A command bus on ctx with a turn running for "user-message" (the id
+        -- ask() passes), under the steering policy: typed input during the
+        -- turn is stored at once as pending steering.
+        local function running_turn(ctx)
+            local bus: any = with_bus(ctx)
+            bus.state = "running"
+            ctx.config.input_policy = { while_running = "steer" }
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            ctx.turn_state.message_id = "user-message"
+            return bus
+        end
+
+        -- A typed message arriving while a turn runs; returns the id of the
+        -- pending steering row it is stored as.
         local function type_during_turn(ctx, bus, text, request_id)
             local ok, err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
                 { data = { text = text }, request_id = request_id }, { finishing = false })
             test.is_nil(err)
             test.is_true(ok)
-            local held: any = (ctx :: any).held
-            local last: any = held[#held]
-            return last.message_id
+            for _, row in ipairs(message_repo.list_pending_inputs(ctx.session_id) or {}) do
+                if row.data == text then return row.message_id end
+            end
+            error("the typed message was not stored as pending steering: " .. text)
+        end
+
+        -- All user text of the prompt the next step builds, in prompt order.
+        -- The prompt joins adjacent user messages, so order is compared by
+        -- position in this text.
+        local function prompt_user_texts(ctx): string
+            local builder: any, err = prompt_builder.from_session(ctx.reader)
+            test.is_nil(err)
+            local texts = {}
+            for _, message in ipairs(builder:get_messages()) do
+                if message.role == "user" then
+                    for _, part in ipairs(message.content) do table.insert(texts, tostring(part.text)) end
+                end
+            end
+            return table.concat(texts, "\n")
+        end
+
+        -- Where `needle` starts in the prompt's user text, or nil.
+        local function index_containing(text: string, needle: string): number?
+            return (string.find(text, needle, 1, true))
+        end
+
+        -- The turn boundary as the session inbox runs it once the bus is
+        -- empty: a continuation step when steering is due, else the end of
+        -- the turn. Returns finish_turn's result.
+        local function reach_boundary(ctx, bus)
+            local finished: any, err = message_handlers.finish_turn(ctx)
+            test.is_nil(err)
+            if finished.completed then
+                local ok, end_err = bus:end_turn()
+                test.is_nil(end_err)
+                test.is_true(ok)
+            end
+            return finished
         end
 
         local function history_ids(ctx)
@@ -508,10 +558,9 @@ local function define_tests()
                 test.contains(command_errors[1].message, "cannot be edited")
             end)
 
-            it("writes typed input held since before a form ahead of it, so the form is not stale", function()
+            it("keeps a message steered before a form ahead of it, and answers it in the next turn", function()
                 local ctx = new_ctx()
-                local bus: any = with_bus(ctx)
-                bus.state = "running"
+                local bus: any = running_turn(ctx)
                 local typed_id = type_during_turn(ctx, bus, "Also check the address", "typed-early")
                 local _, err = ask(ctx, DEFINITION)
                 test.is_nil(err)
@@ -526,13 +575,34 @@ local function define_tests()
                 test.eq(status, 200)
                 test.eq(json.decode(tostring(body)).stale, false)
 
-                -- The turn ends with the form; the next one answers the message.
-                local ok, end_err = bus:end_turn()
-                test.is_nil(end_err)
-                test.is_true(ok)
+                -- The form ends the turn (D11): no continuation step for the
+                -- steering. The next turn starts at the steered message. Its
+                -- request was answered when the message was stored.
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed)
                 test.eq(bus.ops[1].type, consts.OP_TYPE.AGENT_STEP)
                 test.eq(bus.ops[1].message_id, typed_id)
-                test.eq(bus.ops[1].request_id, "typed-early")
+                test.is_true(bus.ops[1].from_user)
+                test.is_nil(bus.ops[1].request_id)
+                test.eq(ctx.status, consts.STATUS.RUNNING)
+
+                -- The step applies it after the form's turn; applying does not
+                -- make the form stale.
+                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, typed_id)
+                test.is_nil(apply_err)
+                test.eq(applied, 1)
+                local _, later = state_service.get_state(user_id, form_id)
+                test.eq(json.decode(tostring(later)).stale, false)
+            end)
+
+            it("makes a form stale with a message steered after it", function()
+                local ctx = new_ctx()
+                local bus: any = running_turn(ctx)
+                ask(ctx, DEFINITION)
+                type_during_turn(ctx, bus, "Never mind, use the old address", "typed-late")
+                local status, body = state_service.get_state(user_id, form_id_of(ctx))
+                test.eq(status, 200)
+                test.eq(json.decode(tostring(body)).stale, true, "real user input accepted after the form")
             end)
 
             it("does not run another agent step on the bus after a form", function()
@@ -736,19 +806,20 @@ local function define_tests()
                 local accepted = submit(form_id_of(ctx))
                 ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "later row")
 
+                -- Admitted in the inbox, like an idle typed message, so the
+                -- turn it starts is in place before any later message.
                 local bus: any = command_bus.new(ctx)
                 local routed = session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
                     { message_id = accepted.answer_message_id }, { finishing = false })
                 test.is_true(routed)
                 test.eq(#bus.ops, 1)
-                test.eq(bus.ops[1].type, consts.OP_TYPE.ADMIT_ANSWER)
-                test.is_true(bus.ops[1].starts_turn)
-
-                local result, err = message_handlers.admit_answer(ctx, bus.ops[1])
-                test.is_nil(err)
-                test.eq(result.next_ops[1].type, consts.OP_TYPE.AGENT_STEP)
-                test.eq(result.next_ops[1].message_id, accepted.answer_message_id)
-                test.is_true(result.next_ops[1].from_user)
+                test.eq(bus.ops[1].type, consts.OP_TYPE.AGENT_STEP)
+                test.eq(bus.ops[1].message_id, accepted.answer_message_id)
+                test.is_true(bus.ops[1].from_user)
+                test.is_true(ctx.turn_state.active)
+                test.eq(ctx.status, consts.STATUS.RUNNING)
+                local stored: any = session_repo.get(ctx.session_id, user_id)
+                test.eq(stored.status, consts.STATUS.RUNNING)
 
                 local rows: any = message_repo.list_by_session(ctx.session_id, 500).messages
                 local last = rows[#rows]
@@ -766,12 +837,11 @@ local function define_tests()
                 test.is_nil(again.next_ops, "a repeated wake-up is a no-op")
             end)
 
-            it("settles an answer held during a turn before a typed message that came after it", function()
+            it("admits an answer held during a turn ahead of a message steered after it", function()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
                 local accepted = submit(form_id_of(ctx))
-                local bus: any = with_bus(ctx)
-                bus.state = "running"
+                local bus: any = running_turn(ctx)
 
                 session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
                     { message_id = accepted.answer_message_id }, { finishing = false })
@@ -779,43 +849,65 @@ local function define_tests()
                 test.eq(message_repo.get(accepted.answer_message_id).metadata.session_form.pending, true)
                 local typed_id = type_during_turn(ctx, bus, "Stop, don't delete", "stop-typed")
 
-                local ok, err = bus:end_turn()
-                test.is_nil(err)
-                test.is_true(ok)
+                -- The steered message waits behind the pending answer, so the
+                -- turn has nothing due and ends.
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed)
                 test.eq(#ctx.held, 0)
-                local rows: any = message_repo.list_by_session(ctx.session_id, 500).messages
-                test.eq(rows[#rows - 1].message_id, accepted.answer_message_id, "the earlier answer first")
-                test.is_nil(rows[#rows - 1].metadata.session_form.pending)
-                test.eq(rows[#rows].message_id, typed_id)
+                test.is_nil(message_repo.get(accepted.answer_message_id).metadata.session_form.pending)
                 test.eq(bus.ops[1].type, consts.OP_TYPE.AGENT_STEP)
-                test.eq(bus.ops[1].message_id, typed_id, "the next turn answers the latest input")
-                test.eq(bus.ops[1].request_id, "stop-typed")
+                test.eq(bus.ops[1].message_id, typed_id, "the next turn starts at the latest input")
+                test.is_nil(bus.ops[1].request_id, "its request was answered when it was stored")
+
+                -- The step places the message after the answer.
+                local _, apply_err = message_handlers.apply_pending_inputs(ctx, typed_id)
+                test.is_nil(apply_err)
+                local texts = prompt_user_texts(ctx)
+                local answer_at = index_containing(texts, "<wippy-form-answers record=")
+                local typed_at = index_containing(texts, "Stop, don't delete")
+                test.not_nil(answer_at)
+                test.not_nil(typed_at)
+                test.is_true((answer_at :: number) < (typed_at :: number), "the earlier answer first")
             end)
 
-            it("settles a typed message held before an answer ahead of it", function()
+            it("steers a message sent before an answer into the turn and admits the answer after", function()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
-                local bus: any = with_bus(ctx)
-                bus.state = "running"
+                local bus: any = running_turn(ctx)
                 local typed_id = type_during_turn(ctx, bus, "One more thing", "typed-first")
                 local accepted = submit(form_id_of(ctx))
                 session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
                     { message_id = accepted.answer_message_id }, { finishing = false })
 
-                local _, err = bus:end_turn()
-                test.is_nil(err)
-                local rows: any = message_repo.list_by_session(ctx.session_id, 500).messages
-                test.eq(rows[#rows - 1].message_id, typed_id)
-                test.eq(rows[#rows].message_id, accepted.answer_message_id)
+                -- The message was sent before the answer: the turn continues
+                -- for it, and the answer still waits.
+                local continued = reach_boundary(ctx, bus)
+                test.is_false(continued.completed)
+                test.eq(continued.next_ops[1].type, consts.OP_TYPE.AGENT_STEP)
+                test.is_false(continued.next_ops[1].from_user)
+                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, nil)
+                test.is_nil(apply_err)
+                test.eq(applied, 1)
+                test.is_nil(index_containing(prompt_user_texts(ctx), "<wippy-form-answers record="),
+                    "the answer is not visible to the running turn")
+
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed)
                 test.eq(bus.ops[1].message_id, accepted.answer_message_id)
                 test.is_nil(bus.ops[1].request_id)
+                local texts = prompt_user_texts(ctx)
+                local typed_at = index_containing(texts, "One more thing")
+                local answer_at = index_containing(texts, "<wippy-form-answers record=")
+                test.not_nil(typed_at)
+                test.not_nil(answer_at)
+                test.is_true((typed_at :: number) < (answer_at :: number))
+                test.not_nil(position_of(history_ids(ctx), typed_id))
             end)
 
-            it("writes typed input for the next step only up to a held answer", function()
+            it("applies steering at a step only up to a pending answer", function()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
-                local bus: any = with_bus(ctx)
-                bus.state = "running"
+                local bus: any = running_turn(ctx)
                 local first_id = type_during_turn(ctx, bus, "Before the answer", "before")
                 local accepted = submit(form_id_of(ctx))
                 session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
@@ -824,16 +916,96 @@ local function define_tests()
 
                 local _, step_err = session.flush_held(ctx, true, "step")
                 test.is_nil(step_err)
-                test.eq(#ctx.held, 2, "the answer and what came after it wait for the end of the turn")
-                test.not_nil(position_of(history_ids(ctx), first_id))
-                test.is_nil(position_of(history_ids(ctx), later_id))
+                test.eq(#ctx.held, 1, "the answer waits for the end of the turn")
+                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, nil)
+                test.is_nil(apply_err)
+                test.eq(applied, 1, "only the message sent before the answer")
+                test.eq(message_repo.get(first_id).metadata.input.state, "applied")
+                test.eq(message_repo.get(later_id).metadata.input.state, "pending")
                 test.eq(message_repo.get(accepted.answer_message_id).metadata.session_form.pending, true)
 
-                local _, end_err = bus:end_turn()
-                test.is_nil(end_err)
-                local ids = history_ids(ctx)
-                test.eq(ids[#ids - 1], accepted.answer_message_id)
-                test.eq(ids[#ids], later_id)
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed, "nothing else is due before the answer")
+                test.eq(bus.ops[1].message_id, later_id)
+                local _, later_err = message_handlers.apply_pending_inputs(ctx, later_id)
+                test.is_nil(later_err)
+                local texts = prompt_user_texts(ctx)
+                local first_at = index_containing(texts, "Before the answer") :: number
+                local answer_at = index_containing(texts, "<wippy-form-answers record=") :: number
+                local later_at = index_containing(texts, "After the answer") :: number
+                test.is_true(first_at < answer_at)
+                test.is_true(answer_at < later_at)
+            end)
+
+            it("does not show a steered turn an answer accepted during it", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                local form_id = form_id_of(ctx)
+                local bus: any = running_turn(ctx)
+                type_during_turn(ctx, bus, "Pick the locker", "steer")
+                local _, apply_err = message_handlers.apply_pending_inputs(ctx, nil)
+                test.is_nil(apply_err)
+
+                local accepted = submit(form_id, { delivery = "Locker" })
+                session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
+                    { message_id = accepted.answer_message_id }, { finishing = false })
+                local builder: any = prompt_builder.from_session(ctx.reader)
+                local messages = builder:get_messages()
+                local index = tostring(messages[#messages].content[1].text)
+                test.contains(index, "answer pending")
+                local texts = prompt_user_texts(ctx)
+                test.not_nil(index_containing(texts, "Pick the locker"))
+                test.is_nil(index_containing(texts, "<wippy-form-answers record="))
+
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed)
+                test.eq(bus.ops[1].type, consts.OP_TYPE.AGENT_STEP)
+                test.is_nil(message_repo.get(bus.ops[1].message_id).metadata.session_form.pending)
+            end)
+
+            it("on Stop delivers the answers, keeps earlier steering ahead of them and later steering pending", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                local form_id = form_id_of(ctx)
+                local bus: any = running_turn(ctx)
+                local before_id = type_during_turn(ctx, bus, "Sent before the answer", "before")
+                local accepted = submit(form_id)
+                session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
+                    { message_id = accepted.answer_message_id }, { finishing = false })
+                local after_id = type_during_turn(ctx, bus, "Sent after the answer", "after")
+
+                session.route_input(ctx, bus, consts.TOPICS.STOP, { request_id = "stop" }, { finishing = false })
+                test.eq(bus.state, "draining_stop")
+                test.is_true(ctx.stop_requested)
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed)
+                test.eq(bus.state, "idle")
+                for _, op in ipairs(bus.ops) do
+                    test.is_false(op.type == consts.OP_TYPE.AGENT_STEP, "a stopped turn starts no agent step")
+                end
+                test.is_nil(message_repo.get(accepted.answer_message_id).metadata.session_form.pending)
+                test.eq(message_repo.get(before_id).metadata.input.state, "applied",
+                    "placed ahead of the answer it came before")
+                test.eq(message_repo.get(after_id).metadata.input.state, "pending",
+                    "unused steering stays pending after Stop")
+
+                -- The next typed message starts a turn that sees all of it in order.
+                local next_id = nil :: string?
+                ctx.upstream.message_received = function(_self, id) next_id = next_id or id end
+                session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                    { data = { text = "Carry on" }, request_id = "next" }, { finishing = false })
+                test.not_nil(next_id)
+                test.eq(bus.ops[#bus.ops].message_id, next_id)
+                local _, apply_err = message_handlers.apply_pending_inputs(ctx, next_id)
+                test.is_nil(apply_err)
+                local texts = prompt_user_texts(ctx)
+                local before_at = index_containing(texts, "Sent before the answer") :: number
+                local answer_at = index_containing(texts, "<wippy-form-answers record=") :: number
+                local after_at = index_containing(texts, "Sent after the answer") :: number
+                local next_at = index_containing(texts, "Carry on") :: number
+                test.is_true(before_at < answer_at)
+                test.is_true(answer_at < after_at)
+                test.is_true(after_at < next_at)
             end)
 
             it("delivers answers of a stopped turn without starting a turn, and never later", function()
@@ -878,11 +1050,13 @@ local function define_tests()
                 test.is_nil(err, "a failed admission is not fatal")
                 test.eq(message_repo.get(accepted.answer_message_id).metadata.session_form.pending, true)
 
-                -- The plugin's scan asks the idle session again.
+                -- The plugin's scan asks the idle session again; the inbox
+                -- admits it, still with no turn for the stopped one.
                 session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER, {}, { finishing = false })
-                test.eq(bus.ops[#bus.ops].type, consts.OP_TYPE.ADMIT_ANSWER)
-                local result = message_handlers.admit_answer(ctx, bus.ops[#bus.ops])
-                test.is_nil(result.next_ops, "still no turn for the stopped one")
+                for _, op in ipairs(bus.ops) do
+                    test.is_false(op.type == consts.OP_TYPE.AGENT_STEP, "still no turn for the stopped one")
+                end
+                test.is_false(ctx.turn_state.active == true)
                 test.is_nil(message_repo.get(accepted.answer_message_id).metadata.session_form.pending)
             end)
 
@@ -890,8 +1064,7 @@ local function define_tests()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
                 local accepted = submit(form_id_of(ctx))
-                local bus: any = with_bus(ctx)
-                bus.state = "running"
+                local bus: any = running_turn(ctx)
                 session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
                     { message_id = accepted.answer_message_id }, { finishing = false })
                 local typed_id = type_during_turn(ctx, bus, "Written anyway", "finish-typed")
@@ -917,37 +1090,38 @@ local function define_tests()
                 -- An admission that finds the session finishing admits nothing.
                 local finishing_bus: any = with_bus(exiting)
                 finishing_bus.state = "draining_finish"
-                local result = message_handlers.admit_answer(exiting, { type = consts.OP_TYPE.ADMIT_ANSWER })
+                local result = message_handlers.admit_answer(exiting, {})
                 test.is_nil(result.next_ops)
                 test.eq(message_repo.get(kept.answer_message_id).metadata.session_form.pending, true)
             end)
 
-            it("settles input held behind an answer admission that starts no turn", function()
+            it("starts no turn for a wake-up whose answer is gone, and a later message starts one", function()
                 local ctx = new_ctx()
                 local bus: any = with_bus(ctx)
                 local steps = {} :: {any}
                 ctx.queue_empty_callback = function() bus:stop(); return true end
-                bus:mount_op_handler(consts.OP_TYPE.ADMIT_ANSWER, message_handlers.admit_answer)
                 bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function(_ctx, op)
                     table.insert(steps, op)
                     return { completed = true }
                 end)
-                -- A wake-up for an answer that is no longer pending admits nothing.
+                -- A wake-up for an answer that is no longer pending admits nothing
+                -- and holds nothing.
                 session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER, { message_id = uuid.v7() }, { finishing = false })
-                local typed_id = type_during_turn(ctx, bus, "Typed meanwhile", "meanwhile")
-                test.eq(#ctx.held, 1)
+                test.eq(#bus.ops, 0)
+                test.eq(#ctx.held, 0)
+                test.is_false(ctx.turn_state.active == true)
+                session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                    { data = { text = "Typed meanwhile" }, request_id = "meanwhile" }, { finishing = false })
 
                 local ok, err = bus:run()
                 test.is_nil(err)
                 test.is_true(ok)
-                test.eq(#ctx.held, 0)
                 test.eq(#steps, 1)
-                test.eq(steps[1].message_id, typed_id)
                 test.eq(steps[1].request_id, "meanwhile")
+                test.eq(message_repo.get(steps[1].message_id).data, "Typed meanwhile")
             end)
 
             it("stores only a list of UUID strings as a message's attachments", function()
-                local ctx = new_ctx()
                 local attachment = uuid.v7()
                 local cases = {
                     { value = { session_form = { pending = true } }, expected = nil },
@@ -956,11 +1130,12 @@ local function define_tests()
                     { value = { attachment }, expected = attachment },
                 }
                 for _, case in ipairs(cases) do
-                    local message_id = uuid.v7()
-                    local _, err = message_handlers.handle_message(ctx,
-                        { message_id = message_id, data = { text = "with files", file_uuids = case.value } })
+                    -- Each on an idle session: the message id is the server's.
+                    local ctx = new_ctx()
+                    local result: any, err = message_handlers.handle_message(ctx,
+                        { data = { text = "with files", file_uuids = case.value } })
                     test.is_nil(err)
-                    local row: any = message_repo.get(message_id)
+                    local row: any = message_repo.get(result.message_id)
                     local stored = row.metadata and row.metadata.file_uuids
                     if case.expected then
                         test.eq(stored[1], case.expected)
@@ -1007,11 +1182,11 @@ local function define_tests()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
                 local accepted = submit(form_id_of(ctx))
-                local typed_id = uuid.v7()
-                local result, err = message_handlers.handle_message(ctx,
-                    { message_id = typed_id, data = { text = "Typed later" } })
+                local result: any, err = message_handlers.handle_message(ctx,
+                    { data = { text = "Typed later" } })
                 test.is_nil(err)
-                test.eq(result.message_id, typed_id)
+                local typed_id = result.message_id
+                test.not_nil(typed_id)
                 local rows: any = message_repo.list_by_session(ctx.session_id, 500).messages
                 test.eq(rows[#rows - 1].message_id, accepted.answer_message_id)
                 test.eq(rows[#rows].message_id, typed_id)

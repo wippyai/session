@@ -169,6 +169,7 @@ entries:
       - security
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
 
@@ -184,6 +185,7 @@ entries:
       - security
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
     method: handler
@@ -239,6 +241,7 @@ entries:
       - security
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
       session_repo: wippy.session.persist:session_repo
 
   # wippy.session.api:list_sessions
@@ -253,6 +256,7 @@ entries:
       - security
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
       session_repo: wippy.session.persist:session_repo
     method: handler
     pool:

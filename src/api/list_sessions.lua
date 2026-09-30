@@ -2,6 +2,7 @@ local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
 local consts = require("consts")
+local input_policy = require("input_policy")
 
 local list_sessions = {}
 
@@ -20,6 +21,14 @@ local function reported_status(session: any): string
         return consts.STATUS.FAILED
     end
     return session.status :: string
+end
+
+-- The interaction follows the reported status (see get_session.lua).
+local function reported_interaction(session: any, stored_status: any): any
+    if session.status ~= stored_status then
+        return input_policy.recovery_snapshot(session, session.status)
+    end
+    return session.meta and session.meta.interaction
 end
 
 type ListSessionsResponse = {
@@ -79,7 +88,9 @@ local function handler()
     end
 
     for i, session in ipairs(sessions) do
+        local stored_status = session.status
         session.status = reported_status(session)
+        session.interaction = reported_interaction(session, stored_status)
         session.current_agent = ""
         session.current_model = ""
 
@@ -100,5 +111,6 @@ end
 
 list_sessions.handler = handler
 list_sessions._reported_status = reported_status
+list_sessions._reported_interaction = reported_interaction
 
 return list_sessions
