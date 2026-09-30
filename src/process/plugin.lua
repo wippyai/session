@@ -59,8 +59,10 @@ local function deadline_matches(session_info, deadline)
         and active.level == deadline.level
 end
 
-local function exit_error_payload(session_id, status, reason)
-    if status ~= consts.STATUS.FAILED then return nil end
+-- The notice that a turn did not complete: after a failed exit, and for a
+-- turn the runtime interrupted (`interrupted`, stored idle).
+local function exit_error_payload(session_id, status, reason, interrupted)
+    if status ~= consts.STATUS.FAILED and not interrupted then return nil end
     return {
         type = consts.UPSTREAM_TYPES.ERROR,
         session_id = session_id,
@@ -106,10 +108,13 @@ local function recover_session_calls(session_id)
     return message_repo.recover_pending(session_id, anchor)
 end
 
-local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
-    local target_status = status_after_exit(session_info, result, exit_error)
+-- Stores `target_status` with the interaction recovery gives it, after
+-- repairing the calls an interrupted turn left pending when `recover_calls`
+-- is set. Returns the status, whether it was stored, the storage error, the
+-- call repair error and the interaction.
+local function settle_session(session_id: string, user_id: string, target_status: string, recover_calls: boolean)
     local recovery_err = nil
-    if target_status == consts.STATUS.FAILED then
+    if recover_calls then
         local _, err = recover_session_calls(session_id)
         recovery_err = err
     end
@@ -124,6 +129,27 @@ local function finalize_exit(session_id: string, user_id: string, session_info: 
         status = target_status, meta = meta
     })
     return target_status, success, status_err, recovery_err, interaction
+end
+
+local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
+    local target_status = status_after_exit(session_info, result, exit_error)
+    return settle_session(session_id, user_id, target_status, target_status == consts.STATUS.FAILED)
+end
+
+-- A session the whole runtime stopped in the middle of a turn: its calls
+-- are repaired and it is stored idle, with an interaction that takes input.
+-- Not failed: in the interaction model a failed session does not take input
+-- (input_policy.resolve), and no session process exists to move it on, so an
+-- interaction-aware client would keep Send disabled while the only way to
+-- continue is to send a message (the plugin reopens a session on its first
+-- message, and a session process always starts idle). Nothing in the session
+-- failed; its turn was interrupted from outside. The clients still get the
+-- recovery notice, and a form answer the turn did not answer reads as
+-- interrupted ("send a message to continue", state_service.delivery_of).
+-- A session process that exits with an error while the runtime keeps running
+-- is settled by finalize_exit as before.
+local function settle_interrupted(session_id: string, user_id: string)
+    return settle_session(session_id, user_id, consts.STATUS.IDLE, true)
 end
 
 local function run(args)
@@ -767,9 +793,9 @@ local function run(args)
 
     -- Tells the user's clients how a session ended: the stored status and
     -- interaction, once they are committed.
-    local function report_final_status(session_id, target_status, stored, reason, interaction)
+    local function report_final_status(session_id, target_status, stored, reason, interaction, interrupted)
         if not state.user_hub_pid then return end
-        local error_update = exit_error_payload(session_id, target_status, reason)
+        local error_update = exit_error_payload(session_id, target_status, reason, interrupted)
         if error_update then
             publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
         end
@@ -787,11 +813,12 @@ local function run(args)
     -- their process exit, so the stored status still says running, and the
     -- Host shows Stop and blocks Send until something reopens the session.
     -- Once, at start, each such session of this user that no live process
-    -- holds is settled like any failed exit (pending calls repaired, status
-    -- failed, clients told). Its form answers read as interrupted, and the
-    -- next open shows the recovery notice. All of the user's running
-    -- sessions are read, a page at a time; the pages follow session ids, so
-    -- settling a session does not move the rows of later pages.
+    -- holds is settled as interrupted (settle_interrupted: pending calls
+    -- repaired, status idle with an interaction that takes input, clients
+    -- told with the recovery notice). Its form answers read as interrupted.
+    -- All of the user's running sessions are read, a page at a time; the
+    -- pages follow session ids, so settling a session does not move the rows
+    -- of later pages.
     local STALE_PAGE_SIZE = 50
     local function settle_stale_running()
         local after = nil :: string?
@@ -807,12 +834,12 @@ local function run(args)
                 if not state.active_sessions[session_id]
                     and not process.registry.lookup(consts.REGISTRY.SESSION .. session_id) then
                     local target_status, stored, status_err, recovery_err, interaction =
-                        finalize_exit(session_id, state.user_id :: string, nil, nil, "runtime stopped")
+                        settle_interrupted(session_id, state.user_id :: string)
                     if recovery_err or status_err then
                         logger:warn("stale session status could not be settled", { session_id = session_id,
                             error = tostring(status_err or recovery_err) })
                     end
-                    report_final_status(session_id, target_status, stored, "runtime stopped", interaction)
+                    report_final_status(session_id, target_status, stored, "runtime stopped", interaction, true)
                 end
             end
             -- A cursor that does not move would read the same page forever.

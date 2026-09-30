@@ -232,6 +232,19 @@ local function flush_held(ctx: any, run_agent: boolean, phase: string?)
             end
         end
     end
+    -- The ended turn was left running (finish_turn, defer_completion): the
+    -- next turn replaced it above, or it completes now. Either way the
+    -- clients see one status change.
+    if ctx.completion_deferred then
+        ctx.completion_deferred = nil
+        if not next_turn then
+            local completed, complete_err = message_handlers.complete_turn(ctx)
+            if not completed then
+                message_handlers.defer_publish(ctx, admitted)
+                return nil, complete_err
+            end
+        end
+    end
     if #admitted > 0 then
         if next_turn then
             -- The session status already says running for the next turn.
@@ -272,6 +285,45 @@ end
 
 local function settle_exit(bus: any, err: any)
     return bus:fail(err)
+end
+
+-- Runs `work` in its own coroutine of the session process, beside the
+-- command bus (see session_handlers.generate_title).
+local function run_in_background(work: any)
+    coroutine.spawn(work)
+end
+
+-- The turn boundary, run by the session inbox once the command bus is empty
+-- (turn_boundary_callback). The turn continues for steering that is due, or
+-- ends: the rest of the held queue and the pending answers are settled, and
+-- the next turn may start. A turn that ends normally is completed only after
+-- that (flush_held), so a turn that admitted answers goes straight into the
+-- next one without an idle status in between. Returns true, or nil and an
+-- error.
+local function turn_boundary(ctx: any, bus: any): (boolean?, string?)
+    -- Internal messages held during the turn, up to the first held form
+    -- answer: a continuation step sees them.
+    local _, flush_err = flush_held(ctx, false, "step")
+    if flush_err then return nil, flush_err end
+    local finished, finish_err = message_handlers.finish_turn(ctx, { defer_completion = true })
+    if not finished then return nil, finish_err end
+    if finished.completed then
+        local _, end_err = bus:end_turn()
+        if end_err then return nil, end_err end
+        -- flush_held completes the deferred turn; this covers a context
+        -- without the held-input hooks, where end_turn settles nothing.
+        if ctx.completion_deferred then
+            ctx.completion_deferred = nil
+            local completed, complete_err = message_handlers.complete_turn(ctx)
+            if not completed then return nil, complete_err end
+        end
+        return true
+    end
+    for _, next_op in ipairs(finished.next_ops or {}) do
+        local queued, queue_err = bus:queue_op(next_op)
+        if not queued then return nil, queue_err end
+    end
+    return true
 end
 
 local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any)
@@ -504,6 +556,8 @@ local function run(args: SessionArgs)
         stop_requested = false,
         turn_generation = 0,
     }
+    -- Work that must not hold up the turn (the session title).
+    context.run_in_background = run_in_background
     -- The session status is kept by the turn boundary (message_handlers.
     -- finish_turn). An empty queue only publishes answers admitted without a
     -- turn (after a stop), which read as delivered now that it is idle.
@@ -717,27 +771,8 @@ local function run(args: SessionArgs)
                 local boundary = msg:payload():data()
                 local boundary_err = nil
                 if #bus.ops == 0 and boundary.generation == context.turn_generation then
-                    -- Internal messages held during the turn, up to the first
-                    -- held form answer: a continuation step sees them.
-                    local _, flush_err = flush_held(context, false, "step")
-                    boundary_err = flush_err
-                    if not boundary_err then
-                        local finished, finish_err = message_handlers.finish_turn(context)
-                        boundary_err = finish_err
-                        if finished then
-                            if finished.completed then
-                                -- Settles the rest of the held queue and the
-                                -- pending answers, and may start the next turn.
-                                local _, end_err = bus:end_turn()
-                                boundary_err = end_err
-                            else
-                                for _, next_op in ipairs(finished.next_ops or {}) do
-                                    local queued, queue_err = bus:queue_op(next_op)
-                                    if not queued then boundary_err = queue_err; break end
-                                end
-                            end
-                        end
-                    end
+                    local _, err = turn_boundary(context, bus)
+                    boundary_err = err
                 end
                 boundary_reply:send({ value = not boundary_err, error = boundary_err })
             elseif topic == consts.TOPICS.FINISH_AND_EXIT then
@@ -823,7 +858,7 @@ local function run(args: SessionArgs)
 end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
-    settle_exit = settle_exit,
+    settle_exit = settle_exit, turn_boundary = turn_boundary, run_in_background = run_in_background,
     write_held_before_form = write_held_before_form,
     commit_held_before_form = commit_held_before_form,
     reference_artifact = reference_artifact, _commit_stop = commit_stop }

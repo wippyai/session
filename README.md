@@ -47,7 +47,8 @@ Accepted steering is pending until the current response and its tool batch
 finish. The next model request includes it after those results in persisted
 message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
-and is included when the user starts another turn.
+and is included when the user starts another turn, ahead of the message that
+starts it. Steering sent after that message follows it.
 
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
@@ -56,6 +57,11 @@ without `interaction` retain legacy status behavior. Steering metadata uses
 `input.state` with `pending` or `applied`, plus `input.after_message_id` after
 application. The messages endpoint returns `pending_inputs` independently of
 history pagination.
+
+A turn cut off by a runtime stop is settled when the user's session plugin
+starts again: pending tool calls are repaired and the session is stored idle,
+with `can_send` true, because a new message is how the user continues it.
+Until then, REST responses report such a session the same way.
 
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
@@ -172,6 +178,9 @@ failing tool returns no `_control`.
 `meta.content_type`, or `text/plain` when absent. A `view_ref` is rendered
 server-side.
 
+Both endpoints answer another user's artifact exactly like a missing one: 404
+with the body `{"success": false, "error": "Artifact not found"}`.
+
 `GET /artifacts?session_id=&limit=&cursor=` returns an actor-scoped catalog,
 metadata only. Pagination is keyset over `(created_at DESC, artifact_id DESC)`.
 Cursors are opaque (`v1:<uuid>`) and resolved within the caller's own scope, so a
@@ -200,7 +209,7 @@ Only `session:`-prefixed topics are relayed to clients.
   updated content. Use `updated_at`.
 - A delegated tool call produces no artifact; the control payload is ignored.
 - SQLite does not cascade artifact deletion with its session. Orphaned rows
-  remain listable, and fetching one returns HTTP 500.
+  remain listable, and fetching one returns HTTP 404.
 
 ## Session Forms
 

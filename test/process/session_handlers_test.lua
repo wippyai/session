@@ -1,5 +1,17 @@
 local test = require("test")
+local sql = require("sql")
+local uuid = require("uuid")
+local security = require("security")
+local consts = require("consts")
 local session_handlers = require("session_handlers")
+local command_bus = require("command_bus")
+local session = require("session")
+local reader = require("reader")
+local writer = require("writer")
+local session_repo = require("session_repo")
+local context_repo = require("context_repo")
+local message_repo = require("message_repo")
+local wait_for_boot = require("wait_for_boot")
 
 local function mock_ctx(state_config)
     local captured = {
@@ -255,6 +267,207 @@ local function define_tests()
             test.is_nil((ctx.turn_state :: any).handoff)
             test.eq(ctx.turn_state.input_policy.while_running, "steer")
             test.eq(captured.resets, 0)
+        end)
+    end)
+
+    describe("agent then model on the stored session", function()
+        -- The Host sends an agent choice and then a model choice as two
+        -- commands. The model change must keep the chosen agent: before
+        -- 0.6.3 it wrote back a config read before the agent change was
+        -- stored, so the session silently returned to the old agent.
+        local user_id = ""
+        local created = {} :: {any}
+
+        before_all(function()
+            wait_for_boot.run()
+            local actor = security.actor()
+            user_id = actor and actor:id() or ""
+        end)
+
+        after_all(function()
+            local db, err = sql.get(consts.get_db_resource())
+            if err then error(err) end
+            for _, item in ipairs(created) do
+                db:execute("DELETE FROM messages WHERE session_id = $1", { item.session_id })
+                db:execute("DELETE FROM sessions WHERE session_id = $1", { item.session_id })
+                db:execute("DELETE FROM contexts WHERE context_id = $1", { item.context_id })
+            end
+            db:release()
+        end)
+
+        it("keeps the chosen agent when a model is chosen next", function()
+            local session_id, context_id = uuid.v7(), uuid.v7()
+            test.is_nil(select(2, context_repo.create(context_id, "primary", "{}")))
+            test.is_nil(select(2, session_repo.create(session_id, user_id, context_id, "Agents", "test", {},
+                { agent_id = "agent:first", model = "model:first" })))
+            table.insert(created, { session_id = session_id, context_id = context_id })
+            local session_reader: any = reader.open(session_id)
+            local session_writer: any = writer.new(session_id)
+            local current = { id = "agent:first", model = "model:first" }
+            local updates = {} :: {any}
+            -- As session.lua sets it up: the live config starts as the stored one.
+            local ctx: any = {
+                session_id = session_id, user_id = user_id, reader = session_reader, writer = session_writer,
+                config = session_reader:state().config, status = consts.STATUS.IDLE, held = {},
+                upstream = {
+                    update_session = function(_self, changes) table.insert(updates, changes) end,
+                    command_error = function() end, session_error = function() end,
+                },
+                agent_ctx = {
+                    current_model = "model:first",
+                    switch_to_agent = function(self, agent_id)
+                        self.current_model = "model:second-default"
+                        current = { id = agent_id, model = self.current_model }
+                        return true
+                    end,
+                    switch_to_model = function(self, model)
+                        self.current_model = model
+                        current = { id = current.id, model = model }
+                        return true
+                    end,
+                    get_current_agent = function() return current end,
+                },
+            }
+            local bus: any = command_bus.new(ctx)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CHANGE, session_handlers.agent_change)
+            bus:mount_op_handler(consts.OP_TYPE.MODEL_CHANGE, session_handlers.model_change)
+
+            local function command(name, value)
+                local ok, err = session.route_input(ctx, bus, consts.TOPICS.COMMAND,
+                    { command = name, name = value, request_id = name .. "-request" }, { finishing = false })
+                test.is_nil(err)
+                test.is_true(ok)
+                while #bus.ops > 0 do
+                    local op: any = table.remove(bus.ops :: {any}, 1)
+                    bus.pending_ops = bus.pending_ops - 1
+                    local result: any, op_err = bus:process_operation(op)
+                    test.is_nil(op_err)
+                    test.is_nil(result.error_message)
+                end
+            end
+            command(consts.COMMANDS.AGENT, "agent:second")
+            command(consts.COMMANDS.MODEL, "model:chosen")
+
+            local stored: any = session_repo.get(session_id, user_id)
+            test.eq(stored.config.agent_id, "agent:second", "the chosen agent is kept")
+            test.eq(stored.config.model, "model:chosen")
+            test.eq(ctx.config.agent_id, "agent:second")
+            test.eq(session_reader:state().config.agent_id, "agent:second")
+            local notices = {}
+            for _, row in ipairs(message_repo.list_by_session(session_id, 50).messages) do
+                if row.type == consts.MSG_TYPE.SYSTEM then table.insert(notices, row.data) end
+            end
+            test.eq(#notices, 2)
+            test.contains(notices[1], "Agent changed to: agent:second")
+            test.contains(notices[2], "Model changed to: model:chosen")
+            local last_agent = nil
+            for _, update in ipairs(updates) do
+                if update.agent then last_agent = update.agent end
+            end
+            test.eq(last_agent, "agent:second", "no update names the old agent again")
+        end)
+    end)
+
+    describe("title generation beside the turn", function()
+        local original_funcs = nil
+
+        before_each(function() original_funcs = session_handlers._funcs end)
+        after_each(function() session_handlers._funcs = original_funcs end)
+
+        -- A session with no title yet whose next title call returns `title`
+        -- (or fails with `title_err`). `calls` counts title function calls.
+        local function title_ctx(title: string?, title_err: string?)
+            local captured = { calls = 0, stored = nil :: string?, announced = nil :: string?, resets = 0 }
+            session_handlers._funcs = { new = function()
+                return {
+                    with_context = function(self) return self end,
+                    call = function()
+                        captured.calls = captured.calls + 1
+                        if title_err then return nil, title_err end
+                        return { title = title }
+                    end,
+                }
+            end }
+            local queued = {} :: {any}
+            local ctx: any = {
+                session_id = "sess-title",
+                config = { title_function_id = "app:title" },
+                run_in_background = function(work) table.insert(queued, work) end,
+                reader = {
+                    state = function() return { title = captured.stored or "", meta = {} } end,
+                    messages = function() return { count = function() return 4 end } end,
+                    get_context = function() return nil end,
+                    get_full_context = function() return {} end,
+                    reset = function() captured.resets = captured.resets + 1; return true end,
+                },
+                writer = {
+                    update_title = function(_self, value) captured.stored = value; return true end,
+                },
+                upstream = {
+                    update_session = function(_self, changes) captured.announced = changes.title end,
+                },
+            }
+            return ctx, captured, queued
+        end
+
+        local function title_ops(result: any): number
+            local count = 0
+            for _, op in ipairs((result and result.next_ops) or {}) do
+                if op.type == "generate_title" then count = count + 1 end
+            end
+            return count
+        end
+
+        it("returns at once and generates the title in the background", function()
+            local ctx, captured, queued = title_ctx("Parcel delivery")
+
+            local result, err = session_handlers.generate_title(ctx, { session_id = "sess-title" })
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.calls, 0, "the operation does not wait for the model call")
+            test.eq(#queued, 1)
+            queued[1]()
+            test.eq(captured.calls, 1)
+            test.eq(captured.stored, "Parcel delivery")
+            test.eq(captured.announced, "Parcel delivery")
+            test.gte(captured.resets, 1)
+        end)
+
+        it("does not ask for a second title while one is being generated", function()
+            local ctx, _, queued = title_ctx("Parcel delivery")
+            local trigger = { tokens = { prompt_tokens = 10 }, message_id = "msg-1" }
+            test.eq(title_ops(session_handlers.check_background_triggers(ctx, trigger)), 1)
+
+            session_handlers.generate_title(ctx, { session_id = "sess-title" })
+            test.eq(title_ops(session_handlers.check_background_triggers(ctx, trigger)), 0,
+                "the next step of the turn does not start another title")
+
+            queued[1]()
+            test.eq(title_ops(session_handlers.check_background_triggers(ctx, trigger)), 0,
+                "the session has its title now")
+        end)
+
+        it("lets a later step try again after a failed title", function()
+            local ctx, captured, queued = title_ctx(nil, "model unavailable")
+            local trigger = { tokens = { prompt_tokens = 10 }, message_id = "msg-1" }
+            session_handlers.generate_title(ctx, { session_id = "sess-title" })
+            queued[1]()
+            test.eq(captured.calls, 1)
+            test.is_nil(captured.stored)
+            test.eq(title_ops(session_handlers.check_background_triggers(ctx, trigger)), 1)
+        end)
+
+        it("generates the title in place when the host runs no background work", function()
+            local ctx, captured = title_ctx("Parcel delivery")
+            ctx.run_in_background = nil
+
+            local result, err = session_handlers.generate_title(ctx, { session_id = "sess-title" })
+
+            test.is_nil(err)
+            test.eq((result :: any).title, "Parcel delivery")
+            test.eq(captured.calls, 1)
+            test.eq(captured.stored, "Parcel delivery")
         end)
     end)
 

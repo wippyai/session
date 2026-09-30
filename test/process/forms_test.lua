@@ -4,10 +4,12 @@ local sql = require("sql")
 local uuid = require("uuid")
 local funcs = require("funcs")
 local security = require("security")
+local time = require("time")
 local consts = require("consts")
 local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
 local control_handlers = require("control_handlers")
+local session_handlers = require("session_handlers")
 local session = require("session")
 local state_service = require("state_service")
 local prompt_builder = require("prompt_builder")
@@ -65,11 +67,12 @@ local function define_tests()
             db:release()
         end)
 
-        local function new_ctx()
+        -- `title` "" makes a session that has no title yet, like a new one.
+        local function new_ctx(title: string?)
             local session_id, context_id = uuid.v7(), uuid.v7()
             local _, context_err = context_repo.create(context_id, "primary", "{}")
             test.is_nil(context_err)
-            local _, session_err = session_repo.create(session_id, user_id, context_id, "Forms", "test")
+            local _, session_err = session_repo.create(session_id, user_id, context_id, title or "Forms", "test")
             test.is_nil(session_err)
             table.insert(created, { session_id = session_id, context_id = context_id })
             local session_writer, writer_err = writer.new(session_id)
@@ -240,6 +243,112 @@ local function define_tests()
             test.eq(status, 200, body)
             return json.decode(tostring(body))
         end
+
+        describe("title generation beside the first form", function()
+            -- A new session's first agent step queues the title check ahead
+            -- of its tool round (message_handlers.agent_step: a checkpoint
+            -- must land before the next step). The title is a model call of
+            -- several seconds; the tool round that stores the form must not
+            -- wait for it (live: every first form appeared 6-10 s late).
+            local TITLE_DELAY_MS = 1500
+            local original_funcs = nil
+
+            before_each(function() original_funcs = session_handlers._funcs end)
+            after_each(function() session_handlers._funcs = original_funcs end)
+
+            -- A title function that takes TITLE_DELAY_MS, like the model call
+            -- the real one makes.
+            local function slow_title(calls: {any})
+                session_handlers._funcs = { new = function()
+                    return {
+                        with_context = function(self) return self end,
+                        call = function(_self, _function_id, args)
+                            table.insert(calls, args)
+                            time.sleep(tostring(TITLE_DELAY_MS) .. "ms")
+                            return { title = "Parcel delivery" }
+                        end,
+                    }
+                end }
+            end
+
+            -- The operations of a first agent step that called ask_user, in
+            -- the order agent_step queues them, run the way the command bus
+            -- loop runs them. Returns the milliseconds from the start until
+            -- the tool round (which stores the form) has finished.
+            local function first_step_with_form(ctx): number
+                ctx.config.title_function_id = "app:slow_title"
+                ctx.writer:add_message(consts.MSG_TYPE.USER, "Deliver my parcel")
+                local call_id = "call-" .. uuid.v7()
+                local _, ids: any, store_err = ctx.writer:add_response("", {}, {
+                    { id = call_id, name = "ask_user", arguments = DEFINITION, registry_id = TOOL_ID,
+                        type = consts.MSG_TYPE.FUNCTION },
+                })
+                test.is_nil(store_err)
+                local tool_result = funcs.new():call(TOOL_ID, DEFINITION)
+                local caller = {
+                    set_strategy = function() end,
+                    execute = function(_self, _context, tools)
+                        return { [call_id] = { result = tool_result, tool_call = tools[call_id] } }
+                    end,
+                }
+                local bus: any = command_bus.new(ctx)
+                bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, session_handlers.check_background_triggers)
+                bus:mount_op_handler(consts.OP_TYPE.GENERATE_TITLE, session_handlers.generate_title)
+                bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+                local started = time.now()
+                local tools_done_at = nil :: any
+                bus:enqueue_result({ next_ops = {
+                    { type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, tokens = { prompt_tokens = 10 },
+                        message_id = "user-message" },
+                    { type = consts.OP_TYPE.PROCESS_TOOLS,
+                        tool_calls = { { id = call_id, name = "ask_user", registry_id = TOOL_ID, arguments = DEFINITION } },
+                        call_message_ids = ids, caller = caller,
+                        validated_tools = { [call_id] = { valid = true, name = "ask_user", args = DEFINITION,
+                            registry_id = TOOL_ID } },
+                        message_id = "user-message", agent = { id = "agent:forms" } },
+                } })
+                while #bus.ops > 0 do
+                    local op: any = table.remove(bus.ops :: {any}, 1)
+                    bus.pending_ops = bus.pending_ops - 1
+                    local result: any, err = bus:process_operation(op)
+                    test.is_nil(err)
+                    if op.type == consts.OP_TYPE.PROCESS_TOOLS then tools_done_at = time.now() end
+                    bus:enqueue_result(result)
+                end
+                test.not_nil(tools_done_at)
+                return tonumber(tools_done_at:sub(started):milliseconds()) or 0
+            end
+
+            -- Waits for a background title to reach the session row.
+            local function stored_title(ctx): string
+                for _ = 1, 100 do
+                    local stored: any = session_repo.get(ctx.session_id, user_id)
+                    if stored and stored.title ~= "" then return tostring(stored.title) end
+                    time.sleep("50ms")
+                end
+                return ""
+            end
+
+            it("stores the first form without waiting for the session title", function()
+                local ctx, events = new_ctx("")
+                ctx.run_in_background = session.run_in_background
+                local calls = {}
+                slow_title(calls)
+
+                local elapsed = first_step_with_form(ctx)
+
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 1)
+                test.lt(elapsed, TITLE_DELAY_MS / 2, "the form was stored " .. tostring(elapsed)
+                    .. " ms after the step; the title takes " .. tostring(TITLE_DELAY_MS) .. " ms")
+                test.eq(stored_title(ctx), "Parcel delivery", "the title is still generated, beside the turn")
+                test.eq(#calls, 1)
+                local announced = nil
+                for _, update in ipairs(events.updates) do
+                    if update.title then announced = update.title end
+                end
+                test.eq(announced, "Parcel delivery")
+            end)
+        end)
 
         describe("creation", function()
             it("stores the form bound to its origin and ends the turn", function()
@@ -868,6 +977,88 @@ local function define_tests()
                 test.not_nil(answer_at)
                 test.not_nil(typed_at)
                 test.is_true((answer_at :: number) < (typed_at :: number), "the earlier answer first")
+            end)
+
+            -- The session statuses written and announced by one turn boundary
+            -- as the session inbox runs it (session.turn_boundary).
+            local function boundary_statuses(ctx, events, bus)
+                local written = {}
+                local session_writer: any = ctx.writer
+                local original_update = session_writer.update_meta
+                session_writer.update_meta = function(self, updates)
+                    if type(updates) == "table" and updates.status then table.insert(written, updates.status) end
+                    return original_update(self, updates)
+                end
+                local announced_from = #events.updates + 1
+                local ok, err = session.turn_boundary(ctx, bus)
+                session_writer.update_meta = original_update
+                test.is_nil(err)
+                test.is_true(ok)
+                local announced = {}
+                for index = announced_from, #events.updates do
+                    local status = events.updates[index].status
+                    if status then table.insert(announced, status) end
+                end
+                return written, announced
+            end
+
+            it("places steering sent after a turn's first message after it, with no form involved", function()
+                -- The message is admitted and its turn is running, but the
+                -- turn's first step has not built its prompt yet (it waits
+                -- behind other queued work). A message typed now is steering
+                -- accepted after the first one and must not overtake it.
+                local ctx = new_ctx()
+                ctx.config.input_policy = { while_running = "steer" }
+                local bus: any = with_bus(ctx)
+                local first_id = nil :: string?
+                ctx.upstream.message_received = function(_self, id) first_id = first_id or id end
+                session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                    { data = { text = "Book a courier" }, request_id = "first" }, { finishing = false })
+                test.not_nil(first_id)
+                test.is_true(ctx.turn_state.active)
+                local steer_id = type_during_turn(ctx, bus, "Make it tomorrow", "second")
+
+                -- The first step applies the pending input the way agent_step does.
+                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, first_id)
+                test.is_nil(apply_err)
+                test.eq(applied, 1)
+                test.eq(message_repo.get(steer_id).metadata.input.after_message_id, first_id)
+                local texts = prompt_user_texts(ctx)
+                local first_at = index_containing(texts, "Book a courier") :: number
+                local steer_at = index_containing(texts, "Make it tomorrow") :: number
+                test.is_true(first_at < steer_at, "sent second, read second")
+            end)
+
+            it("goes from a turn that admitted an answer straight into the next turn", function()
+                local ctx, events = new_ctx()
+                ask(ctx, DEFINITION)
+                local accepted = submit(form_id_of(ctx))
+                local bus: any = running_turn(ctx)
+                session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
+                    { message_id = accepted.answer_message_id }, { finishing = false })
+
+                local written, announced = boundary_statuses(ctx, events, bus)
+
+                test.eq(bus.ops[1].type, consts.OP_TYPE.AGENT_STEP)
+                test.eq(bus.ops[1].message_id, accepted.answer_message_id)
+                test.eq(table.concat(written, ","), consts.STATUS.RUNNING,
+                    "one write, no idle between the two turns")
+                test.eq(table.concat(announced, ","), consts.STATUS.RUNNING)
+                test.eq(session_repo.get(ctx.session_id, user_id).status, consts.STATUS.RUNNING)
+                test.is_true(ctx.turn_state.active)
+            end)
+
+            it("still ends a turn idle when nothing follows it", function()
+                local ctx, events = new_ctx()
+                local bus: any = running_turn(ctx)
+
+                local written, announced = boundary_statuses(ctx, events, bus)
+
+                test.eq(#bus.ops, 0)
+                test.eq(table.concat(written, ","), consts.STATUS.IDLE)
+                test.eq(table.concat(announced, ","), consts.STATUS.IDLE)
+                test.eq(session_repo.get(ctx.session_id, user_id).status, consts.STATUS.IDLE)
+                test.is_false(ctx.turn_state.active == true)
             end)
 
             it("steers a message sent before an answer into the turn and admits the answer after", function()

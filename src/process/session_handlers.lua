@@ -1,4 +1,5 @@
 local funcs = require("funcs")
+local logger = require("logger"):named("session.process")
 local consts = require("consts")
 local tool_caller = require("tool_caller")
 local time = require("time")
@@ -226,7 +227,11 @@ function session_handlers.check_background_triggers(ctx, op)
         end
     end
 
-    if ctx.config.title_function_id and not checkpoint_needed then
+    -- A title already being generated in the background (generate_title)
+    -- has not reached the session row yet; the steps meanwhile do not start
+    -- another one.
+    local title_in_flight = (tonumber(ctx.titles_in_flight) or 0) > 0
+    if ctx.config.title_function_id and not checkpoint_needed and not title_in_flight then
         local has_title = session_data.title and session_data.title ~= ""
 
         if not has_title then
@@ -254,11 +259,7 @@ function session_handlers.check_background_triggers(ctx, op)
     }
 end
 
-function session_handlers.generate_title(ctx, op)
-    if not ctx.config.title_function_id then
-        return nil, "No title function ID configured"
-    end
-
+local function generate_title_now(ctx)
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         session_context = {}
@@ -290,6 +291,40 @@ function session_handlers.generate_title(ctx, op)
         title = result.title,
         tokens = result.tokens
     }
+end
+
+-- The title is a model call that only names the session, so it runs beside
+-- the turn, not in it. As an ordinary bus operation it held up whatever the
+-- turn queued behind it for the whole call: check_background_triggers runs
+-- ahead of the tool round (a checkpoint must land before the next step), so
+-- on every new session the first tool round, and the form an ask_user call
+-- stores, waited several seconds for the title, and a turn without tools
+-- stayed running that long after its reply. ctx.run_in_background (set by
+-- the session process) runs the work in its own coroutine; the title reaches
+-- the session row, the reader and the clients when the call returns. The
+-- session writer serializes the row write with the turn's own writes. A
+-- failed title is logged and a later step asks again. Without a background
+-- runner the title is generated in place, as before.
+function session_handlers.generate_title(ctx, op)
+    if not ctx.config.title_function_id then
+        return nil, "No title function ID configured"
+    end
+    if type(ctx.run_in_background) ~= "function" then
+        return generate_title_now(ctx)
+    end
+
+    ctx.titles_in_flight = (tonumber(ctx.titles_in_flight) or 0) + 1
+    ctx.run_in_background(function()
+        local ran, result, err = pcall(generate_title_now, ctx)
+        ctx.titles_in_flight = math.max((tonumber(ctx.titles_in_flight) or 1) - 1, 0)
+        if not ran or not result then
+            logger:warn("session title generation failed", {
+                session_id = ctx.session_id,
+                error = tostring(ran and err or result),
+            })
+        end
+    end)
+    return { completed = true, background = true }
 end
 
 function session_handlers.create_checkpoint(ctx, op)

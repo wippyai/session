@@ -641,6 +641,50 @@ local function define_tests()
         end)
     end)
 
+    describe("stop during the model call", function()
+        -- Stop does not cancel a model call that is already running. When
+        -- its reply arrives the reply is stored and sent to the clients at
+        -- once, so the chat does not gain it silently on a later reload.
+        it("stores the reply and announces it live, and runs nothing after it", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local updates = {} :: {any}
+            ctx.upstream.send_message_update = function(_self, id, kind, payload)
+                table.insert(updates, { id = id, kind = kind, payload = payload })
+            end
+            ctx.upstream.response_beginning = function(_self, response_id)
+                table.insert(updates, { id = response_id, kind = consts.UPSTREAM_TYPES.RESPONSE_STARTED })
+            end
+            ctx.agent_ctx.load_agent = function()
+                return {
+                    id = "agent:documents", model = "model:test", tool_wrappers = {}, agent_options = {},
+                    step = function()
+                        -- The user pressed Stop while the model was answering.
+                        ctx.stop_requested = true
+                        return { result = "Done working.", tool_calls = {} }
+                    end,
+                }
+            end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(#result.next_ops, 0)
+            local replies = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(#replies, 1)
+            test.eq(replies[1].content, "Done working.")
+            local started, content = nil, nil
+            for _, update in ipairs(updates) do
+                if update.kind == consts.UPSTREAM_TYPES.RESPONSE_STARTED then started = update end
+                if update.kind == consts.UPSTREAM_TYPES.CONTENT then content = update end
+            end
+            test.not_nil(started)
+            test.not_nil(content, "the stored reply is also sent live")
+            test.eq((content :: any).id, (started :: any).id, "on the response the clients are showing")
+            test.eq((content :: any).payload.content, "Done working.")
+        end)
+    end)
+
     describe("stop during tool execution", function()
         it("records the returned result and ends the turn before another agent step", function()
             local steps = 0

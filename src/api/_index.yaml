@@ -28,6 +28,34 @@ entries:
     func: delete_session
     path: /sessions/delete
 
+  # wippy.session.api:artifact_access
+  - name: artifact_access
+    kind: library.lua
+    meta:
+      comment: Owner check of the artifact endpoints; a foreign or missing artifact is one generic 404
+    source: file://artifact_access.lua
+    modules:
+      - http
+    imports:
+      artifact_repo: wippy.session.persist:artifact_repo
+      session_repo: wippy.session.persist:session_repo
+
+  # wippy.session.api:get_artifact_module
+  # Whole-module import of the same source as get_artifact below, for tests:
+  # a function.lua entry's require() gives the bound `method` function, not
+  # the table, so the _serve test seam needs a library.lua registration.
+  - name: get_artifact_module
+    kind: library.lua
+    meta:
+      comment: Test-only whole-module import of get_artifact.lua
+    source: file://get_artifact.lua
+    modules:
+      - http
+      - security
+    imports:
+      artifact_access: wippy.session.api:artifact_access
+      artifact_projection: wippy.session.persist:artifact_projection
+
   # wippy.session.api:get_artifact
   - name: get_artifact
     kind: function.lua
@@ -39,9 +67,8 @@ entries:
       - http
       - security
     imports:
-      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_access: wippy.session.api:artifact_access
       artifact_projection: wippy.session.persist:artifact_projection
-      session_repo: wippy.session.persist:session_repo
     method: handler
     pool:
       size: 4
@@ -56,6 +83,23 @@ entries:
     func: get_artifact
     path: /artifact/{id}
 
+  # wippy.session.api:get_artifact_content_module
+  # Whole-module import of get_artifact_content.lua, for the same reason as
+  # get_artifact_module above.
+  - name: get_artifact_content_module
+    kind: library.lua
+    meta:
+      comment: Test-only whole-module import of get_artifact_content.lua
+    source: file://get_artifact_content.lua
+    modules:
+      - http
+      - json
+      - security
+    imports:
+      artifact_access: wippy.session.api:artifact_access
+      artifact_repo: wippy.session.persist:artifact_repo
+      renderer: wippy.views:renderer
+
   # wippy.session.api:get_artifact_content
   - name: get_artifact_content
     kind: function.lua
@@ -68,9 +112,9 @@ entries:
       - json
       - security
     imports:
+      artifact_access: wippy.session.api:artifact_access
       artifact_repo: wippy.session.persist:artifact_repo
       renderer: wippy.views:renderer
-      session_repo: wippy.session.persist:session_repo
     method: handler
     pool:
       size: 4

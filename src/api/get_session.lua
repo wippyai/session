@@ -13,13 +13,14 @@ function get_session._lookup_session(session_id: string): any
 end
 
 -- A stored "running" status with no registered session process is a crash
--- the plugin's startup reconciliation has not reached yet. Report it as
--- failed here so the Host never blocks Send on a session that will not
--- resume on its own; the stored value is untouched, and the plugin's own
--- scan still owns recovery.
+-- the plugin's startup reconciliation has not reached yet. Report it the way
+-- that reconciliation stores it, idle (plugin.lua, settle_stale_running), so
+-- the Host never blocks Send on a session that will not resume on its own:
+-- in the interaction model a failed session takes no input. The stored value
+-- is untouched, and the plugin's own scan still owns recovery.
 local function reported_status(session: any): string
     if session.status == consts.STATUS.RUNNING and not get_session._lookup_session(session.session_id) then
-        return consts.STATUS.FAILED
+        return consts.STATUS.IDLE
     end
     return session.status :: string
 end

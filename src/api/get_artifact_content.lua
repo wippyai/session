@@ -1,45 +1,14 @@
 local http = require("http")
 local json = require("json")
 local artifact_repo = require("artifact_repo")
-local session_repo = require("session_repo")
+local artifact_access = require("artifact_access")
 local security = require("security")
 local renderer = require("renderer")
 
-local function handler()
-    -- Get response object
-    local res = http.response()
-    local req = http.request()
-    if not res or not req then
-        return nil, "Failed to get HTTP context"
-    end
-
-    -- Security check - ensure user is authenticated
-    local actor = security.actor()
-    if not actor then
-        res:set_status(http.STATUS.UNAUTHORIZED)
-        res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Authentication required"
-        })
-        return
-    end
-
-    -- Get user ID from the authenticated actor
-    local user_id = actor:id()
-
+-- Answers one request for `user_id`, already authenticated.
+local function serve(req: any, res: any, user_id: string)
     -- Get artifact ID from URL path
-    local artifact_id, err = req:param("id")
-    if err then
-        res:set_status(http.STATUS.INTERNAL_ERROR)
-        res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Error getting path parameter: " .. err
-        })
-        return
-    end
-
+    local artifact_id = req:param("id")
     if not artifact_id or artifact_id == "" then
         res:set_status(http.STATUS.BAD_REQUEST)
         res:set_content_type(http.CONTENT.JSON)
@@ -50,63 +19,11 @@ local function handler()
         return
     end
 
-    -- First fetch the artifact metadata to get content type
-    local artifact, err = artifact_repo.get(artifact_id)
-    if err then
-        -- Handle not found error
-        if err:match("not found") then
-            res:set_status(http.STATUS.NOT_FOUND)
-            res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Artifact not found: " .. artifact_id
-            })
-            return
-        end
-
-        -- Handle other errors
-        res:set_status(http.STATUS.INTERNAL_ERROR)
-        res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Failed to retrieve artifact metadata: " .. err
-        })
-        return
-    end
-
-    -- Get the session to check ownership
-    if artifact.session_id and artifact.session_id ~= "" then
-        local session, session_err = session_repo.get(artifact.session_id)
-        if session_err then
-            res:set_status(http.STATUS.INTERNAL_ERROR)
-            res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Failed to verify artifact ownership: " .. session_err
-            })
-            return
-        end
-
-        -- Verify the session belongs to the authenticated user
-        if session.user_id ~= user_id then
-            res:set_status(http.STATUS.FORBIDDEN)
-            res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Access denied: You don't have permission to access this artifact"
-            })
-            return
-        end
-    end
-
-    -- Verify the artifact belongs to the authenticated user
-    if artifact.user_id ~= user_id then
-        res:set_status(http.STATUS.FORBIDDEN)
-        res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Access denied: You don't have permission to access this artifact"
-        })
+    -- A foreign artifact answers exactly like a missing one (artifact_access):
+    -- 404 with a generic body, not 403, which confirmed that the id exists.
+    local artifact, refused = artifact_access.find_owned(user_id, artifact_id :: string)
+    if not artifact then
+        artifact_access.respond_refused(res, refused)
         return
     end
 
@@ -204,6 +121,32 @@ local function handler()
     res:write(content :: string)
 end
 
+local function handler()
+    -- Get response object
+    local res = http.response()
+    local req = http.request()
+    if not res or not req then
+        return nil, "Failed to get HTTP context"
+    end
+
+    -- Security check - ensure user is authenticated
+    local actor = security.actor()
+    if not actor then
+        res:set_status(http.STATUS.UNAUTHORIZED)
+        res:set_content_type(http.CONTENT.JSON)
+        res:write_json({
+            success = false,
+            error = "Authentication required"
+        })
+        return
+    end
+
+    serve(req, res, actor:id())
+end
+
 return {
-    handler = handler
+    handler = handler,
+    -- Test seam: the request handling after authentication, which a unit
+    -- test can drive with a fake request and response.
+    _serve = serve,
 }

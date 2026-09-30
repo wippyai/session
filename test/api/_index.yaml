@@ -16,13 +16,37 @@ entries:
       test: wippy.test:test
     method: run
 
+  - name: artifact_endpoints_test
+    kind: function.lua
+    meta:
+      name: Artifact endpoints access
+      type: test
+      suite: session
+      comment: GET /artifact/{id} and /artifact/{id}/content answer a foreign id like a missing one (404, same body) and still serve the owner
+    source: file://artifact_endpoints_test.lua
+    modules:
+      - sql
+      - json
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      get_artifact: wippy.session.api:get_artifact_module
+      get_artifact_content: wippy.session.api:get_artifact_content_module
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run
+
   - name: session_status_test
     kind: function.lua
     meta:
       name: Session status reporting
       type: test
       suite: session
-      comment: get_session/list_sessions report a stored running status with no registered process as failed, with the interaction recovery will store
+      comment: get_session/list_sessions report a stored running status with no registered process as idle, with the interaction recovery will store
     source: file://session_status_test.lua
     imports:
       get_session: wippy.session.api:get_session_module

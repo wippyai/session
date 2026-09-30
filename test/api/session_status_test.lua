@@ -3,9 +3,10 @@ local get_session = require("get_session")
 local list_sessions = require("list_sessions")
 
 -- get_session.lua and list_sessions.lua report a stored "running" status as
--- "failed" when no session process is registered for it (a crash the
+-- "idle" when no session process is registered for it (a crash the
 -- plugin's startup reconciliation has not reached yet), so the Host never
--- blocks Send on it. The full handlers need a live http.request()/response()
+-- blocks Send on it: in the interaction model a "failed" session takes no
+-- input. The full handlers need a live http.request()/response()
 -- context a unit test cannot construct, so this covers the pure
 -- _reported_status logic directly, with _lookup_session swapped for a fake
 -- (the same test-seam convention as state_service._lookup_session).
@@ -22,9 +23,9 @@ local function define_tests()
             get_session._lookup_session = original
         end)
 
-        it("reports a stored running status as failed when no process is registered", function()
+        it("reports a stored running status as idle when no process is registered", function()
             get_session._lookup_session = function() return nil end
-            test.eq(get_session._reported_status({ status = "running", session_id = "s1" }), "failed")
+            test.eq(get_session._reported_status({ status = "running", session_id = "s1" }), "idle")
         end)
 
         it("keeps a stored running status when its process is registered", function()
@@ -40,11 +41,11 @@ local function define_tests()
         end)
 
         it("reports the interaction the plugin's recovery will store for a crashed turn", function()
-            -- A steering turn left running by a crash: stored as sendable.
-            local session = { status = "failed", session_id = "s1", config = {},
-                meta = { interaction = { can_send = true, revision = 4 } } }
+            -- A blocking turn left running by a crash: stored as not sendable.
+            local session = { status = "idle", session_id = "s1", config = {},
+                meta = { interaction = { can_send = false, revision = 4 } } }
             local interaction: any = get_session._reported_interaction(session, "running")
-            test.is_false(interaction.can_send, "a failed session does not take input")
+            test.is_true(interaction.can_send, "a message continues the session")
             test.eq(interaction.revision, 5, "newer than the stored one")
         end)
 
@@ -66,9 +67,9 @@ local function define_tests()
             list_sessions._lookup_session = original
         end)
 
-        it("reports a stored running status as failed when no process is registered", function()
+        it("reports a stored running status as idle when no process is registered", function()
             list_sessions._lookup_session = function() return nil end
-            test.eq(list_sessions._reported_status({ status = "running", session_id = "s2" }), "failed")
+            test.eq(list_sessions._reported_status({ status = "running", session_id = "s2" }), "idle")
         end)
 
         it("keeps a stored running status when its process is registered", function()
@@ -82,10 +83,10 @@ local function define_tests()
         end)
 
         it("reports a crashed turn's interaction like get_session", function()
-            local session = { status = "failed", session_id = "s2", config = {},
-                meta = { interaction = { can_send = true, revision = 2 } } }
+            local session = { status = "idle", session_id = "s2", config = {},
+                meta = { interaction = { can_send = false, revision = 2 } } }
             local interaction: any = list_sessions._reported_interaction(session, "running")
-            test.is_false(interaction.can_send)
+            test.is_true(interaction.can_send)
             test.eq(interaction.revision, 3)
         end)
     end)

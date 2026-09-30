@@ -59,7 +59,7 @@ entries:
       name: Session forms in the session process
       type: test
       suite: session
-      comment: Form creation through ask_user and process_tools (origin binding, one form per turn, end of turn, failure row rewrite) and admission of accepted answers (idle, during a turn, scans) on the real database
+      comment: Form creation through ask_user and process_tools (origin binding, one form per turn, end of turn, failure row rewrite, no wait for the session title) and admission of accepted answers (idle, during a turn, scans, one status change into the next turn) on the real database
     source: file://forms_test.lua
     modules:
       - json
@@ -67,11 +67,13 @@ entries:
       - uuid
       - funcs
       - security
+      - time
     imports:
       consts: wippy.session:consts
       command_bus: wippy.session.process:command_bus
       message_handlers: wippy.session.process:message_handlers
       control_handlers: wippy.session.process:control_handlers
+      session_handlers: wippy.session.process:session_handlers
       session: wippy.session.process:session
       state_service: wippy.session.forms:state_service
       prompt_builder: wippy.session:prompt_builder
@@ -120,10 +122,23 @@ entries:
       name: Session config normalization
       type: test
       suite: session
-      comment: Unit tests for session config normalization during agent/model changes
+      comment: Unit tests for session config normalization during agent/model changes, an agent then model choice on the real database, and title generation beside the turn
     source: file://session_handlers_test.lua
+    modules:
+      - sql
+      - uuid
+      - security
     imports:
+      consts: wippy.session:consts
       session_handlers: wippy.session.process:session_handlers
+      command_bus: wippy.session.process:command_bus
+      session: wippy.session.process:session
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
       test: wippy.test:test
     method: run_tests
 

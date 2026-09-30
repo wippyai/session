@@ -437,10 +437,25 @@ local function scan_inputs(ctx, start_id)
 end
 
 -- The applied-state updates for the steering rows due now: those accepted
--- before the first pending form answer. A row accepted before `start_id`
--- (the ordinary row that starts the turn: a typed message or an admitted
--- answer) goes before it, as upstream does for input left from a stopped
--- turn; a row accepted after it goes after it.
+-- before the first pending form answer.
+--
+-- Placement relative to `start_id`, the ordinary row that starts the turn (a
+-- typed message, or an admitted answer), which the first step passes:
+--   - a row accepted before it goes before it. This is the case upstream
+--     0.6.3 describes: steering left pending by a stopped or recovered turn
+--     is included when the user starts another turn, ahead of the new
+--     message.
+--   - a row accepted after it goes after it. Upstream anchored every pending
+--     row to the last row before the turn's first message, so a message typed
+--     after that one, while its turn was admitted but its first step had not
+--     built the prompt yet (the step waits behind any operation queued ahead
+--     of it), reached the model before the message the user sent first. That
+--     contradicts the documented rule that steering is included "in persisted
+--     message order": the first message is persisted before it. Forms make the
+--     case common, because a turn can start at an admitted answer while the
+--     user keeps typing, but the rule does not depend on forms.
+-- On later steps (no `start_id`) every due row goes after the latest ordinary
+-- row, as upstream does.
 local function steering_updates(scan, start_id)
     local updates = {}
     for _, entry in ipairs(scan.pending) do
@@ -554,9 +569,17 @@ end
 -- Called only by the session inbox after its command bus becomes empty. The
 -- turn continues while steering is due (accepted before any pending form
 -- answer), unless it ended by creating a form.
-function message_handlers.finish_turn(ctx)
+--
+-- opts.defer_completion: a turn that ends normally (not stopped, failed or
+-- finishing) is left running, with ctx.completion_deferred set, and the end
+-- of the turn completes it (session.flush_held): idle when nothing follows,
+-- or straight into the next turn when admitted answers or steering left
+-- after a form start one. Completing it here first wrote idle and then
+-- running again, two status changes the clients saw as a flicker.
+function message_handlers.finish_turn(ctx, opts)
     local state = ctx.turn_state
-    if state and state.active and not is_turn_blocked(ctx) and not message_handlers.ended_by_form(ctx) then
+    local ends_normally = state and state.active and not is_turn_blocked(ctx)
+    if ends_normally and not message_handlers.ended_by_form(ctx) then
         local updates, err = prepare_pending_inputs(ctx, nil)
         if not updates then return nil, err or "Failed to read pending input" end
         if #updates > 0 then
@@ -565,6 +588,12 @@ function message_handlers.finish_turn(ctx)
                 request_id = state.request_id, from_user = false,
             } } }
         end
+    end
+    local coordinator = type(ctx.coordinator) == "table" and ctx.coordinator or nil
+    if opts and opts.defer_completion and ends_normally and ctx.status == consts.STATUS.RUNNING
+        and coordinator and coordinator.state == "running" then
+        ctx.completion_deferred = true
+        return { completed = true, next_ops = {} }
     end
     local completed, complete_err = message_handlers.complete_turn(ctx)
     if not completed then return nil, complete_err end
@@ -1371,6 +1400,9 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
+        -- Also after Stop: Stop does not cancel a model call already in
+        -- flight, and a reply that arrives after it is stored above, so it is
+        -- sent now too. Otherwise the chat would gain it only on a reload.
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,

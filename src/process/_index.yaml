@@ -32,6 +32,7 @@ entries:
     source: file://session_handlers.lua
     modules:
       - funcs
+      - logger
       - time
     imports:
       consts: wippy.session:consts

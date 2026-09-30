@@ -1419,8 +1419,11 @@ local function define_tests()
             session_repo.list_by_user_status = original_list
             message_repo.list_sessions_with_pending_answers = original_pending
             local stale_statuses = {} :: {any}
+            local stale_interactions = {} :: {any}
             for _, session_id in ipairs(stale_ids) do
-                table.insert(stale_statuses, session_repo.get(session_id).status)
+                local stored: any = session_repo.get(session_id)
+                table.insert(stale_statuses, stored.status)
+                table.insert(stale_interactions, stored.meta and stored.meta.interaction)
             end
             local call_status = message_repo.get(call_id).metadata.status
             local live_status = session_repo.get(live_id).status
@@ -1434,8 +1437,13 @@ local function define_tests()
             test.eq(pages[1].status, consts.STATUS.RUNNING)
             test.is_nil(pages[1].after)
             test.not_nil(pages[2].after, "the next page starts after the last one")
+            -- Idle, not failed: in the interaction model a failed session
+            -- takes no input, and nothing would reopen it for the user.
             for index, status in ipairs(stale_statuses) do
-                test.eq(status, consts.STATUS.FAILED, "Send works again in session " .. index)
+                test.eq(status, consts.STATUS.IDLE, "Send works again in session " .. index)
+                local interaction = stale_interactions[index]
+                test.not_nil(interaction, "session " .. index .. " stores its interaction")
+                test.is_true(interaction.can_send, "session " .. index .. " takes a message")
             end
             test.eq(call_status, consts.FUNC_STATUS.ERROR, "the interrupted call is settled")
             test.eq(live_status, consts.STATUS.RUNNING, "a live process still holds it")
@@ -1450,7 +1458,8 @@ local function define_tests()
                     and sent.topic == consts.TOPIC_PREFIXES.SESSION .. payload.session_id then
                     if payload.type == consts.UPSTREAM_TYPES.UPDATE then
                         updates[payload.session_id] = (updates[payload.session_id] or 0) + 1
-                        test.eq(payload.status, consts.STATUS.FAILED)
+                        test.eq(payload.status, consts.STATUS.IDLE)
+                        test.is_true(payload.interaction.can_send)
                     elseif payload.type == consts.UPSTREAM_TYPES.ERROR then
                         errors[payload.session_id] = (errors[payload.session_id] or 0) + 1
                     end
