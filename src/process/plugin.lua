@@ -133,13 +133,10 @@ local function settle_session(session_id: string, user_id: string, target_status
     return target_status, success, status_err, recovery_err, interaction
 end
 
-local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
-    local target_status = status_after_exit(session_info, result, exit_error)
-    return settle_session(session_id, user_id, target_status, target_status == consts.STATUS.FAILED)
-end
-
--- A session the whole runtime stopped in the middle of a turn: its calls
--- are repaired and it is stored idle, with an interaction that takes input.
+-- A session whose turn was stopped from outside: its calls are repaired and
+-- it is stored idle, with an interaction that takes input. That is a session
+-- the whole runtime stopped in the middle of a turn, or one whose process the
+-- plugin cancelled or terminated to enforce the user's Stop (stop_enforced).
 -- Not failed: in the interaction model a failed session does not take input
 -- (input_policy.resolve), and no session process exists to move it on, so an
 -- interaction-aware client would keep Send disabled while the only way to
@@ -148,10 +145,27 @@ end
 -- failed; its turn was interrupted from outside. The clients still get the
 -- recovery notice, and a form answer the turn did not answer reads as
 -- interrupted ("send a message to continue", state_service.delivery_of).
--- A session process that exits with an error while the runtime keeps running
--- is settled by finalize_exit as before.
 local function settle_interrupted(session_id: string, user_id: string)
     return settle_session(session_id, user_id, consts.STATUS.IDLE, true)
+end
+
+-- Whether the plugin cancelled or terminated the session process to enforce
+-- the user's Stop: the turn did not stop within the stop deadline (a model
+-- call Stop cannot interrupt, for example), so the exit that follows is that
+-- Stop, not a failure of the session.
+local function stop_enforced(session_info: any): boolean
+    return type(session_info) == "table" and (tonumber(session_info.stop_escalation) or 0) >= 2
+end
+
+-- Settles a session process that exited while the runtime keeps running. A
+-- process that exits with an error, or is cancelled for any other reason, is
+-- stored failed.
+local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
+    if stop_enforced(session_info) then
+        return settle_interrupted(session_id, user_id)
+    end
+    local target_status = status_after_exit(session_info, result, exit_error)
+    return settle_session(session_id, user_id, target_status, target_status == consts.STATUS.FAILED)
 end
 
 local function run(args)
@@ -1029,6 +1043,7 @@ local function run(args)
                         end
 
                         -- Update session status in database based on termination reason
+                        local enforced = stop_enforced(session_info)
                         local target_status, success, status_err, recovery_err, interaction =
                             finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error)
                         if recovery_err then
@@ -1065,7 +1080,7 @@ local function run(args)
                         })
 
                         -- Session status update first, then the closed notification
-                        report_final_status(session_id, target_status, success, err, interaction)
+                        report_final_status(session_id, target_status, success, err, interaction, enforced)
                         if state.user_hub_pid then
                             publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,
