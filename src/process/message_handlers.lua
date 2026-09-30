@@ -441,21 +441,18 @@ end
 --
 -- Placement relative to `start_id`, the ordinary row that starts the turn (a
 -- typed message, or an admitted answer), which the first step passes:
---   - a row accepted before it goes before it. This is the case upstream
---     0.6.3 describes: steering left pending by a stopped or recovered turn
---     is included when the user starts another turn, ahead of the new
---     message.
---   - a row accepted after it goes after it. Upstream anchored every pending
---     row to the last row before the turn's first message, so a message typed
---     after that one, while its turn was admitted but its first step had not
---     built the prompt yet (the step waits behind any operation queued ahead
---     of it), reached the model before the message the user sent first. That
---     contradicts the documented rule that steering is included "in persisted
---     message order": the first message is persisted before it. Forms make the
---     case common, because a turn can start at an admitted answer while the
---     user keeps typing, but the rule does not depend on forms.
+--   - a row accepted before it goes before it: steering left pending by a
+--     stopped or recovered turn is included when the user starts another
+--     turn, ahead of the new message.
+--   - a row accepted after it goes after it. Steering is included in
+--     persisted message order, and a message typed while the turn's first
+--     step has not built the prompt yet (the step waits behind any operation
+--     queued ahead of it) was persisted after the message that starts the
+--     turn, so it must not reach the model before that message. A turn that
+--     starts at an admitted form answer while the user keeps typing hits
+--     this often, but the rule does not depend on forms.
 -- On later steps (no `start_id`) every due row goes after the latest ordinary
--- row, as upstream does.
+-- row.
 local function steering_updates(scan, start_id)
     local updates = {}
     for _, entry in ipairs(scan.pending) do
@@ -511,7 +508,7 @@ function message_handlers.apply_pending_inputs(ctx, new_user_id)
 end
 
 -- Whether the current turn ended by creating a form (control_forms keys its
--- one-form-per-turn marker by the same turn id). D11: such a turn takes no
+-- one-form-per-turn marker by the same turn id). Such a turn takes no
 -- further step; steering that is still pending starts the next turn instead
 -- (session.flush_held).
 function message_handlers.ended_by_form(ctx): boolean
@@ -724,7 +721,6 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
-local UUID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 local MAX_FILE_UUIDS = 100
 
 -- The client's attachment ids, kept only when they are a list of UUID
@@ -738,7 +734,7 @@ local function file_uuids_of(value: any): {string}?
     local out: {string} = {}
     for index = 1, count do
         local item = value[index]
-        if type(item) ~= "string" or not string.match(item, UUID_PATTERN) then return nil end
+        if type(item) ~= "string" or not string.match(item, consts.UUID_PATTERN) then return nil end
         out[index] = item
     end
     return out
@@ -931,10 +927,9 @@ end
 function message_handlers.publish_admitted(rows: {any}?)
     if not rows then return end
     for _, row in ipairs(rows) do
-        local metadata: any = type(row) == "table" and row.metadata or nil
-        local form: any = type(metadata) == "table" and metadata.session_form or nil
-        if type(form) == "table" and type(form.artifact_id) == "string" then
-            local form_artifact = artifact_repo.get(form.artifact_id)
+        local form_id = type(row) == "table" and message_repo.answer_form_id(row) or nil
+        if form_id then
+            local form_artifact = artifact_repo.get(form_id)
             if form_artifact then artifact_events.publish_updated(form_artifact) end
         end
     end
@@ -983,15 +978,6 @@ function message_handlers.admit_in_order(ctx, through_id)
         if through_id and answer.message_id == through_id then break end
     end
     return admitted, nil
-end
-
--- Admits the session's pending answers in acceptance order, bounded.
--- Returns the id of the last admitted row (nil when none), the first error
--- and the admitted rows.
-function message_handlers.admit_answers(ctx, _opts)
-    local admitted, err = message_handlers.admit_in_order(ctx, nil)
-    local last = admitted[#admitted]
-    return last and last.message_id or nil, err, admitted
 end
 
 -- The latest admitted answer a turn should answer (not one of a stopped turn).
@@ -1080,24 +1066,6 @@ function message_handlers.admit_answer(ctx, _op)
     return { message_id = start_id, next_ops = {{
         type = consts.OP_TYPE.AGENT_STEP, message_id = start_id, from_user = true
     }} }
-end
-
--- Form answers accepted but not admitted yet, by form id, for the tools of
--- the running turn: read_form must not show the turn an answer it may not
--- see yet. nil when unknown (then read_form refuses to show answers).
-local function pending_form_answers(ctx)
-    if type(ctx.session_id) ~= "string" or ctx.session_id == "" then return nil end
-    local rows, err = message_repo.list_pending_answers(ctx.session_id, 200)
-    if not rows then
-        logger:warn("pending form answer scan failed", { session_id = ctx.session_id, error = tostring(err) })
-        return nil
-    end
-    local forms = {}
-    for _, row in ipairs(rows) do
-        local form = type(row.metadata) == "table" and row.metadata.session_form or nil
-        if type(form) == "table" and type(form.artifact_id) == "string" then forms[form.artifact_id] = true end
-    end
-    return forms
 end
 
 function message_handlers.agent_step(ctx, op)
@@ -1562,8 +1530,6 @@ function message_handlers.process_tools(ctx, op)
         session_context = {}
     end
     session_context = with_agent_run_context(ctx, session_context, active_agent)
-    local pending_forms = pending_form_answers(ctx)
-    session_context.session_forms = pending_forms and { pending_answers = pending_forms } or nil
 
     local executed, results, execute_err = pcall(function()
         return caller:execute(session_context, validated_tools)
@@ -1686,7 +1652,7 @@ function message_handlers.process_tools(ctx, op)
                 local rejected = nil
                 -- Set once this call's form is committed. The form names the
                 -- call as its origin, so from then on a failure leaves the call
-                -- pending: recovery (message_repo.recover_pending) settles it as
+                -- pending: recovery (form_recovery.settle_call) settles it as
                 -- created. Marking it an error would make the agent ask again
                 -- and leave two forms.
                 local form_committed = false

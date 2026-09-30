@@ -6,6 +6,7 @@ local artifact_events = require("artifact_events")
 local tx = require("tx")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
+local form_meta = require("form_meta")
 local input_policy = require("input_policy")
 
 type ArtifactData = {
@@ -276,7 +277,7 @@ function control_handlers.control_artifacts(ctx, op)
             -- A session form's content, answers and origin binding are
             -- server-authored; an agent changes a question by asking a new form.
             local target = artifact_repo.get(artifact_data.id)
-            if target and type(target.meta) == "table" and target.meta[form_artifact.META_KEY] ~= nil then
+            if target and form_meta.of(target.meta) then
                 return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
             end
         end
@@ -358,7 +359,6 @@ end
 -- created_cursor) are written in one transaction, so a failure leaves no
 -- form behind and the input stays held. Success asks process_tools to end
 -- the turn instead of running another agent step.
-local ARTIFACT_ID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 
 -- Unanswered forms a session may hold; above it the agent must resolve or
 -- supersede older forms (nothing is deleted silently).
@@ -369,8 +369,8 @@ local function count_unresolved_forms(session_id)
     if not artifacts then return nil, err end
     local count = 0
     for _, artifact in ipairs(artifacts) do
-        local form = type(artifact.meta) == "table" and artifact.meta[form_artifact.META_KEY] or nil
-        if type(form) == "table" and type(form.submission) ~= "table" then count = count + 1 end
+        local form = form_meta.of(artifact.meta)
+        if form and not form_meta.submission(form) then count = count + 1 end
     end
     return count
 end
@@ -395,7 +395,7 @@ function control_handlers.control_forms(ctx, op)
         if not def then
             return reject("invalid_definition", "Invalid form definition:\n" .. definition.format_errors(def_errors))
         end
-        if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, ARTIFACT_ID_PATTERN) then
+        if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, consts.UUID_PATTERN) then
             return reject("invalid_request", "Form artifact id is missing or invalid.")
         end
         if ctx.form_turn_id == op.turn_id then
@@ -440,15 +440,15 @@ function control_handlers.control_forms(ctx, op)
                 return nil, "Form artifact message date is unknown"
             end
 
-            local meta_text, encode_err = form_artifact.encode_meta(def, form_artifact.new_meta({
-                turn_id = op.turn_id,
-                call_id = op.call_id,
-                tool_message_id = op.tool_message_id,
-                created_cursor = stored.message_date,
-            }))
-            if not meta_text then return nil, "Failed to encode form meta: " .. tostring(encode_err) end
             local _, meta_err = artifact_repo.update(stored.artifact_id, {
-                meta_patch = { [form_artifact.META_KEY] = artifact_repo.raw_json(meta_text) },
+                meta_patch = {
+                    [form_artifact.META_KEY] = form_artifact.new_meta({
+                        turn_id = op.turn_id,
+                        call_id = op.call_id,
+                        tool_message_id = op.tool_message_id,
+                        created_cursor = stored.message_date,
+                    }),
+                },
             }, { tx = dbtx })
             if meta_err then return nil, "Failed to bind form origin: " .. tostring(meta_err) end
             return stored

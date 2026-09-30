@@ -7,6 +7,22 @@ namespace: wippy.session.forms
 # module: see src/process/control_handlers.lua (creation), src/api (state
 # endpoints) and src/process/message_handlers.lua (answer admission).
 entries:
+  # wippy.session.forms:ordered_json
+  - name: ordered_json
+    kind: library.lua
+    meta:
+      comment: JSON objects with a fixed key order and explicit nulls, for the answer record, replay key, read_form result and state API bodies
+    source: file://ordered_json.lua
+    modules:
+      - json
+
+  # wippy.session.forms:form_meta
+  - name: form_meta
+    kind: library.lua
+    meta:
+      comment: Accessors for the form record in artifact meta (meta.session_form); imports nothing, so persistence can use it
+    source: file://form_meta.lua
+
   # wippy.session.forms:definition
   - name: definition
     kind: library.lua
@@ -15,6 +31,8 @@ entries:
     source: file://definition.lua
     modules:
       - json
+    imports:
+      ordered_json: wippy.session.forms:ordered_json
 
   # wippy.session.forms:form_artifact
   - name: form_artifact
@@ -26,6 +44,7 @@ entries:
       - json
     imports:
       definition: wippy.session.forms:definition
+      form_meta: wippy.session.forms:form_meta
 
   # wippy.session.forms:answer_text
   - name: answer_text
@@ -33,10 +52,9 @@ entries:
     meta:
       comment: Server-built text of the user message that carries an accepted form answer
     source: file://answer_text.lua
-    modules:
-      - json
     imports:
       definition: wippy.session.forms:definition
+      ordered_json: wippy.session.forms:ordered_json
 
   # wippy.session.forms:state_service
   - name: state_service
@@ -53,13 +71,16 @@ entries:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
       form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
       answer_text: wippy.session.forms:answer_text
+      ordered_json: wippy.session.forms:ordered_json
       tx: wippy.session.persist:tx
       artifact_repo: wippy.session.persist:artifact_repo
       artifact_events: wippy.session.persist:artifact_events
       message_repo: wippy.session.persist:message_repo
       message_date: wippy.session.persist:message_date
       session_repo: wippy.session.persist:session_repo
+      session_status: wippy.session.process:session_status
 
   # wippy.session.forms:ask_user_tool
   - name: ask_user_tool
@@ -166,6 +187,7 @@ entries:
       - uuid
     imports:
       definition: wippy.session.forms:definition
+      form_artifact: wippy.session.forms:form_artifact
     method: handler
     pool:
       size: 2
@@ -238,14 +260,28 @@ entries:
     source: file://read_form.lua
     modules:
       - ctx
-      - json
     imports:
       answer_text: wippy.session.forms:answer_text
       artifact_repo: wippy.session.persist:artifact_repo
       form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
+      message_repo: wippy.session.persist:message_repo
+      ordered_json: wippy.session.forms:ordered_json
     method: handler
     pool:
       size: 2
+
+  # wippy.session.forms:form_recovery
+  - name: form_recovery
+    kind: library.lua
+    meta:
+      comment: Settles a pending ask_user call whose form was committed, for message_repo.recover_pending
+    source: file://form_recovery.lua
+    imports:
+      consts: wippy.session:consts
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
 
   # wippy.session.forms:form_index
   - name: form_index
@@ -256,4 +292,5 @@ entries:
     modules:
       - json
     imports:
-      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
+      message_repo: wippy.session.persist:message_repo

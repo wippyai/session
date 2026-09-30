@@ -1,5 +1,6 @@
 local json = require("json")
-local form_artifact = require("form_artifact")
+local form_meta = require("form_meta")
+local message_repo = require("message_repo")
 
 -- A bounded, deterministic index of a session's forms for the prompt.
 --
@@ -18,7 +19,7 @@ local form_index = {}
 form_index.MAX_UNANSWERED = 8
 form_index.MAX_ANSWERED = 4
 form_index.MAX_BYTES = 8 * 1024
--- Bound for the pending answer lookup that goes with the index.
+-- Bound for the pending answer lookup (pending_answers).
 form_index.MAX_PENDING_SCAN = 200
 
 local HEADING = "Session forms (index; exact answers are in the answer messages and can be read with read_form when available):"
@@ -29,11 +30,10 @@ local HEADING = "Session forms (index; exact answers are in the answer messages 
 local function forms_of(artifacts, pending_answers)
     local forms = {}
     for _, artifact in ipairs(artifacts or {}) do
-        local meta = type(artifact.meta) == "table" and artifact.meta or nil
-        local form = meta and meta[form_artifact.META_KEY] or nil
-        if type(form) == "table" then
-            local origin = type(form.origin) == "table" and form.origin or {}
-            local submission = type(form.submission) == "table" and form.submission or nil
+        local form = form_meta.of(artifact.meta)
+        if form then
+            local origin = form_meta.origin(form)
+            local submission = form_meta.submission(form)
             table.insert(forms, {
                 artifact_id = artifact.artifact_id,
                 title = artifact.title or "",
@@ -50,11 +50,26 @@ end
 -- can an answer be pending).
 function form_index.has_answers(artifacts)
     for _, artifact in ipairs(artifacts or {}) do
-        local meta = type(artifact.meta) == "table" and artifact.meta or nil
-        local form = meta and meta[form_artifact.META_KEY] or nil
-        if type(form) == "table" and type(form.submission) == "table" then return true end
+        if form_meta.submission(form_meta.of(artifact.meta)) then return true end
     end
     return false
+end
+
+-- The ids of the session's forms whose accepted answer the session has not
+-- admitted yet, as a set: the running turn must not see those answers. An
+-- answer can be pending only for a form that holds a submission, so the
+-- answer rows are read only when `artifacts` (the session's artifact rows,
+-- meta decoded) include one. Returns the set, or nil and an error.
+function form_index.pending_answers(session_id, artifacts)
+    local pending = {}
+    if not form_index.has_answers(artifacts) then return pending, nil end
+    local rows, err = message_repo.list_pending_answers(session_id, form_index.MAX_PENDING_SCAN)
+    if not rows then return nil, err end
+    for _, row in ipairs(rows) do
+        local form_id = message_repo.answer_form_id(row)
+        if form_id then pending[form_id] = true end
+    end
+    return pending, nil
 end
 
 -- Newest first, ties by id, so the output is stable for the same rows.
@@ -68,7 +83,7 @@ end
 
 -- Returns the index text, or nil when the session has no forms.
 -- opts.pending_answers: set of form ids whose accepted answer is not
--- admitted yet (message_repo.list_pending_answers).
+-- admitted yet (pending_answers).
 function form_index.build(artifacts, opts)
     local pending_answers = type(opts) == "table" and type(opts.pending_answers) == "table"
         and opts.pending_answers or {}

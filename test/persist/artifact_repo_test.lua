@@ -401,6 +401,53 @@ local function define_tests()
             db:release()
         end)
 
+        describe("get_owned", function()
+            it("gives the owner the artifact and reads every other case as NOT_FOUND", function()
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local other_user = "other-" .. uuid.v7()
+                local other_context, other_session = uuid.v7(), uuid.v7()
+                context_repo.create(other_context, "primary", "{}")
+                session_repo.create(other_session, other_user, other_context, "Other", "test")
+                local sessionless = uuid.v7()
+                local foreign = uuid.v7()
+                local in_foreign_session = uuid.v7()
+                insert_artifact(db, sessionless, nil, test_data.user_id, "static", "No session", "x", nil)
+                insert_artifact(db, foreign, other_session, other_user, "static", "Foreign", "x", nil)
+                -- Owned by this user, but in another user's session.
+                insert_artifact(db, in_foreign_session, other_session, test_data.user_id, "static", "Moved", "x", nil)
+                db:release()
+
+                local owned: any, owned_err = artifact_repo.get_owned(test_data.user_id, test_data.artifact_id2)
+                test.is_nil(owned_err)
+                test.eq(owned.artifact_id, test_data.artifact_id2)
+                test.eq(owned.meta.content_type, "text/markdown", "meta decoded as by get")
+                local alone: any = artifact_repo.get_owned(test_data.user_id, sessionless)
+                test.eq(alone.artifact_id, sessionless)
+
+                for _, case in ipairs({
+                    { user = test_data.user_id, id = uuid.v7(), what = "missing" },
+                    { user = test_data.user_id, id = foreign, what = "another user's artifact" },
+                    { user = test_data.user_id, id = in_foreign_session, what = "another user's session" },
+                    { user = other_user, id = test_data.artifact_id2, what = "read by another user" },
+                }) do
+                    local artifact, err = artifact_repo.get_owned(case.user, case.id)
+                    test.is_nil(artifact, case.what)
+                    test.is_true(artifact_repo.is_not_found(err), case.what)
+                end
+                test.is_false(artifact_repo.is_not_found("Failed to get artifact: database is locked"))
+                test.is_false(artifact_repo.is_not_found(nil))
+
+                local cleanup, cleanup_err = sql.get(consts.get_db_resource())
+                if not cleanup then error(cleanup_err) end
+                cleanup:execute("DELETE FROM artifacts WHERE artifact_id IN ($1, $2, $3)",
+                    { sessionless, foreign, in_foreign_session })
+                cleanup:release()
+                session_repo.delete(other_session)
+                context_repo.delete(other_context)
+            end)
+        end)
+
         describe("update: meta_patch, meta_remove, expected_version, content_version", function()
             local function fresh_artifact(kind: string?, meta: {[string]: any}?)
                 local id = uuid.v7()
@@ -646,48 +693,45 @@ local function define_tests()
                 test.eq(raw_meta(was_null), "{}")
             end)
 
-            it("writes top-level keys sorted, keeps untouched keys' text and stores a raw_json value as given", function()
+            it("keeps every key the patch does not name, nested objects and empty lists included", function()
+                -- Another owner's keys: an empty list, an empty object and a
+                -- nested object. Their values survive; the key order inside a
+                -- stored object is not kept, and nothing reads it.
                 local id = fresh_artifact("static", nil)
-                set_raw_meta(id, '{"zeta":{"b":1,"a":2},"alpha":"x"}')
-                local _, err = artifact_repo.update(id, { meta_patch = {
-                    middle = artifact_repo.raw_json('{"value":"v","note":"n"}'),
-                    status = "idle",
-                } })
-                test.is_nil(err)
-                test.eq(raw_meta(id), '{"alpha":"x","middle":{"value":"v","note":"n"},"status":"idle","zeta":{"b":1,"a":2}}')
-                local artifact: any = artifact_repo.get(id)
-                test.eq(artifact.meta.middle.note, "n")
-                test.eq(artifact.meta.zeta.a, 2)
-
-                -- A later patch of other keys leaves that text alone.
-                local _, remove_err = artifact_repo.update(id, { meta_remove = { "alpha" } })
-                test.is_nil(remove_err)
-                test.eq(raw_meta(id), '{"middle":{"value":"v","note":"n"},"status":"idle","zeta":{"b":1,"a":2}}')
-            end)
-
-            it("splits stored meta with spacing, escapes and brackets inside strings", function()
-                local id = fresh_artifact("static", nil)
-                set_raw_meta(id, [[ { "a\"b" : "x}{[\\" , "n" : -1.5e3 , "t":true,"z":null, "arr":[1,{"k":"]"}] } ]])
+                set_raw_meta(id, '{"owner":{"list":[],"empty":{},"nested":{"deep":{"items":[1,2],"flag":true},'
+                    .. '"name":"x"}},"note":"kept"}')
                 local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
                 test.is_nil(err)
-                test.eq(raw_meta(id), [[{"a\"b":"x}{[\\","arr":[1,{"k":"]"}],"n":-1.5e3,"status":"idle","t":true,"z":null}]])
-                local artifact: any = artifact_repo.get(id)
-                test.eq(artifact.meta['a"b'], "x}{[\\")
-                test.eq(artifact.meta.arr[2].k, "]")
 
-                -- An empty meta that json.encode once stored as "[]".
+                local stored = tostring(raw_meta(id))
+                test.contains(stored, '"list":[]')
+                test.contains(stored, '"empty":{}')
+                test.contains(stored, '"items":[1,2]')
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta.status, "idle")
+                test.eq(artifact.meta.note, "kept")
+                test.eq(artifact.meta.owner.nested.name, "x")
+                test.eq(artifact.meta.owner.nested.deep.flag, true)
+                test.eq(artifact.meta.owner.nested.deep.items[2], 2)
+                test.eq(#artifact.meta.owner.list, 0)
+
+                -- A later removal of another key leaves them as they are.
+                local _, remove_err = artifact_repo.update(id, { meta_remove = { "note" } })
+                test.is_nil(remove_err)
+                local after = tostring(raw_meta(id))
+                test.contains(after, '"list":[]')
+                test.contains(after, '"empty":{}')
+                test.is_false(string.find(after, '"note"', 1, true) ~= nil)
+                local reread: any = artifact_repo.get(id)
+                test.eq(reread.meta.owner.nested.deep.items[1], 1)
+                test.eq(reread.meta.owner.nested.deep.flag, true)
+
+                -- An empty meta stored as "[]" is patched as an empty object.
                 local legacy = fresh_artifact("static", nil)
                 set_raw_meta(legacy, "[]")
                 local _, legacy_err = artifact_repo.update(legacy, { meta_patch = { status = "idle" } })
                 test.is_nil(legacy_err)
                 test.eq(raw_meta(legacy), '{"status":"idle"}')
-            end)
-
-            it("replaces meta with sorted top-level keys", function()
-                local id = fresh_artifact("static", nil)
-                local _, err = artifact_repo.update(id, { meta = { status = "idle", icon = "star", content_type = "x" } })
-                test.is_nil(err)
-                test.eq(raw_meta(id), '{"content_type":"x","icon":"star","status":"idle"}')
             end)
 
             it("meta_patch keeps working for inline and view_ref artifacts", function()

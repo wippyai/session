@@ -57,6 +57,7 @@ entries:
       tx: wippy.session.persist:tx
       definition: wippy.session.forms:definition
       form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
       input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:message_handlers
@@ -94,6 +95,16 @@ entries:
     source: file://input_policy.lua
     modules: [json]
 
+  # wippy.session.process:session_status
+  - name: session_status
+    kind: library.lua
+    meta:
+      comment: Status and interaction clients see for a session; a stored running status with no live process reads as idle
+    source: file://session_status.lua
+    imports:
+      consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
+
   # wippy.session.process:session
   - name: session
     kind: process.lua
@@ -118,6 +129,7 @@ entries:
       tools: wippy.agent.discovery:tools
       input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
+      form_recovery: wippy.session.forms:form_recovery
     method: run
 
   # wippy.session.process:plugin
@@ -143,6 +155,8 @@ entries:
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
       input_policy: wippy.session.process:input_policy
+      session_status: wippy.session.process:session_status
+      form_recovery: wippy.session.forms:form_recovery
       reader: wippy.session.persist:reader
       message_repo: wippy.session.persist:message_repo
     method: run

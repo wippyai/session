@@ -462,13 +462,38 @@ local function define_tests()
             test.eq(answers.other.other, "Line one\tand\nline two")
         end)
 
-        it("treats invisible-only Other text as blank", function()
-            -- U+200B ZERO WIDTH SPACE either side of ordinary whitespace.
-            test.eq(field_code({ single = "Courier", other = { other = "  \226\128\139  " }, must = { "a" } },
-                "other"), "blank")
+        -- The form component trims Other text and notes with JavaScript's
+        -- String.prototype.trim, so the server removes exactly the same
+        -- characters: Unicode spaces (U+00A0, U+2003, U+3000...), U+FEFF and
+        -- line terminators (U+2028), but not U+200B ZERO WIDTH SPACE.
+        local NBSP, EM, IDEO, BOM = "\194\160", "\226\128\131", "\227\128\128", "\239\187\191"
+        local ZWSP, LS, OGHAM = "\226\128\139", "\226\128\168", "\225\154\128"
+
+        it("trims Other text with the characters JavaScript trim removes", function()
+            local answers, field_errors = check({ single = "Courier",
+                other = { other = NBSP .. EM .. " Drone " .. IDEO .. BOM .. LS }, must = { "a" } })
+            test.is_nil(field_errors)
+            test.eq(answers.other.other, "Drone")
+            test.eq(field_code({ single = "Courier", other = { other = NBSP .. EM .. IDEO .. BOM .. OGHAM .. " \t" },
+                must = { "a" } }, "other"), "blank")
         end)
 
-        it("finishes fast on a pathological whitespace run instead of hanging (H3)", function()
+        it("keeps a lone U+200B as Other text, as JavaScript trim does", function()
+            local answers, field_errors = check({ single = "Courier", other = { other = "  " .. ZWSP .. "  " },
+                must = { "a" } })
+            test.is_nil(field_errors)
+            test.eq(answers.other.other, ZWSP)
+        end)
+
+        it("trims notes with the characters JavaScript trim removes", function()
+            local answers = check({ single = { value = "Courier", note = IDEO .. " Ring twice " .. NBSP .. BOM },
+                many = { { value = "b", note = EM .. BOM .. LS } }, must = { { value = "a", note = ZWSP } } })
+            test.eq(answers.single.note, "Ring twice")
+            test.eq(answers.many[1], "b", "a note of trimmed characters only is no note")
+            test.eq(answers.must[1].note, ZWSP, "U+200B is not trimmed")
+        end)
+
+        it("finishes fast on a pathological whitespace run instead of hanging", function()
             local time = require("time")
             local huge_padded = "x" .. string.rep(" ", 60000) .. "y"
             local huge_blank = string.rep(" ", 60000)
@@ -488,8 +513,8 @@ local function define_tests()
             test.eq(other_blank_code, "too_long")
             test.eq(note_code, "too_long")
             test.eq(note_blank_code, "too_long")
-            -- The old quadratic trim cost about 2e9 steps on one such value
-            -- (H3); a linear trim plus the raw-byte cap finish in well under
+            -- A backtracking trim pattern costs about 2e9 steps on one such
+            -- value; a linear trim plus the raw-byte cap finish in well under
             -- a second for all four.
             test.is_true(elapsed:milliseconds() < 2000,
                 string.format("expected well under 2000ms, took %.2fms", elapsed:milliseconds()))
@@ -517,6 +542,16 @@ local function define_tests()
             test.eq(answers.single, "Courier")
             test.eq(answers.many[1], "b")
             test.eq(definition.encode_answers(def, answers), '{"single":"Courier","many":["b"],"must":["a"]}')
+        end)
+
+        it("neutralizes a typed answer tag in any letter case and leaves other text alone", function()
+            test.eq(answer_text.neutralize("a <wippy-form-answers record='x'> </WIPPY-Form-Answers> b"),
+                "a &lt;wippy-form-answers record='x'> &lt;/WIPPY-Form-Answers> b")
+            test.eq(answer_text.neutralize("<wippy-form record='x'> <wippy-form-answer>"),
+                "<wippy-form record='x'> <wippy-form-answer>")
+            test.eq(answer_text.neutralize("<wippyXformXanswers>"), "<wippyXformXanswers>",
+                "the dashes are literal")
+            test.is_nil(answer_text.neutralize(nil))
         end)
 
         it("encodes equal answers equally, whatever order their tables were built in", function()
@@ -586,7 +621,7 @@ local function define_tests()
             -- when a caller (e.g. state_service's stored submission.answers)
             -- json.encodes it directly instead of going through
             -- encode_answers: a plain {} is indistinguishable from an empty
-            -- array (probe J5) and would otherwise serialize as [].
+            -- array and would otherwise serialize as [].
             test.eq((json.encode(answers)), "{}")
         end)
     end)

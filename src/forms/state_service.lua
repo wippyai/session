@@ -4,18 +4,21 @@ local security = require("security")
 local consts = require("consts")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
+local form_meta = require("form_meta")
 local answer_text = require("answer_text")
+local ordered_json = require("ordered_json")
 local tx = require("tx")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
 local message_repo = require("message_repo")
 local message_date = require("message_date")
 local session_repo = require("session_repo")
+local session_status = require("session_status")
 
 -- Form state behind GET/POST /artifact/{id}/state (the HTTP handlers in
 -- src/api/artifact_state.lua are thin adapters). Every function returns an
 -- HTTP status and a JSON body string; bodies are composed with explicit
--- nulls (form_artifact.json_object) because the contract has nullable keys.
+-- nulls (ordered_json.object) because the contract has nullable keys.
 --
 -- Acceptance (POST) is one transaction: lock the session row, re-read the
 -- form, decide `late`, insert the answer as a pending user row and switch the
@@ -68,7 +71,7 @@ local function error_body(code, message, extra)
         { "message", message },
     }
     for _, entry in ipairs(extra or {}) do table.insert(entries, entry) end
-    return form_artifact.json_object(entries)
+    return ordered_json.object(entries)
 end
 
 local function failure(status, code, message, extra)
@@ -79,34 +82,24 @@ end
 -- Loading and authorization
 ---------------------------------------------------------------------------
 
-local function is_not_found(err)
-    return string.find(string.lower(tostring(err)), "not found", 1, true) ~= nil
-end
-
 -- Loads the artifact and its form for `user_id`. Returns (artifact, form) or
 -- (nil, nil, status, body). A missing artifact, another user's artifact and
--- an artifact whose session is gone or not the user's are all 404, so the
--- endpoint does not reveal that a foreign artifact exists.
+-- an artifact whose session is gone or not the user's are all 404
+-- (artifact_repo.get_owned), so the endpoint does not reveal that a foreign
+-- artifact exists. A form always belongs to a session.
 local function load_form(user_id, artifact_id)
     if type(artifact_id) ~= "string" or artifact_id == "" then
         return nil, nil, failure(400, "invalid_request", "Missing artifact ID in path")
     end
-    local artifact, err = artifact_repo.get(artifact_id)
+    local artifact, err = artifact_repo.get_owned(user_id, artifact_id)
     if not artifact then
-        if is_not_found(err) then
+        if artifact_repo.is_not_found(err) then
             return nil, nil, failure(404, "not_found", "Form not found")
         end
         return nil, nil, failure(500, "internal", "Failed to read the form")
     end
-    if artifact.user_id ~= user_id or type(artifact.session_id) ~= "string" or artifact.session_id == "" then
+    if type(artifact.session_id) ~= "string" or artifact.session_id == "" then
         return nil, nil, failure(404, "not_found", "Form not found")
-    end
-    local session, session_err = session_repo.get(artifact.session_id, user_id)
-    if not session then
-        if is_not_found(session_err) then
-            return nil, nil, failure(404, "not_found", "Form not found")
-        end
-        return nil, nil, failure(500, "internal", "Failed to read the form")
     end
     local form, form_err = form_artifact.parse(artifact)
     if not form then
@@ -146,13 +139,10 @@ end
 
 local function delivery_of(submission, session_id)
     if type(submission) ~= "table" then return nil, nil end
-    local row, err = message_repo.get(submission.message_id)
-    if not row then
-        if is_not_found(err) then return "interrupted", nil end
-        return nil, tostring(err)
-    end
-    local marker = type(row.metadata) == "table" and row.metadata.session_form or nil
-    if type(marker) == "table" and marker.pending == true then return "pending", nil end
+    local row, err = message_repo.find(submission.message_id)
+    if err then return nil, tostring(err) end
+    if not row then return "interrupted", nil end
+    if message_repo.is_pending_answer(row) then return "pending", nil end
 
     -- The newest rows after the answer (the answer row among them when few
     -- follow). A full page means the conversation went on long after it.
@@ -162,13 +152,12 @@ local function delivery_of(submission, session_id)
     for _, candidate in ipairs(later) do
         if candidate.message_id ~= row.message_id and is_reply(candidate) then return "complete", nil end
     end
-    -- The stored status stays "running" after a crash until the session
-    -- process starts again, so "running" also needs a live session process.
+    -- A stored "running" status with no live session process is a stopped
+    -- turn, not a running one (session_status).
     local session, session_err = session_repo.get(session_id)
     if not session then return nil, tostring(session_err) end
-    if session.status == consts.STATUS.RUNNING and state_service._lookup_session(session_id) then
-        return "running", nil
-    end
+    local status = session_status.effective(session, state_service._lookup_session)
+    if status == consts.STATUS.RUNNING then return "running", nil end
     return "interrupted", nil
 end
 
@@ -184,12 +173,11 @@ function state_service.get_state(user_id, artifact_id)
         return failure(403, "forbidden", "You cannot read forms in this session.")
     end
 
-    local submission = form.meta.submission
-    local origin = type(form.meta.origin) == "table" and form.meta.origin or {}
+    local submission = form_meta.submission(form.meta)
+    local origin = form_meta.origin(form.meta)
     local stale = false
     local delivery = nil
-    if type(submission) ~= "table" then
-        submission = nil
+    if not submission then
         if type(origin.created_cursor) == "string" and origin.created_cursor ~= "" then
             local moved_on, stale_err = message_repo.has_user_input_after(
                 artifact.session_id, origin.created_cursor, artifact.artifact_id)
@@ -202,7 +190,7 @@ function state_service.get_state(user_id, artifact_id)
         if delivery_err then return failure(500, "internal", "Failed to read the delivery state") end
     end
 
-    return 200, form_artifact.json_object({
+    return 200, ordered_json.object({
         { "form_version", definition.FORM_VERSION },
         { "artifact_id", artifact.artifact_id },
         { "session_id", artifact.session_id },
@@ -255,7 +243,7 @@ local function parse_envelope(raw_body)
 end
 
 local function success_body(r)
-    return form_artifact.json_object({
+    return ordered_json.object({
         { "success", true },
         { "artifact_id", r.artifact_id },
         { "request_id", r.request_id },
@@ -320,10 +308,10 @@ local function validation_body(field_errors, form_errors)
     for id in pairs(field_errors or {}) do table.insert(ids, id) end
     table.sort(ids)
     for _, id in ipairs(ids) do table.insert(field_entries, { id, field_errors[id] }) end
-    local errors_json = form_artifact.json_object(field_entries)
+    local errors_json = ordered_json.object(field_entries)
     local form_errors_json = "[]"
     if form_errors and #form_errors > 0 then form_errors_json = json.encode(form_errors) end
-    return form_artifact.json_object({
+    return ordered_json.object({
         { "success", false },
         { "code", "validation_failed" },
         { "message", "Some answers are not valid." },
@@ -351,8 +339,9 @@ function state_service.submit(user_id, artifact_id, raw_body)
 
     -- An answered form is settled before the answers are validated: only an
     -- exact replay (same request id) needs them normalized.
-    if type(form.meta.submission) == "table" then
-        return against_existing(artifact, form, form.meta.submission, request_id, envelope.answers)
+    local existing = form_meta.submission(form.meta)
+    if existing then
+        return against_existing(artifact, form, existing, request_id, envelope.answers)
     end
     local expected_version = envelope.expected_content_version
     if expected_version ~= nil and (artifact.content_version or 1) ~= expected_version then
@@ -371,27 +360,27 @@ function state_service.submit(user_id, artifact_id, raw_body)
         -- The session row's write lock comes first, so `late` is decided
         -- against every input written before this answer, and any input
         -- written after waits for this commit and sorts after the answer.
+        -- A session removed meanwhile fails the lock; the owner check after
+        -- the transaction then answers 404.
         local _, lock_err = message_date.lock_session(dbtx, session_id)
-        if lock_err then
-            if is_not_found(lock_err) then return nil, { status = 404 } end
-            return nil, tostring(lock_err)
-        end
+        if lock_err then return nil, tostring(lock_err) end
 
-        local current, current_err = artifact_repo.get(artifact.artifact_id, { tx = dbtx })
+        -- Ownership and revision are read again under the lock.
+        local current, current_err = artifact_repo.get_owned(user_id, artifact.artifact_id, { tx = dbtx })
         if not current then
-            if is_not_found(current_err) then return nil, { status = 404 } end
+            if artifact_repo.is_not_found(current_err) then return nil, { status = 404 } end
             return nil, tostring(current_err)
         end
         local current_form, parse_err = form_artifact.parse(current)
         if not current_form then return nil, tostring(parse_err) end
-        if type(current_form.meta.submission) == "table" then
+        if form_meta.submission(current_form.meta) then
             return nil, { existing = current, form = current_form }
         end
         if expected_version ~= nil and (current.content_version or 1) ~= expected_version then
             return nil, { version_conflict = current }
         end
 
-        local origin = type(current_form.meta.origin) == "table" and current_form.meta.origin or {}
+        local origin = form_meta.origin(current_form.meta)
         local late = false
         if type(origin.created_cursor) == "string" and origin.created_cursor ~= "" then
             local moved_on, stale_err = message_repo.has_user_input_after(
@@ -406,11 +395,11 @@ function state_service.submit(user_id, artifact_id, raw_body)
             answers = normalized,
             late = late,
         })
+        -- The row's marker: which form it answers, and that the session has
+        -- not admitted it yet.
         local stored: any, message_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER, text, {
             session_form = {
                 artifact_id = current.artifact_id,
-                submission_id = request_id,
-                late = late,
                 pending = true,
             },
         }, { tx = dbtx })
@@ -427,14 +416,10 @@ function state_service.submit(user_id, artifact_id, raw_body)
             message_id = message_id,
             late = late,
         }
-        -- Stored as canonical text: answers in definition order, whatever
-        -- order the request or the tables above put them in.
-        local meta_text, meta_err = form_artifact.encode_meta(current_form.definition, meta)
-        if not meta_text then return nil, "Failed to encode the form meta: " .. tostring(meta_err) end
         local updated, update_err = artifact_repo.update(current.artifact_id, {
             content = content,
             meta_patch = {
-                [form_artifact.META_KEY] = artifact_repo.raw_json(meta_text),
+                [form_artifact.META_KEY] = meta,
                 status = form_artifact.STATE.IDLE,
             },
         -- The conditional update is the winner check even without a client
@@ -454,16 +439,18 @@ function state_service.submit(user_id, artifact_id, raw_body)
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
             if accept_err.existing then
                 return against_existing(accept_err.existing, accept_err.form,
-                    accept_err.form.meta.submission, request_id, envelope.answers)
+                    form_meta.submission(accept_err.form.meta), request_id, envelope.answers)
             end
         end
         -- A concurrent submission may have won while this transaction ran:
         -- SQLite reports the loser as busy, PostgreSQL as a revision
         -- conflict. Read the committed state and classify against it.
-        local winner = artifact_repo.get(artifact.artifact_id)
+        local winner, winner_err = artifact_repo.get_owned(user_id, artifact.artifact_id)
+        if artifact_repo.is_not_found(winner_err) then return failure(404, "not_found", "Form not found") end
         local winner_form = winner and form_artifact.parse(winner) or nil
-        if winner_form and type(winner_form.meta.submission) == "table" then
-            return against_existing(winner, winner_form, winner_form.meta.submission, request_id, envelope.answers)
+        local won = winner_form and form_meta.submission(winner_form.meta) or nil
+        if won then
+            return against_existing(winner, winner_form, won, request_id, envelope.answers)
         end
         if type(accept_err) == "table" and accept_err.version_conflict then
             return failure(409, "version_conflict", "The form changed since it was loaded.",

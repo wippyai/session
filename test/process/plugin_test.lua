@@ -1536,7 +1536,44 @@ local function define_tests()
             test.is_nil(run.error)
             test.eq(run.cancelled, 1)
             test.eq(run.terminated, 1)
-            test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.FAILED)
+            -- Terminated to enforce the user's Stop: stopped, not failed.
+            test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("settles a Stop it had to enforce as idle with input, not as failed", function()
+            -- The user stopped a turn whose model call outlives the stop
+            -- deadline, so the plugin cancels the session process, which
+            -- exits the way session.lua does on a cancel.
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Enforced Stop", "running")
+            local call_id = add_pending_call(session_id)
+            local stop_messages = {
+                { topic = consts.TOPICS.STOP_ESCALATION, data = { session_id = session_id,
+                    from_pid = "plugin-lifecycle-session", stop_request_id = "slow-stop" } },
+                { topic = consts.TOPICS.STOP_DEADLINE, data = { session_id = session_id,
+                    session_pid = "plugin-lifecycle-session", stop_request_id = "slow-stop", level = 1 } },
+            }
+            local run = run_plugin_lifecycle(actor, session_id, "stop-hub", stop_messages,
+                { status = "shutdown", session_id = session_id, interrupted = true, intentional_exit = false })
+            test.is_nil(run.error)
+            test.eq(run.cancelled, 1)
+
+            local stored: any = session_repo.get(session_id, actor:id())
+            test.eq(stored.status, consts.STATUS.IDLE, "a user Stop is not a failure")
+            test.is_true(stored.meta.interaction.can_send, "the next message is accepted")
+            test.eq(message_repo.get(call_id).metadata.status, consts.FUNC_STATUS.ERROR,
+                "the call the Stop cut off is settled")
+            local update = nil :: any
+            for _, sent in ipairs(run.sent) do
+                local payload = type(sent.payload) == "table" and sent.payload or {}
+                if sent.pid == "stop-hub" and payload.type == consts.UPSTREAM_TYPES.UPDATE and payload.status then
+                    update = payload
+                end
+            end
+            test.not_nil(update)
+            test.eq(update.status, consts.STATUS.IDLE)
+            test.is_true(update.interaction.can_send)
             cleanup_session_fixture(session_id, context_id)
         end)
 

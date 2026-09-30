@@ -197,10 +197,13 @@ local function define_tests()
             test.contains(row.data, "”.\n\n<wippy-form-answers record='{")
             test.contains(row.data, '"answer":{"other":"Drone"}')
             test.contains(row.data, '"answer":[{"value":"Gift wrap","label":"Gift wrap"},{"value":"Receipt","label":"Receipt"}]')
+            -- The marker names the form and says the row is not admitted yet;
+            -- the request id and the late flag live in the form's submission
+            -- and in the record text.
             test.eq(row.metadata.session_form.artifact_id, artifact_id)
-            test.eq(row.metadata.session_form.submission_id, request_id)
             test.eq(row.metadata.session_form.pending, true)
-            test.eq(row.metadata.session_form.late, false)
+            test.is_nil(row.metadata.session_form.submission_id)
+            test.is_nil(row.metadata.session_form.late)
 
             test.eq(#wakes, 1)
             test.eq(wakes[1].pid, "pid-" .. ctx.session_id)
@@ -241,8 +244,8 @@ local function define_tests()
             test.not_nil(body.submitted_at)
             test.eq(body.delivery, "pending")
 
-            local admitted = message_handlers.admit_answers(ctx)
-            test.eq(admitted, accepted.answer_message_id)
+            local admitted: any = message_handlers.admit_in_order(ctx, nil)
+            test.eq(admitted[#admitted].message_id, accepted.answer_message_id)
             local _, stopped = get(artifact_id)
             test.eq(stopped.delivery, "interrupted", "admitted, no reply, session not running")
 
@@ -270,7 +273,7 @@ local function define_tests()
             local second = new_form(ctx)
             -- The first answer, accepted before the second form existed, is
             -- admitted now and lands after the second form in the history.
-            test.eq(message_handlers.admit_answers(ctx) ~= nil, true)
+            test.eq(#message_handlers.admit_in_order(ctx, nil), 1)
             local _, before = get(second)
             test.eq(before.stale, false, "an answer accepted earlier does not make a later form stale")
             ctx.writer:add_message(consts.MSG_TYPE.USER, "Something else")
@@ -358,37 +361,6 @@ local function define_tests()
             test.eq(retry.answer_message_id, first.answer_message_id)
             test.eq(#user_rows(ctx.session_id), 1)
             test.eq(#wakes, 1)
-        end)
-
-        it("stores the accepted submission as canonical text, answers in definition order", function()
-            local ctx = new_session()
-            local artifact_id = new_form(ctx)
-            local request_id = uuid.v7()
-            local noted = {}
-            noted.note = "Ring twice"
-            noted.value = "Courier"
-            local answers = {}
-            answers.extras = { "Receipt", "Gift wrap" }
-            answers.delivery = noted
-            local status, body = post(artifact_id, answer(request_id, answers))
-            test.eq(status, 200)
-
-            local db, db_err = sql.get(consts.get_db_resource())
-            if not db then error(db_err) end
-            local rows, query_err = db:query("SELECT meta FROM artifacts WHERE artifact_id = $1", { artifact_id })
-            db:release()
-            test.is_nil(query_err)
-            local raw = tostring(rows[1].meta)
-            test.contains(raw, '"session_form":{"version":1,"origin":{"turn_id":')
-            test.contains(raw, ',"call_id":"call-1","tool_message_id":"tool-row-1","created_cursor":')
-            test.contains(raw, ',"submission":{"request_id":' .. (json.encode(request_id))
-                .. ',"answers":{"delivery":{"value":"Courier","note":"Ring twice"},"extras":["Gift wrap","Receipt"]}'
-                .. ',"submitted_at":')
-            test.contains(raw, ',"message_id":' .. (json.encode(body.answer_message_id)) .. ',"late":false}}')
-            local session_form_at = string.find(raw, '"session_form":', 1, true)
-            local status_at = string.find(raw, '"status":', 1, true)
-            test.is_true(session_form_at ~= nil and status_at ~= nil and session_form_at < status_at,
-                "top-level keys sorted")
         end)
 
         it("rejects the same request id with different answers", function()
@@ -505,7 +477,6 @@ local function define_tests()
             test.eq(body.late, true)
             local row: any = message_repo.get(body.answer_message_id)
             test.contains(row.data, '"late":true,"late_notice":')
-            test.eq(row.metadata.session_form.late, true)
             local _, state = get(artifact_id)
             test.eq(state.late, true)
             test.eq(state.stale, false)
@@ -522,7 +493,7 @@ local function define_tests()
             test.eq(body.code, "forbidden")
         end)
 
-        it("decides late once, on the acceptance transaction, and keeps text, row and form in step", function()
+        it("decides late once, on the acceptance transaction, and keeps the text and the form in step", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             ctx.writer:add_message(consts.MSG_TYPE.USER, "Something else meanwhile")
@@ -540,7 +511,6 @@ local function define_tests()
             test.eq(body.late, true)
             local row: any = message_repo.get(body.answer_message_id)
             test.contains(row.data, '"late":true,"late_notice":')
-            test.eq(row.metadata.session_form.late, true)
             test.eq(artifact_repo.get(artifact_id).meta.session_form.submission.late, true)
             test.eq(#user_rows(ctx.session_id), 2, "one answer row next to the typed one")
         end)
@@ -596,7 +566,7 @@ local function define_tests()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             local _, accepted = post(artifact_id, answer())
-            message_handlers.admit_answers(ctx)
+            message_handlers.admit_in_order(ctx, nil)
             state_service._lookup_session = function() return nil end
 
             -- A tool call alone is not a reply: the turn stopped or crashed after it.
@@ -623,7 +593,7 @@ local function define_tests()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             post(artifact_id, answer())
-            message_handlers.admit_answers(ctx)
+            message_handlers.admit_in_order(ctx, nil)
             local original_get = session_repo.get
             session_repo.get = function(session_id, owner)
                 -- The ownership check passes; the delivery lookup fails.

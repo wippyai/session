@@ -15,6 +15,7 @@ local state_service = require("state_service")
 local prompt_builder = require("prompt_builder")
 local artifact_repo = require("artifact_repo")
 local message_repo = require("message_repo")
+local form_recovery = require("form_recovery")
 local context_repo = require("context_repo")
 local session_repo = require("session_repo")
 local reader = require("reader")
@@ -455,7 +456,7 @@ local function define_tests()
                 ctx.writer:update_message_meta(message_id, { status = consts.FUNC_STATUS.PENDING })
                 test.eq(message_repo.get(message_id).metadata.status, consts.FUNC_STATUS.PENDING)
 
-                local recovered, err = message_repo.recover_pending(ctx.session_id)
+                local recovered, err = message_repo.recover_pending(ctx.session_id, nil, form_recovery.settle_call)
                 test.is_nil(err)
                 test.eq(recovered, 1)
                 local row: any = message_repo.get(message_id)
@@ -615,7 +616,7 @@ local function define_tests()
                 test.eq(row.metadata.status, consts.FUNC_STATUS.PENDING,
                     "not an error: the form exists and the agent must not ask again")
 
-                local recovered, recover_err = message_repo.recover_pending(ctx.session_id)
+                local recovered, recover_err = message_repo.recover_pending(ctx.session_id, nil, form_recovery.settle_call)
                 test.is_nil(recover_err)
                 test.eq(recovered, 1)
                 local settled: any = message_repo.get((ids :: any)[call_id])
@@ -684,7 +685,7 @@ local function define_tests()
                 test.eq(status, 200)
                 test.eq(json.decode(tostring(body)).stale, false)
 
-                -- The form ends the turn (D11): no continuation step for the
+                -- The form ends the turn: no continuation step for the
                 -- steering. The next turn starts at the steered message. Its
                 -- request was answered when the message was stored.
                 local finished = reach_boundary(ctx, bus)
@@ -789,7 +790,7 @@ local function define_tests()
                 test.is_false(string.find(pending.user, "<wippy-form-answers record=", 1, true) ~= nil,
                     "the pending answer is not in the prompt yet")
 
-                message_handlers.admit_answers(ctx)
+                message_handlers.admit_in_order(ctx, nil)
                 local admitted = prompt_parts()
                 test.contains(admitted.index, "answered: \"Delivery preference\" form_id=" .. answered_id)
                 test.contains(admitted.index, "answer_message_id=" .. accepted.answer_message_id)
@@ -815,7 +816,7 @@ local function define_tests()
                 ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Noted.")
                 ask(ctx, DEFINITION)
                 submit(form_id_of(ctx))
-                message_handlers.admit_answers(ctx)
+                message_handlers.admit_in_order(ctx, nil)
                 local builder = prompt_builder.build(ctx.reader:messages():all(), {}, {},
                     { include_contexts = false, include_files = false, cache_markers = false })
                 local user_text = ""
@@ -834,8 +835,7 @@ local function define_tests()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
                 local form_id = form_id_of(ctx)
-                local in_turn = { agent_run = { host = { session_id = ctx.session_id } },
-                    session_forms = { pending_answers = {} } }
+                local in_turn = { agent_run = { host = { session_id = ctx.session_id } } }
                 local caller = funcs.new():with_context(in_turn)
                 local open, open_err = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(open_err)
@@ -843,21 +843,20 @@ local function define_tests()
                 test.contains(open.message, "\"options\":[")
                 test.contains(open.message, "\"label\":\"Locker\"")
 
+                -- Accepted but not admitted: pending, without its values.
                 submit(form_id, { delivery = "Locker" })
-                message_handlers.admit_answers(ctx)
+                local hidden = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(hidden.message, "\"status\":\"answer_pending\"")
+                test.is_false(string.find(hidden.message, "\"value\":\"Locker\"", 1, true) ~= nil)
+
+                message_handlers.admit_in_order(ctx, nil)
                 local result, err = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(err)
                 test.contains(result.message, "\"status\":\"answered\"")
                 test.contains(result.message, "\"answer\":{\"value\":\"Locker\",\"label\":\"Locker\"}")
 
-                -- Without the session's list of pending answers no answer is shown.
-                local unknown = funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
-                local hidden = unknown:call("wippy.session.forms:read_form_tool", { form_id = form_id })
-                test.contains(hidden.message, "\"status\":\"answer_pending\"")
-
                 local other = new_ctx()
-                local foreign = funcs.new():with_context({ agent_run = { host = { session_id = other.session_id } },
-                    session_forms = { pending_answers = {} } })
+                local foreign = funcs.new():with_context({ agent_run = { host = { session_id = other.session_id } } })
                 local none, foreign_err = foreign:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(none)
                 test.contains(tostring(foreign_err), "No form")
@@ -903,10 +902,57 @@ local function define_tests()
                 test.contains(pending, "\"status\":\"answer_pending\"")
                 test.is_false(string.find(pending, "Locker", 1, true) ~= nil, "no answer values")
 
-                message_handlers.admit_answers(ctx)
+                message_handlers.admit_in_order(ctx, nil)
                 local admitted = read_in_turn()
                 test.contains(admitted, "\"status\":\"answered\"")
                 test.contains(admitted, "\"label\":\"Locker\"")
+            end)
+
+            it("gives read_form no values of an answer accepted while its tool round runs", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                local form_id = form_id_of(ctx)
+                local read_id = "wippy.session.forms:read_form_tool"
+
+                -- One read_form call through process_tools. `accept` runs after
+                -- process_tools built the tool context and before read_form
+                -- reads the form: the answer arrives while the round runs.
+                local function read_in_turn(accept: (() -> ())?)
+                    local call_id = "call-" .. uuid.v7()
+                    local args = { form_id = form_id }
+                    local _, ids: any, store_err = ctx.writer:add_response("", {}, {
+                        { id = call_id, name = "read_form", arguments = args, registry_id = read_id,
+                            type = consts.MSG_TYPE.FUNCTION },
+                    })
+                    test.is_nil(store_err)
+                    local seen = nil :: any
+                    local caller = {
+                        set_strategy = function() end,
+                        execute = function(_self, context, tools)
+                            if accept then accept() end
+                            local result, err = funcs.new():with_context(context):call(read_id, args)
+                            seen = result
+                            return { [call_id] = { result = result, error = err, tool_call = tools[call_id] } }
+                        end,
+                    }
+                    local _, err = message_handlers.process_tools(ctx, {
+                        tool_calls = { { id = call_id, name = "read_form", registry_id = read_id, arguments = args } },
+                        call_message_ids = ids, caller = caller,
+                        validated_tools = { [call_id] = { valid = true, name = "read_form", args = args, registry_id = read_id } },
+                        message_id = "user-message", agent = { id = "agent:forms" },
+                    })
+                    test.is_nil(err)
+                    return tostring(seen and seen.message)
+                end
+
+                local during = read_in_turn(function() submit(form_id, { delivery = "Locker" }) end)
+                test.contains(during, "\"status\":\"answer_pending\"")
+                test.is_false(string.find(during, "Locker", 1, true) ~= nil, "no answer values")
+
+                message_handlers.admit_in_order(ctx, nil)
+                local admitted = read_in_turn(nil)
+                test.contains(admitted, "\"status\":\"answered\"")
+                test.contains(admitted, "\"answer\":{\"value\":\"Locker\",\"label\":\"Locker\"}")
             end)
 
             it("admits an answer that arrives while idle and starts a turn for it", function()
@@ -1353,17 +1399,18 @@ local function define_tests()
                 local pending: any = message_repo.list_pending_answers(ctx.session_id, 1)
                 test.eq(pending[1].message_id, first.answer_message_id)
 
-                local last_id, err = message_handlers.admit_answers(ctx)
+                local admitted: any, err = message_handlers.admit_in_order(ctx, nil)
                 test.is_nil(err)
-                test.eq(last_id, second.answer_message_id)
+                test.eq(#admitted, 2)
+                test.eq(admitted[2].message_id, second.answer_message_id)
                 local rows: any = message_repo.list_by_session(ctx.session_id, 500).messages
                 test.eq(rows[#rows - 1].message_id, first.answer_message_id)
                 test.eq(rows[#rows].message_id, second.answer_message_id)
                 local admitted_date = rows[#rows].date
 
-                local again, again_err = message_handlers.admit_answers(ctx)
+                local again, again_err = message_handlers.admit_in_order(ctx, nil)
                 test.is_nil(again_err)
-                test.is_nil(again)
+                test.eq(#again, 0)
                 test.eq(message_repo.get(second.answer_message_id).date, admitted_date)
                 test.eq(#message_repo.list_pending_answers(ctx.session_id, 50), 0)
                 test.is_nil(message_repo.admit_pending_answer(ctx.session_id, first.answer_message_id))

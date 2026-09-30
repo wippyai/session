@@ -1,4 +1,5 @@
 local json = require("json")
+local ordered_json = require("ordered_json")
 
 -- Session forms V1 contract: the definition an agent authors (choice fields
 -- only) and the answers a user submits for it.
@@ -9,8 +10,8 @@ local json = require("json")
 --
 -- Answers are validated one field at a time with explicit checks rather than
 -- one json.validate call over the whole object: the runtime validator names
--- only the first violation of a document (probe J2), and an empty Lua table
--- is indistinguishable from an empty array (probe J5).
+-- only the first violation of a document, and an empty Lua table is
+-- indistinguishable from an empty array.
 
 local definition = {}
 
@@ -36,7 +37,7 @@ local FIELD_ID_MAX = 40
 -- A valid Other/note answer is at most LIMIT UTF-8 characters (4 bytes
 -- each) plus whatever surrounding whitespace a real client sends. This
 -- bounds every per-byte scan on the raw value to a small multiple of the
--- limit, independent of the 64 KiB body cap, before any of them run (H3).
+-- limit, independent of the 64 KiB body cap, before any of them run.
 local RAW_TEXT_MULTIPLIER = 8
 
 local ROOT_KEYS = {
@@ -64,7 +65,7 @@ local function is_array(value: any): boolean
 end
 
 -- A decoded JSON object: a table whose keys are all strings. An empty table
--- passes both is_array and is_object (J5); callers decide what empty means.
+-- passes both is_array and is_object; callers decide what empty means.
 local function is_object(value: any): boolean
     if type(value) ~= "table" then return false end
     for key in pairs(value) do
@@ -73,98 +74,82 @@ local function is_object(value: any): boolean
     return true
 end
 
--- Number of Unicode code points in `text`, or nil when it is not valid UTF-8
--- (malformed or truncated sequences, overlong forms, surrogates, values past
--- U+10FFFF). Limits count characters as users see them (probe J4 shows
--- json.validate's maxLength does the same). The standard utf8 library is not
--- available in this runtime, so the decoding is done here.
+-- Decodes the UTF-8 character at byte `index` of `text`. Returns its code
+-- point and the index of the next character, or nil when the bytes there are
+-- not valid UTF-8: a malformed or truncated sequence, an overlong form, a
+-- surrogate or a value past U+10FFFF. The runtime (Lua 5.3, Wippy
+-- modification) has no utf8 library, global or required, so this is the one
+-- decoder every text rule below uses.
+local function decode_at(text: string, index: integer): (integer?, integer)
+    local byte = string.byte(text, index)
+    local extra, minimum, value
+    if byte < 0x80 then
+        return byte, index + 1
+    elseif byte >= 0xC2 and byte <= 0xDF then
+        extra, minimum, value = 1, 0x80, byte - 0xC0
+    elseif byte >= 0xE0 and byte <= 0xEF then
+        extra, minimum, value = 2, 0x800, byte - 0xE0
+    elseif byte >= 0xF0 and byte <= 0xF4 then
+        extra, minimum, value = 3, 0x10000, byte - 0xF0
+    else
+        return nil, index
+    end
+    if index + extra > #text then return nil, index end
+    for offset = 1, extra do
+        local continuation = string.byte(text, index + offset)
+        if continuation < 0x80 or continuation > 0xBF then return nil, index end
+        value = value * 64 + (continuation - 0x80)
+    end
+    if value < minimum or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF) then
+        return nil, index
+    end
+    return value, index + extra + 1
+end
+
+-- Number of Unicode code points in `text`, or nil when it is not valid
+-- UTF-8. Limits count characters as users see them, as json.validate's
+-- maxLength does.
 local function char_length(text: string): number?
     local count = 0
     local index = 1
     local size = #text
     while index <= size do
-        local byte = string.byte(text, index)
-        local extra, minimum, value
-        if byte < 0x80 then
-            extra, minimum, value = 0, 0, byte
-        elseif byte >= 0xC2 and byte <= 0xDF then
-            extra, minimum, value = 1, 0x80, byte - 0xC0
-        elseif byte >= 0xE0 and byte <= 0xEF then
-            extra, minimum, value = 2, 0x800, byte - 0xE0
-        elseif byte >= 0xF0 and byte <= 0xF4 then
-            extra, minimum, value = 3, 0x10000, byte - 0xF0
-        else
-            return nil
-        end
-        if index + extra > size then return nil end
-        for offset = 1, extra do
-            local continuation = string.byte(text, index + offset)
-            if continuation < 0x80 or continuation > 0xBF then return nil end
-            value = value * 64 + (continuation - 0x80)
-        end
-        if value < minimum or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF) then
-            return nil
-        end
+        local value
+        value, index = decode_at(text, index)
+        if not value then return nil end
         count = count + 1
-        index = index + extra + 1
     end
     return count
 end
 
--- Bytes the ASCII whitespace class %s matches: space, tab, LF, VT, FF, CR.
-local ASCII_WHITESPACE = { [32] = true, [9] = true, [10] = true, [11] = true, [12] = true, [13] = true }
-
--- Unicode code points that are invisible or render as a space. Combined with
--- ASCII_WHITESPACE, text made up only of these still counts as blank, even
--- though the byte class %s (used by the old `not string.find(text, "%S")`)
--- treats every non-ASCII byte as "visible" and so missed all of them.
-local BLANK_CODEPOINTS = {
-    [0x00A0] = true, -- NO-BREAK SPACE
-    [0x1680] = true, -- OGHAM SPACE MARK
-    [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true,
-    [0x2004] = true, [0x2005] = true, [0x2006] = true, [0x2007] = true,
-    [0x2008] = true, [0x2009] = true, [0x200A] = true, -- EN QUAD .. HAIR SPACE
-    [0x200B] = true, [0x200C] = true, [0x200D] = true, -- ZERO WIDTH SPACE/NON-JOINER/JOINER
-    [0x202F] = true, -- NARROW NO-BREAK SPACE
-    [0x205F] = true, -- MEDIUM MATHEMATICAL SPACE
-    [0x2060] = true, -- WORD JOINER
-    [0x3000] = true, -- IDEOGRAPHIC SPACE
-    [0xFEFF] = true, -- ZERO WIDTH NO-BREAK SPACE / BOM
+-- The characters JavaScript's String.prototype.trim removes: ECMAScript
+-- WhiteSpace (tab, vertical tab, form feed, U+FEFF and every Unicode space
+-- separator) and LineTerminator (LF, CR, U+2028, U+2029). The form component
+-- trims Other text and notes with it, so the server trims them, and decides
+-- they are blank, with exactly this set. U+200B ZERO WIDTH SPACE is not in it.
+local WHITESPACE = {
+    [0x0009] = true, [0x000A] = true, [0x000B] = true, [0x000C] = true, [0x000D] = true,
+    [0x0020] = true, [0x00A0] = true, [0x1680] = true,
+    [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true, [0x2004] = true,
+    [0x2005] = true, [0x2006] = true, [0x2007] = true, [0x2008] = true, [0x2009] = true,
+    [0x200A] = true, [0x2028] = true, [0x2029] = true, [0x202F] = true, [0x205F] = true,
+    [0x3000] = true, [0xFEFF] = true,
 }
 
--- Decodes one UTF-8 code point starting at byte `index` of `text` (assumed
--- already valid UTF-8: callers run this only after char_length has accepted
--- the string). Returns the code point and the index of the next character.
-local function next_codepoint(text: string, index: integer): (integer, integer)
-    local byte = string.byte(text, index)
-    local extra, value
-    if byte < 0x80 then
-        extra, value = 0, byte
-    elseif byte >= 0xC2 and byte <= 0xDF then
-        extra, value = 1, byte - 0xC0
-    elseif byte >= 0xE0 and byte <= 0xEF then
-        extra, value = 2, byte - 0xE0
-    elseif byte >= 0xF0 and byte <= 0xF4 then
-        extra, value = 3, byte - 0xF0
-    else
-        extra, value = 0, byte
-    end
-    for offset = 1, extra do
-        value = value * 64 + (string.byte(text, index + offset) - 0x80)
-    end
-    return value, index + extra + 1
-end
+-- Invisible format characters. An agent-authored title, label or message
+-- made up only of these and WHITESPACE shows nothing, so it is blank too.
+local ZERO_WIDTH = { [0x200B] = true, [0x200C] = true, [0x200D] = true, [0x2060] = true }
 
--- True when `text` (valid UTF-8) is empty, or every code point in it is
--- ASCII whitespace or a BLANK_CODEPOINTS entry (probe H-review: zero-width
--- and no-break spaces used to pass this check as "visible" text).
+-- True when `text` (valid UTF-8) shows nothing: empty, or every character
+-- in WHITESPACE or ZERO_WIDTH. For agent-authored definition text; answer
+-- text follows JavaScript trim instead (trim).
 local function is_blank(text: string): boolean
     local index = 1
     local size = #text
     while index <= size do
         local value
-        value, index = next_codepoint(text, index)
-        if not (ASCII_WHITESPACE[value] or BLANK_CODEPOINTS[value]) then
+        value, index = decode_at(text, index)
+        if not value or not (WHITESPACE[value] or ZERO_WIDTH[value]) then
             return false
         end
     end
@@ -186,7 +171,8 @@ local function has_control_characters(text: string, multiline: boolean): boolean
     local size = #text
     while index <= size do
         local value
-        value, index = next_codepoint(text, index)
+        value, index = decode_at(text, index)
+        if not value then return true end
         if value < 0x80 then
             local is_c0 = value < 32 or value == 127
             if is_c0 and multiline and (value == 9 or value == 10) then
@@ -203,17 +189,25 @@ local function has_control_characters(text: string, multiline: boolean): boolean
     return false
 end
 
--- Linear-time equivalent of string.match(s, "^%s*(.-)%s*$"): that pattern
--- backtracks quadratically on a long run of trailing whitespace (H3), and
--- "^%s*(.*%S)" is quadratic on an all-whitespace string. One forward scan
--- for the first non-space byte, one backward scan for the last.
+-- `text` without the WHITESPACE characters at either end, as JavaScript's
+-- String.prototype.trim gives it. One forward pass, so it stays linear on a
+-- long run of spaces, where a "^%s*(.-)%s*$" pattern backtracks
+-- quadratically. Text that is not valid UTF-8 is returned as it is, for the
+-- caller's UTF-8 check to refuse.
 local function trim(text: string): string
-    local first = string.find(text, "%S")
-    if not first then return "" end
-    local last = #text
-    while last > first and ASCII_WHITESPACE[string.byte(text, last)] do
-        last = last - 1
+    local index = 1
+    local size = #text
+    local first, last = nil, 0
+    while index <= size do
+        local value, next_index = decode_at(text, index)
+        if not value then return text end
+        if not WHITESPACE[value] then
+            first = first or index
+            last = next_index - 1
+        end
+        index = next_index
     end
+    if not first then return "" end
     return string.sub(text, first, last)
 end
 
@@ -495,7 +489,7 @@ local function check_other(field: any, value: table): (any, any)
         return nil, { code = "invalid_type", message = "The other answer must be text." }
     end
     -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it (H3); a real answer never needs this much raw text.
+    -- on it; a real answer never needs this much raw text.
     if #text > definition.LIMITS.OTHER_TEXT * RAW_TEXT_MULTIPLIER then
         return nil, { code = "too_long", message = string.format(
             "The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) }
@@ -509,7 +503,7 @@ local function check_other(field: any, value: table): (any, any)
     if has_control_characters(text :: string, true) then
         return nil, { code = "invalid_text", message = "The other answer must not contain control characters other than tabs and line breaks." }
     end
-    if is_blank(text) then
+    if text == "" then
         return nil, { code = "blank", message = "Enter the other answer." }
     end
     if length > definition.LIMITS.OTHER_TEXT then
@@ -538,7 +532,7 @@ local function check_noted(value: table, positions: {[string]: number}): (any, a
         return nil, { code = "invalid_type", message = "A note must be text." }
     end
     -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it (H3); a real note never needs this much raw text.
+    -- on it; a real note never needs this much raw text.
     if #note > definition.LIMITS.NOTE_TEXT * RAW_TEXT_MULTIPLIER then
         return nil, { code = "too_long", message = string.format(
             "A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) }
@@ -646,7 +640,7 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
     local form_errors = {}
     -- table.create(0, n) (Wippy extension) forces json.encode to read this
     -- as an object, not an array: a plain {} is indistinguishable from an
-    -- empty array (probe J5), so an all-optional unanswered form would
+    -- empty array, so an all-optional unanswered form would
     -- otherwise store/serialize submission.answers as [] instead of {}.
     local normalized = table.create(0, #def.fields)
 
@@ -705,12 +699,12 @@ local function encode_value(value: any): string
     if is_array(value) and #value > 0 then
         local parts = {}
         for _, item in ipairs(value) do table.insert(parts, encode_value(item)) end
-        return "[" .. table.concat(parts, ",") .. "]"
+        return ordered_json.array(parts)
     end
     if value.value ~= nil then
-        return "{\"value\":" .. (json.encode(value.value)) .. ",\"note\":" .. (json.encode(value.note)) .. "}"
+        return ordered_json.object({ { "value", value.value }, { "note", value.note } })
     end
-    return "{\"other\":" .. (json.encode(value.other)) .. "}"
+    return ordered_json.object({ { "other", value.other } })
 end
 
 -- Canonical JSON of normalized answers: keys in definition order, `{}` when
@@ -718,14 +712,14 @@ end
 -- Equal answers always produce the same string, so it also serves as the
 -- replay comparison key.
 function definition.encode_answers(def: any, answers: any): string
-    local parts = {}
+    local entries = {}
     for _, field in ipairs(def.fields) do
         local value = answers and answers[field.id]
         if value ~= nil then
-            table.insert(parts, (json.encode(field.id)) .. ":" .. encode_value(value))
+            table.insert(entries, { field.id, raw = encode_value(value) })
         end
     end
-    return "{" .. table.concat(parts, ",") .. "}"
+    return ordered_json.object(entries)
 end
 
 definition.is_array = is_array

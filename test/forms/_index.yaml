@@ -30,6 +30,7 @@ entries:
     source: file://form_index_test.lua
     imports:
       form_index: wippy.session.forms:form_index
+      message_repo: wippy.session.persist:message_repo
       test: wippy.test:test
     method: run
 

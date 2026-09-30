@@ -10,6 +10,7 @@ local session_handlers = require("session_handlers")
 local agent_context = require("agent_context")
 local tools = require("tools")
 local message_repo = require("message_repo")
+local form_recovery = require("form_recovery")
 local uuid = require("uuid")
 local input_policy = require("input_policy")
 
@@ -495,7 +496,7 @@ local function run(args: SessionArgs)
     local recovered_calls = 0
     if not args.create then
         local count, recovery_err = message_repo.recover_pending(args.session_id,
-            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
+            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
         if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
         recovered_calls = count
     end
@@ -615,7 +616,7 @@ local function run(args: SessionArgs)
     context.commit_held_before_form = function(written) return commit_held_before_form(context, written) end
     context.settle_intents = function()
         return message_repo.recover_pending(args.session_id,
-            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
+            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
     end
 
     local bus = command_bus.new(context)

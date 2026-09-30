@@ -1,10 +1,10 @@
 local sql = require("sql")
 local json = require("json")
-local time = require("time")
 local consts = require("consts")
 local tx = require("tx")
 local message_date = require("message_date")
 local input_metadata = require("input_metadata")
+local form_meta = require("form_meta")
 
 type Message = {
     message_id: string,
@@ -67,82 +67,28 @@ function message_repo.create_batch(session_id, rows)
     return result, nil, dates
 end
 
--- A pending call whose control operations created a session form that was
--- committed (the process stopped after storing the form but before settling
--- the call). Returns the form's artifact row ({ artifact_id, title }), nil
--- when there is no such form, or nil and an error when the lookup failed:
--- recovery then stops and runs again later instead of reporting the call as
--- interrupted while its form exists.
-local function committed_form_of(row)
-    local operations = row.metadata.control_operations
-    local forms = type(operations) == "table" and operations.forms or nil
-    local first = type(forms) == "table" and forms[1] or nil
-    if type(first) ~= "table" or type(first.artifact_id) ~= "string" then return nil end
-
-    local artifact, err = message_repo._form_artifact(first.artifact_id, row.session_id)
-    if err then return nil, err end
-    if not artifact then return nil end
-
-    -- The form's server-written origin must name this call. A call cannot
-    -- claim a form that another call created.
-    local form = type(artifact.meta) == "table" and artifact.meta.session_form or nil
-    local origin = type(form) == "table" and form.origin or nil
-    if type(origin) ~= "table" or origin.tool_message_id ~= row.message_id then return nil end
-    if origin.call_id ~= nil and origin.call_id ~= row.metadata.call_id then return nil end
-    return artifact
-end
-
--- The artifact `artifact_id` of `session_id` with its meta decoded, nil when
--- there is none, or nil and an error. A meta that does not decode reads as
--- none. Replaceable in tests.
-function message_repo._form_artifact(artifact_id, session_id)
-    local db, err = get_db()
-    if err then return nil, err end
-    local rows, query_err = sql.builder.select("artifact_id", "title", "meta")
-        :from("artifacts")
-        :where(sql.builder.and_({
-            sql.builder.expr("artifact_id = ?", artifact_id),
-            sql.builder.expr("session_id = ?", session_id),
-        }))
-        :limit(1)
-        :run_with(db):query()
-    db:release()
-    if query_err then return nil, "Failed to read form artifact: " .. tostring(query_err) end
-    if #rows == 0 then return nil end
-    local artifact = rows[1]
-    if type(artifact.meta) == "string" and artifact.meta ~= "" then
-        local decoded, decode_err = json.decode(artifact.meta :: string)
-        artifact.meta = not decode_err and decoded or nil
-    end
-    return artifact
-end
-
-function message_repo.recover_pending(session_id, anchor_id)
+-- Settles the calls an interrupted turn left pending, in the session's rows
+-- after `anchor_id` (every row when it is nil). Returns how many it settled.
+--
+-- settle (optional): settle(row) is asked first about each pending call row
+-- and returns the metadata that settles it when the call's effect is known
+-- to have completed, nil when it is not, or nil and an error, which stops
+-- recovery so that it runs again later. A call nothing settles is reported
+-- as interrupted with an unknown outcome.
+function message_repo.recover_pending(session_id, anchor_id, settle)
     local recovered = 0
     local function recover_rows(rows)
         for _, row in ipairs(rows or {}) do
-            local form = nil
-            if row.type == consts.MSG_TYPE.FUNCTION and type(row.metadata) == "table"
-                and row.metadata.status == consts.FUNC_STATUS.PENDING then
-                local form_err
-                form, form_err = committed_form_of(row)
-                if form_err then return nil, form_err end
-            end
-            if form then
-                -- The form exists and is visible, so the call succeeded;
-                -- reporting it as interrupted would make the agent ask again.
-                local _, update_err = message_repo.update_metadata(row.message_id, {
-                    status = consts.FUNC_STATUS.SUCCESS,
-                    result = { message = string.format(
-                        'Form "%s" was created as %s. Its answer will arrive as a user message.',
-                        form.title, form.artifact_id) }
-                })
-                if update_err then return nil, update_err end
-                recovered = recovered + 1
-            elseif (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+            if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
                 or row.type == consts.MSG_TYPE.DELEGATION)
                 and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
-                local _, update_err = message_repo.update_metadata(row.message_id, {
+                local update = nil
+                if settle then
+                    local settle_err
+                    update, settle_err = settle(row)
+                    if settle_err then return nil, settle_err end
+                end
+                local _, update_err = message_repo.update_metadata(row.message_id, update or {
                     status = consts.FUNC_STATUS.ERROR,
                     result = "interrupted, outcome unknown"
                 })
@@ -340,7 +286,9 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
 end
 
 -- Get a message by ID
-function message_repo.get(message_id)
+-- The message `message_id` with its metadata decoded, or nil without an
+-- error when there is none.
+function message_repo.find(message_id)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
@@ -367,7 +315,7 @@ function message_repo.get(message_id)
     end
 
     if #messages == 0 then
-        return nil, "Message not found"
+        return nil, nil
     end
 
     local message = messages[1]
@@ -380,6 +328,17 @@ function message_repo.get(message_id)
         end
     end
 
+    return message
+end
+
+function message_repo.get(message_id)
+    local message, err = message_repo.find(message_id)
+    if err then
+        return nil, err
+    end
+    if not message then
+        return nil, "Message not found"
+    end
     return message
 end
 
@@ -973,6 +932,17 @@ end
 -- the active turn must not see input accepted after it started.
 message_repo.is_pending_answer = is_pending_answer
 
+-- Whether a history row (metadata decoded) is a server-written form answer,
+-- admitted or not. Only these carry a real answer record.
+message_repo.is_form_answer = is_form_answer
+
+-- The id of the form a form answer row answers, or nil for any other row.
+function message_repo.answer_form_id(row)
+    if not is_form_answer(row) then return nil end
+    local form_id = row.metadata.session_form.artifact_id
+    return type(form_id) == "string" and form_id or nil
+end
+
 -- Runs `build()` (a select that includes `<prefix>message_id`) page by page
 -- in (date, message_id) order and calls visit(row) for each row until it
 -- returns true. Returns true when visit stopped the scan, false when the rows
@@ -1121,18 +1091,12 @@ function message_repo.admit_pending_answer(session_id, message_id)
     return result
 end
 
-local function parse_instant(value)
-    if type(value) ~= "string" then return nil end
-    local parsed, parse_err = time.parse(time.RFC3339NANO, value)
-    if parse_err then return nil end
-    return parsed
-end
-
 -- Whether `value` (an acceptance time) is later than `after` (a message
--- date). Both come from the clock, possibly with different offsets, so they
--- are compared as instants; as text only when one does not parse.
+-- date). Both come from the clock, possibly with different offsets and in
+-- any layout a stored date comes back in, so they are compared as instants;
+-- as text only when one does not parse.
 local function accepted_after(value, after)
-    local value_at, after_at = parse_instant(value), parse_instant(after)
+    local value_at, after_at = message_date.parse_stored(value), message_date.parse_stored(after)
     if value_at and after_at then return value_at:after(after_at) end
     return value > after
 end
@@ -1194,9 +1158,8 @@ function message_repo.has_user_input_after(session_id, after_date, exclude_artif
         if row.artifact_id ~= exclude_artifact_id then
             local meta = row.meta
             if type(meta) == "string" then meta = json.decode(meta :: string) end
-            local form = type(meta) == "table" and meta.session_form or nil
-            local submission = type(form) == "table" and form.submission or nil
-            if type(submission) == "table" and type(submission.submitted_at) == "string"
+            local submission = form_meta.submission(form_meta.of(meta))
+            if submission and type(submission.submitted_at) == "string"
                 and accepted_after(submission.submitted_at, after_date) then
                 return true
             end

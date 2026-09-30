@@ -109,7 +109,9 @@ local function latest_date(conn, session_id)
     return rows[1] and rows[1].date
 end
 
-local function parse_stored(value: any)
+-- The instant a stored date names, in any layout it may come back in
+-- (READ_LAYOUTS), or nil when `value` is not such a date.
+function message_date.parse_stored(value: any)
     if type(value) ~= "string" or value == "" then return nil end
     for _, layout in ipairs(READ_LAYOUTS) do
         local parsed, parse_err = time.parse(layout, value)
@@ -137,7 +139,7 @@ function message_date.next(conn, session_id)
 
     local latest, latest_err = latest_date(conn, session_id)
     if latest_err then return nil, latest_err end
-    local parsed = parse_stored(latest)
+    local parsed = message_date.parse_stored(latest)
     if parsed then
         for _, step in ipairs(STEPS) do
             local candidate = parsed:add(step):format(FIXED_LAYOUT)

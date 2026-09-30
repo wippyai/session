@@ -1,34 +1,7 @@
 local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
-local consts = require("consts")
-local input_policy = require("input_policy")
-
-local list_sessions = {}
-
--- Seam for tests.
-function list_sessions._lookup_session(session_id: string): any
-    return process.registry.lookup(consts.REGISTRY.SESSION .. session_id)
-end
-
--- A stored "running" status with no registered session process is a crash
--- the plugin's startup reconciliation has not reached yet. Report it the way
--- that reconciliation stores it, idle, so the Host never blocks Send on it
--- (see get_session.lua). The stored value is untouched.
-local function reported_status(session: any): string
-    if session.status == consts.STATUS.RUNNING and not list_sessions._lookup_session(session.session_id) then
-        return consts.STATUS.IDLE
-    end
-    return session.status :: string
-end
-
--- The interaction follows the reported status (see get_session.lua).
-local function reported_interaction(session: any, stored_status: any): any
-    if session.status ~= stored_status then
-        return input_policy.recovery_snapshot(session, session.status)
-    end
-    return session.meta and session.meta.interaction
-end
+local session_status = require("session_status")
 
 type ListSessionsResponse = {
     success: boolean,
@@ -87,9 +60,8 @@ local function handler()
     end
 
     for i, session in ipairs(sessions) do
-        local stored_status = session.status
-        session.status = reported_status(session)
-        session.interaction = reported_interaction(session, stored_status)
+        -- A turn the runtime stopped reads as idle (session_status).
+        session.status, session.interaction = session_status.effective(session)
         session.current_agent = ""
         session.current_model = ""
 
@@ -108,8 +80,6 @@ local function handler()
     })
 end
 
-list_sessions.handler = handler
-list_sessions._reported_status = reported_status
-list_sessions._reported_interaction = reported_interaction
-
-return list_sessions
+return {
+    handler = handler
+}

@@ -7,15 +7,14 @@ local security = require("security")
 local consts = require("consts")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
-local get_artifact = require("get_artifact")
-local get_artifact_content = require("get_artifact_content")
+local artifact_access = require("artifact_access")
 local wait_for_boot = require("wait_for_boot")
 
--- GET /artifact/{id} and GET /artifact/{id}/content, driven through their
--- _serve seams with a fake request and response on the real database. Both
--- answer another user's artifact exactly like a missing one (404, same
--- body), so neither tells a caller that a foreign id exists. The owner gets
--- the artifact as before.
+-- GET /artifact/{id} and GET /artifact/{id}/content, driven through
+-- artifact_access (their request handling after authentication) with a fake
+-- request and response on the real database. Both answer another user's
+-- artifact exactly like a missing one (404, same body), so neither tells a
+-- caller that a foreign id exists. The owner gets the artifact as before.
 
 local function fake_exchange(artifact_id: string)
     local req = {
@@ -34,9 +33,9 @@ local function fake_exchange(artifact_id: string)
     return req, res
 end
 
-local function call(module: any, artifact_id: string, user_id: string)
+local function call(serve: any, artifact_id: string, user_id: string)
     local req, res = fake_exchange(artifact_id)
-    module._serve(req, res, user_id)
+    serve(req, res, user_id)
     return res.status, res.body
 end
 
@@ -105,11 +104,11 @@ local function define_tests()
         end)
 
         for _, endpoint in ipairs({
-            { name = "GET /artifact/{id}", module = get_artifact },
-            { name = "GET /artifact/{id}/content", module = get_artifact_content },
+            { name = "GET /artifact/{id}", serve = artifact_access.serve_metadata },
+            { name = "GET /artifact/{id}/content", serve = artifact_access.serve_content },
         }) do
             it(endpoint.name .. " answers a foreign id exactly like a missing one", function()
-                local missing_status, missing_body = call(endpoint.module, uuid.v7(), owner_id)
+                local missing_status, missing_body = call(endpoint.serve, uuid.v7(), owner_id)
                 test.eq(missing_status, 404)
 
                 local cases = {
@@ -118,7 +117,7 @@ local function define_tests()
                     { label = "this user's artifact asked by someone else", id = fixture.owned, user = fixture.other_user },
                 }
                 for _, case in ipairs(cases) do
-                    local status, body = call(endpoint.module, tostring(case.id), tostring(case.user))
+                    local status, body = call(endpoint.serve, tostring(case.id), tostring(case.user))
                     test.eq(status, 404, case.label)
                     test.eq(canonical(body), canonical(missing_body), case.label .. ": same body as a missing id")
                 end
@@ -128,11 +127,11 @@ local function define_tests()
         end
 
         it("still serves the owner", function()
-            local status, body: any = call(get_artifact, tostring(fixture.owned), owner_id)
+            local status, body: any = call(artifact_access.serve_metadata, tostring(fixture.owned), owner_id)
             test.eq(status, 200)
             test.eq(body.uuid, fixture.owned)
 
-            local content_status, content = call(get_artifact_content, tostring(fixture.owned), owner_id)
+            local content_status, content = call(artifact_access.serve_content, tostring(fixture.owned), owner_id)
             test.eq(content_status, 200)
             test.eq(content, "owner text")
         end)

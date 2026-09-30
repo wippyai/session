@@ -8,6 +8,8 @@ local tx = require("tx")
 local writer = require("writer")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
+local artifact_repo = require("artifact_repo")
+local form_recovery = require("form_recovery")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
@@ -835,7 +837,7 @@ local function define_tests()
 
         describe("dates, anchors and form answers", function()
             local owned = {}
-            local PENDING_META = '{"session_form":{"artifact_id":"%s","pending":true,"submission_id":"r"}}'
+            local PENDING_META = '{"session_form":{"artifact_id":"%s","pending":true}}'
             -- A typed message whose client data (file_uuids) carries a
             -- session_form object: it must never pass for a server answer.
             local LOOKALIKE_META = '{"file_uuids":{"session_form":{"artifact_id":"x","pending":true}}}'
@@ -1003,6 +1005,43 @@ local function define_tests()
                 test.is_false(before, "accepted 30 minutes before the form was created")
             end)
 
+            it("reads a form's creation date in any stored date layout when comparing acceptance times", function()
+                -- 10:00Z as a timestamp column can read back. As text, every
+                -- RFC3339 value sorts after it ("T" > " ").
+                local created = "2001-03-01 10:00:00 +0000 UTC"
+                local earlier_session = new_session("Accepted earlier, timestamp layout")
+                insert_artifact(earlier_session, uuid.v7(),
+                    '{"session_form":{"submission":{"submitted_at":"2001-03-01T11:30:00.000000000+02:00"}}}')
+                local before, before_err = message_repo.has_user_input_after(earlier_session, created, nil)
+                test.is_nil(before_err)
+                test.is_false(before, "accepted at 09:30Z, before the form was created")
+
+                local later_session = new_session("Accepted later, timestamp layout")
+                insert_artifact(later_session, uuid.v7(),
+                    '{"session_form":{"submission":{"submitted_at":"2001-03-01T10:30:00.000000000Z"}}}')
+                local after, after_err = message_repo.has_user_input_after(later_session, created, nil)
+                test.is_nil(after_err)
+                test.is_true(after, "accepted at 10:30Z, after the form was created")
+            end)
+
+            it("parses every layout a stored message date comes back in", function()
+                local function utc_text(value)
+                    local parsed = message_date.parse_stored(value)
+                    return parsed and parsed:utc():format(time.RFC3339NANO) or nil
+                end
+                test.eq(utc_text("2001-03-01T12:00:00.000000000+02:00"), "2001-03-01T10:00:00Z")
+                test.eq(utc_text("2001-03-01T10:00:05.15Z"), "2001-03-01T10:00:05.15Z", "a trimmed fraction")
+                test.eq(utc_text("2001-03-01 12:00:00.5+02:00"), "2001-03-01T10:00:00.5Z")
+                test.eq(utc_text("2001-03-01 10:00:00.123 +0000 UTC"), "2001-03-01T10:00:00.123Z")
+                -- Without a zone the wall clock is kept, in the host's zone.
+                local no_zone: any = message_date.parse_stored("2001-03-01 10:00:00")
+                test.not_nil(no_zone)
+                test.eq(no_zone:format("2006-01-02 15:04:05"), "2001-03-01 10:00:00")
+                test.is_nil(message_date.parse_stored("yesterday"))
+                test.is_nil(message_date.parse_stored(""))
+                test.is_nil(message_date.parse_stored(1))
+            end)
+
             it("does not let a lookalike row hide a real pending answer", function()
                 local session_id = new_session("Pending behind a lookalike")
                 insert_row(session_id, uuid.v7(), consts.MSG_TYPE.USER, "2001-01-01T00:00:01.000000000Z", LOOKALIKE_META)
@@ -1043,6 +1082,8 @@ local function define_tests()
                 test.eq((rest :: any)[2], third)
             end)
 
+            -- Recovery with the forms step the session process passes
+            -- (form_recovery.settle_call).
             describe("recover_pending and committed forms", function()
                 local function pending_form_call(session_id, artifact_id)
                     local session_writer: any = writer.new(session_id)
@@ -1068,7 +1109,7 @@ local function define_tests()
                     local message_id, call_id = pending_form_call(session_id, artifact_id)
                     insert_artifact(session_id, artifact_id, form_meta(call_id, message_id))
 
-                    local recovered, err = message_repo.recover_pending(session_id)
+                    local recovered, err = message_repo.recover_pending(session_id, nil, form_recovery.settle_call)
                     test.is_nil(err)
                     test.eq(recovered, 1)
                     local row: any = message_repo.get(message_id)
@@ -1082,7 +1123,7 @@ local function define_tests()
                     local message_id = pending_form_call(session_id, artifact_id)
                     insert_artifact(session_id, artifact_id, form_meta("call-other", uuid.v7()))
 
-                    local recovered, err = message_repo.recover_pending(session_id)
+                    local recovered, err = message_repo.recover_pending(session_id, nil, form_recovery.settle_call)
                     test.is_nil(err)
                     test.eq(recovered, 1)
                     local row: any = message_repo.get(message_id)
@@ -1096,10 +1137,10 @@ local function define_tests()
                     local message_id, call_id = pending_form_call(session_id, artifact_id)
                     insert_artifact(session_id, artifact_id, form_meta(call_id, message_id))
 
-                    local original = message_repo._form_artifact
-                    message_repo._form_artifact = function() return nil, "database unavailable" end
-                    local recovered, err = message_repo.recover_pending(session_id)
-                    message_repo._form_artifact = original
+                    local original = artifact_repo.find
+                    artifact_repo.find = function() return nil, "database unavailable" end
+                    local recovered, err = message_repo.recover_pending(session_id, nil, form_recovery.settle_call)
+                    artifact_repo.find = original
 
                     test.is_nil(recovered)
                     test.contains(tostring(err), "database unavailable")
