@@ -3,6 +3,7 @@ local consts = require("consts")
 local contract = require("contract")
 local message_repo = require("message_repo")
 local form_index = require("form_index")
+local answer_text = require("answer_text")
 local input_metadata = require("input_metadata")
 
 type BuildOptions = {
@@ -74,17 +75,6 @@ local function resolve_file(file_uuid: string, options: table)
     end
 
     return nil
-end
-
--- A <wippy-form-answers> element is the server's record of a form answer, and
--- only the answer rows (metadata.session_form) carry one. The same tag typed
--- or pasted by a user is escaped, so the model reads it as the user's text and
--- not as an answer record.
-local FORM_ANSWERS_TAG = "<(/?)([Ww][Ii][Pp][Pp][Yy]%-[Ff][Oo][Rr][Mm]%-[Aa][Nn][Ss][Ww][Ee][Rr][Ss])"
-
-function prompt_builder.neutralize_form_answers(text: any): any
-    if type(text) ~= "string" then return text end
-    return (string.gsub(text, FORM_ANSWERS_TAG, "&lt;%1%2"))
 end
 
 function prompt_builder.build(messages, contexts, session_meta, options)
@@ -171,8 +161,9 @@ function prompt_builder.build(messages, contexts, session_meta, options)
             -- (moving it to the end of the history), so it stays out until then.
         elseif msg.type == consts.MSG_TYPE.USER then
             local text = msg.data
-            if type(metadata.session_form) ~= "table" then
-                text = prompt_builder.neutralize_form_answers(text)
+            if not message_repo.is_form_answer(msg) then
+                -- A <wippy-form-answers> tag the user typed is not a record.
+                text = answer_text.neutralize(text)
             end
             builder:add_user(text :: string)
 

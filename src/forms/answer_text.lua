@@ -72,7 +72,24 @@ local function plain(text: any): string
     return escaped
 end
 
-local ATTRIBUTE_SAFE = { ["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }
+-- The element's tag in any letter case, as a Lua pattern built from TAG.
+-- Captures the "/" of a closing tag and the name as written.
+local function any_case(letter: string): string
+    return "[" .. string.upper(letter) .. string.lower(letter) .. "]"
+end
+local TAG_NAME_PATTERN = (string.gsub((string.gsub(answer_text.TAG, "%-", "%%-")), "%a", any_case))
+local TAG_PATTERN = "<(/?)(" .. TAG_NAME_PATTERN .. ")"
+
+-- Only answer rows carry a real answer record. The same tag typed or pasted
+-- by a user, opening or closing and in any letter case, has its "<" written
+-- as "&lt;", so the model (and the checkpoint summary) reads it as the
+-- user's text and not as an answer record.
+function answer_text.neutralize(text: any): any
+    if type(text) ~= "string" then return text end
+    return (string.gsub(text, TAG_PATTERN, "&lt;%1%2"))
+end
+
+local ATTRIBUTE_SAFE ={ ["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }
 
 -- Only valid on encoded JSON: these characters occur there only inside
 -- strings, where the \u escapes decode to the same text.

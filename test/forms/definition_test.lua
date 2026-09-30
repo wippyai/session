@@ -519,6 +519,16 @@ local function define_tests()
             test.eq(definition.encode_answers(def, answers), '{"single":"Courier","many":["b"],"must":["a"]}')
         end)
 
+        it("neutralizes a typed answer tag in any letter case and leaves other text alone", function()
+            test.eq(answer_text.neutralize("a <wippy-form-answers record='x'> </WIPPY-Form-Answers> b"),
+                "a &lt;wippy-form-answers record='x'> &lt;/WIPPY-Form-Answers> b")
+            test.eq(answer_text.neutralize("<wippy-form record='x'> <wippy-form-answer>"),
+                "<wippy-form record='x'> <wippy-form-answer>")
+            test.eq(answer_text.neutralize("<wippyXformXanswers>"), "<wippyXformXanswers>",
+                "the dashes are literal")
+            test.is_nil(answer_text.neutralize(nil))
+        end)
+
         it("encodes equal answers equally, whatever order their tables were built in", function()
             local expected = '{"single":{"value":"Courier","note":"Ring twice"},"other":{"other":"Drone"},'
                 .. '"many":[{"value":"a","note":"Gift wrap it"},"c",{"other":"x"}],"must":["b"]}'

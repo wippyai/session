@@ -490,4 +490,5 @@ entries:
       prompt: wippy.llm:prompt
       message_repo: wippy.session.persist:message_repo
       form_index: wippy.session.forms:form_index
+      answer_text: wippy.session.forms:answer_text
       input_metadata: wippy.session:input_metadata
