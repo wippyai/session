@@ -23,16 +23,16 @@ function O(...t) {
   const e = /* @__PURE__ */ new Set();
   for (const s of t)
     if (s)
-      for (const [i, n] of Object.entries(s)) {
-        if ((i === "@light" || i === "@dark") && n && typeof n == "object") {
-          for (const [l, c] of Object.entries(n)) {
+      for (const [i, r] of Object.entries(s)) {
+        if ((i === "@light" || i === "@dark") && r && typeof r == "object") {
+          for (const [l, c] of Object.entries(r)) {
             const a = typeof c == "string" ? m(l) : null;
             a && e.add(a);
           }
           continue;
         }
-        const r = typeof n == "string" ? m(i) : null;
-        r && e.add(r);
+        const n = typeof r == "string" ? m(i) : null;
+        n && e.add(n);
       }
   return [...e].sort();
 }
@@ -50,22 +50,22 @@ function N(t, e) {
   s && y(t, s, "@wippy-fe/css-variables-bridge");
 }
 function H(t, e) {
-  const i = (e ?? T).map(async (n) => {
-    const r = w[n];
-    if (!r)
-      return console.warn(`[wippy-fe/webcomponent-core] hostCss key "${n}" is undefined — skipping. Remove it from hostCssKeys if the CSS was removed.`), null;
+  const i = (e ?? T).map(async (r) => {
+    const n = w[r];
+    if (!n)
+      return console.warn(`[wippy-fe/webcomponent-core] hostCss key "${r}" is undefined — skipping. Remove it from hostCssKeys if the CSS was removed.`), null;
     try {
-      return await V(r);
+      return await V(n);
     } catch (l) {
-      return console.warn(`[wippy-fe/webcomponent-core] Failed to load hostCss "${n}" (${r}):`, l), null;
+      return console.warn(`[wippy-fe/webcomponent-core] Failed to load hostCss "${r}" (${n}):`, l), null;
     }
   });
-  return Promise.all(i).then((n) => {
-    for (const r of n) {
-      if (!r)
+  return Promise.all(i).then((r) => {
+    for (const n of r) {
+      if (!n)
         continue;
       const l = document.createElement("style");
-      l.textContent = r, l.setAttribute("role", "@wippy-fe/host-css"), t.appendChild(l);
+      l.textContent = n, l.setAttribute("role", "@wippy-fe/host-css"), t.appendChild(l);
     }
   });
 }
@@ -75,8 +75,8 @@ function j(t, e) {
 }
 function y(t, e, s) {
   if (typeof CSSStyleSheet < "u" && "replaceSync" in CSSStyleSheet.prototype) {
-    const n = new CSSStyleSheet();
-    n.replaceSync(e), t.adoptedStyleSheets = [...t.adoptedStyleSheets, n];
+    const r = new CSSStyleSheet();
+    r.replaceSync(e), t.adoptedStyleSheets = [...t.adoptedStyleSheets, r];
     return;
   }
   const i = document.createElement("style");
@@ -119,13 +119,13 @@ function R(t, e, s) {
 }
 function d(t, e) {
   const s = {}, i = [];
-  for (const [n, r] of Object.entries(e.properties)) {
-    const l = t.getAttribute(n), c = $(n);
+  for (const [r, n] of Object.entries(e.properties)) {
+    const l = t.getAttribute(r), c = $(r);
     if (l === null) {
-      r.default !== void 0 && (s[c] = r.default);
+      n.default !== void 0 && (s[c] = n.default);
       continue;
     }
-    const a = R(n, l, r);
+    const a = R(r, l, n);
     a.error ? i.push(a.error) : s[c] = a.value;
   }
   return { props: s, errors: i };
@@ -141,26 +141,26 @@ var F = class {
       get errors() {
         return s._errors;
       },
-      subscribe(i, n) {
-        return s._subscribeProps(i, n);
+      subscribe(i, r) {
+        return s._subscribeProps(i, r);
       }
     }, this.events = {
-      emit(i, n) {
-        s._disposed || s._emitToDom(i, n);
+      emit(i, r) {
+        s._disposed || s._emitToDom(i, r);
       }
     }, this.content = t.hasContent ? {
       get value() {
         return s._content;
       },
-      subscribe(i, n) {
-        return s._subscribeContent(i, n);
+      subscribe(i, r) {
+        return s._subscribeContent(i, r);
       }
     } : null, this.hostVisibility = {
       get value() {
         return s._hostVisibility;
       },
-      subscribe(i, n) {
-        return s._subscribeHostVisibility(i, n);
+      subscribe(i, r) {
+        return s._subscribeHostVisibility(i, r);
       }
     };
   }
@@ -307,12 +307,12 @@ var F = class {
       if (this._lastProps !== null)
         s = this._lastProps, i = this._lastErrors;
       else {
-        const r = d(this, t.propsSchema);
-        t.validateProps && r.errors.push(...t.validateProps(r.props)), s = r.props, i = r.errors, this._lastProps = s, this._lastErrors = i;
+        const n = d(this, t.propsSchema);
+        t.validateProps && n.errors.push(...t.validateProps(n.props)), s = n.props, i = n.errors, this._lastProps = s, this._lastErrors = i;
       }
-      const n = e ? this._lastContent ?? this._extractContent(t.contentTemplate) : null;
-      e && this._lastContent === null && (this._lastContent = n), this._reactive = new F(
-        { props: s, errors: i, content: n, hasContent: e, hostVisibility: this._hostVisible },
+      const r = e ? this._lastContent ?? this._extractContent(t.contentTemplate) : null;
+      e && this._lastContent === null && (this._lastContent = r), this._reactive = new F(
+        { props: s, errors: i, content: r, hasContent: e, hostVisibility: this._hostVisible },
         this.emitEvent.bind(this)
       );
     }
@@ -348,10 +348,10 @@ var F = class {
         a.length > 0 && i.classList.add(...a), s.appendChild(i), this._container = i, C(v);
       }
       this._applyTheme(), this._themeUnsub || (this._themeUnsub = g("@theme", (a) => this._applyTheme(a)));
-      const { props: n, errors: r } = d(this, t.propsSchema);
-      t.validateProps && r.push(...t.validateProps(n));
-      const l = n;
-      this._lastProps = l, this._lastErrors = r;
+      const { props: r, errors: n } = d(this, t.propsSchema);
+      t.validateProps && n.push(...t.validateProps(r));
+      const l = r;
+      this._lastProps = l, this._lastErrors = n;
       let c = null;
       t.contentTemplate && (c = this._extractContent(t.contentTemplate), this._lastContent = c, this._contentObserver = new MutationObserver(() => {
         const a = this._extractContent(t.contentTemplate);
@@ -360,7 +360,7 @@ var F = class {
         childList: !0,
         characterData: !0,
         subtree: !0
-      })), this.onMount(s, i, l, r, c, e), this._internals.states.delete("loading"), this._internals.states.add("ready"), e || (this._initialized = !0), this.onReady(), this.emitEvent("load");
+      })), this.onMount(s, i, l, n, c, e), this._internals.states.delete("loading"), this._internals.states.add("ready"), e || (this._initialized = !0), this.onReady(), this.emitEvent("load");
     } catch (t) {
       this.onError(t), this._internals.states.delete("loading"), this._internals.states.add("error"), this.emitEvent("error", {
         message: t instanceof Error ? t.message : String(t),
@@ -394,10 +394,10 @@ var F = class {
       this._hostVisible = a, this.isConnected && this._initialized && (this._reactive?.notifyHostVisibility(a, c), this.onHostVisibilityChanged(a, c));
       return;
     }
-    const i = this.constructor.wippyConfig, { props: n, errors: r } = d(this, i.propsSchema);
-    i.validateProps && r.push(...i.validateProps(n));
-    const l = n;
-    this._lastProps = l, this._lastErrors = r, this._reactive?.notifyProps(l, r), this.onPropsChanged(l, r);
+    const i = this.constructor.wippyConfig, { props: r, errors: n } = d(this, i.propsSchema);
+    i.validateProps && n.push(...i.validateProps(r));
+    const l = r;
+    this._lastProps = l, this._lastErrors = n, this._reactive?.notifyProps(l, n), this.onPropsChanged(l, n);
   }
   // ── Hooks ──────────────────────────────────────────────────
   /** Called right after shadow DOM is attached, before CSS or container. */
@@ -432,11 +432,8 @@ var F = class {
 };
 const z = { props: { type: "object", properties: { record: { type: "string", default: "", description: "The self-contained JSON answer record (form_id, form_version, title, late, answers) as a single-line string, written into this attribute by the Session server immediately after a form is answered. The server escapes `'`, `<`, `>`, and `&` inside the JSON so the attribute value round-trips through HTML parsing intact; getAttribute('record') returns it already unescaped. Agents never write this attribute themselves." } } } }, B = {
   wippy: z
-}, D = `:host {
-  display: none;
-}
-`;
-function M(t) {
+};
+function D(t) {
   const e = t?.trim();
   if (!e)
     return null;
@@ -448,13 +445,14 @@ function M(t) {
   }
   return s === null || typeof s != "object" || Array.isArray(s) ? null : s;
 }
+const M = ":host{display:none}";
 class J extends K {
   static get wippyConfig() {
     return {
       propsSchema: B.wippy.props,
       // Nothing is ever visible, so no platform CSS is needed at all.
       hostCssKeys: [],
-      inlineCss: D,
+      inlineCss: M,
       // This element must never receive host/app customCSS either — it has
       // nothing to style, and skipping the injection keeps it that way
       // even if a facade or page customCSS rule happened to target the tag.
@@ -471,11 +469,11 @@ class J extends K {
    * Deliberately NOT named `record`: the Host's chat compiles message HTML
    * as a Vue template, and Vue assigns a prop on a custom element as a DOM
    * property whenever the element has one by that name (`key in el`). A
-   * `record` getter swallowed the value, so the attribute was never set
-   * (seen live 2026-09-30). The element must not own a `record` property.
+   * `record` getter swallows the value, so the attribute is never set. The
+   * element must not own a `record` property.
    */
   get answerRecord() {
-    return M(this.getAttribute("record"));
+    return D(this.getAttribute("record"));
   }
   onMount() {
   }
