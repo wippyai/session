@@ -498,6 +498,7 @@ describe('WippyForm — answered elsewhere', () => {
     expect(wrapper.find('.w-form__card--answered').exists()).toBe(true)
     const notice = wrapper.find('[role="status"]')
     expect(notice.text()).toContain('already answered elsewhere')
+    expect(notice.text()).toContain('your draft was not saved')
     expect(wrapper.text()).toContain('Option B')
   })
 
@@ -560,8 +561,9 @@ describe('WippyForm — background swap to answered explains the drop, gated by 
     await wrapper.vm.$nextTick()
 
     expect(submitFn).not.toHaveBeenCalled()
-    // A passive copy just switches to the read-only summary — claiming
-    // "your answer was not sent" would be false; nothing was ever entered.
+    // A passive copy just switches to the read-only summary — the notice
+    // (which says a draft was not saved) would be false here; nothing was
+    // ever entered, so there was no draft.
     expect(wrapper.find('[role="status"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Option B')
   })
@@ -595,7 +597,11 @@ describe('WippyForm — background swap to answered explains the drop, gated by 
     expect(submitFn).not.toHaveBeenCalled()
     const notice = wrapper.find('[role="status"]')
     expect(notice.exists()).toBe(true)
+    // Says what happened (answered elsewhere, draft not saved) — never "was
+    // not sent", which is false here: nothing was ever sent to begin with.
     expect(notice.text()).toContain('already answered elsewhere')
+    expect(notice.text()).toContain('your draft was not saved')
+    expect(notice.text()).not.toContain('was not sent')
     expect(wrapper.text()).toContain('Option B')
   })
 

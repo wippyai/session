@@ -18,7 +18,14 @@ import QuestionCardActive from './question-card/question-card-active.vue'
 import QuestionCardSummary from './question-card/question-card-summary.vue'
 
 const RELOAD_FAILED_NOTICE = 'Could not refresh this form. Showing what you last saw.'
-const ANSWERED_ELSEWHERE_NOTICE = 'This form was already answered elsewhere, so your answer was not sent. The saved answer is shown below.'
+// Covers two different histories with one notice: our own submit attempt
+// losing a race (rejected, e.g. a 409 already_submitted) and a background
+// reload finding unsent local content that was never submitted at all.
+// "was not sent" (the old wording) reads as false for the second case —
+// nothing was ever sent there. "draft" is accurate either way: a rejected
+// attempt and an untouched local pick are both still just a draft once
+// another answer has already been saved.
+const ANSWERED_ELSEWHERE_NOTICE = 'This form was already answered elsewhere, so your draft was not saved. The saved answer is shown below.'
 /** The only `form_version` this component knows how to render interactively (see `unsupportedVersion` below). */
 const SUPPORTED_FORM_VERSION = 1
 
@@ -57,8 +64,8 @@ let suppressAnsweredElsewhereWatch = false
 // as losing our own submit race: the same "answered elsewhere" notice.
 //
 // A PASSIVE instance — this copy was never touched, nothing chosen/typed —
-// has nothing to lose, so the notice would be false: it reads as "your
-// answer was not sent" when no answer was ever attempted. Gated on
+// has nothing to lose, so the notice would be false: it would claim a
+// draft was not saved when there was no draft at all. Gated on
 // `hasUnsentInput()` (read synchronously here, before the
 // active view unmounts on the next render — this watcher runs pre-flush).
 // A form flavor with no exposed `hasUnsentInput` (should not happen; both
