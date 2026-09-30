@@ -32,13 +32,12 @@ entries:
   - name: artifact_access
     kind: library.lua
     meta:
-      comment: Owner check of the artifact endpoints; a foreign or missing artifact is one generic 404
+      comment: Refusal of the artifact endpoints; a foreign or missing artifact is one generic 404
     source: file://artifact_access.lua
     modules:
       - http
     imports:
       artifact_repo: wippy.session.persist:artifact_repo
-      session_repo: wippy.session.persist:session_repo
 
   # wippy.session.api:get_artifact_module
   # Whole-module import of the same source as get_artifact below, for tests:
@@ -55,6 +54,7 @@ entries:
     imports:
       artifact_access: wippy.session.api:artifact_access
       artifact_projection: wippy.session.persist:artifact_projection
+      artifact_repo: wippy.session.persist:artifact_repo
 
   # wippy.session.api:get_artifact
   - name: get_artifact
@@ -69,6 +69,7 @@ entries:
     imports:
       artifact_access: wippy.session.api:artifact_access
       artifact_projection: wippy.session.persist:artifact_projection
+      artifact_repo: wippy.session.persist:artifact_repo
     method: handler
     pool:
       size: 4

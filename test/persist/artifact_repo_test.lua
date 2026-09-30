@@ -401,6 +401,53 @@ local function define_tests()
             db:release()
         end)
 
+        describe("get_owned", function()
+            it("gives the owner the artifact and reads every other case as NOT_FOUND", function()
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local other_user = "other-" .. uuid.v7()
+                local other_context, other_session = uuid.v7(), uuid.v7()
+                context_repo.create(other_context, "primary", "{}")
+                session_repo.create(other_session, other_user, other_context, "Other", "test")
+                local sessionless = uuid.v7()
+                local foreign = uuid.v7()
+                local in_foreign_session = uuid.v7()
+                insert_artifact(db, sessionless, nil, test_data.user_id, "static", "No session", "x", nil)
+                insert_artifact(db, foreign, other_session, other_user, "static", "Foreign", "x", nil)
+                -- Owned by this user, but in another user's session.
+                insert_artifact(db, in_foreign_session, other_session, test_data.user_id, "static", "Moved", "x", nil)
+                db:release()
+
+                local owned: any, owned_err = artifact_repo.get_owned(test_data.user_id, test_data.artifact_id2)
+                test.is_nil(owned_err)
+                test.eq(owned.artifact_id, test_data.artifact_id2)
+                test.eq(owned.meta.content_type, "text/markdown", "meta decoded as by get")
+                local alone: any = artifact_repo.get_owned(test_data.user_id, sessionless)
+                test.eq(alone.artifact_id, sessionless)
+
+                for _, case in ipairs({
+                    { user = test_data.user_id, id = uuid.v7(), what = "missing" },
+                    { user = test_data.user_id, id = foreign, what = "another user's artifact" },
+                    { user = test_data.user_id, id = in_foreign_session, what = "another user's session" },
+                    { user = other_user, id = test_data.artifact_id2, what = "read by another user" },
+                }) do
+                    local artifact, err = artifact_repo.get_owned(case.user, case.id)
+                    test.is_nil(artifact, case.what)
+                    test.is_true(artifact_repo.is_not_found(err), case.what)
+                end
+                test.is_false(artifact_repo.is_not_found("Failed to get artifact: database is locked"))
+                test.is_false(artifact_repo.is_not_found(nil))
+
+                local cleanup, cleanup_err = sql.get(consts.get_db_resource())
+                if not cleanup then error(cleanup_err) end
+                cleanup:execute("DELETE FROM artifacts WHERE artifact_id IN ($1, $2, $3)",
+                    { sessionless, foreign, in_foreign_session })
+                cleanup:release()
+                session_repo.delete(other_session)
+                context_repo.delete(other_context)
+            end)
+        end)
+
         describe("update: meta_patch, meta_remove, expected_version, content_version", function()
             local function fresh_artifact(kind: string?, meta: {[string]: any}?)
                 local id = uuid.v7()

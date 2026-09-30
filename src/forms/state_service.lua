@@ -81,34 +81,24 @@ end
 -- Loading and authorization
 ---------------------------------------------------------------------------
 
-local function is_not_found(err)
-    return string.find(string.lower(tostring(err)), "not found", 1, true) ~= nil
-end
-
 -- Loads the artifact and its form for `user_id`. Returns (artifact, form) or
 -- (nil, nil, status, body). A missing artifact, another user's artifact and
--- an artifact whose session is gone or not the user's are all 404, so the
--- endpoint does not reveal that a foreign artifact exists.
+-- an artifact whose session is gone or not the user's are all 404
+-- (artifact_repo.get_owned), so the endpoint does not reveal that a foreign
+-- artifact exists. A form always belongs to a session.
 local function load_form(user_id, artifact_id)
     if type(artifact_id) ~= "string" or artifact_id == "" then
         return nil, nil, failure(400, "invalid_request", "Missing artifact ID in path")
     end
-    local artifact, err = artifact_repo.get(artifact_id)
+    local artifact, err = artifact_repo.get_owned(user_id, artifact_id)
     if not artifact then
-        if is_not_found(err) then
+        if artifact_repo.is_not_found(err) then
             return nil, nil, failure(404, "not_found", "Form not found")
         end
         return nil, nil, failure(500, "internal", "Failed to read the form")
     end
-    if artifact.user_id ~= user_id or type(artifact.session_id) ~= "string" or artifact.session_id == "" then
+    if type(artifact.session_id) ~= "string" or artifact.session_id == "" then
         return nil, nil, failure(404, "not_found", "Form not found")
-    end
-    local session, session_err = session_repo.get(artifact.session_id, user_id)
-    if not session then
-        if is_not_found(session_err) then
-            return nil, nil, failure(404, "not_found", "Form not found")
-        end
-        return nil, nil, failure(500, "internal", "Failed to read the form")
     end
     local form, form_err = form_artifact.parse(artifact)
     if not form then
@@ -150,7 +140,8 @@ local function delivery_of(submission, session_id)
     if type(submission) ~= "table" then return nil, nil end
     local row, err = message_repo.get(submission.message_id)
     if not row then
-        if is_not_found(err) then return "interrupted", nil end
+        -- message_repo.get reports a missing row with exactly this text.
+        if err == "Message not found" then return "interrupted", nil end
         return nil, tostring(err)
     end
     if message_repo.is_pending_answer(row) then return "pending", nil end
@@ -372,15 +363,15 @@ function state_service.submit(user_id, artifact_id, raw_body)
         -- The session row's write lock comes first, so `late` is decided
         -- against every input written before this answer, and any input
         -- written after waits for this commit and sorts after the answer.
+        -- A session removed meanwhile fails the lock; the owner check after
+        -- the transaction then answers 404.
         local _, lock_err = message_date.lock_session(dbtx, session_id)
-        if lock_err then
-            if is_not_found(lock_err) then return nil, { status = 404 } end
-            return nil, tostring(lock_err)
-        end
+        if lock_err then return nil, tostring(lock_err) end
 
-        local current, current_err = artifact_repo.get(artifact.artifact_id, { tx = dbtx })
+        -- Ownership and revision are read again under the lock.
+        local current, current_err = artifact_repo.get_owned(user_id, artifact.artifact_id, { tx = dbtx })
         if not current then
-            if is_not_found(current_err) then return nil, { status = 404 } end
+            if artifact_repo.is_not_found(current_err) then return nil, { status = 404 } end
             return nil, tostring(current_err)
         end
         local current_form, parse_err = form_artifact.parse(current)
@@ -457,7 +448,8 @@ function state_service.submit(user_id, artifact_id, raw_body)
         -- A concurrent submission may have won while this transaction ran:
         -- SQLite reports the loser as busy, PostgreSQL as a revision
         -- conflict. Read the committed state and classify against it.
-        local winner = artifact_repo.get(artifact.artifact_id)
+        local winner, winner_err = artifact_repo.get_owned(user_id, artifact.artifact_id)
+        if artifact_repo.is_not_found(winner_err) then return failure(404, "not_found", "Form not found") end
         local winner_form = winner and form_artifact.parse(winner) or nil
         local won = winner_form and form_meta.submission(winner_form.meta) or nil
         if won then

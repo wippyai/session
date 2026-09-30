@@ -21,7 +21,7 @@ local function serve(req: any, res: any, user_id: string)
 
     -- A foreign artifact answers exactly like a missing one (artifact_access):
     -- 404 with a generic body, not 403, which confirmed that the id exists.
-    local artifact, refused = artifact_access.find_owned(user_id, artifact_id :: string)
+    local artifact, refused = artifact_repo.get_owned(user_id, artifact_id :: string)
     if not artifact then
         artifact_access.respond_refused(res, refused)
         return

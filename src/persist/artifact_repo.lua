@@ -32,7 +32,7 @@ end
 
 -- Runs fn(conn) on opts.tx when the caller supplies a transaction (no
 -- acquire/release), otherwise on a pooled connection released afterwards.
-local function with_connection(opts, fn)
+local function with_connection(opts: any, fn: (any) -> (any, any)): (any, any)
     if opts and opts.tx then
         return fn(opts.tx)
     end
@@ -135,38 +135,22 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
     }
 end
 
--- Get an artifact by ID.
---
--- opts.tx (optional): read on this caller-supplied transaction.
-function artifact_repo.get(artifact_id, opts)
-    if not artifact_id or artifact_id == "" then
-        return nil, "Artifact ID is required"
-    end
-
-    -- Build the SELECT query
-    local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "content", "meta", "created_at", "updated_at", "content_version")
+-- One artifact row on `conn` with its meta decoded; nil without an error
+-- when there is none.
+local function read_artifact(conn: any, artifact_id: string): (any, string?)
+    local rows, query_err = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "content", "meta", "created_at", "updated_at", "content_version")
         :from("artifacts")
         :where("artifact_id = ?", artifact_id)
         :limit(1)
-
-    -- Execute the query
-    local artifacts: any, err = with_connection(opts, function(conn)
-        local rows, query_err = query:run_with(conn):query()
-        if query_err then
-            return nil, "Failed to get artifact: " .. query_err
-        end
-        return rows
-    end)
-
-    if err then
-        return nil, err
+        :run_with(conn):query()
+    if query_err then
+        return nil, "Failed to get artifact: " .. query_err
+    end
+    if #rows == 0 then
+        return nil, nil
     end
 
-    if #artifacts == 0 then
-        return nil, "Artifact not found"
-    end
-
-    local artifact = artifacts[1]
+    local artifact = rows[1]
 
     -- Parse meta JSON if it exists
     if artifact.meta and artifact.meta ~= "" then
@@ -177,6 +161,74 @@ function artifact_repo.get(artifact_id, opts)
     end
 
     return artifact
+end
+
+local function not_found(artifact_id)
+    return errors.new({
+        kind = errors.NOT_FOUND,
+        message = "Artifact not found",
+        details = { artifact_id = artifact_id },
+    })
+end
+
+-- Get an artifact by ID.
+--
+-- opts.tx (optional): read on this caller-supplied transaction.
+function artifact_repo.get(artifact_id, opts)
+    if not artifact_id or artifact_id == "" then
+        return nil, "Artifact ID is required"
+    end
+
+    local artifact: any, err = with_connection(opts, function(conn)
+        return read_artifact(conn, artifact_id)
+    end)
+    if err then
+        return nil, err
+    end
+    if not artifact then
+        return nil, "Artifact not found"
+    end
+    return artifact
+end
+
+-- The artifact when `user_id` owns it: the artifact is the user's, and so is
+-- its session when it has one. A missing artifact, another user's artifact
+-- and an artifact whose session is gone or belongs to someone else are all
+-- one NOT_FOUND error (artifact_repo.is_not_found), so a caller that answers
+-- them alike tells nobody that a foreign id exists. Any other error is a
+-- storage failure.
+--
+-- opts.tx (optional): read on this caller-supplied transaction.
+function artifact_repo.get_owned(user_id, artifact_id, opts)
+    if not artifact_id or artifact_id == "" then
+        return nil, "Artifact ID is required"
+    end
+
+    return with_connection(opts, function(conn)
+        local artifact, err = read_artifact(conn, artifact_id)
+        if err then return nil, err end
+        if not artifact or artifact.user_id ~= user_id then return nil, not_found(artifact_id) end
+        if type(artifact.session_id) == "string" and artifact.session_id ~= "" then
+            local sessions, session_err = sql.builder.select("session_id")
+                :from("sessions")
+                :where(sql.builder.and_({
+                    sql.builder.expr("session_id = ?", artifact.session_id),
+                    sql.builder.expr("user_id = ?", user_id),
+                }))
+                :limit(1)
+                :run_with(conn):query()
+            if session_err then return nil, "Failed to check the artifact's session: " .. session_err end
+            if #sessions == 0 then return nil, not_found(artifact_id) end
+        end
+        return artifact
+    end)
+end
+
+-- Whether `err` is the NOT_FOUND error get_owned and update return.
+function artifact_repo.is_not_found(err: any): boolean
+    if err == nil or type(err) == "string" then return false end
+    local ok, kind = pcall(function() return err:kind() end)
+    return ok and kind == errors.NOT_FOUND
 end
 
 -- Conditional writes a meta patch makes before it reports a conflict. Each
@@ -200,11 +252,7 @@ local function read_meta(conn, artifact_id)
         return nil, nil, "Failed to read current meta: " .. err
     end
     if #rows == 0 then
-        return nil, nil, errors.new({
-            kind = errors.NOT_FOUND,
-            message = "Artifact not found",
-            details = { artifact_id = artifact_id },
-        })
+        return nil, nil, not_found(artifact_id)
     end
 
     local raw = rows[1].meta
@@ -386,11 +434,7 @@ function artifact_repo.update(artifact_id, updates, opts)
         end
 
         if #state_rows == 0 then
-            return nil, errors.new({
-                kind = errors.NOT_FOUND,
-                message = "Artifact not found",
-                details = { artifact_id = artifact_id },
-            })
+            return nil, not_found(artifact_id)
         end
 
         local state = state_rows[1]

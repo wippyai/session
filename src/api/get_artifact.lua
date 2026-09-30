@@ -1,5 +1,6 @@
 local http = require("http")
 local artifact_access = require("artifact_access")
+local artifact_repo = require("artifact_repo")
 local artifact_projection = require("artifact_projection")
 local security = require("security")
 
@@ -36,7 +37,7 @@ local function serve(req: any, res: any, user_id: string)
     end
 
     -- A foreign artifact answers exactly like a missing one (artifact_access).
-    local artifact, refused = artifact_access.find_owned(user_id, artifact_id :: string)
+    local artifact, refused = artifact_repo.get_owned(user_id, artifact_id :: string)
     if not artifact then
         artifact_access.respond_refused(res, refused)
         return
