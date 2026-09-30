@@ -1,6 +1,5 @@
 local sql = require("sql")
 local json = require("json")
-local time = require("time")
 local consts = require("consts")
 local tx = require("tx")
 local message_date = require("message_date")
@@ -1079,18 +1078,12 @@ function message_repo.admit_pending_answer(session_id, message_id)
     return result
 end
 
-local function parse_instant(value)
-    if type(value) ~= "string" then return nil end
-    local parsed, parse_err = time.parse(time.RFC3339NANO, value)
-    if parse_err then return nil end
-    return parsed
-end
-
 -- Whether `value` (an acceptance time) is later than `after` (a message
--- date). Both come from the clock, possibly with different offsets, so they
--- are compared as instants; as text only when one does not parse.
+-- date). Both come from the clock, possibly with different offsets and in
+-- any layout a stored date comes back in, so they are compared as instants;
+-- as text only when one does not parse.
 local function accepted_after(value, after)
-    local value_at, after_at = parse_instant(value), parse_instant(after)
+    local value_at, after_at = message_date.parse_stored(value), message_date.parse_stored(after)
     if value_at and after_at then return value_at:after(after_at) end
     return value > after
 end

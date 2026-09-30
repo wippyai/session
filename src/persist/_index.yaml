@@ -95,7 +95,6 @@ entries:
     modules:
       - sql
       - json
-      - time
     imports:
       consts: wippy.session:consts
       tx: wippy.session.persist:tx
