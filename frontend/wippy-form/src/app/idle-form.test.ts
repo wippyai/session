@@ -32,7 +32,7 @@ const baseState: FormState = {
   delivery: null,
 }
 
-describe('IdleForm — delivery state text (item 7)', () => {
+describe('IdleForm — delivery state text', () => {
   it('shows the pending message', () => {
     const wrapper = mount(IdleForm, { props: { state: { ...baseState, delivery: 'pending' } }, global: { plugins: [PrimeVuePlugin] } })
     expect(wrapper.text()).toContain('Submitted. Waiting for the assistant.')
@@ -67,14 +67,14 @@ describe('IdleForm — delivery state text (item 7)', () => {
   })
 })
 
-describe('IdleForm — required indicator hidden on read-only fields (item 5)', () => {
+describe('IdleForm — required indicator hidden on read-only fields', () => {
   it('does not show "(required)" for a required, already-answered field', () => {
     const wrapper = mount(IdleForm, { props: { state: baseState }, global: { plugins: [PrimeVuePlugin] } })
     expect(wrapper.text()).not.toContain('(required)')
   })
 })
 
-describe('IdleForm — focusStatus (item 8)', () => {
+describe('IdleForm — focusStatus', () => {
   it('exposes a focusable status element that receives focus when asked', async () => {
     const wrapper = mount(IdleForm, {
       props: { state: { ...baseState, submitted_at: '2026-01-01T00:00:00.000Z' } },

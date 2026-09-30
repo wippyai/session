@@ -55,7 +55,7 @@ beforeEach(() => {
   vi.mocked(WippyProxy.on).mockReset().mockReturnValue(() => {})
 })
 
-describe('useFormState — background reload vs first load (item 1)', () => {
+describe('useFormState — background reload vs first load', () => {
   it('only sets status to "loading" for the artifact\'s first load, not a later background reload', async () => {
     const getFn = vi.fn().mockResolvedValue(state())
     mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -134,7 +134,7 @@ describe('useFormState — retry after a failed background refresh', () => {
   })
 })
 
-describe('useFormState — reload coalescing (item 1 / item 2)', () => {
+describe('useFormState — reload coalescing', () => {
   it('coalesces reload calls made while a load is already in flight into a single follow-up load', async () => {
     let resolveFirst: ((s: FormState) => void) | undefined
     const first = new Promise<FormState>((resolve) => { resolveFirst = resolve })
@@ -159,7 +159,7 @@ describe('useFormState — reload coalescing (item 1 / item 2)', () => {
   })
 })
 
-describe('useFormState — visibility restore (item 2)', () => {
+describe('useFormState — visibility restore', () => {
   it('reloads once when the proxy reports the document becoming visible again', async () => {
     const getFn = vi.fn().mockResolvedValue(state())
     mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -182,7 +182,7 @@ describe('useFormState — visibility restore (item 2)', () => {
   })
 })
 
-describe('useFormState — Host reconnect (item 7)', () => {
+describe('useFormState — Host reconnect', () => {
   it('reloads when the proxy reports @reconnect, so the form does not stay stale through a server restart', async () => {
     const getFn = vi.fn().mockResolvedValue(state())
     mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -214,7 +214,7 @@ describe('useFormState — Host reconnect (item 7)', () => {
   })
 })
 
-describe('useFormState — rebind race (item 1)', () => {
+describe('useFormState — rebind race', () => {
   it('drops a GET for the previous artifact that resolves only after the id has already moved on', async () => {
     let resolveA: ((s: FormState) => void) | undefined
     const pendingA = new Promise<FormState>((resolve) => { resolveA = resolve })
@@ -245,7 +245,7 @@ describe('useFormState — rebind race (item 1)', () => {
   })
 })
 
-describe('useFormState — refresh() awaits a coalesced load (item 9)', () => {
+describe('useFormState — refresh() awaits a coalesced load', () => {
   it('resolves with the freshest state, not a stale value, when called while a load is already in flight', async () => {
     let resolveFirst: ((s: FormState) => void) | undefined
     const first = new Promise<FormState>((resolve) => { resolveFirst = resolve })

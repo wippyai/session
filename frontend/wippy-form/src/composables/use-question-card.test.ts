@@ -205,7 +205,7 @@ describe('useQuestionCard — several questions', () => {
   })
 })
 
-describe('useQuestionCard — commits an unsent multi-choice tick on navigating away (item 8)', () => {
+describe('useQuestionCard — commits an unsent multi-choice tick on navigating away', () => {
   it('counts a ticked-but-never-sent answer as answered once the user leaves the question', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     c.activate(twoQDef.fields[0], 0) // Q1 (single) answers and advances to Q2
@@ -231,7 +231,7 @@ describe('useQuestionCard — commits an unsent multi-choice tick on navigating 
   })
 })
 
-describe('useQuestionCard — review focus on a missing required answer (item 4)', () => {
+describe('useQuestionCard — review focus on a missing required answer', () => {
   it('targets the first missing question\'s review row, not the disabled "send-all"', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     c.go(2) // straight to review without answering the required Q1

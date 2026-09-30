@@ -2,11 +2,11 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import QuestionCardAnswerItems from './question-card-answer-items.vue'
 
-// Round B finding (item 3): a multi-line "Own answer" (the Other textarea
-// allows Shift+Enter) shows on one line in the review step and the answered
-// card, even though the stored value keeps the "\n". Both surfaces render
+// A multi-line "Own answer" (the Other textarea allows Shift+Enter) must
+// not collapse onto one line in the review step and the answered card,
+// even though the stored value keeps the "\n". Both surfaces render
 // through this shared component, so the fix belongs here.
-describe('QuestionCardAnswerItems — an own (Other) answer keeps its line breaks (round B, item 3)', () => {
+describe('QuestionCardAnswerItems — an own (Other) answer keeps its line breaks', () => {
   it('renders a <br> between lines instead of collapsing them onto one line', () => {
     const wrapper = mount(QuestionCardAnswerItems, {
       props: { items: [{ label: 'text me\nafter 6', own: true }] },

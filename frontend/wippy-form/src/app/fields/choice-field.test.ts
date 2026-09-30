@@ -33,7 +33,7 @@ function mountField(props: Partial<InstanceType<typeof ChoiceField>['$props']> =
   })
 }
 
-describe('ChoiceField — DOM id uniqueness (item 11)', () => {
+describe('ChoiceField — DOM id uniqueness', () => {
   it('builds option ids from index, never from option values, and keeps the Other control id distinct', () => {
     const wrapper = mountField()
 
@@ -63,7 +63,7 @@ describe('ChoiceField — DOM id uniqueness (item 11)', () => {
   })
 })
 
-describe('ChoiceField — Other control accessible name (item 8)', () => {
+describe('ChoiceField — Other control accessible name', () => {
   it('gives the Other radio and its text input separate accessible names', () => {
     const wrapper = mountField()
 
@@ -82,7 +82,7 @@ describe('ChoiceField — Other control accessible name (item 8)', () => {
   })
 })
 
-describe('ChoiceField — fieldset aria-describedby (item 8)', () => {
+describe('ChoiceField — fieldset aria-describedby', () => {
   it('describes the fieldset with the description and error ids, not an inner div', () => {
     const described: FormField = { ...trickyField, description: 'Pick carefully' }
     const wrapper = mountField({
@@ -102,7 +102,7 @@ describe('ChoiceField — fieldset aria-describedby (item 8)', () => {
   })
 })
 
-describe('ChoiceField — group role and required (item 8)', () => {
+describe('ChoiceField — group role and required', () => {
   it('marks a required single-choice group with role="radiogroup" and aria-required', () => {
     const wrapper = mountField()
     const group = wrapper.find('[role="radiogroup"]')
@@ -117,7 +117,7 @@ describe('ChoiceField — group role and required (item 8)', () => {
   })
 })
 
-describe('ChoiceField — required indicator hidden when read-only (item 5)', () => {
+describe('ChoiceField — required indicator hidden when read-only', () => {
   it('does not render "(required)" for a read-only (answered) field', () => {
     const wrapper = mountField({ readonly: true, disabled: true, modelValue: 'other' })
     expect(wrapper.text()).not.toContain('(required)')

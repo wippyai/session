@@ -19,6 +19,8 @@ import QuestionCardSummary from './question-card/question-card-summary.vue'
 
 const RELOAD_FAILED_NOTICE = 'Could not refresh this form. Showing what you last saw.'
 const ANSWERED_ELSEWHERE_NOTICE = 'This form was already answered elsewhere, so your answer was not sent. The saved answer is shown below.'
+/** The only `form_version` this component knows how to render interactively (see `unsupportedVersion` below). */
+const SUPPORTED_FORM_VERSION = 1
 
 const props = useComponentProps()
 const propErrors = useComponentPropsErrors()
@@ -56,8 +58,8 @@ let suppressAnsweredElsewhereWatch = false
 //
 // A PASSIVE instance — this copy was never touched, nothing chosen/typed —
 // has nothing to lose, so the notice would be false: it reads as "your
-// answer was not sent" when no answer was ever attempted (round B finding
-// F-1). Gated on `hasUnsentInput()` (read synchronously here, before the
+// answer was not sent" when no answer was ever attempted. Gated on
+// `hasUnsentInput()` (read synchronously here, before the
 // active view unmounts on the next render — this watcher runs pre-flush).
 // A form flavor with no exposed `hasUnsentInput` (should not happen; both
 // ActiveForm and QuestionCardActive provide one) falls back to the old,
@@ -82,10 +84,10 @@ watch(() => state.value?.status, (status, previousStatus) => {
 // Host's `Submit` button must simply not exist.
 const unsupportedVersion = computed(() => {
   const propVersion = props.value.formVersion
-  if (propVersion !== undefined && propVersion !== 1)
+  if (propVersion !== undefined && propVersion !== SUPPORTED_FORM_VERSION)
     return true
   const stateVersion = state.value?.form_version
-  if (stateVersion !== undefined && stateVersion !== 1)
+  if (stateVersion !== undefined && stateVersion !== SUPPORTED_FORM_VERSION)
     return true
   return false
 })
@@ -116,7 +118,7 @@ const hostState = computed<HostState>(() => {
   // Without this check, `card-state` fell through to `questionCardState`'s
   // default ("active") here too, so styling reported an interactive card
   // for the ~tens of milliseconds before the GET actually landed and any
-  // options existed to interact with (round B item 7).
+  // options existed to interact with.
   if (state.value === null)
     return 'loading'
   if (state.value.status === 'idle')

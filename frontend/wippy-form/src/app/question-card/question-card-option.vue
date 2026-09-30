@@ -60,7 +60,7 @@ const togglePart = computed(() => partClass('note-toggle', props.note && 'has-no
 const keyPart = computed(() => partClass('option-key'))
 const errorPart = computed(() => partClass('error'))
 // Links the note textarea's aria-invalid/aria-describedby to its own
-// too-long notice — previously an unlinked role="alert" paragraph (M05).
+// too-long notice, instead of leaving it an unlinked role="alert" paragraph.
 const noteErrorId = `${useId()}-note-err`
 
 function onRowClick(event: MouseEvent) {

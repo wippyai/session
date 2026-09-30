@@ -6,10 +6,10 @@
  * surface-300/700 borders, about 1.3-1.4:1, short of the 3:1 target) used
  * to have a fix here as a raw `.p-radiobutton` / `.p-checkbox` override
  * (module CSS must never carry `.p-*` rules — that shadows the
- * facade/theme layer, see never-do.md). Per D27 that fix is DEFERRED to a
- * later theme-level change (facade `custom_css`), not shipped yet — until
- * then this module uses the theme as-is, with no local `.p-*` override and
- * no workaround.
+ * facade/theme layer, see never-do.md). That fix is deferred to a later
+ * theme-level change (facade `custom_css`), not shipped yet — until then
+ * this module uses the theme as-is, with no local `.p-*` override and no
+ * workaround.
  */
 
 /* Never overflow the chat column; long labels/descriptions must wrap. */
@@ -21,9 +21,8 @@
 
 /*
  * Question card — Styling API (`--wippy-form-*` tokens, `part`s, `w-form__*`
- * classes, host attributes). See
- * `.local/work/session-forms/design/2026-09-30-styling-contract.md` and this
- * package's README for the full contract. Every colour/size below is read
+ * classes, host attributes). See this package's README for the full
+ * contract. Every colour/size below is read
  * through a private `--_x` var whose own fallback is a semantic `--p-*`
  * theme var (never a raw hex as the PRIMARY fallback) — so a facade retint
  * or a dark-mode flip restyles the card with zero edits here, and only a
@@ -145,10 +144,10 @@
   flex: none;
 }
 /*
- * Round B item 6: sat directly on the question line, no gap — the "shown
- * under the title, muted" the README's parts table already documented was
- * never actually wired in. Same scale/color as `.w-form__description` /
- * `.w-form__hint` below (the field-level equivalent), not a one-off value.
+ * Spacing and muted color for the form-level description, so it reads as
+ * "shown under the title, muted" the way the README's parts table already
+ * documents. Same scale/color as `.w-form__description` / `.w-form__hint`
+ * below (the field-level equivalent), not a one-off value.
  */
 .w-form__form-description {
   margin: 0 0 8px;
@@ -410,10 +409,10 @@ span.w-form__option-mark {
  * errors below the note/Other boxes (question-card-option.vue,
  * question-card-question.vue) — those stay plain elements, not `Message`s,
  * because PrimeVue's `Message` sets `inheritAttrs: false` and would
- * silently drop the `:id` their `aria-describedby` linking depends on
- * (round A M05). `color` here is what actually marks them as errors for a
- * sighted user (D27-style contrast gap otherwise — round B A04): the same
- * danger token `.w-form__footer-text` and
+ * silently drop the `:id` their `aria-describedby` linking depends on.
+ * `color` here is what actually marks them as errors for a sighted user
+ * (text alone is not enough contrast against the surrounding copy): the
+ * same danger token `.w-form__footer-text` and
  * `.w-form__review-item--missing .w-form__review-answer` already use, not
  * a local color hack.
  */

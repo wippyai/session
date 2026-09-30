@@ -1,7 +1,6 @@
 /**
  * Part and class names for one piece of the question card and its states,
- * per the Session Forms styling contract
- * (`.local/work/session-forms/design/2026-09-30-styling-contract.md`):
+ * per the Session Forms styling contract:
  * a state is `<part>-<state>` for `::part()` (which can't take attribute
  * selectors) and `w-form__<part>--<state>` for the matching class. Classes
  * carry the same names as parts so non-shadow-DOM renderers and tests share

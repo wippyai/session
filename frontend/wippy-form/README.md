@@ -39,7 +39,7 @@ Notes are limited to 1,000 Unicode code points (server code `too_long`); Other t
 
 ## Question card
 
-The Claude-style question card for a `choice`-only form: one question with immediate-submit-on-click (single answer) or tick-and-send (several answers), several questions advance through a counter with a review step before sending, per-answer notes, and a read-only answered summary. Built from `src/composables/use-question-card.ts` (the interaction state machine) and `src/app/question-card/*.vue` (the view). Follows the Session Forms styling contract (`.local/work/session-forms/design/2026-09-30-styling-contract.md`): every visual value is a `--wippy-form-*` token with a semantic-theme-var fallback, every restylable piece is a `part`, states are reflected as `<part>-<state>` parts and `w-form__<part>--<state>` classes, and state the styling needs is a host attribute.
+The Claude-style question card for a `choice`-only form: one question with immediate-submit-on-click (single answer) or tick-and-send (several answers), several questions advance through a counter with a review step before sending, per-answer notes, and a read-only answered summary. Built from `src/composables/use-question-card.ts` (the interaction state machine) and `src/app/question-card/*.vue` (the view). Follows the Session Forms styling contract: every visual value is a `--wippy-form-*` token with a semantic-theme-var fallback, every restylable piece is a `part`, states are reflected as `<part>-<state>` parts and `w-form__<part>--<state>` classes, and state the styling needs is a host attribute.
 
 **Tokens used:** all of the shared tokens below. **New tokens:** none — the question card is what the shared token list in the styling contract was written for.
 
@@ -164,7 +164,7 @@ wippy-form::part(nav) {
 
 ### Design decisions locked for V1 (differences from the approved prototype)
 
-The prototype (`.local/work/session-forms/design/2026-09-30-question-card-v2.html`) is the behavioral and styling-API reference; three things were decided differently for this build:
+The approved prototype is the behavioral and styling-API reference; three things were decided differently for this build:
 
 1. **No decline/dismiss button.** The prototype's close button and `declined` state are dropped entirely — no `dismiss` part, no `declined` value for the `card`/`state` states.
 2. **Notes change the answer shape**, as described above — this was "to decide" in the prototype's design doc; it is settled for V1.

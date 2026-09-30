@@ -29,9 +29,9 @@ describe('plainText', () => {
   })
 })
 
-// Round B, item 3: a multi-line "Own answer" (Other textarea, Shift+Enter)
-// must keep its line breaks when displayed back — see textLines' callers
-// in question-card-answer-items.vue.
+// A multi-line "Own answer" (Other textarea, Shift+Enter) must keep its
+// line breaks when displayed back — see textLines' callers in
+// question-card-answer-items.vue.
 describe('textLines', () => {
   it('splits on \\n', () => {
     expect(textLines('text me\nafter 6')).toEqual(['text me', 'after 6'])

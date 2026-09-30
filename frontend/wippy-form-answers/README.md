@@ -60,7 +60,7 @@ The parsing logic lives in `src/lib/parse-record.ts` (`parseFormAnswersRecord`) 
 
 ## Styling API
 
-This control has no visible surface, so it has none of the four public styling surfaces the [Session Forms styling contract](../../.local/work/session-forms/design/2026-09-30-styling-contract.md) defines for the sibling `wippy-form` question card:
+This control has no visible surface, so it has none of the four public styling surfaces the Session Forms styling contract defines for the sibling `wippy-form` question card:
 
 **Tokens used:** none. **New tokens:** none — there is nothing to color, size, or space.
 

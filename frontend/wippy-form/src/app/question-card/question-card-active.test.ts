@@ -94,7 +94,7 @@ describe('QuestionCardActive — single question, single answer', () => {
 
   it('pressing a row\'s number key answers it', async () => {
     const wrapper = mountCard(singleQuestionDef)
-    // A real digit keypress carries both — `.key` is what the fix (item 6)
+    // A real digit keypress carries both — `.key` is what the handler
     // actually reads for a plain (non-Shift) digit.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit2', key: '2' })
     expect(wrapper.emitted('submit')?.[0]).toEqual([{ f1: 'no' }])
@@ -134,7 +134,7 @@ describe('QuestionCardActive — offline indicator and blocked answering (P2 tra
     expect(notice.text()).toContain('You are offline. Your choices are kept.')
 
     // Rows silently ignoring clicks (via JS) is not enough — assistive tech
-    // needs the disabled state marked on the control itself (item 5).
+    // needs the disabled state marked on the control itself.
     const row = wrapper.find('[role="radio"]')
     expect(row.attributes('aria-disabled')).toBe('true')
 
@@ -152,7 +152,7 @@ describe('QuestionCardActive — offline indicator and blocked answering (P2 tra
   })
 })
 
-describe('QuestionCardActive — blocked while a submit is already in flight (item 2)', () => {
+describe('QuestionCardActive — blocked while a submit is already in flight', () => {
   it('marks the card aria-busy and blocks a row click and a number key from submitting again', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.setProps({ submitting: true })
@@ -169,7 +169,7 @@ describe('QuestionCardActive — blocked while a submit is already in flight (it
   })
 })
 
-describe('QuestionCardActive — keyboard boundaries (item 6)', () => {
+describe('QuestionCardActive — keyboard boundaries', () => {
   it('a digit typed into Other does not answer the question', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('textarea.w-form__other-input')
@@ -201,7 +201,7 @@ describe('QuestionCardActive — keyboard boundaries (item 6)', () => {
   })
 })
 
-describe('QuestionCardActive — Escape in a note (round B, item 8: documented, verified no data loss)', () => {
+describe('QuestionCardActive — Escape in a note closes it without losing the draft', () => {
   it('closes the note editor but keeps the typed draft, shown back under the row', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
@@ -292,7 +292,7 @@ describe('QuestionCardActive — 422 field errors', () => {
   })
 })
 
-describe('QuestionCardActive — length-error and server-error linking (M05: alerts were not linked to the textarea)', () => {
+describe('QuestionCardActive — length-error and server-error alerts are linked to the textarea', () => {
   it('links the Other textarea to its own too-long alert via aria-describedby/aria-invalid', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('textarea.w-form__other-input')
@@ -467,7 +467,7 @@ describe('QuestionCardActive — several questions', () => {
     expect(collapsedEvents.at(-1)).toEqual([true])
   })
 
-  it('reaching review with a required question still unanswered keeps focus inside the card, on that question\'s row (item 4)', async () => {
+  it('reaching review with a required question still unanswered keeps focus inside the card, on that question\'s row', async () => {
     const wrapper = mountCard(twoQuestionDef)
     // Answer Q1, then jump straight past Q2 (required, multi) into review
     // via -> without ticking or sending anything for it.
@@ -489,8 +489,8 @@ describe('QuestionCardActive — several questions', () => {
   })
 })
 
-describe('QuestionCardActive — checkbox visual state follows the model (round B, item 2: F-3)', () => {
-  // Round B found: ticking a row's checkbox with the mouse while that row's
+describe('QuestionCardActive — checkbox visual state follows the model', () => {
+  // Ticking a row's checkbox with the mouse while that row's
   // own note is open leaves aria-checked="true" (driven by our own
   // `selected` prop) but the nested PrimeVue Checkbox's own visual mark
   // empty (data-p-checked="false") — the row and its Checkbox disagree.
@@ -542,7 +542,7 @@ describe('QuestionCardActive — checkbox visual state follows the model (round 
   })
 })
 
-describe('QuestionCardActive — single-choice is one Tab stop with a roving tabindex (round B, item 5)', () => {
+describe('QuestionCardActive — single-choice is one Tab stop with a roving tabindex', () => {
   it('starts with tabindex=0 on the first row and -1 on the rest, for a single-choice (radio) question', () => {
     const wrapper = mountCard(singleQuestionDef)
     const rows = wrapper.findAll('[role="radio"]')

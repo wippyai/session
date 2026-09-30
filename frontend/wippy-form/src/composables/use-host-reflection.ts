@@ -6,8 +6,7 @@ export type HostState = 'loading' | 'active' | 'review' | 'answered' | 'unsuppor
 
 /**
  * Reflects the question-card's `card-state`/`collapsed` host attributes onto
- * the raw custom element (`<wippy-form>` itself), per the styling contract
- * (`.local/work/session-forms/design/2026-09-30-styling-contract.md`):
+ * the raw custom element (`<wippy-form>` itself), per the styling contract:
  * `wippy-form[card-state="review"]`, `wippy-form[collapsed]`. `density` is
  * NOT written here — it is read-only input from the host app, matched
  * purely via the `:host([density="comfortable"])` selector in the

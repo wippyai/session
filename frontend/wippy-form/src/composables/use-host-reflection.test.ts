@@ -61,7 +61,7 @@ describe('useHostReflection', () => {
     expect(() => mount(harness)).not.toThrow()
   })
 
-  it('never writes the observed `state` prop attribute — only `card-state` — to avoid triggering a reload loop (item 3)', async () => {
+  it('never writes the observed `state` prop attribute — only `card-state` — to avoid triggering a reload loop', async () => {
     const el = document.createElement('wippy-form')
     const { wrapper, state } = mountReflection(el)
     await wrapper.vm.$nextTick()
