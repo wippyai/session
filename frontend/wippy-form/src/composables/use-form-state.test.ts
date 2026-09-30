@@ -319,3 +319,59 @@ describe('useFormState — newer session messages', () => {
     expect(sessionListener()).toBeUndefined()
   })
 })
+
+describe('useFormState — session status change (e.g. a Stop that settles the turn with no reply)', () => {
+  const STATUS_TOPIC = 'session:session-1'
+
+  function statusListener() {
+    const calls = vi.mocked(WippyProxy.on).mock.calls.filter(([topic]) => topic === STATUS_TOPIC)
+    return calls.at(-1)?.[1] as unknown as ((message: unknown) => void) | undefined
+  }
+
+  it('reloads on a session-level status event while delivery is interrupted, and stops listening once complete', async () => {
+    const unsubscribe = vi.fn()
+    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === STATUS_TOPIC ? unsubscribe : () => {}) as never)
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(state({ status: 'idle', delivery: 'interrupted' }))
+      .mockResolvedValueOnce(state({ status: 'idle', delivery: 'complete' }))
+    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+
+    const wrapper = mountHarness('artifact-1')
+    await flushPromises()
+    const onStatus = statusListener()
+    expect(onStatus).toBeDefined()
+
+    // The session-level topic carries no `type` to filter on (unlike
+    // message:*) — any event on it is a reason to reload.
+    onStatus?.({ data: { status: 'idle' } })
+    await flushPromises()
+    expect(getFn).toHaveBeenCalledTimes(2)
+    expect((wrapper.vm as unknown as { state: FormState }).state.delivery).toBe('complete')
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+
+  it('subscribes to the session-level topic (not just session:<id>:message:*), scoped to this session id', async () => {
+    const getFn = vi.fn().mockResolvedValue(state({ status: 'idle', delivery: 'running', session_id: 'session-42' }))
+    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    mountHarness('artifact-1')
+    await flushPromises()
+
+    const topics = vi.mocked(WippyProxy.on).mock.calls.map(([topic]) => topic)
+    expect(topics).toContain('session:session-42')
+    expect(topics).toContain('session:session-42:message:*')
+  })
+
+  it('unsubscribes the status listener on unmount', async () => {
+    const unsubscribe = vi.fn()
+    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === STATUS_TOPIC ? unsubscribe : () => {}) as never)
+    const getFn = vi.fn().mockResolvedValue(state({ status: 'idle', delivery: 'running' }))
+    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+
+    const wrapper = mountHarness('artifact-1')
+    await flushPromises()
+    expect(statusListener()).toBeDefined()
+
+    wrapper.unmount()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+})

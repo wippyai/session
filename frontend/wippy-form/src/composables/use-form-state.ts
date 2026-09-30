@@ -29,8 +29,10 @@ export interface UseFormStateResult {
  * the id changes, when the Host's `state` prop changes (props.state="idle"
  * once the answer is accepted), on the `artifact:<id>` relay event, and on
  * the proxy's `@visibility` restore event (tab/document becoming visible
- * again), and on new messages in the form's session while the form can
- * still become "asked earlier" or its answer is not yet complete.
+ * again), and on new messages or a status change in the form's session
+ * while the form can still become "asked earlier" or its answer is not yet
+ * complete — the session-level `session:<id>` topic fires even when a Stop
+ * settles the turn with no reply message to trigger the message listener.
  * Superseded/late responses (unmount, id change, or a newer load
  * already in flight) are dropped via a generation counter rather than an
  * abort signal, since the Host client has no cancellation contract.
@@ -208,14 +210,29 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
     return null
   })
   let unsubscribeSessionMessages: (() => void) | null = null
+  let unsubscribeSessionStatus: (() => void) | null = null
   watch(watchedSessionId, (sessionId) => {
     unsubscribeSessionMessages?.()
     unsubscribeSessionMessages = null
+    unsubscribeSessionStatus?.()
+    unsubscribeSessionStatus = null
     if (sessionId) {
       unsubscribeSessionMessages = on(`session:${sessionId}:message:*`, (message) => {
         if ((message.data as { type?: string } | undefined)?.type !== 'chunk')
           void runLoad()
       })
+      // A user Stop that settles the turn without a pending answer to admit
+      // stores no reply message at all — only the session's own status
+      // flips. The message:* listener above never fires for that, so a card
+      // whose delivery the Stop interrupted (`delivery: 'interrupted'`)
+      // stays on "The assistant is reading your answer." until something
+      // else happens to reload it. `session:<id>` (no further segments) is
+      // the session-level metadata/status topic (see websocket-topics.md —
+      // distinct from `session:<id>:message:*` by segment count, per
+      // topic-matcher's exact part-count check), so it fires on that status
+      // change even when no message does. Same gate as the listener above:
+      // only while this card's own delivery could still change.
+      unsubscribeSessionStatus = on(`session:${sessionId}`, () => { void runLoad() })
     }
   }, { immediate: true })
 
@@ -243,6 +260,8 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
     unsubscribeArtifactEvent = null
     unsubscribeSessionMessages?.()
     unsubscribeSessionMessages = null
+    unsubscribeSessionStatus?.()
+    unsubscribeSessionStatus = null
     unsubscribeVisibility()
     unsubscribeReconnect()
   })
