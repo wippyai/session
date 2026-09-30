@@ -139,12 +139,9 @@ end
 
 local function delivery_of(submission, session_id)
     if type(submission) ~= "table" then return nil, nil end
-    local row, err = message_repo.get(submission.message_id)
-    if not row then
-        -- message_repo.get reports a missing row with exactly this text.
-        if err == "Message not found" then return "interrupted", nil end
-        return nil, tostring(err)
-    end
+    local row, err = message_repo.find(submission.message_id)
+    if err then return nil, tostring(err) end
+    if not row then return "interrupted", nil end
     if message_repo.is_pending_answer(row) then return "pending", nil end
 
     -- The newest rows after the answer (the answer row among them when few

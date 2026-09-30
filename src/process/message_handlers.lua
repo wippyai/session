@@ -12,7 +12,6 @@ local control_handlers = require("control_handlers")
 local message_repo = require("message_repo")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
-local form_index = require("form_index")
 local logger = require("logger"):named("session.forms")
 
 type SessionContext = {
@@ -1069,22 +1068,6 @@ function message_handlers.admit_answer(ctx, _op)
     }} }
 end
 
--- Form answers accepted but not admitted yet, by form id, for the tools of
--- the running turn: read_form must not show the turn an answer it may not
--- see yet. nil when unknown (then read_form refuses to show answers).
-local function pending_form_answers(ctx)
-    if type(ctx.session_id) ~= "string" or ctx.session_id == "" then return nil end
-    if type(ctx.reader) ~= "table" or type(ctx.reader.artifacts) ~= "function" then return nil end
-    local artifacts, list_err = ctx.reader:artifacts():all()
-    local forms, err = nil, list_err
-    if artifacts then forms, err = form_index.pending_answers(ctx.session_id, artifacts) end
-    if not forms then
-        logger:warn("pending form answer scan failed", { session_id = ctx.session_id, error = tostring(err) })
-        return nil
-    end
-    return forms
-end
-
 function message_handlers.agent_step(ctx, op)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
@@ -1547,8 +1530,6 @@ function message_handlers.process_tools(ctx, op)
         session_context = {}
     end
     session_context = with_agent_run_context(ctx, session_context, active_agent)
-    local pending_forms = pending_form_answers(ctx)
-    session_context.session_forms = pending_forms and { pending_answers = pending_forms } or nil
 
     local executed, results, execute_err = pcall(function()
         return caller:execute(session_context, validated_tools)

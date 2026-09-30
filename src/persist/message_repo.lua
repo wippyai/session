@@ -286,7 +286,9 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
 end
 
 -- Get a message by ID
-function message_repo.get(message_id)
+-- The message `message_id` with its metadata decoded, or nil without an
+-- error when there is none.
+function message_repo.find(message_id)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
@@ -313,7 +315,7 @@ function message_repo.get(message_id)
     end
 
     if #messages == 0 then
-        return nil, "Message not found"
+        return nil, nil
     end
 
     local message = messages[1]
@@ -326,6 +328,17 @@ function message_repo.get(message_id)
         end
     end
 
+    return message
+end
+
+function message_repo.get(message_id)
+    local message, err = message_repo.find(message_id)
+    if err then
+        return nil, err
+    end
+    if not message then
+        return nil, "Message not found"
+    end
     return message
 end
 

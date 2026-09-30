@@ -265,6 +265,7 @@ entries:
       artifact_repo: wippy.session.persist:artifact_repo
       form_artifact: wippy.session.forms:form_artifact
       form_meta: wippy.session.forms:form_meta
+      message_repo: wippy.session.persist:message_repo
       ordered_json: wippy.session.forms:ordered_json
     method: handler
     pool:

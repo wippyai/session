@@ -835,8 +835,7 @@ local function define_tests()
                 local ctx = new_ctx()
                 ask(ctx, DEFINITION)
                 local form_id = form_id_of(ctx)
-                local in_turn = { agent_run = { host = { session_id = ctx.session_id } },
-                    session_forms = { pending_answers = {} } }
+                local in_turn = { agent_run = { host = { session_id = ctx.session_id } } }
                 local caller = funcs.new():with_context(in_turn)
                 local open, open_err = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(open_err)
@@ -844,21 +843,20 @@ local function define_tests()
                 test.contains(open.message, "\"options\":[")
                 test.contains(open.message, "\"label\":\"Locker\"")
 
+                -- Accepted but not admitted: pending, without its values.
                 submit(form_id, { delivery = "Locker" })
+                local hidden = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(hidden.message, "\"status\":\"answer_pending\"")
+                test.is_false(string.find(hidden.message, "\"value\":\"Locker\"", 1, true) ~= nil)
+
                 message_handlers.admit_in_order(ctx, nil)
                 local result, err = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(err)
                 test.contains(result.message, "\"status\":\"answered\"")
                 test.contains(result.message, "\"answer\":{\"value\":\"Locker\",\"label\":\"Locker\"}")
 
-                -- Without the session's list of pending answers no answer is shown.
-                local unknown = funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
-                local hidden = unknown:call("wippy.session.forms:read_form_tool", { form_id = form_id })
-                test.contains(hidden.message, "\"status\":\"answer_pending\"")
-
                 local other = new_ctx()
-                local foreign = funcs.new():with_context({ agent_run = { host = { session_id = other.session_id } },
-                    session_forms = { pending_answers = {} } })
+                local foreign = funcs.new():with_context({ agent_run = { host = { session_id = other.session_id } } })
                 local none, foreign_err = foreign:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(none)
                 test.contains(tostring(foreign_err), "No form")
@@ -908,6 +906,53 @@ local function define_tests()
                 local admitted = read_in_turn()
                 test.contains(admitted, "\"status\":\"answered\"")
                 test.contains(admitted, "\"label\":\"Locker\"")
+            end)
+
+            it("gives read_form no values of an answer accepted while its tool round runs", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                local form_id = form_id_of(ctx)
+                local read_id = "wippy.session.forms:read_form_tool"
+
+                -- One read_form call through process_tools. `accept` runs after
+                -- process_tools built the tool context and before read_form
+                -- reads the form: the answer arrives while the round runs.
+                local function read_in_turn(accept: (() -> ())?)
+                    local call_id = "call-" .. uuid.v7()
+                    local args = { form_id = form_id }
+                    local _, ids: any, store_err = ctx.writer:add_response("", {}, {
+                        { id = call_id, name = "read_form", arguments = args, registry_id = read_id,
+                            type = consts.MSG_TYPE.FUNCTION },
+                    })
+                    test.is_nil(store_err)
+                    local seen = nil :: any
+                    local caller = {
+                        set_strategy = function() end,
+                        execute = function(_self, context, tools)
+                            if accept then accept() end
+                            local result, err = funcs.new():with_context(context):call(read_id, args)
+                            seen = result
+                            return { [call_id] = { result = result, error = err, tool_call = tools[call_id] } }
+                        end,
+                    }
+                    local _, err = message_handlers.process_tools(ctx, {
+                        tool_calls = { { id = call_id, name = "read_form", registry_id = read_id, arguments = args } },
+                        call_message_ids = ids, caller = caller,
+                        validated_tools = { [call_id] = { valid = true, name = "read_form", args = args, registry_id = read_id } },
+                        message_id = "user-message", agent = { id = "agent:forms" },
+                    })
+                    test.is_nil(err)
+                    return tostring(seen and seen.message)
+                end
+
+                local during = read_in_turn(function() submit(form_id, { delivery = "Locker" }) end)
+                test.contains(during, "\"status\":\"answer_pending\"")
+                test.is_false(string.find(during, "Locker", 1, true) ~= nil, "no answer values")
+
+                message_handlers.admit_in_order(ctx, nil)
+                local admitted = read_in_turn(nil)
+                test.contains(admitted, "\"status\":\"answered\"")
+                test.contains(admitted, "\"answer\":{\"value\":\"Locker\",\"label\":\"Locker\"}")
             end)
 
             it("admits an answer that arrives while idle and starts a turn for it", function()
