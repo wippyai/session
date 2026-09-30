@@ -339,6 +339,58 @@ local function define_tests()
             test.eq(#wakes, 1)
         end)
 
+        it("replays a retry whose JSON lists the same answers with keys in another order", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local request_id = uuid.v7()
+            local first_body = '{"form_version":1,"request_id":' .. (json.encode(request_id))
+                .. ',"expected_content_version":1,"answers":{"delivery":{"value":"Courier","note":"Ring twice"},'
+                .. '"extras":["Receipt","Gift wrap"]}}'
+            local retry_body = '{"answers":{"extras":["Gift wrap","Receipt"],'
+                .. '"delivery":{"note":"  Ring twice ","value":"Courier"}},"expected_content_version":1,'
+                .. '"request_id":' .. (json.encode(request_id)) .. ',"form_version":1}'
+            local status, first = post(artifact_id, first_body)
+            test.eq(status, 200)
+            test.eq(first.replayed, false)
+            local retry_status, retry = post(artifact_id, retry_body)
+            test.eq(retry_status, 200, "a retry, not a request_conflict")
+            test.eq(retry.replayed, true)
+            test.eq(retry.answer_message_id, first.answer_message_id)
+            test.eq(#user_rows(ctx.session_id), 1)
+            test.eq(#wakes, 1)
+        end)
+
+        it("stores the accepted submission as canonical text, answers in definition order", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local request_id = uuid.v7()
+            local noted = {}
+            noted.note = "Ring twice"
+            noted.value = "Courier"
+            local answers = {}
+            answers.extras = { "Receipt", "Gift wrap" }
+            answers.delivery = noted
+            local status, body = post(artifact_id, answer(request_id, answers))
+            test.eq(status, 200)
+
+            local db, db_err = sql.get(consts.get_db_resource())
+            if not db then error(db_err) end
+            local rows, query_err = db:query("SELECT meta FROM artifacts WHERE artifact_id = $1", { artifact_id })
+            db:release()
+            test.is_nil(query_err)
+            local raw = tostring(rows[1].meta)
+            test.contains(raw, '"session_form":{"version":1,"origin":{"turn_id":')
+            test.contains(raw, ',"call_id":"call-1","tool_message_id":"tool-row-1","created_cursor":')
+            test.contains(raw, ',"submission":{"request_id":' .. (json.encode(request_id))
+                .. ',"answers":{"delivery":{"value":"Courier","note":"Ring twice"},"extras":["Gift wrap","Receipt"]}'
+                .. ',"submitted_at":')
+            test.contains(raw, ',"message_id":' .. (json.encode(body.answer_message_id)) .. ',"late":false}}')
+            local session_form_at = string.find(raw, '"session_form":', 1, true)
+            local status_at = string.find(raw, '"status":', 1, true)
+            test.is_true(session_form_at ~= nil and status_at ~= nil and session_form_at < status_at,
+                "top-level keys sorted")
+        end)
+
         it("rejects the same request id with different answers", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)

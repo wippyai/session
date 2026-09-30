@@ -440,15 +440,15 @@ function control_handlers.control_forms(ctx, op)
                 return nil, "Form artifact message date is unknown"
             end
 
+            local meta_text, encode_err = form_artifact.encode_meta(def, form_artifact.new_meta({
+                turn_id = op.turn_id,
+                call_id = op.call_id,
+                tool_message_id = op.tool_message_id,
+                created_cursor = stored.message_date,
+            }))
+            if not meta_text then return nil, "Failed to encode form meta: " .. tostring(encode_err) end
             local _, meta_err = artifact_repo.update(stored.artifact_id, {
-                meta_patch = {
-                    [form_artifact.META_KEY] = form_artifact.new_meta({
-                        turn_id = op.turn_id,
-                        call_id = op.call_id,
-                        tool_message_id = op.tool_message_id,
-                        created_cursor = stored.message_date,
-                    }),
-                },
+                meta_patch = { [form_artifact.META_KEY] = artifact_repo.raw_json(meta_text) },
             }, { tx = dbtx })
             if meta_err then return nil, "Failed to bind form origin: " .. tostring(meta_err) end
             return stored

@@ -1230,7 +1230,7 @@ function message_handlers.agent_step(ctx, op)
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
         if result.result and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local _, store_err, stored: any = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
@@ -1243,7 +1243,8 @@ function message_handlers.agent_step(ctx, op)
 
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
-                using_tools = false
+                using_tools = false,
+                date = type(stored) == "table" and stored.date or nil
             })
         end
 
@@ -1382,7 +1383,8 @@ function message_handlers.agent_step(ctx, op)
                 type = call_type
             })
         end
-        local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
+        local stored_id, call_message_ids, store_err, stored_date = ctx.writer:add_response(
+            result.result or "", metadata, intents)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
@@ -1403,10 +1405,14 @@ function message_handlers.agent_step(ctx, op)
         -- Also after Stop: Stop does not cancel a model call already in
         -- flight, and a reply that arrives after it is stored above, so it is
         -- sent now too. Otherwise the chat would gain it only on a reload.
+        -- It carries the stored row's date: the response began when the step
+        -- started, which after a Stop can be long before the reply was
+        -- stored, and the live reply must show the time the history keeps.
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
-                using_tools = (#unified_tool_calls > 0)
+                using_tools = (#unified_tool_calls > 0),
+                date = stored_date
             })
         end
     else

@@ -25,7 +25,12 @@ type MessageList = {
 local message_repo = {}
 local get_db
 
+-- Inserts rows (each { message_id, type, data, metadata }) in one
+-- transaction, dated in array order. Returns true and, as the third value,
+-- each row's stored date keyed by message_id, so callers can announce the
+-- same date the history will show.
 function message_repo.create_batch(session_id, rows)
+    local dates = {}
     local result, err = tx.run(function(dbtx)
         local _, lock_err = message_date.lock_session(dbtx, session_id)
         if lock_err then return nil, lock_err end
@@ -44,6 +49,7 @@ function message_repo.create_batch(session_id, rows)
             }):run_with(dbtx):exec()
             if insert_err then return nil, insert_err end
             last_date = date
+            dates[row.message_id] = date
         end
 
         if #rows == 0 then return true end
@@ -58,7 +64,7 @@ function message_repo.create_batch(session_id, rows)
     end)
 
     if err then return nil, err end
-    return result
+    return result, nil, dates
 end
 
 -- A pending call whose control operations created a session form that was

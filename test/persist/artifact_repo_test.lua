@@ -646,6 +646,50 @@ local function define_tests()
                 test.eq(raw_meta(was_null), "{}")
             end)
 
+            it("writes top-level keys sorted, keeps untouched keys' text and stores a raw_json value as given", function()
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, '{"zeta":{"b":1,"a":2},"alpha":"x"}')
+                local _, err = artifact_repo.update(id, { meta_patch = {
+                    middle = artifact_repo.raw_json('{"value":"v","note":"n"}'),
+                    status = "idle",
+                } })
+                test.is_nil(err)
+                test.eq(raw_meta(id), '{"alpha":"x","middle":{"value":"v","note":"n"},"status":"idle","zeta":{"b":1,"a":2}}')
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta.middle.note, "n")
+                test.eq(artifact.meta.zeta.a, 2)
+
+                -- A later patch of other keys leaves that text alone.
+                local _, remove_err = artifact_repo.update(id, { meta_remove = { "alpha" } })
+                test.is_nil(remove_err)
+                test.eq(raw_meta(id), '{"middle":{"value":"v","note":"n"},"status":"idle","zeta":{"b":1,"a":2}}')
+            end)
+
+            it("splits stored meta with spacing, escapes and brackets inside strings", function()
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, [[ { "a\"b" : "x}{[\\" , "n" : -1.5e3 , "t":true,"z":null, "arr":[1,{"k":"]"}] } ]])
+                local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
+                test.is_nil(err)
+                test.eq(raw_meta(id), [[{"a\"b":"x}{[\\","arr":[1,{"k":"]"}],"n":-1.5e3,"status":"idle","t":true,"z":null}]])
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta['a"b'], "x}{[\\")
+                test.eq(artifact.meta.arr[2].k, "]")
+
+                -- An empty meta that json.encode once stored as "[]".
+                local legacy = fresh_artifact("static", nil)
+                set_raw_meta(legacy, "[]")
+                local _, legacy_err = artifact_repo.update(legacy, { meta_patch = { status = "idle" } })
+                test.is_nil(legacy_err)
+                test.eq(raw_meta(legacy), '{"status":"idle"}')
+            end)
+
+            it("replaces meta with sorted top-level keys", function()
+                local id = fresh_artifact("static", nil)
+                local _, err = artifact_repo.update(id, { meta = { status = "idle", icon = "star", content_type = "x" } })
+                test.is_nil(err)
+                test.eq(raw_meta(id), '{"content_type":"x","icon":"star","status":"idle"}')
+            end)
+
             it("meta_patch keeps working for inline and view_ref artifacts", function()
                 local inline_id = fresh_artifact("inline", { display_type = "inline" })
                 local inline_result, inline_err = artifact_repo.update(inline_id, {

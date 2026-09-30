@@ -221,6 +221,35 @@ local function define_tests()
             context_repo.delete(context_id)
         end)
 
+        it("hands back the stored dates of a response and of a batch", function()
+            local context_id = uuid.v7()
+            local session_id = uuid.v7()
+            context_repo.create(context_id, "primary", "{}")
+            session_repo.create(session_id, test_data.user_id, context_id, "Response dates", "test")
+            local session_writer, writer_err = writer.new(session_id)
+            test.is_nil(writer_err)
+            test.not_nil(session_writer)
+            local assistant_id, call_ids: any, response_err, date = session_writer:add_response("answer", {}, {
+                { id = "call-1", name = "lookup", arguments = "{}", type = consts.MSG_TYPE.FUNCTION }
+            })
+            test.is_nil(response_err)
+            local stored: any = message_repo.get(assistant_id)
+            test.not_nil(date)
+            test.eq(date, stored.date, "the assistant row's own date")
+
+            local row_id = uuid.v7()
+            local created, create_err, dates: any = message_repo.create_batch(session_id, {
+                { message_id = row_id, type = consts.MSG_TYPE.USER, data = "later", metadata = {} },
+            })
+            test.is_nil(create_err)
+            test.is_true(created)
+            test.eq(dates[row_id], (message_repo.get(row_id) :: any).date)
+
+            for _, id in ipairs({ assistant_id, call_ids["call-1"], row_id }) do message_repo.delete(id) end
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+        end)
+
         it("recovers pending calls without decoding unrelated history", function()
             local unrelated_id = uuid.v7()
             local resource = consts.get_db_resource()

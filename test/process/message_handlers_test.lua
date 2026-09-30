@@ -455,6 +455,29 @@ local function define_tests()
             test.eq(result.next_ops[1].type, consts.OP_TYPE.AGENT_STEP)
         end)
 
+        it("announces a truncated reply with its stored date", function()
+            local agent = fake_agent(nil)
+            agent.step = function() return { result = "Partial answer", truncated = true, tool_calls = {} } end
+            local ctx = mock_ctx(agent)
+            local stored_date = "2026-09-30T20:27:19.007000000+02:00"
+            local original_add = ctx.writer.add_message
+            ctx.writer.add_message = function(self, kind, content, metadata)
+                local id, add_err = original_add(self, kind, content, metadata)
+                return id, add_err, { message_id = id, date = stored_date }
+            end
+            local content = nil
+            ctx.upstream.send_message_update = function(_self, _id, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.CONTENT then content = payload end
+            end
+
+            local _, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.not_nil(content)
+            test.eq((content :: any).content, "Partial answer")
+            test.eq((content :: any).date, stored_date)
+        end)
+
         it("continues tool work when a memory prompt cannot be stored", function()
             local agent = fake_agent(nil)
             agent.step = function()
@@ -647,6 +670,14 @@ local function define_tests()
         -- once, so the chat does not gain it silently on a later reload.
         it("stores the reply and announces it live, and runs nothing after it", function()
             local ctx, captured = mock_ctx(fake_agent(nil))
+            -- The reply row's date, taken when it was stored, long after the
+            -- step started.
+            local stored_date = "2026-09-30T20:27:19.007000000+02:00"
+            local add_response = ctx.writer.add_response
+            ctx.writer.add_response = function(self, content, metadata, calls)
+                local id, ids, err = add_response(self, content, metadata, calls)
+                return id, ids, err, stored_date
+            end
             local updates = {} :: {any}
             ctx.upstream.send_message_update = function(_self, id, kind, payload)
                 table.insert(updates, { id = id, kind = kind, payload = payload })
@@ -682,6 +713,8 @@ local function define_tests()
             test.not_nil(content, "the stored reply is also sent live")
             test.eq((content :: any).id, (started :: any).id, "on the response the clients are showing")
             test.eq((content :: any).payload.content, "Done working.")
+            test.eq((content :: any).payload.date, stored_date,
+                "the stored row's date, not the time the response started")
         end)
     end)
 

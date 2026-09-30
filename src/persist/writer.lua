@@ -221,9 +221,11 @@ function session_writer:add_response(content, metadata, calls)
             }
         })
     end
-    local _, err = session_writer._message_repo.create_batch(self.session_id, rows)
+    local _, err, dates: any = session_writer._message_repo.create_batch(self.session_id, rows)
     if err then return nil, nil, err end
-    return assistant_id, call_ids, nil
+    -- The fourth value is the assistant row's stored date: a live update of
+    -- the reply carries it, so the chat shows the time the history keeps.
+    return assistant_id, call_ids, nil, type(dates) == "table" and dates[assistant_id] or nil
 end
 
 function session_writer:update_message_meta(message_id, metadata)

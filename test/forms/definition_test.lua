@@ -519,6 +519,38 @@ local function define_tests()
             test.eq(definition.encode_answers(def, answers), '{"single":"Courier","many":["b"],"must":["a"]}')
         end)
 
+        it("encodes equal answers equally, whatever order their tables were built in", function()
+            local expected = '{"single":{"value":"Courier","note":"Ring twice"},"other":{"other":"Drone"},'
+                .. '"many":[{"value":"a","note":"Gift wrap it"},"c",{"other":"x"}],"must":["b"]}'
+
+            local first = {}
+            first.single = { value = "Courier", note = "Ring twice" }
+            first.other = { other = "Drone" }
+            first.many = { "c", { value = "a", note = "Gift wrap it" }, { other = "x" } }
+            first.must = { "b" }
+
+            -- Keys set in the opposite order, the list in another order, and
+            -- each noted answer built "note" first.
+            local noted_single = {}
+            noted_single.note = "Ring twice"
+            noted_single.value = "Courier"
+            local noted_many = {}
+            noted_many.note = "Gift wrap it"
+            noted_many.value = "a"
+            local second = {}
+            second.must = { "b" }
+            second.many = { { other = "x" }, noted_many, "c" }
+            second.other = { other = "Drone" }
+            second.single = noted_single
+
+            test.eq(definition.encode_answers(def, (check(first))), expected)
+            test.eq(definition.encode_answers(def, (check(second))), expected)
+            -- Stored answers read back from JSON in any key order encode the same.
+            local shuffled = json.decode('{"must":["b"],"many":[{"note":"Gift wrap it","value":"a"},"c",'
+                .. '{"other":"x"}],"other":{"other":"Drone"},"single":{"note":"Ring twice","value":"Courier"}}')
+            test.eq(definition.encode_answers(def, shuffled), expected)
+        end)
+
         it("bounds notes and rejects bad noted answers", function()
             local long_ok = check({ single = { value = "Courier", note = string.rep("ж", 1000) }, must = { "a" } })
             test.not_nil(long_ok, "1000 code points is the limit")

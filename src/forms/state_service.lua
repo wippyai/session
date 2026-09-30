@@ -283,8 +283,11 @@ end
 
 -- Classifies a request against an already accepted submission: an exact
 -- replay (same request id, same normalized answers) gets the original result;
--- anything else is a 409. The answers are only validated for a replay
--- candidate, so an answered form costs no validation work.
+-- anything else is a 409. Both sides are compared as definition.encode_answers
+-- writes them from the decoded values, never as request or stored JSON text,
+-- so key order in either cannot turn a retry into a request_conflict. The
+-- answers are only validated for a replay candidate, so an answered form
+-- costs no validation work.
 local function against_existing(artifact, form, submission, request_id, answers)
     if submission.request_id == request_id then
         local accepted = definition.encode_answers(form.definition, submission.answers)
@@ -424,10 +427,14 @@ function state_service.submit(user_id, artifact_id, raw_body)
             message_id = message_id,
             late = late,
         }
+        -- Stored as canonical text: answers in definition order, whatever
+        -- order the request or the tables above put them in.
+        local meta_text, meta_err = form_artifact.encode_meta(current_form.definition, meta)
+        if not meta_text then return nil, "Failed to encode the form meta: " .. tostring(meta_err) end
         local updated, update_err = artifact_repo.update(current.artifact_id, {
             content = content,
             meta_patch = {
-                [form_artifact.META_KEY] = meta,
+                [form_artifact.META_KEY] = artifact_repo.raw_json(meta_text),
                 status = form_artifact.STATE.IDLE,
             },
         -- The conditional update is the winner check even without a client

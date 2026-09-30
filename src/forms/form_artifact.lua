@@ -42,6 +42,70 @@ function form_artifact.new_meta(origin: any): any
     }
 end
 
+-- Key order of the stored meta.session_form object and its parts. Keys not
+-- listed here are written after the listed ones, sorted.
+local META_ORDER = { "version", "origin", "submission" }
+local ORIGIN_ORDER = { "turn_id", "call_id", "tool_message_id", "created_cursor" }
+local SUBMISSION_ORDER = { "request_id", "answers", "submitted_at", "message_id", "late" }
+
+local function encode_plain(value: any): (string?, string?)
+    local encoded, err = json.encode(value)
+    if err then return nil, tostring(err) end
+    return encoded, nil
+end
+
+-- Encodes an object with `order` first, then its other keys sorted.
+-- encoders[key] (optional) encodes that key's value.
+local function ordered_object(value: any, order: {string}, encoders: any?): (string?, string?)
+    local known = {}
+    local keys = {}
+    for _, key in ipairs(order) do
+        known[key] = true
+        table.insert(keys, key)
+    end
+    local extra = {}
+    for key in pairs(value) do
+        if not known[key] then table.insert(extra, tostring(key)) end
+    end
+    table.sort(extra)
+    for _, key in ipairs(extra) do table.insert(keys, key) end
+
+    local parts = {}
+    for _, key in ipairs(keys) do
+        local item = value[key]
+        if item ~= nil then
+            local encoder = encoders and encoders[key] or encode_plain
+            local encoded, err = encoder(item)
+            if not encoded then return nil, err end
+            table.insert(parts, (json.encode(key)) .. ":" .. encoded)
+        end
+    end
+    return "{" .. table.concat(parts, ",") .. "}", nil
+end
+
+-- The stored text of meta.session_form, for artifact_repo.raw_json: keys in
+-- a fixed order, and accepted answers as definition.encode_answers writes
+-- them (definition order, "value" before "note"). The same form and answers
+-- are always stored as the same text, whatever order their tables were
+-- built in.
+function form_artifact.encode_meta(def: any, meta: any): (string?, string?)
+    local encoders = {
+        origin = function(origin: any): (string?, string?)
+            if type(origin) ~= "table" then return encode_plain(origin) end
+            return ordered_object(origin, ORIGIN_ORDER)
+        end,
+        submission = function(submission: any): (string?, string?)
+            if type(submission) ~= "table" then return encode_plain(submission) end
+            return ordered_object(submission, SUBMISSION_ORDER, {
+                answers = function(answers: any): (string?, string?)
+                    return definition.encode_answers(def, answers), nil
+                end,
+            })
+        end,
+    }
+    return ordered_object(meta, META_ORDER, encoders)
+end
+
 -- Reads a form out of an artifact row (meta already decoded). Returns
 -- { definition, state, meta } or nil plus a reason when the artifact is not
 -- a supported form.
