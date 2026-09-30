@@ -22,7 +22,17 @@ const emit = defineEmits<{
 const groupId = useId()
 const descriptionId = `${groupId}-desc`
 const errorId = `${groupId}-err`
-const otherLabelId = `${groupId}-other-label`
+// Distinct prefixes ("opt-<index>" vs "other"/"other-text") so the Other
+// control's id can never collide with an option id, regardless of what the
+// option values are (they may contain spaces, or literally be "other").
+const otherControlId = `${groupId}-other`
+const otherLabelId = `${otherControlId}-label`
+const otherTextId = `${groupId}-other-text`
+const otherTextLabelId = `${otherTextId}-label`
+
+function optionId(index: number): string {
+  return `${groupId}-opt-${index}`
+}
 
 const fieldsetEl = ref<HTMLFieldSetElement | null>(null)
 
@@ -30,13 +40,15 @@ const describedBy = computed(() => {
   const ids: string[] = []
   if (props.field.description)
     ids.push(descriptionId)
-  if (props.errors.length > 0)
+  if (!props.readonly && props.errors.length > 0)
     ids.push(errorId)
   return ids.length > 0 ? ids.join(' ') : undefined
 })
 
 // ── Single choice ──────────────────────────────────────────────
-const OTHER_TOKEN = '__wippy_form_other__'
+// Local sentinel value for the "Other" radio's v-model binding — never sent
+// anywhere; just distinguishes "Other is selected" from a real option value.
+const OTHER_TOKEN = 'choice-field-other-sentinel'
 
 const singleSelected = computed<string>({
   get() {
@@ -136,6 +148,16 @@ defineExpose({
   focusFirstControl() {
     fieldsetEl.value?.querySelector<HTMLElement>('input, textarea')?.focus()
   },
+  // For a blank Other answer the text box is what needs fixing.
+  focusOtherText() {
+    // Ids come from Vue's useId plus a fixed suffix, so a quoted attribute
+    // selector needs no escaping.
+    const text = fieldsetEl.value?.querySelector<HTMLElement>(`[id="${otherTextId}"]`)
+    if (text)
+      text.focus()
+    else
+      fieldsetEl.value?.querySelector<HTMLElement>('input, textarea')?.focus()
+  },
 })
 </script>
 
@@ -143,11 +165,12 @@ defineExpose({
   <fieldset
     ref="fieldsetEl"
     class="flex flex-col gap-2 border-0 p-0 m-0 min-w-0"
+    :aria-describedby="describedBy"
   >
-    <legend class="text-sm font-medium text-surface-900 dark:text-surface-0 p-0">
+    <legend class="text-sm font-medium text-color p-0">
       {{ field.label }}<span
-        v-if="field.required"
-        class="text-red-600 dark:text-red-400"
+        v-if="!readonly && field.required"
+        class="text-danger-600 dark:text-danger-400"
       > (required)</span>
     </legend>
     <p
@@ -160,7 +183,7 @@ defineExpose({
 
     <p
       v-if="readonly"
-      class="text-sm text-surface-900 dark:text-surface-0 break-words"
+      class="text-sm text-color break-words"
     >
       {{ readOnlyText }}
     </p>
@@ -168,24 +191,25 @@ defineExpose({
     <div
       v-else
       class="flex flex-col gap-1.5"
-      :aria-describedby="describedBy"
+      :role="field.multiple ? 'group' : 'radiogroup'"
+      :aria-required="field.required ? 'true' : undefined"
     >
       <template v-if="!field.multiple">
         <div
-          v-for="option in field.options"
+          v-for="(option, index) in field.options"
           :key="option.value"
           class="flex items-start gap-2"
         >
           <RadioButton
             v-model="singleSelected"
-            :input-id="`${groupId}-${option.value}`"
+            :input-id="optionId(index)"
             :name="groupId"
             :value="option.value"
             :disabled="disabled"
           />
           <label
-            :for="`${groupId}-${option.value}`"
-            class="text-sm text-surface-900 dark:text-surface-0 break-words"
+            :for="optionId(index)"
+            class="text-sm text-color break-words"
           >
             {{ option.label }}
             <span
@@ -200,7 +224,7 @@ defineExpose({
         >
           <RadioButton
             v-model="singleSelected"
-            :input-id="`${groupId}-other`"
+            :input-id="otherControlId"
             :name="groupId"
             :value="OTHER_TOKEN"
             :disabled="disabled"
@@ -208,16 +232,19 @@ defineExpose({
           <div class="flex flex-col gap-1 min-w-0 grow">
             <label
               :id="otherLabelId"
-              :for="`${groupId}-other-text`"
-              class="text-sm text-surface-900 dark:text-surface-0"
+              :for="otherControlId"
+              class="text-sm text-color"
             >Other</label>
+            <label
+              :id="otherTextLabelId"
+              :for="otherTextId"
+              class="sr-only"
+            >Other answer</label>
             <InputText
-              :id="`${groupId}-other-text`"
+              :id="otherTextId"
               v-model="singleOtherText"
-              :aria-labelledby="otherLabelId"
               :disabled="disabled || singleSelected !== OTHER_TOKEN"
               size="small"
-              maxlength="2000"
               class="w-full"
             />
           </div>
@@ -226,20 +253,20 @@ defineExpose({
 
       <template v-else>
         <div
-          v-for="option in field.options"
+          v-for="(option, index) in field.options"
           :key="option.value"
           class="flex items-start gap-2"
         >
           <Checkbox
             :model-value="multiSelected.includes(option.value)"
             binary
-            :input-id="`${groupId}-${option.value}`"
+            :input-id="optionId(index)"
             :disabled="disabled"
             @update:model-value="(checked) => toggleOption(option.value, !!checked)"
           />
           <label
-            :for="`${groupId}-${option.value}`"
-            class="text-sm text-surface-900 dark:text-surface-0 break-words"
+            :for="optionId(index)"
+            class="text-sm text-color break-words"
           >
             {{ option.label }}
             <span
@@ -255,23 +282,26 @@ defineExpose({
           <Checkbox
             :model-value="multiOtherChecked"
             binary
-            :input-id="`${groupId}-other`"
+            :input-id="otherControlId"
             :disabled="disabled"
             @update:model-value="(checked) => toggleOther(!!checked)"
           />
           <div class="flex flex-col gap-1 min-w-0 grow">
             <label
               :id="otherLabelId"
-              :for="`${groupId}-other-text`"
-              class="text-sm text-surface-900 dark:text-surface-0"
+              :for="otherControlId"
+              class="text-sm text-color"
             >Other</label>
+            <label
+              :id="otherTextLabelId"
+              :for="otherTextId"
+              class="sr-only"
+            >Other answer</label>
             <InputText
-              :id="`${groupId}-other-text`"
+              :id="otherTextId"
               v-model="multiOtherText"
-              :aria-labelledby="otherLabelId"
               :disabled="disabled || !multiOtherChecked"
               size="small"
-              maxlength="2000"
               class="w-full"
             />
           </div>
@@ -282,8 +312,7 @@ defineExpose({
     <ul
       v-if="!readonly && errors.length > 0"
       :id="errorId"
-      class="text-xs text-red-600 dark:text-red-400 list-none p-0 m-0 flex flex-col gap-0.5"
-      role="alert"
+      class="text-xs text-danger-600 dark:text-danger-400 list-none p-0 m-0 flex flex-col gap-0.5"
     >
       <li
         v-for="(err, i) in errors"

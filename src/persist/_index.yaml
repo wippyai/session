@@ -6,7 +6,7 @@ entries:
   - name: tx
     kind: library.lua
     meta:
-      comment: Shared transaction helper for the persist layer (begin/pcall/commit-or-rollback/release)
+      comment: Shared transaction helper for the persist layer (begin/pcall/commit-or-rollback/release); refuses nested tx.run and repository connections inside it
     source: file://tx.lua
     modules:
       - sql
@@ -17,10 +17,11 @@ entries:
   - name: message_date
     kind: library.lua
     meta:
-      comment: Produces fixed-width UTC message dates so text order equals time order, with strictly-increasing per-session fallback
+      comment: Locks a session row and produces message dates the store orders after every row of the session
     source: file://message_date.lua
     modules:
       - time
+      - sql
 
   # wippy.session.persist:artifact_projection
   - name: artifact_projection
@@ -71,7 +72,6 @@ entries:
       - security
       - time
     imports:
-      consts: wippy.session:consts
       tx: wippy.session.persist:tx
 
   # wippy.session.persist:context_repo
@@ -95,6 +95,7 @@ entries:
     modules:
       - sql
       - json
+      - time
     imports:
       consts: wippy.session:consts
       tx: wippy.session.persist:tx
@@ -124,7 +125,6 @@ entries:
       - json
       - time
     imports:
-      consts: wippy.session:consts
       tx: wippy.session.persist:tx
 
   # wippy.session.persist:reader

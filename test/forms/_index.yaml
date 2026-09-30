@@ -13,9 +13,23 @@ entries:
     source: file://definition_test.lua
     modules:
       - json
+      - time
     imports:
       definition: wippy.session.forms:definition
       answer_text: wippy.session.forms:answer_text
+      test: wippy.test:test
+    method: run
+
+  - name: form_index_test
+    kind: function.lua
+    meta:
+      name: Form index for the prompt
+      type: test
+      suite: session
+      comment: Bounded, deterministic index of unanswered and answered forms
+    source: file://form_index_test.lua
+    imports:
+      form_index: wippy.session.forms:form_index
       test: wippy.test:test
     method: run
 

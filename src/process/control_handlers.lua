@@ -25,6 +25,14 @@ type ArtifactData = {
 
 local control_handlers = {}
 
+-- A refused request is not an error of the session: an effect returns
+-- { completed = true, rejected = "<code>: <message>" } and process_tools
+-- turns only that call into a tool error. Storage failures stay errors
+-- (nil, err) and fail the turn as for every other effect.
+local function reject(code, message)
+    return { completed = true, rejected = code .. ": " .. message }
+end
+
 function control_handlers.handle_context_command(ctx, op)
     if not op.action then
         return nil, consts.ERR.CONTEXT_ACTION_REQUIRED
@@ -208,10 +216,16 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
         record.message_date = type(stored_row) == "table" and stored_row.date or nil
     end
 
-    ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
+    local _, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
         system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
         artifact_id = artifact_id
     }, write_opts)
+    -- On a caller's transaction the rows go in together or not at all. Without
+    -- one the artifact is already stored and this informational row stays
+    -- best effort, as before.
+    if system_err and opts.tx then
+        return nil, "Failed to store artifact created message: " .. tostring(system_err)
+    end
 
     return record, nil
 end
@@ -232,6 +246,19 @@ end
 function control_handlers.control_artifacts(ctx, op)
     if not op.artifacts or #op.artifacts == 0 then
         return nil, "No artifacts provided"
+    end
+
+    -- The whole batch is checked before anything is written, so a refused
+    -- item never leaves the earlier ones created and announced.
+    for _, artifact_data in ipairs(op.artifacts) do
+        if not (artifact_data.title and (artifact_data.content or artifact_data.page_id)) and artifact_data.id then
+            -- A session form's content, answers and origin binding are
+            -- server-authored; an agent changes a question by asking a new form.
+            local target = artifact_repo.get(artifact_data.id)
+            if target and type(target.meta) == "table" and target.meta[form_artifact.META_KEY] ~= nil then
+                return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
+            end
+        end
     end
 
     local created_artifacts = {}
@@ -304,19 +331,27 @@ end
 --
 -- The definition is validated again here (the server does not trust the
 -- tool output). One form per bus turn: a second attempt in the same turn is
--- rejected before anything is written. The artifact, its standalone chat
--- message, the system row and meta.session_form (origin binding, with the
--- artifact message's date as created_cursor) are written in one transaction,
--- so a failure leaves no form behind. Success asks process_tools to end the
--- turn instead of running another agent step.
+-- rejected before anything is written. Typed input the session held during
+-- the turn, the artifact, its standalone chat message, the system row and
+-- meta.session_form (origin binding, with the artifact message's date as
+-- created_cursor) are written in one transaction, so a failure leaves no
+-- form behind and the input stays held. Success asks process_tools to end
+-- the turn instead of running another agent step.
 local ARTIFACT_ID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 
--- A refused request is not an error of the session: control_forms returns
--- { completed = true, rejected = "<code>: <message>" } and process_tools
--- turns only that call into a tool error. Storage failures stay errors
--- (nil, err) and fail the turn as for every other effect.
-local function reject(code, message)
-    return { completed = true, rejected = code .. ": " .. message }
+-- Unanswered forms a session may hold; above it the agent must resolve or
+-- supersede older forms (nothing is deleted silently).
+control_handlers.MAX_UNRESOLVED_FORMS = 100
+
+local function count_unresolved_forms(session_id)
+    local artifacts, err = artifact_repo.list_by_session(session_id)
+    if not artifacts then return nil, err end
+    local count = 0
+    for _, artifact in ipairs(artifacts) do
+        local form = type(artifact.meta) == "table" and artifact.meta[form_artifact.META_KEY] or nil
+        if type(form) == "table" and type(form.submission) ~= "table" then count = count + 1 end
+    end
+    return count
 end
 
 function control_handlers.control_forms(ctx, op)
@@ -347,11 +382,27 @@ function control_handlers.control_forms(ctx, op)
                 "This turn already asked the user with a form. No second form was created; "
                     .. "wait for the answer to the first one.")
         end
+        local unresolved, count_err = count_unresolved_forms(ctx.session_id)
+        if not unresolved then return nil, "Failed to count unanswered forms: " .. tostring(count_err) end
+        if unresolved >= control_handlers.MAX_UNRESOLVED_FORMS then
+            return reject("too_many_forms", "This session already has "
+                .. control_handlers.MAX_UNRESOLVED_FORMS
+                .. " unanswered forms. Ask the user to answer or dismiss older forms first.")
+        end
 
         local content, content_err = form_artifact.build_content(def, form_artifact.STATE.ACTIVE)
         if not content then return nil, content_err end
 
+        -- Typed input the session held during this turn was sent before the
+        -- form existed: it goes into the history first (session.lua,
+        -- write_held_before_form), so it does not make the form stale.
+        local held_written = nil
         local record, create_err = tx.run(function(dbtx)
+            if ctx.write_held_before_form then
+                local written, held_err = ctx.write_held_before_form({ tx = dbtx })
+                if not written then return nil, "Failed to store held input: " .. tostring(held_err) end
+                held_written = written
+            end
             local stored, store_err = control_handlers.store_artifact(ctx, {
                 type = consts.ARTIFACT_TYPES.INLINE,
                 title = def.title,
@@ -382,6 +433,7 @@ function control_handlers.control_forms(ctx, op)
         if not record then
             return nil, "Failed to create form: " .. tostring(create_err)
         end
+        if held_written and ctx.commit_held_before_form then ctx.commit_held_before_form(held_written) end
 
         ctx.form_turn_id = op.turn_id
         control_handlers.announce_artifact(ctx, record)

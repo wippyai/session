@@ -55,49 +55,153 @@ local function queue_error_code(bus)
     return "SESSION_BUSY"
 end
 
-local function flush_held(ctx: any, run_agent: boolean)
-    local last_user_id = nil
-    local last_request_id = nil
-    while #ctx.held > 0 do
-        local item = ctx.held[1]
-        local message_id, msg_type = message_handlers.write_input(ctx, item)
-        if not message_id then
-            if ctx.upstream then
-                for _, pending in ipairs(ctx.held) do
-                    ctx.upstream:message_error(pending.message_id,
-                        consts.ERROR_CODES.STORAGE_ERROR, msg_type)
-                end
-            end
-            return nil, msg_type
-        end
-        table.remove(ctx.held :: {any}, 1)
-        if msg_type == consts.MSG_TYPE.USER then
-            last_user_id = message_id
-            last_request_id = item.request_id
-        end
-    end
-    return run_agent and last_user_id or nil, nil, last_request_id
+-- THE HELD QUEUE (ctx.held)
+--
+-- Input that arrives while a turn is active waits here in arrival order:
+--   typed input        { message_id, data, request_id }
+--   form answer        { answer_id } - the wake-up of an answer the state API
+--                      already committed as a pending row
+-- Arrival order is the order the inputs were accepted, and the history keeps
+-- it: an answer sent before a typed "stop, don't do that" stays before it.
+local MAX_HELD = 256
+local MAX_HELD_ANSWERS = 64
+
+local function is_answer(item: any): boolean
+    return type(item) == "table" and type(item.answer_id) == "string"
 end
 
--- end_turn hook: admits the form answers that arrived during the turn (and
--- any the scan finds). Returns the latest admitted id when the next turn
--- should run for it. While draining a stop or finish no turn follows, so the
--- rows stay pending for the next end_turn or startup scan instead of being
--- marked delivered unanswered. A storage failure is logged, not fatal: the
--- rows stay pending and the next scan admits them.
-local function admit_answers_at_turn_end(ctx: any, run_agent: boolean)
-    if not run_agent then return nil end
-    local last_id, err = message_handlers.admit_answers(ctx)
-    if err then
-        logger:warn("form answer admission failed", { session_id = ctx.session_id, error = tostring(err) })
+local function hold_answer(ctx: any, message_id: string)
+    local answers = 0
+    for _, item in ipairs(ctx.held) do
+        if is_answer(item) then
+            if item.answer_id == message_id then return end
+            answers = answers + 1
+        end
     end
-    if not last_id then return nil end
-    local _, status_err = ctx.writer:update_status(consts.STATUS.RUNNING)
-    if status_err then
-        logger:warn("session status update failed", { session_id = ctx.session_id, error = tostring(status_err) })
+    -- Beyond the bounds the row stays pending; the end-of-turn scan admits it.
+    if answers >= MAX_HELD_ANSWERS or #ctx.held >= MAX_HELD then return end
+    table.insert(ctx.held, { answer_id = message_id })
+end
+
+-- Settles held input. phase:
+--   "step"      between two steps of a turn: typed input is written for the
+--               next step to see, up to the first held form answer. Answers
+--               are only admitted when the turn ends, and input that came
+--               after one waits with it so the order holds.
+--   "turn_end"  the turn ended: typed input is written and answers admitted
+--               in arrival order, then any pending answer nobody woke the
+--               session for. Returns the latest of them for the next turn.
+--   "stop"      the user stopped the turn: the same, but no turn follows.
+--               The answers are delivered now so that they never start a
+--               turn on their own later.
+--   "exit"      the session is finishing or failing: typed input is written;
+--               answers stay pending for the next session start.
+-- Returns (id for the next turn or nil, error, its request id). A write
+-- failure keeps the unwritten input held and reports it; a failed answer
+-- admission leaves the row pending (the plugin's scan asks again).
+local function flush_held(ctx: any, run_agent: boolean, phase: string?)
+    phase = phase or (run_agent and "turn_end" or "exit")
+    local settle = phase == "turn_end" or phase == "stop"
+    local turn_id, turn_request = nil, nil
+    local unserved = ctx.unserved_input
+    ctx.unserved_input = nil
+    if phase == "turn_end" and type(unserved) == "table" then
+        turn_id, turn_request = unserved.message_id, unserved.request_id
     end
-    if ctx.upstream then ctx.upstream:update_session({ status = consts.STATUS.RUNNING }) end
-    return last_id
+
+    local admitted = {}
+    -- Input arriving while this runs waits for the next boundary.
+    local count = #ctx.held
+    for _ = 1, count do
+        local item = ctx.held[1]
+        if is_answer(item) then
+            if phase == "step" then break end
+            table.remove(ctx.held :: {any}, 1)
+            if settle then
+                local row, admit_err = message_handlers.admit_one(ctx, item.answer_id)
+                if admit_err then
+                    logger:warn("form answer admission failed",
+                        { session_id = ctx.session_id, error = tostring(admit_err) })
+                    if phase == "stop" then message_handlers.note_stopped_answer(ctx, item.answer_id) end
+                elseif row then
+                    table.insert(admitted, row)
+                    if not row.no_turn then turn_id, turn_request = row.message_id, nil end
+                end
+            end
+        else
+            local message_id, msg_type = message_handlers.write_input(ctx, item)
+            if not message_id then
+                if ctx.upstream then
+                    for _, pending in ipairs(ctx.held) do
+                        if not is_answer(pending) then
+                            ctx.upstream:message_error(pending.message_id,
+                                consts.ERROR_CODES.STORAGE_ERROR, msg_type)
+                        end
+                    end
+                end
+                message_handlers.publish_admitted(admitted)
+                return nil, msg_type
+            end
+            table.remove(ctx.held :: {any}, 1)
+            if msg_type == consts.MSG_TYPE.USER then
+                turn_id, turn_request = message_id, item.request_id
+            end
+        end
+    end
+
+    if settle and type(ctx.session_id) == "string" then
+        -- Pending answers whose wake-up never arrived (all later than the
+        -- inputs above as far as this session knows).
+        local _, scan_err, found = message_handlers.admit_answers(ctx)
+        if scan_err then
+            logger:warn("form answer admission failed", { session_id = ctx.session_id, error = tostring(scan_err) })
+        end
+        for _, row in ipairs(found or {}) do
+            table.insert(admitted, row)
+            if not row.no_turn then turn_id, turn_request = row.message_id, nil end
+        end
+    end
+
+    local next_turn = phase == "turn_end" and run_agent and turn_id or nil
+    if #admitted > 0 then
+        if next_turn then
+            -- The status still says running (the turn that just ended), and
+            -- the next turn starts right away.
+            message_handlers.publish_admitted(admitted)
+        else
+            message_handlers.defer_publish(ctx, admitted)
+        end
+    end
+    return next_turn, nil, next_turn and turn_request or nil
+end
+
+-- A form is being created inside a turn. Typed input held since before it is
+-- written ahead of the form, on the form's transaction, so the form does not
+-- start out as asked earlier than a message the user sent before it existed.
+-- Only the input before the first held answer (answers wait for the end of
+-- the turn). Returns the written entries for commit_held_before_form.
+local function write_held_before_form(ctx: any, write_opts: any)
+    local written = {}
+    for _, item in ipairs(ctx.held) do
+        if is_answer(item) then break end
+        local message_id, msg_type = message_handlers.write_input(ctx, item,
+            { tx = write_opts and write_opts.tx, announce = false })
+        if not message_id then return nil, msg_type end
+        table.insert(written, { item = item, message_id = message_id, msg_type = msg_type })
+    end
+    return written, nil
+end
+
+-- After the form's transaction committed: the entries are no longer held,
+-- and the turn that follows the form answers the latest typed message.
+local function commit_held_before_form(ctx: any, written: any)
+    for _ = 1, #written do table.remove(ctx.held :: {any}, 1) end
+    for _, entry in ipairs(written) do
+        message_handlers.announce_input(ctx, entry.message_id, entry.msg_type, entry.item)
+        if entry.msg_type == consts.MSG_TYPE.USER then
+            ctx.unserved_input = { message_id = entry.message_id, request_id = entry.item.request_id }
+        end
+    end
 end
 
 local function settle_exit(bus: any, err: any)
@@ -131,7 +235,7 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             ctx.upstream:command_error(payload_data.request_id, "SESSION_FINISHING", "Session is finishing")
             return true
         end
-        if #ctx.held >= 256 then
+        if #ctx.held >= MAX_HELD then
             ctx.upstream:command_error(payload_data.request_id, "SESSION_BUSY", "Deferred message buffer is full")
             return true
         end
@@ -164,15 +268,14 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
     if topic == consts.TOPICS.FORM_ANSWER then
         -- The answer row is already committed and marked pending, so nothing
         -- here needs to be durable: a dropped wake-up is recovered by the
-        -- end_turn and startup scans. Never admitted mid-turn: the running
-        -- turn must not see an answer that arrived after it started.
+        -- end-of-turn, startup and plugin scans. Never admitted mid-turn: the
+        -- running turn must not see an answer that arrived after it started;
+        -- it waits in the held queue in arrival order. Without a message id
+        -- this is the plugin asking the session to look for pending answers.
         local message_id = payload_data.message_id
-        if type(message_id) ~= "string" or message_id == "" then return true end
         if session_state.finishing then return true end
         if bus:is_turn_active() then
-            if #ctx.pending_answers < 256 then
-                table.insert(ctx.pending_answers, message_id)
-            end
+            if type(message_id) == "string" and message_id ~= "" then hold_answer(ctx, message_id) end
         else
             bus:queue_op({ type = consts.OP_TYPE.ADMIT_ANSWER,
                 message_id = message_id, starts_turn = true })
@@ -300,19 +403,22 @@ local function run(args: SessionArgs)
         config = session_config,
         agent_ctx = agent_ctx,
         held = {},
-        pending_answers = {},
         parent_pid = args.parent_pid,
         lifecycle_state = {},
-        queue_empty_callback = function()
-            local _, status_err = session_writer:update_status(consts.STATUS.IDLE)
-            if status_err then return nil, status_err end
-            session_upstream:update_session({ status = consts.STATUS.IDLE })
-            return true
-        end
     }
+    context.queue_empty_callback = function()
+        local _, status_err = session_writer:update_status(consts.STATUS.IDLE)
+        if status_err then return nil, status_err end
+        session_upstream:update_session({ status = consts.STATUS.IDLE })
+        -- Answers admitted with no turn (after a stop) read as delivered
+        -- now that the status is idle.
+        message_handlers.publish_deferred(context)
+        return true
+    end
 
-    context.flush_held = function(run_agent) return flush_held(context, run_agent) end
-    context.admit_answers = function(run_agent) return admit_answers_at_turn_end(context, run_agent) end
+    context.flush_held = function(run_agent, phase) return flush_held(context, run_agent, phase) end
+    context.write_held_before_form = function(write_opts) return write_held_before_form(context, write_opts) end
+    context.commit_held_before_form = function(written) return commit_held_before_form(context, written) end
     context.settle_intents = function()
         return message_repo.recover_pending(args.session_id,
             session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
@@ -504,5 +610,6 @@ end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
     settle_exit = settle_exit,
-    admit_answers_at_turn_end = admit_answers_at_turn_end,
+    write_held_before_form = write_held_before_form,
+    commit_held_before_form = commit_held_before_form,
     reference_artifact = reference_artifact }

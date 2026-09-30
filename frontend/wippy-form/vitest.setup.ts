@@ -56,4 +56,15 @@ if (typeof window !== 'undefined') {
       context: { resourceId: '', resourceType: 'page' },
     }
   }
+  // jsdom does not implement ResizeObserver. PrimeVue's Textarea uses it
+  // for `auto-resize` (question-card-composer.vue) — without this stub,
+  // mounting any component with an auto-resizing Textarea throws
+  // `ResizeObserver is not defined` during onMounted.
+  if (!w.ResizeObserver) {
+    w.ResizeObserver = class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
 }

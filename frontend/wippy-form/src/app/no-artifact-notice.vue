@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { FormDefinition } from '../lib/definition'
 import Message from 'primevue/message'
-import ChoiceField from './fields/ChoiceField.vue'
+import ChoiceField from './fields/choice-field.vue'
 
 defineProps<{
   definition: FormDefinition
@@ -11,7 +11,7 @@ defineProps<{
 <template>
   <div class="flex flex-col gap-4 min-w-0">
     <div class="flex flex-col gap-1">
-      <h2 class="text-base font-semibold text-surface-900 dark:text-surface-0 break-words">
+      <h2 class="text-base font-semibold text-color break-words">
         {{ definition.title }}
       </h2>
       <p

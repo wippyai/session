@@ -273,6 +273,12 @@ function session_writer:create_artifact(artifact_id, kind, title, content, meta,
     return artifact_id
 end
 
+-- Returns artifact_repo.update's result table ({ artifact_id, updated,
+-- content_version }). opts (optional) is passed on to artifact_repo:
+-- opts.tx runs the ownership check and the update on that transaction,
+-- opts.expected_version makes the update conditional. A CONFLICT or
+-- NOT_FOUND error from the update is returned as it is, so callers can check
+-- err:kind().
 function session_writer:update_artifact(artifact_id, updates, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
@@ -284,8 +290,9 @@ function session_writer:update_artifact(artifact_id, updates, opts)
 
     -- Session ownership check stays unconditional, even when opts carries a
     -- caller-supplied transaction: this ensures a writer can only ever touch
-    -- artifacts belonging to its own session.
-    local artifact, err = session_writer._artifact_repo.get(artifact_id)
+    -- artifacts belonging to its own session. It reads on that same
+    -- transaction, so it sees the caller's uncommitted rows.
+    local artifact, err = session_writer._artifact_repo.get(artifact_id, opts)
     if err then
         return nil, "Failed to get artifact: " .. err
     end
@@ -298,9 +305,12 @@ function session_writer:update_artifact(artifact_id, updates, opts)
         return nil, "Artifact belongs to different session"
     end
 
-    local result, err = session_writer._artifact_repo.update(artifact_id, updates, opts)
-    if err then
-        return nil, "Failed to update artifact: " .. err
+    local result, update_err = session_writer._artifact_repo.update(artifact_id, updates, opts)
+    if update_err then
+        if type(update_err) ~= "string" then
+            return nil, update_err
+        end
+        return nil, "Failed to update artifact: " .. update_err
     end
 
     return result

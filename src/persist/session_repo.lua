@@ -1,7 +1,6 @@
 local sql = require("sql")
 local json = require("json")
 local time = require("time")
-local consts = require("consts")
 local tx = require("tx")
 
 type Session = {
@@ -30,14 +29,24 @@ type SessionUpdates = {
 
 local session_repo = {}
 
--- Get a database connection
+-- Get a database connection (refused inside tx.run; see tx.connect)
 local function get_db()
-    local db_resource = consts.get_db_resource()
-    local db, err = sql.get(db_resource)
-    if err then
-        return nil, "Failed to connect to database: " .. err
+    return tx.connect()
+end
+
+-- Decodes a listed session row's JSON fields in place; a missing or
+-- malformed value reads as an empty table.
+local function decode_json_fields(session)
+    for _, field in ipairs({ "meta", "config", "public_meta" }) do
+        local value = session[field]
+        local decoded = nil
+        if type(value) == "string" and value ~= "" then
+            local parsed, decode_err = json.decode(value)
+            if not decode_err then decoded = parsed end
+        end
+        session[field] = decoded or {}
     end
-    return db
+    return session
 end
 
 -- Count sessions by user ID
@@ -258,41 +267,77 @@ function session_repo.list_by_user(user_id, limit, offset)
 
     -- Parse JSON fields for each session
     for i, session in ipairs(sessions) do
-        if session.meta and session.meta ~= "" then
-            local decoded, err = json.decode(session.meta :: string)
-            if not err then
-                session.meta = decoded
-            else
-                session.meta = {}
-            end
-        else
-            session.meta = {}
-        end
-
-        if session.config and session.config ~= "" then
-            local decoded, err = json.decode(session.config :: string)
-            if not err then
-                session.config = decoded
-            else
-                session.config = {}
-            end
-        else
-            session.config = {}
-        end
-
-        if session.public_meta and session.public_meta ~= "" then
-            local decoded, err = json.decode(session.public_meta :: string)
-            if not err then
-                session.public_meta = decoded
-            else
-                session.public_meta = {}
-            end
-        else
-            session.public_meta = {}
-        end
+        decode_json_fields(session)
     end
 
     return sessions
+end
+
+-- One page of a user's sessions whose status equals `status`, in session_id
+-- order. Lets a caller visit every session in a state (for example every
+-- stale "running" one after a restart), not only the most recently active.
+--
+-- limit: page size, default 50. opts.after: the next_cursor of the previous
+-- page. Returns { sessions, has_more, next_cursor }; next_cursor is nil on
+-- the last page. Sessions have meta, config and public_meta decoded, as in
+-- list_by_user.
+function session_repo.list_by_user_status(user_id, status, limit, opts)
+    if not user_id or user_id == "" then
+        return nil, "User ID is required"
+    end
+    if not status or status == "" then
+        return nil, "Status is required"
+    end
+    limit = limit or 50
+    if limit < 1 then
+        limit = 1
+    end
+
+    local db, err = get_db()
+    if err then
+        return nil, err
+    end
+
+    local filters = {
+        sql.builder.expr("user_id = ?", user_id),
+        sql.builder.expr("status = ?", status),
+    }
+    local after = opts and opts.after
+    if type(after) == "string" and after ~= "" then
+        -- Keyset on the primary key: rows that change status or are added
+        -- between pages do not shift the rows of later pages.
+        table.insert(filters, sql.builder.expr("session_id > ?", after))
+    end
+
+    local sessions, query_err = sql.builder.select(
+            "session_id", "user_id", "status", "primary_context_id",
+            "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+        )
+        :from("sessions")
+        :where(sql.builder.and_(filters))
+        :order_by("session_id ASC")
+        :limit(limit + 1)
+        :run_with(db):query()
+
+    db:release()
+
+    if query_err then
+        return nil, "Failed to list sessions by status: " .. query_err
+    end
+
+    local has_more = #sessions > limit
+    if has_more then
+        table.remove(sessions)
+    end
+    for _, session in ipairs(sessions) do
+        decode_json_fields(session)
+    end
+
+    return {
+        sessions = sessions,
+        has_more = has_more,
+        next_cursor = has_more and sessions[#sessions].session_id or nil,
+    }
 end
 
 -- Update session metadata (title, meta, config, public_meta, status, last_message_date)

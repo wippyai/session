@@ -419,6 +419,54 @@ local function define_tests()
             session_repo.delete(session_ids.id1)
             session_repo.delete(session_ids.id3)
         end)
+
+        it("lists every session of a user in a status, page by page in session_id order", function()
+            -- A status no other suite uses, so only these sessions match.
+            local status = "status-test-" .. uuid.v7()
+            local matching = {}
+            for i = 1, 3 do
+                local session_id = uuid.v7()
+                test.is_nil(select(2, session_repo.create(session_id, test_data.user_id, test_data.context_id,
+                    "Status " .. i, "test")))
+                test.is_nil(select(2, session_repo.update_session_meta(session_id, { status = status })))
+                table.insert(matching, session_id)
+            end
+            table.sort(matching)
+            local other_status = uuid.v7()
+            session_repo.create(other_status, test_data.user_id, test_data.context_id, "Other status", "test")
+            session_repo.update_session_meta(other_status, { status = "idle" })
+            local other_user = uuid.v7()
+            session_repo.create(other_user, uuid.v7(), test_data.context_id, "Other user", "test")
+            session_repo.update_session_meta(other_user, { status = status })
+
+            local first, first_err = session_repo.list_by_user_status(test_data.user_id, status, 2)
+            local rest, rest_err = session_repo.list_by_user_status(test_data.user_id, status, 2,
+                { after = first and first.next_cursor })
+            local missing_status, status_err = session_repo.list_by_user_status(test_data.user_id, "", 2)
+            for _, id in ipairs(matching) do session_repo.delete(id) end
+            session_repo.delete(other_status)
+            session_repo.delete(other_user)
+
+            test.is_nil(first_err)
+            assert(first)
+            test.eq(#first.sessions, 2)
+            test.eq(first.sessions[1].session_id, matching[1])
+            test.eq(first.sessions[2].session_id, matching[2])
+            test.eq(first.sessions[1].status, status)
+            test.is_table(first.sessions[1].meta)
+            test.is_true(first.has_more)
+            test.eq(first.next_cursor, matching[2])
+
+            test.is_nil(rest_err)
+            assert(rest)
+            test.eq(#rest.sessions, 1)
+            test.eq(rest.sessions[1].session_id, matching[3])
+            test.is_false(rest.has_more)
+            test.is_nil(rest.next_cursor)
+
+            test.is_nil(missing_status)
+            test.contains(tostring(status_err), "Status is required")
+        end)
     end)
 end
 

@@ -103,6 +103,7 @@ local function define_tests()
             end
 
             -- Delete test data in proper order (respecting foreign key constraints)
+            tx:execute("DELETE FROM artifacts WHERE session_id = $1", { test_data.session_id })
             tx:execute("DELETE FROM messages WHERE session_id = $1", { test_data.session_id })
             tx:execute("DELETE FROM session_contexts WHERE session_id = $1", { test_data.session_id })
             tx:execute("DELETE FROM sessions WHERE session_id = $1", { test_data.session_id })
@@ -706,34 +707,12 @@ local function define_tests()
             test.contains(tostring(err), "Message ID is required")
         end)
 
-        it("formats message_date.now() with a 9-digit fraction, and orders instants 50ms apart correctly", function()
+        it("formats message_date.now() with a 9-digit fraction", function()
             local fixed_pattern = "^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%d%d%d%d%d%d%d[Z%+%-]"
-            local now = message_date.now()
-            test.not_nil(now:match(fixed_pattern))
-
-            -- Two instants 50ms apart inside the same second: with a fixed
-            -- 9-digit fraction and a "Z" offset, text order matches time
-            -- order. The old trimmed, offset-bearing format could disagree
-            -- here on a UTC host (e.g. "...05.1Z" sorting after "...05.15Z").
+            test.not_nil(message_date.now():match(fixed_pattern))
             local earlier = time.date(2026, 1, 1, 0, 0, 0, 100000000, time.utc):format(message_date.LAYOUT)
             local later = time.date(2026, 1, 1, 0, 0, 0, 150000000, time.utc):format(message_date.LAYOUT)
             test.is_true(earlier < later)
-
-            -- next() with no prior date returns the fixed-width format too.
-            local first = message_date.next(nil)
-            test.not_nil(first:match(fixed_pattern))
-
-            -- A legacy row (trimmed fraction, same offset) sorts before the
-            -- value next() returns for it, as text.
-            local legacy = time.date(2026, 1, 1, 0, 0, 5, 150000000, time.utc):format(time.RFC3339NANO)
-            local after_legacy = message_date.next(legacy)
-            test.is_true(legacy < after_legacy)
-
-            -- next() never returns a date that is not strictly greater than
-            -- the one it was given, even when called back-to-back (same
-            -- clock tick).
-            local second = message_date.next(first)
-            test.is_true(second > first)
         end)
 
         it("keeps 100 rapid create() calls in one session in strict insertion order", function()
@@ -809,6 +788,252 @@ local function define_tests()
             for _, id in ipairs(batch_ids) do message_repo.delete(id) end
             session_repo.delete(session_id)
             context_repo.delete(context_id)
+        end)
+
+        describe("dates, anchors and form answers", function()
+            local owned = {}
+            local PENDING_META = '{"session_form":{"artifact_id":"%s","pending":true,"submission_id":"r"}}'
+            -- A typed message whose client data (file_uuids) carries a
+            -- session_form object: it must never pass for a server answer.
+            local LOOKALIKE_META = '{"file_uuids":{"session_form":{"artifact_id":"x","pending":true}}}'
+
+            after_all(function()
+                for _, item in ipairs(owned) do
+                    session_repo.delete(item.session_id)
+                    context_repo.delete(item.context_id)
+                end
+            end)
+
+            local function new_session(title)
+                local context_id, session_id = uuid.v7(), uuid.v7()
+                local _, context_err = context_repo.create(context_id, "primary", "{}")
+                test.is_nil(context_err)
+                local _, session_err = session_repo.create(session_id, test_data.user_id, context_id, title, "test")
+                test.is_nil(session_err)
+                table.insert(owned, { session_id = session_id, context_id = context_id })
+                return session_id
+            end
+
+            local function exec(query, params)
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local _, exec_err = db:execute(query, params)
+                db:release()
+                test.is_nil(exec_err)
+            end
+
+            local function insert_row(session_id, message_id, msg_type, date, metadata: string?)
+                exec("INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
+                    { message_id, session_id, date, msg_type, message_id, metadata or "{}" })
+            end
+
+            local function insert_artifact(session_id, artifact_id, meta)
+                local now = time.now():format(time.RFC3339)
+                exec("INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    { artifact_id, session_id, test_data.user_id, "inline", "Form " .. artifact_id, "{}", meta, now, now })
+            end
+
+            local function ids_in_order(session_id)
+                local page, err = message_repo.list_by_session(session_id, 500)
+                test.is_nil(err)
+                local out = {}
+                for _, row in ipairs((page :: any).messages) do table.insert(out, row.message_id) end
+                return out
+            end
+
+            -- Two days ahead of the clock, so neither the clock nor a later
+            -- calendar day in the host offset orders a new row after it;
+            -- only the stored values can.
+            local function ahead_of_clock()
+                return time.now():add(48 * 3600 * time.SECOND)
+            end
+
+            it("orders a new message after a trimmed UTC date that is ahead of the clock", function()
+                local session_id = new_session("Trimmed legacy date")
+                local ahead = ahead_of_clock():utc()
+                local y, mo, d = ahead:date()
+                local h, mi, s = ahead:clock()
+                -- The trimmed layout older rows hold: "...:SS.15Z". A fixed
+                -- 9-digit value of the same second ("...:SS.150000001Z")
+                -- sorts before it as text.
+                local legacy = time.date(y, mo, d, h, mi, s, 150000000, time.utc):format(time.RFC3339NANO)
+                local legacy_id = uuid.v7()
+                insert_row(session_id, legacy_id, consts.MSG_TYPE.ASSISTANT, legacy, nil)
+                exec("UPDATE sessions SET last_message_date = $1 WHERE session_id = $2", { legacy, session_id })
+
+                local new_id = uuid.v7()
+                local created, create_err = message_repo.create(new_id, session_id, consts.MSG_TYPE.USER, "after legacy")
+                test.is_nil(create_err)
+                test.not_nil(created)
+
+                local ids = ids_in_order(session_id)
+                test.eq(ids[#ids - 1], legacy_id)
+                test.eq(ids[#ids], new_id)
+                local moved_on, moved_err = message_repo.has_user_input_after(session_id, legacy, nil)
+                test.is_nil(moved_err)
+                test.is_true(moved_on, "the typed row written after the legacy row counts as later input")
+            end)
+
+            it("orders new and admitted rows after the latest row when last_message_date was moved back", function()
+                local session_id = new_session("Anchor moved back")
+                local ahead_id = uuid.v7()
+                insert_row(session_id, ahead_id, consts.MSG_TYPE.ASSISTANT, ahead_of_clock():format(message_date.LAYOUT), nil)
+                -- What writer:update_status does: a second-resolution "now",
+                -- below the row above.
+                local _, meta_err = session_repo.update_session_meta(session_id, { last_message_date = os.time() })
+                test.is_nil(meta_err)
+
+                local typed_id = uuid.v7()
+                local _, create_err = message_repo.create(typed_id, session_id, consts.MSG_TYPE.USER, "typed")
+                test.is_nil(create_err)
+                local ids = ids_in_order(session_id)
+                test.eq(ids[#ids - 1], ahead_id)
+                test.eq(ids[#ids], typed_id)
+
+                local _, lower_err = session_repo.update_session_meta(session_id, { last_message_date = os.time() })
+                test.is_nil(lower_err)
+                local answer_id = uuid.v7()
+                insert_row(session_id, answer_id, consts.MSG_TYPE.USER, message_date.now(),
+                    string.format(PENDING_META, uuid.v7()))
+                local admitted, admit_err = message_repo.admit_pending_answer(session_id, answer_id)
+                test.is_nil(admit_err)
+                test.not_nil(admitted)
+                ids = ids_in_order(session_id)
+                test.eq(ids[#ids], answer_id)
+            end)
+
+            it("counts a later typed message whose client data mentions session_form", function()
+                local session_id = new_session("Lookalike typed row")
+                local after = "2001-01-01T00:00:00.000000000Z"
+                insert_row(session_id, uuid.v7(), consts.MSG_TYPE.USER, "2001-01-01T00:00:01.000000000Z", LOOKALIKE_META)
+                local moved_on, err = message_repo.has_user_input_after(session_id, after, nil)
+                test.is_nil(err)
+                test.is_true(moved_on)
+            end)
+
+            it("compares answer acceptance times as instants, not as text", function()
+                local later_session = new_session("Accepted later, other offset")
+                -- 10:00Z written with a +02:00 offset; the answer was
+                -- accepted at 10:30Z, which sorts before it as text.
+                local created = "2001-03-01T12:00:00.000000000+02:00"
+                insert_artifact(later_session, uuid.v7(),
+                    '{"session_form":{"submission":{"submitted_at":"2001-03-01T10:30:00.000000000Z"}}}')
+                local moved_on, err = message_repo.has_user_input_after(later_session, created, nil)
+                test.is_nil(err)
+                test.is_true(moved_on, "accepted 30 minutes after the form was created")
+
+                local earlier_session = new_session("Accepted earlier, other offset")
+                insert_artifact(earlier_session, uuid.v7(),
+                    '{"session_form":{"submission":{"submitted_at":"2001-03-01T09:30:00.000000000Z"}}}')
+                local before, before_err = message_repo.has_user_input_after(earlier_session, created, nil)
+                test.is_nil(before_err)
+                test.is_false(before, "accepted 30 minutes before the form was created")
+            end)
+
+            it("does not let a lookalike row hide a real pending answer", function()
+                local session_id = new_session("Pending behind a lookalike")
+                insert_row(session_id, uuid.v7(), consts.MSG_TYPE.USER, "2001-01-01T00:00:01.000000000Z", LOOKALIKE_META)
+                local real_id = uuid.v7()
+                insert_row(session_id, real_id, consts.MSG_TYPE.USER, "2001-01-01T00:00:02.000000000Z",
+                    string.format(PENDING_META, uuid.v7()))
+                local pending, err = message_repo.list_pending_answers(session_id, 1)
+                -- Pending rows of this user are visible to every resume scan.
+                session_repo.delete(session_id)
+                test.is_nil(err)
+                test.eq(#(pending :: any), 1)
+                test.eq((pending :: any)[1].message_id, real_id)
+            end)
+
+            it("lists sessions with pending answers oldest first, skipping lookalikes and excluded ids", function()
+                -- Dated far in the past so no other suite's rows come first.
+                local lookalike = new_session("Only a lookalike")
+                insert_row(lookalike, uuid.v7(), consts.MSG_TYPE.USER, "2000-01-01T00:00:01.000000000Z", LOOKALIKE_META)
+                local first, second, third = new_session("Pending 1"), new_session("Pending 2"), new_session("Pending 3")
+                insert_row(third, uuid.v7(), consts.MSG_TYPE.USER, "2000-01-01T00:00:04.000000000Z",
+                    string.format(PENDING_META, uuid.v7()))
+                insert_row(first, uuid.v7(), consts.MSG_TYPE.USER, "2000-01-01T00:00:02.000000000Z",
+                    string.format(PENDING_META, uuid.v7()))
+                insert_row(second, uuid.v7(), consts.MSG_TYPE.USER, "2000-01-01T00:00:03.000000000Z",
+                    string.format(PENDING_META, uuid.v7()))
+
+                local ids, err = message_repo.list_sessions_with_pending_answers(test_data.user_id, 2)
+                test.is_nil(err)
+                test.eq(#(ids :: any), 2)
+                test.eq((ids :: any)[1], first)
+                test.eq((ids :: any)[2], second)
+
+                local rest, rest_err = message_repo.list_sessions_with_pending_answers(test_data.user_id, 2,
+                    { exclude = { first } })
+                for _, id in ipairs({ lookalike, first, second, third }) do session_repo.delete(id) end
+                test.is_nil(rest_err)
+                test.eq((rest :: any)[1], second)
+                test.eq((rest :: any)[2], third)
+            end)
+
+            describe("recover_pending and committed forms", function()
+                local function pending_form_call(session_id, artifact_id)
+                    local session_writer: any = writer.new(session_id)
+                    local call_id = "call-" .. uuid.v7()
+                    local _, ids: any, err = session_writer:add_response("", {}, {
+                        { id = call_id, name = "ask_user", arguments = "{}", type = consts.MSG_TYPE.FUNCTION },
+                    })
+                    test.is_nil(err)
+                    local message_id = ids[call_id]
+                    session_writer:update_message_meta(message_id,
+                        { control_operations = { forms = { { artifact_id = artifact_id } } } })
+                    return message_id, call_id
+                end
+
+                local function form_meta(call_id, tool_message_id)
+                    return json.encode({ status = "active", session_form = { version = 1,
+                        origin = { call_id = call_id, tool_message_id = tool_message_id } } })
+                end
+
+                it("settles a call whose form names it as origin", function()
+                    local session_id = new_session("Committed form")
+                    local artifact_id = uuid.v7()
+                    local message_id, call_id = pending_form_call(session_id, artifact_id)
+                    insert_artifact(session_id, artifact_id, form_meta(call_id, message_id))
+
+                    local recovered, err = message_repo.recover_pending(session_id)
+                    test.is_nil(err)
+                    test.eq(recovered, 1)
+                    local row: any = message_repo.get(message_id)
+                    test.eq(row.metadata.status, consts.FUNC_STATUS.SUCCESS)
+                    test.contains(tostring(row.metadata.result.message), artifact_id)
+                end)
+
+                it("does not settle a call with a form whose origin is another call", function()
+                    local session_id = new_session("Foreign form")
+                    local artifact_id = uuid.v7()
+                    local message_id = pending_form_call(session_id, artifact_id)
+                    insert_artifact(session_id, artifact_id, form_meta("call-other", uuid.v7()))
+
+                    local recovered, err = message_repo.recover_pending(session_id)
+                    test.is_nil(err)
+                    test.eq(recovered, 1)
+                    local row: any = message_repo.get(message_id)
+                    test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                    test.eq(row.metadata.result, "interrupted, outcome unknown")
+                end)
+
+                it("returns a failed form lookup instead of marking the call interrupted", function()
+                    local session_id = new_session("Lookup failure")
+                    local artifact_id = uuid.v7()
+                    local message_id, call_id = pending_form_call(session_id, artifact_id)
+                    insert_artifact(session_id, artifact_id, form_meta(call_id, message_id))
+
+                    local original = message_repo._form_artifact
+                    message_repo._form_artifact = function() return nil, "database unavailable" end
+                    local recovered, err = message_repo.recover_pending(session_id)
+                    message_repo._form_artifact = original
+
+                    test.is_nil(recovered)
+                    test.contains(tostring(err), "database unavailable")
+                    local row: any = message_repo.get(message_id)
+                    test.eq(row.metadata.status, consts.FUNC_STATUS.PENDING)
+                end)
+            end)
         end)
     end)
 end

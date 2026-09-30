@@ -2,7 +2,7 @@ import type { Ref } from 'vue'
 import type { FieldError, FormAnswers, SubmitAccepted, SubmitEnvelope, SubmitResult } from '../lib/definition'
 import type { SubmitErrorCode } from '../lib/submit-error'
 import * as WippyProxy from '@wippy-fe/proxy'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { generateRequestId } from '../lib/request-id'
 import { classifySubmitError, validationErrorsOf } from '../lib/submit-error'
 
@@ -15,7 +15,12 @@ export interface SubmitOutcome {
   code?: SubmitErrorCode
   retryable?: boolean
   shouldReload?: boolean
+  /** True when the artifact was rebound to a different id while this attempt was in flight — the caller must not apply this result. */
+  ignored?: boolean
 }
+
+/** Shown once the one automatic retry for a no-response failure has also failed. */
+const RETRY_EXHAUSTED_MESSAGE = 'Network problem. Your answer may not have been saved. Check your connection, then select Retry.'
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -39,6 +44,17 @@ export function useFormSubmit(artifactId: Ref<string | null>) {
   const submitting = ref(false)
   const lastRequestId = ref<string | null>(null)
   const lastAnswersKey = ref<string | null>(null)
+
+  // Bumped whenever the bound artifact id changes, so a submit attempt that
+  // started against the previous artifact can tell its result is stale once
+  // it finally resolves (the Host rebound the element to a different
+  // artifact — e.g. double-buffered w-page swap — while the request was in
+  // flight). A brand-new artifact also starts a fresh request-id identity.
+  let generation = 0
+  watch(artifactId, () => {
+    generation++
+    resetIdentity()
+  })
 
   function requestIdFor(answers: FormAnswers): string {
     const key = keyOfAnswers(answers)
@@ -72,6 +88,7 @@ export function useFormSubmit(artifactId: Ref<string | null>) {
     if (typeof artifactStateFn !== 'function')
       return { ok: false, message: 'This form needs a newer Web Host.' }
 
+    const myGeneration = generation
     const requestId = requestIdFor(answers)
     const envelope: SubmitEnvelope = {
       form_version: formVersion,
@@ -87,6 +104,8 @@ export function useFormSubmit(artifactId: Ref<string | null>) {
         result = await artifactStateFn(id).submit(envelope)
       }
       catch (err) {
+        if (myGeneration !== generation)
+          return { ok: false, ignored: true }
         // The Host client rejects a 422 with field errors attached.
         const invalid = validationErrorsOf(err)
         if (invalid)
@@ -100,15 +119,40 @@ export function useFormSubmit(artifactId: Ref<string | null>) {
         // returns the original result (`replayed: true`), so this can't
         // duplicate the answer.
         await delay(800)
+        if (myGeneration !== generation)
+          return { ok: false, ignored: true }
         try {
           result = await artifactStateFn(id).submit(envelope)
         }
         catch (err2) {
+          if (myGeneration !== generation)
+            return { ok: false, ignored: true }
+          // A 422 on the retry itself must map to field errors the same
+          // way the first attempt's does — without this check it fell
+          // through to classifySubmitError(), which has no 422 branch and
+          // turned real validation errors into a generic "Could not submit
+          // this form." with no field to fix.
+          const invalid2 = validationErrorsOf(err2)
+          if (invalid2)
+            return { ok: false, fieldErrors: invalid2.errors, formErrors: invalid2.formErrors }
           const classified2 = classifySubmitError(err2)
-          return { ok: false, message: classified2.message, code: classified2.code, retryable: true, shouldReload: classified2.shouldReload }
+          // The retry itself is exhausted here — never repeat "Retrying…"
+          // copy for a still-uncertain outcome; for any other classified
+          // failure on the retry, its own message already applies.
+          const message = classified2.uncertain ? RETRY_EXHAUSTED_MESSAGE : classified2.message
+          // `retryable` must reflect the actual classification (a 401/404/
+          // 409 is not retryable — retrying without a change can't help —
+          // and offering Retry for one is misleading), EXCEPT the genuinely
+          // uncertain no-response case, which stays retryable even once
+          // exhausted (RETRY_EXHAUSTED_MESSAGE itself tells the user to
+          // select Retry).
+          const retryable = classified2.uncertain ? true : classified2.retryable
+          return { ok: false, message, code: classified2.code, retryable, shouldReload: classified2.shouldReload }
         }
       }
 
+      if (myGeneration !== generation)
+        return { ok: false, ignored: true }
       resetIdentity()
       return { ok: true, accepted: result }
     }

@@ -67,6 +67,7 @@ entries:
       - uuid
       - funcs
       - time
+      - logger
     imports:
       consts: wippy.session:consts
       agent_context: wippy.agent:context
@@ -77,6 +78,8 @@ entries:
       output: wippy.llm:output
       control_handlers: wippy.session.process:control_handlers
       message_repo: wippy.session.persist:message_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_events: wippy.session.persist:artifact_events
 
   # wippy.session.process:session
   - name: session

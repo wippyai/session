@@ -1,6 +1,8 @@
 local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
+local message_repo = require("message_repo")
+local form_index = require("form_index")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -72,6 +74,17 @@ local function resolve_file(file_uuid: string, options: table)
     return nil
 end
 
+-- A <wippy-form-answers> element is the server's record of a form answer, and
+-- only the answer rows (metadata.session_form) carry one. The same tag typed
+-- or pasted by a user is escaped, so the model reads it as the user's text and
+-- not as an answer record.
+local FORM_ANSWERS_TAG = "<(/?)([Ww][Ii][Pp][Pp][Yy]%-[Ff][Oo][Rr][Mm]%-[Aa][Nn][Ss][Ww][Ee][Rr][Ss])"
+
+function prompt_builder.neutralize_form_answers(text: any): any
+    if type(text) ~= "string" then return text end
+    return (string.gsub(text, FORM_ANSWERS_TAG, "&lt;%1%2"))
+end
+
 function prompt_builder.build(messages, contexts, session_meta, options)
     if not messages then
         return nil, "Messages are required"
@@ -101,13 +114,16 @@ function prompt_builder.build(messages, contexts, session_meta, options)
 
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
-        elseif msg.type == consts.MSG_TYPE.USER
-            and type(metadata.session_form) == "table" and metadata.session_form.pending == true then
+        elseif message_repo.is_pending_answer(msg) then
             -- A form answer accepted while a turn was running. It is committed
             -- but not yet admitted: the session admits it after the turn ends
             -- (moving it to the end of the history), so it stays out until then.
         elseif msg.type == consts.MSG_TYPE.USER then
-            builder:add_user(msg.data :: string)
+            local text = msg.data
+            if type(metadata.session_form) ~= "table" then
+                text = prompt_builder.neutralize_form_answers(text)
+            end
+            builder:add_user(text :: string)
 
             if include_files and metadata.file_uuids and #metadata.file_uuids > 0 then
                 local file_info = {}
@@ -251,6 +267,34 @@ local function anchors_on_agent_message(session: any, messages: any): boolean
     return first.type ~= consts.MSG_TYPE.USER and first.type ~= consts.MSG_TYPE.DEVELOPER
 end
 
+-- The session's form index (form identity and state survive checkpoints
+-- through it, not through the free-text summary). Answers accepted during the
+-- running turn are listed as pending, without their values. Returns
+-- (text or nil, error).
+local function forms_index_of(session: any): (string?, string?)
+    if type(session.artifacts) ~= "function" then
+        return nil, nil
+    end
+    local artifacts, err = session:artifacts():all()
+    if err then
+        return nil, "Failed to load forms: " .. tostring(err)
+    end
+    local pending = {}
+    if form_index.has_answers(artifacts) and type(session.session_id) == "string" then
+        local rows, pending_err = message_repo.list_pending_answers(session.session_id, form_index.MAX_PENDING_SCAN)
+        if not rows then
+            return nil, "Failed to load pending form answers: " .. tostring(pending_err)
+        end
+        for _, row in ipairs(rows) do
+            local form = type(row.metadata) == "table" and row.metadata.session_form or nil
+            if type(form) == "table" and type(form.artifact_id) == "string" then
+                pending[form.artifact_id] = true
+            end
+        end
+    end
+    return form_index.build(artifacts, { pending_answers = pending }), nil
+end
+
 function prompt_builder.from_session(session, options)
     if not session then
         return nil, "Session reader is required"
@@ -275,9 +319,24 @@ function prompt_builder.from_session(session, options)
         return nil, "Failed to load contexts: " .. err
     end
 
+    local index, index_err = forms_index_of(session)
+    if index_err then
+        return nil, index_err
+    end
+
     local session_meta = session:state()
 
-    return prompt_builder.build(messages, contexts, session_meta, options)
+    local builder, build_err = prompt_builder.build(messages, contexts, session_meta, options)
+    if not builder then
+        return nil, build_err
+    end
+    -- After the history and its cache marker: the index changes whenever a
+    -- form is asked, answered or admitted, and anywhere earlier it would make
+    -- the provider re-read the cached history behind it on the next step.
+    if index then
+        builder:add_developer(index)
+    end
+    return builder, nil
 end
 
 return prompt_builder

@@ -1,9 +1,560 @@
 @import "@wippy-fe/theme/theme-config.css";
 @import 'tailwind.css';
 
+/*
+ * The unchecked radio/checkbox/input-edge contrast issue (theme
+ * surface-300/700 borders, about 1.3-1.4:1, short of the 3:1 target) used
+ * to have a fix here as a raw `.p-radiobutton` / `.p-checkbox` override
+ * (module CSS must never carry `.p-*` rules — that shadows the
+ * facade/theme layer, see never-do.md). Per D27 that fix is DEFERRED to a
+ * later theme-level change (facade `custom_css`), not shipped yet — until
+ * then this module uses the theme as-is, with no local `.p-*` override and
+ * no workaround.
+ */
+
 /* Never overflow the chat column; long labels/descriptions must wrap. */
 :host,
 [data-wippy-theme-root] {
   max-width: 100%;
   overflow-wrap: break-word;
+}
+
+/*
+ * Question card — Styling API (`--wippy-form-*` tokens, `part`s, `w-form__*`
+ * classes, host attributes). See
+ * `.local/work/session-forms/design/2026-09-30-styling-contract.md` and this
+ * package's README for the full contract. Every colour/size below is read
+ * through a private `--_x` var whose own fallback is a semantic `--p-*`
+ * theme var (never a raw hex as the PRIMARY fallback) — so a facade retint
+ * or a dark-mode flip restyles the card with zero edits here, and only a
+ * final safety-net hex (host-less dev, no theme loaded) is a literal color.
+ * The Host already wraps this component in the artifact card's own
+ * background/border, so `--wippy-form-surface`/`--wippy-form-border`
+ * default to transparent — the card does not draw a second one.
+ */
+:host {
+  --_font: var(--wippy-form-font, inherit);
+  --_size: var(--wippy-form-font-size, var(--_d-size));
+  --_q-size: var(--wippy-form-question-size, var(--_d-q-size));
+  --_q-weight: var(--wippy-form-question-weight, 600);
+  --_small: var(--wippy-form-small-size, 13px);
+  --_surface: var(--wippy-form-surface, transparent);
+  --_border: var(--wippy-form-border, transparent);
+  --_text: var(--wippy-form-text, var(--p-text-color));
+  --_muted: var(--wippy-form-text-muted, var(--p-text-muted-color));
+  --_row: var(--wippy-form-row, color-mix(in srgb, var(--p-content-hover-background) 45%, transparent));
+  --_row-hover: var(--wippy-form-row-hover, var(--p-content-hover-background));
+  --_accent: var(--wippy-form-accent, var(--p-primary-color));
+  --_accent-soft: var(--wippy-form-accent-soft, var(--p-highlight-background));
+  --_on-accent: var(--wippy-form-accent-contrast, var(--p-primary-contrast-color));
+  --_danger: var(--wippy-form-danger, var(--p-danger-500, #b91c1c));
+  --_focus: var(--wippy-form-focus, var(--_accent));
+  --_key-border: var(--wippy-form-key-border, var(--p-content-border-color));
+  --_code-bg: var(--wippy-form-code-bg, color-mix(in srgb, var(--p-text-color) 8%, transparent));
+  --_radius: var(--wippy-form-radius, 12px);
+  --_row-radius: var(--wippy-form-row-radius, 8px);
+  --_pad: var(--wippy-form-padding, var(--_d-pad));
+  --_row-py: var(--wippy-form-row-padding-y, var(--_d-row-py));
+  --_row-px: var(--wippy-form-row-padding-x, var(--_d-row-px));
+  --_gap: var(--wippy-form-gap, var(--_d-gap));
+  --_key: var(--wippy-form-key-size, var(--_d-key));
+
+  /* Compact density internals (density="comfortable" below overrides these). */
+  --_d-size: 14px;
+  --_d-q-size: 15px;
+  --_d-pad: 12px;
+  --_d-row-py: 6px;
+  --_d-row-px: 10px;
+  --_d-gap: 4px;
+  --_d-key: 20px;
+
+  display: block;
+  container-type: inline-size;
+}
+
+:host([density='comfortable']) {
+  --_d-size: 15px;
+  --_d-q-size: 17px;
+  --_d-pad: 16px;
+  --_d-row-py: 10px;
+  --_d-row-px: 12px;
+  --_d-gap: 6px;
+  --_d-key: 24px;
+}
+
+.w-form {
+  font-family: var(--_font);
+  font-size: var(--_size);
+  line-height: 1.4;
+  color: var(--_text);
+  background: var(--_surface);
+  border: 1px solid var(--_border);
+  border-radius: var(--_radius);
+  padding: var(--_pad);
+  outline: none;
+  display: flex;
+  flex-direction: column;
+}
+/*
+ * The card never takes focus on its own (design decision), but it DOES
+ * receive it programmatically — collapsing it, or Escape inside the Other
+ * box, both move focus to the card root (`focusOn('card')` in
+ * question-card-active.vue). `outline: none` above with no replacement left
+ * that landing spot invisible; this restores a visible ring for exactly
+ * that case. `.w-form__status` is the equivalent landing spot on the
+ * read-only answered summary (question-card-summary.vue), focused after a
+ * successful submit.
+ */
+.w-form:focus-visible,
+.w-form__status:focus-visible {
+  outline: 2px solid var(--_focus);
+  outline-offset: 2px;
+}
+
+.w-form__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.w-form__code {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--_code-bg);
+  padding: 0 0.3em;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Title (several questions) ---------- */
+.w-form__title {
+  margin: 0 0 6px;
+  font-size: var(--_small);
+  color: var(--_muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.w-form__title svg {
+  width: 14px;
+  height: 14px;
+  color: var(--_accent);
+  flex: none;
+}
+
+/* ---------- Header: nav / question / actions ---------- */
+.w-form__header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'nav question actions';
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: start;
+}
+.w-form__header--single {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'question actions';
+}
+.w-form__nav {
+  grid-area: nav;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border: 1px solid var(--_border);
+  border-radius: 999px;
+  background: var(--_row);
+}
+/*
+ * Box sizing (width/height) comes from the PrimeVue Button `size="small"`
+ * prop on these components (question-card-header.vue), not a CSS override
+ * — out-specifying `.p-button` to force a size is the same shadowing the
+ * "no raw `.p-*` rules" rule forbids, just reached through a two-class
+ * ancestor selector instead of a `.p-*` one. Only the icon color, which
+ * PrimeVue's own `text` variant does not set, belongs here.
+ */
+.w-form .w-form__prev,
+.w-form .w-form__next {
+  color: var(--_muted);
+}
+.w-form .w-form__prev svg,
+.w-form .w-form__next svg {
+  width: 14px;
+  height: 14px;
+}
+.w-form__counter {
+  min-width: 2.8em;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--_accent);
+}
+.w-form__question {
+  grid-area: question;
+  margin: 0;
+  font-size: var(--_q-size);
+  font-weight: var(--_q-weight);
+  line-height: 1.35;
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+}
+:host([collapsed]) .w-form__question {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-form__actions {
+  grid-area: actions;
+  display: flex;
+  gap: 2px;
+}
+.w-form .w-form__collapse {
+  /* Sizing: the Button's own `size="small"` prop — see the comment above `.w-form__prev`. */
+  color: var(--_muted);
+}
+
+/* ---------- Notice / hint ---------- */
+.w-form__notice {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  font-size: var(--_small);
+  color: var(--_muted);
+  background: var(--_row);
+  border-radius: var(--_row-radius);
+  max-width: 72ch;
+}
+.w-form__description,
+.w-form__hint {
+  margin: 4px 0 0;
+  font-size: var(--_small);
+  color: var(--_muted);
+}
+
+/* ---------- Options ---------- */
+.w-form__options {
+  display: grid;
+  gap: var(--_gap);
+  margin-top: 8px;
+}
+.w-form__option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  column-gap: 6px;
+  align-items: center;
+  padding: var(--_row-py) var(--_row-px);
+  background: var(--_row);
+  border: 1px solid transparent;
+  border-radius: var(--_row-radius);
+  cursor: pointer;
+}
+.w-form__option:hover {
+  background: var(--_row-hover);
+}
+.w-form__option:has(.w-form__option-main:focus-visible) {
+  outline: 2px solid var(--_focus);
+  outline-offset: 1px;
+}
+.w-form__option--selected {
+  background: var(--_accent-soft);
+  border-color: var(--_accent);
+}
+.w-form__option--selected:hover {
+  background: color-mix(in srgb, var(--_accent-soft) 85%, var(--_accent));
+}
+.w-form__option--other {
+  grid-template-columns: minmax(0, 1fr) auto;
+  cursor: text;
+}
+.w-form__option-main {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  outline: none;
+}
+.w-form__option-label {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  display: inline-flex;
+  /* `center`, not `baseline` — the checkbox/check-mark has no text
+     baseline of its own, so `baseline` alignment left it sitting high
+     against the label text (verified against a live capture). */
+  align-items: center;
+  gap: 7px;
+}
+.w-form__option-description {
+  font-size: var(--_small);
+  color: var(--_muted);
+  overflow-wrap: anywhere;
+}
+.w-form__option-mark {
+  display: inline-grid;
+  place-items: center;
+  color: var(--_accent);
+  flex: none;
+}
+/* Sizes only the single-choice check-mark <span> — the several-answer mark
+   is a real PrimeVue Checkbox (`size="small"`, a <div> root), which must
+   size itself from its own prestyle, not be fought over here. */
+span.w-form__option-mark {
+  width: 15px;
+  height: 15px;
+}
+.w-form__option-mark svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3;
+}
+.w-form__option-note {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  margin-top: 2px;
+  font-size: var(--_small);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--_muted);
+}
+.w-form__option-note svg {
+  width: 12px;
+  height: 12px;
+  position: relative;
+  top: 1px;
+  flex: none;
+}
+.w-form .w-form__note-toggle {
+  /* Sizing: the Button's own `size="small"` prop — see the comment above `.w-form__prev`. */
+  color: var(--_muted);
+  opacity: 0;
+}
+.w-form__option:hover .w-form__note-toggle,
+.w-form__option:focus-within .w-form__note-toggle,
+.w-form__option--has-note .w-form__note-toggle,
+.w-form__option--editing .w-form__note-toggle {
+  opacity: 1;
+}
+.w-form__option--has-note .w-form__note-toggle,
+.w-form__option--editing .w-form__note-toggle {
+  color: var(--_accent);
+}
+@media (hover: none) {
+  /*
+   * Same selector shape (`.w-form .w-form__note-toggle`, two classes) as
+   * the resting-state rule above — a single-class `.w-form__note-toggle`
+   * selector here LOSES to that rule's opacity:0 on specificity alone
+   * regardless of source order (0,1,0 vs 0,2,0), which left the note
+   * toggle invisible on touch devices (no `:hover` to reveal it).
+   */
+  .w-form .w-form__note-toggle {
+    opacity: 1;
+  }
+}
+.w-form__option-key {
+  min-width: var(--_key);
+  height: var(--_key);
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  font: 500 12px/1 var(--_font);
+  font-variant-numeric: tabular-nums;
+  color: var(--_muted);
+  border: 1px solid var(--_key-border);
+  border-radius: 5px;
+}
+.w-form__option--selected .w-form__option-key {
+  background: var(--_accent);
+  border-color: var(--_accent);
+  color: var(--_on-accent);
+}
+
+/* ---------- Composer (Other / note joined input) — see question-card-composer.vue ---------- */
+.w-form__composer--note {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+}
+.w-form__note-input,
+.w-form__other-input {
+  /*
+   * `@wippy-fe/theme/primevue/inputgroup.css` only grows `.p-inputtext` /
+   * `.p-inputwrapper` children to fill the joined input (`flex-auto
+   * w-[1%]`) — a bare `Textarea`'s own class, `.p-textarea`, isn't in that
+   * selector, so without this the box sat at its intrinsic (~150px)
+   * width (confirmed against a live capture: text wrapped onto 3 lines,
+   * the row's right two-thirds stayed empty). `flex: 1 1 auto` plus
+   * `min-width: 0` is the same "grow to fill, then wrap" behavior, via
+   * our own BEM class — not a `.p-*` override.
+   */
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 10em;
+}
+
+/* ---------- Error / keys / footer ---------- */
+.w-form__error {
+  margin: 6px 0 0;
+}
+.w-form__keys {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--_muted);
+}
+.w-form__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+.w-form__footer-text {
+  margin: 0 auto 0 0;
+  font-size: var(--_small);
+  color: var(--_danger);
+}
+.w-form__send,
+.w-form__send-all {
+  gap: 6px;
+}
+.w-form__send-all svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------- Review ---------- */
+.w-form__review {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--_gap);
+}
+.w-form__review-edit {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  padding: var(--_row-py) var(--_row-px);
+  background: var(--_row);
+  border: 1px solid transparent;
+  border-radius: var(--_row-radius);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.w-form__review-edit:hover {
+  background: var(--_row-hover);
+}
+.w-form__review-number {
+  grid-row: 1 / span 2;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--_muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 1px;
+}
+.w-form__review-question {
+  font-size: var(--_small);
+  color: var(--_muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-form__review-answer {
+  font-weight: 500;
+}
+.w-form__review-item--missing .w-form__review-edit {
+  border-color: var(--_danger);
+}
+.w-form__review-item--missing .w-form__review-answer {
+  color: var(--_danger);
+  font-weight: 400;
+}
+.w-form__answer-item {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.w-form__answer-note {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  font-weight: 400;
+  font-size: var(--_small);
+  color: var(--_muted);
+  white-space: pre-wrap;
+}
+.w-form__answer-note svg {
+  width: 12px;
+  height: 12px;
+  position: relative;
+  top: 1px;
+  flex: none;
+}
+.w-form__answer-empty,
+.w-form__answer-own {
+  font-weight: 400;
+  color: var(--_muted);
+}
+
+/* ---------- Answered summary ---------- */
+.w-form__summary {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.w-form__summary-item {
+  display: grid;
+  gap: 1px;
+}
+.w-form__summary-question {
+  font-size: var(--_small);
+  color: var(--_muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-form__summary-answer {
+  margin: 0;
+  font-weight: 500;
+}
+.w-form__status {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--_muted);
+}
+.w-form__card--answered .w-form__title {
+  font-size: var(--_q-size);
+  font-weight: var(--_q-weight);
+  color: var(--_text);
+}
+.w-form__card--answered .w-form__title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--_accent);
+}
+
+@container (max-width: 520px) {
+  .w-form__header:not(.w-form__header--single) {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: 'nav . actions' 'question question question';
+  }
+  .w-form__keys {
+    display: none;
+  }
+}
+@media (hover: none) {
+  .w-form__keys {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w-form * {
+    transition: none !important;
+  }
 }

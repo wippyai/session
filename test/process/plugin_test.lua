@@ -43,6 +43,7 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
             spawned_init = init
+            if options.on_spawn then options.on_spawn(init) end
             if options.confirm_start ~= false then
                 table.insert(inputs, { topic = consts.TOPICS.SESSION_OPENED,
                     data = { session_id = init.session_id, from_pid = session_pid } })
@@ -562,6 +563,63 @@ add_pending_call = function(session_id)
     test.is_nil(err)
     test.is_true(created)
     return call_id
+end
+
+-- An actor of its own, so scans by user (pending answers, stale statuses)
+-- see only this test's sessions and none of another suite's.
+local function isolated_actor()
+    local user_id = "plugin-test-" .. uuid.v7()
+    return { id = function() return user_id end }
+end
+
+-- Runs the plugin through a script of inbox messages ({ topic, data }) and
+-- exits ({ exit = session_id }: that session's process fails), then cancels
+-- it. Every spawn gets its own pid.
+local function run_plugin_script(actor, hub_pid, script)
+    local sent = {} :: {any}
+    local spawned = {} :: {any}
+    local pids = {} :: {[string]: string}
+    local step = 0
+    mock("process.with_context", function()
+        return { spawn_linked_monitored = function(_self, _id, _host, init)
+            local pid = "script-pid-" .. tostring(#spawned + 1)
+            table.insert(spawned, { session_id = init.session_id, pid = pid })
+            pids[init.session_id] = pid
+            return pid, nil
+        end }
+    end)
+    mock("process.send", function(pid, topic, payload)
+        table.insert(sent, { pid = pid, topic = topic, payload = payload })
+        return true, nil
+    end)
+    mock("coroutine.spawn", function() end)
+    local inbox = process.inbox()
+    local events = process.events()
+    mock("channel.select", function(cases)
+        if cases.default then return { ok = true, default = true } end
+        step = step + 1
+        local item = script[step]
+        if not item then
+            return { ok = true, channel = events, value = { kind = process.event.CANCEL } }
+        end
+        if item.exit then
+            return { ok = true, channel = events, value = { kind = process.event.EXIT,
+                from = pids[item.exit], result = { error = "start failed" } } }
+        end
+        return { ok = true, channel = inbox, value = plugin_message(item.topic, item.data) }
+    end)
+    local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = hub_pid })
+    restore_mock("channel.select")
+    restore_mock("coroutine.spawn")
+    restore_mock("process.send")
+    restore_mock("process.with_context")
+    return { result = result, error = run_err, sent = sent, spawned = spawned }
+end
+
+local function add_pending_answer(session_id)
+    local _, create_err = message_repo.create(uuid.v7(), session_id, consts.MSG_TYPE.USER,
+        "Answers to form", { session_form = { artifact_id = uuid.v7(), pending = true } })
+    test.is_nil(create_err)
 end
 
 local function upstream_error(run, hub_pid)
@@ -1167,6 +1225,164 @@ local function define_tests()
             test.not_nil(forwarded)
             test.eq(forwarded.message_id, "answer-2")
             cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("starts a stopped session that still holds an unadmitted form answer", function()
+            local actor = isolated_actor()
+            local session_id, context_id = create_session_fixture(actor, "Resume answers", consts.STATUS.IDLE)
+            add_pending_answer(session_id)
+            local started = {}
+            local run = run_plugin_lifecycle(actor, session_id, "resume-hub", {
+                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} }
+            }, nil, { open = false, cancel_plugin = true, on_spawn = function(init)
+                table.insert(started, init.session_id)
+            end })
+            cleanup_session_fixture(session_id, context_id)
+            test.is_nil(run.error)
+            local found = false
+            for _, id in ipairs(started) do
+                if id == session_id then found = true end
+            end
+            test.is_true(found, "the session with the pending answer was started")
+            test.is_nil(run.spawned_init.conn_pid)
+        end)
+
+        it("asks a running session that holds a pending answer to admit it again", function()
+            local actor = isolated_actor()
+            local session_id, context_id = create_session_fixture(actor, "Nudge running", consts.STATUS.IDLE)
+            add_pending_answer(session_id)
+            local run = run_plugin_lifecycle(actor, session_id, "nudge-hub", {}, nil, {
+                cancel_plugin = true,
+                after_open = { { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} } },
+            })
+            cleanup_session_fixture(session_id, context_id)
+            test.is_nil(run.error)
+            local nudges = {} :: {any}
+            for _, sent in ipairs(run.sent) do
+                if sent.pid == run.session_pid and sent.topic == consts.TOPICS.FORM_ANSWER then
+                    table.insert(nudges, sent.payload)
+                end
+            end
+            test.eq(#nudges, 1)
+            test.is_nil(nudges[1].message_id, "no id: the session looks for its pending answers")
+        end)
+
+        it("waits longer before restarting a session whose start with pending answers failed", function()
+            local actor = isolated_actor()
+            local keeper_id, keeper_context = create_session_fixture(actor, "Keeps the plugin", consts.STATUS.IDLE)
+            local failing_id, failing_context = create_session_fixture(actor, "Fails to start", consts.STATUS.IDLE)
+            add_pending_answer(failing_id)
+            local resume = { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} }
+            local run = run_plugin_script(actor, "backoff-hub", {
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = keeper_id } },
+                resume,
+                { exit = failing_id },
+                resume,
+                resume,
+            })
+            cleanup_session_fixture(keeper_id, keeper_context)
+            cleanup_session_fixture(failing_id, failing_context)
+            test.is_nil(run.error)
+            local starts = 0
+            for _, spawn in ipairs(run.spawned) do
+                if spawn.session_id == failing_id then starts = starts + 1 end
+            end
+            test.eq(starts, 2, "skipped by the scan right after the failure, retried by the next")
+        end)
+
+        it("settles every session a stopped runtime left running, across pages, once, when it starts", function()
+            -- The test's own actor (the call repair opens the session as it).
+            -- The scan reads this test's sessions only, two per page, so
+            -- more than one page of running sessions has to be settled.
+            local actor = security.actor()
+            local fixtures = {} :: {any}
+            local stale_ids = {} :: {string}
+            for index = 1, 5 do
+                local session_id, context_id = create_session_fixture(actor, "Left running " .. index,
+                    consts.STATUS.RUNNING)
+                table.insert(fixtures, { session_id = session_id, context_id = context_id })
+                table.insert(stale_ids, session_id)
+            end
+            local call_id = add_pending_call(stale_ids[1])
+            local live_id, live_context = create_session_fixture(actor, "Still running", consts.STATUS.RUNNING)
+            local idle_id, idle_context = create_session_fixture(actor, "Idle", consts.STATUS.IDLE)
+            table.insert(fixtures, { session_id = live_id, context_id = live_context })
+            table.insert(fixtures, { session_id = idle_id, context_id = idle_context })
+            local own = {}
+            for _, fixture in ipairs(fixtures) do own[fixture.session_id] = true end
+
+            local original_list = session_repo.list_by_user_status
+            local pages = {} :: {any}
+            session_repo.list_by_user_status = function(user_id, status, _limit, opts)
+                table.insert(pages, { status = status, after = opts and opts.after })
+                local page, err = original_list(user_id, status, 2, opts)
+                if not page then return nil, err end
+                local mine = {}
+                for _, session in ipairs(page.sessions) do
+                    if own[session.session_id] then table.insert(mine, session) end
+                end
+                return { sessions = mine, has_more = page.has_more, next_cursor = page.next_cursor }
+            end
+            local original_pending = message_repo.list_sessions_with_pending_answers
+            message_repo.list_sessions_with_pending_answers = function() return {} end
+            mock("process.registry", {
+                register = function() return true, nil end,
+                lookup = function(name)
+                    if name == consts.REGISTRY.SESSION .. live_id then return "live-pid" end
+                    return nil
+                end,
+            })
+            local run = run_plugin_lifecycle(actor, stale_ids[1], "stale-hub", {
+                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} },
+                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} },
+            }, nil, { open = false, cancel_plugin = true })
+            restore_mock("process.registry")
+            session_repo.list_by_user_status = original_list
+            message_repo.list_sessions_with_pending_answers = original_pending
+            local stale_statuses = {} :: {any}
+            for _, session_id in ipairs(stale_ids) do
+                table.insert(stale_statuses, session_repo.get(session_id).status)
+            end
+            local call_status = message_repo.get(call_id).metadata.status
+            local live_status = session_repo.get(live_id).status
+            local idle_status = session_repo.get(idle_id).status
+            for _, fixture in ipairs(fixtures) do
+                cleanup_session_fixture(fixture.session_id, fixture.context_id)
+            end
+
+            test.is_nil(run.error)
+            test.is_true(#pages >= 3, "five of this test's running sessions need three pages or more")
+            test.eq(pages[1].status, consts.STATUS.RUNNING)
+            test.is_nil(pages[1].after)
+            test.not_nil(pages[2].after, "the next page starts after the last one")
+            for index, status in ipairs(stale_statuses) do
+                test.eq(status, consts.STATUS.FAILED, "Send works again in session " .. index)
+            end
+            test.eq(call_status, consts.FUNC_STATUS.ERROR, "the interrupted call is settled")
+            test.eq(live_status, consts.STATUS.RUNNING, "a live process still holds it")
+            test.eq(idle_status, consts.STATUS.IDLE)
+
+            -- Each stale session is reported once: the second scan does not
+            -- settle again.
+            local updates, errors = {}, {}
+            for _, sent in ipairs(run.sent) do
+                local payload = type(sent.payload) == "table" and sent.payload or {}
+                if sent.pid == "stale-hub" and payload.session_id and own[payload.session_id]
+                    and sent.topic == consts.TOPIC_PREFIXES.SESSION .. payload.session_id then
+                    if payload.type == consts.UPSTREAM_TYPES.UPDATE then
+                        updates[payload.session_id] = (updates[payload.session_id] or 0) + 1
+                        test.eq(payload.status, consts.STATUS.FAILED)
+                    elseif payload.type == consts.UPSTREAM_TYPES.ERROR then
+                        errors[payload.session_id] = (errors[payload.session_id] or 0) + 1
+                    end
+                end
+            end
+            for _, session_id in ipairs(stale_ids) do
+                test.eq(updates[session_id], 1, "once, not on every scan")
+                test.eq(errors[session_id], 1)
+            end
+            test.is_nil(updates[live_id])
+            test.is_nil(updates[idle_id])
         end)
 
         it("ignores a wake for a session this user does not have", function()

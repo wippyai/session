@@ -209,7 +209,10 @@ local function history_result(reader, args)
 
     local events = {}
     for _, msg in ipairs(messages or {}) do
-        events[#events + 1] = normalize_event(msg)
+        -- Unadmitted form answers are not part of the conversation yet.
+        if not message_repo.is_pending_answer(msg) then
+            events[#events + 1] = normalize_event(msg)
+        end
     end
     local truncated
     events, truncated = clamp_events(events, sel.max_chars)

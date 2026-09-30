@@ -27,6 +27,8 @@ type ActiveSession = {
     stop_escalation: number?,
     stop_request_id: string?,
     stop_deadline: any?,
+    -- Started to admit pending form answers (wake-up or scan), not by a client.
+    answer_start: boolean?,
 }
 
 local function clear_stop_deadline(session_info)
@@ -130,7 +132,11 @@ local function run(args)
         base_config = base_config,
         active_sessions = {} :: {[string]: ActiveSession},
         session_count = 0,
-        shutting_down = false
+        shutting_down = false,
+        -- session id -> { failures, wait }: a session started for its
+        -- pending form answers that failed; the scan skips it `wait` times.
+        resume_backoff = {} :: {[string]: any},
+        stale_checked = false,
     }
 
     process.set_options({ trap_links = true })
@@ -650,11 +656,12 @@ local function run(args)
     end
 
     -- A form answer was accepted for one of this user's sessions. A running
-    -- session gets the answer id; a stopped one is started with no client
-    -- connection and admits its pending answers on start. An unknown or
-    -- foreign session is ignored: create_session only reopens sessions this
-    -- user owns and never creates one without a start token.
-    local function handle_wake(payload_data)
+    -- session gets the answer id (without one it looks for pending answers
+    -- itself); a stopped one is started with no client connection and admits
+    -- its pending answers on start. An unknown or foreign session is
+    -- ignored: create_session only reopens sessions this user owns and never
+    -- creates one without a start token.
+    local function handle_wake(payload_data: any)
         if type(payload_data) ~= "table" or type(payload_data.session_id) ~= "string"
             or payload_data.session_id == "" or state.shutting_down then
             return
@@ -662,17 +669,129 @@ local function run(args)
         local session_id: string = payload_data.session_id
         local session_info = state.active_sessions[session_id]
         if session_info then
-            if not session_info.terminating and type(payload_data.message_id) == "string" then
-                process.send(session_info.pid :: string, consts.TOPICS.FORM_ANSWER,
-                    { message_id = payload_data.message_id })
+            if not session_info.terminating then
+                local message_id = type(payload_data.message_id) == "string" and payload_data.message_id or nil
+                process.send(session_info.pid :: string, consts.TOPICS.FORM_ANSWER, { message_id = message_id })
             end
             return
         end
-        local _, err = create_session({ session_id = session_id })
+        local started_id, err = create_session({ session_id = session_id })
         if err then
             logger:warn("form answer wake could not start the session",
                 { user_id = state.user_id, session_id = session_id, error = tostring(err) })
+            return
         end
+        local started = state.active_sessions[started_id :: string]
+        if started then started.answer_start = true end
+    end
+
+    -- Scans for this user's sessions that hold form answers nobody admitted.
+    -- A stopped session is started (the wake-up was lost, e.g. the runtime
+    -- restarted while no client was connected); a running one is asked to
+    -- look again (its admission failed, or its wake-up was lost). Bounded:
+    -- a few starts per scan, never at the cost of evicting a session the
+    -- user may be using, and a session whose start failed waits a growing
+    -- number of scans, so it neither restarts on every tick nor keeps the
+    -- others from their turn.
+    local RESUME_SCAN_LIMIT = 20
+    local RESUME_STARTS_PER_SCAN = 3
+    local MAX_RESUME_WAIT = 32
+    local function resume_pending_answer_sessions()
+        if state.shutting_down then return end
+        local waiting = {}
+        for session_id, entry in pairs(state.resume_backoff) do
+            if entry.wait > 0 then
+                entry.wait = entry.wait - 1
+                waiting[session_id] = true
+            end
+        end
+        local exclude = {}
+        for session_id in pairs(waiting) do table.insert(exclude, session_id) end
+        table.sort(exclude)
+        local ids, err = message_repo.list_sessions_with_pending_answers(state.user_id, RESUME_SCAN_LIMIT,
+            { exclude = exclude })
+        if err then
+            logger:warn("pending form answer scan failed", { user_id = state.user_id, error = tostring(err) })
+            return
+        end
+        local starts = 0
+        for _, session_id in ipairs(ids or {}) do
+            if state.active_sessions[session_id] then
+                handle_wake({ session_id = session_id })
+            elseif not waiting[session_id] and starts < RESUME_STARTS_PER_SCAN
+                and state.session_count < consts.LIMITS.MAX_SESSIONS_PER_USER - 1 then
+                starts = starts + 1
+                handle_wake({ session_id = session_id })
+            end
+        end
+    end
+
+    -- A session started for its pending answers that exits with a failure
+    -- waits longer before the next try; a clean exit clears that.
+    local function note_resume_exit(session_id, session_info, target_status)
+        if target_status ~= consts.STATUS.FAILED then
+            state.resume_backoff[session_id] = nil
+            return
+        end
+        if not session_info.answer_start then return end
+        local entry = state.resume_backoff[session_id] or { failures = 0, wait = 0 }
+        entry.failures = entry.failures + 1
+        entry.wait = math.min(2 ^ (entry.failures - 1), MAX_RESUME_WAIT)
+        state.resume_backoff[session_id] = entry
+    end
+
+    -- Tells the user's clients how a session ended.
+    local function report_final_status(session_id, target_status, stored, reason)
+        if not state.user_hub_pid then return end
+        local error_update = exit_error_payload(session_id, target_status, reason)
+        if error_update then
+            process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
+        end
+        if stored then
+            process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
+                type = consts.UPSTREAM_TYPES.UPDATE,
+                session_id = session_id,
+                status = target_status
+            })
+        end
+    end
+
+    -- Sessions left "running" when the whole runtime stopped: no plugin saw
+    -- their process exit, so the stored status still says running, and the
+    -- Host shows Stop and blocks Send until something reopens the session.
+    -- Once, at start, each such session of this user that no live process
+    -- holds is settled like any failed exit (pending calls repaired, status
+    -- failed, clients told). Its form answers read as interrupted, and the
+    -- next open shows the recovery notice. All of the user's running
+    -- sessions are read, a page at a time; the pages follow session ids, so
+    -- settling a session does not move the rows of later pages.
+    local STALE_PAGE_SIZE = 50
+    local function settle_stale_running()
+        local after = nil :: string?
+        repeat
+            local page, err = session_repo.list_by_user_status(state.user_id, consts.STATUS.RUNNING,
+                STALE_PAGE_SIZE, { after = after })
+            if not page then
+                logger:warn("stale session status scan failed", { user_id = state.user_id, error = tostring(err) })
+                return
+            end
+            for _, session in ipairs(page.sessions or {}) do
+                local session_id = tostring(session.session_id)
+                if not state.active_sessions[session_id]
+                    and not process.registry.lookup(consts.REGISTRY.SESSION .. session_id) then
+                    local target_status, stored, status_err, recovery_err =
+                        finalize_exit(session_id, nil, nil, "runtime stopped")
+                    if recovery_err or status_err then
+                        logger:warn("stale session status could not be settled", { session_id = session_id,
+                            error = tostring(status_err or recovery_err) })
+                    end
+                    report_final_status(session_id, target_status, stored, "runtime stopped")
+                end
+            end
+            -- A cursor that does not move would read the same page forever.
+            if page.next_cursor == after then return end
+            after = page.next_cursor
+        until not after
     end
 
     local function check_inactive_sessions()
@@ -701,6 +820,9 @@ local function run(args)
             end
         end
     end
+
+    -- First pending-answer scan as an ordinary inbox message, after start-up.
+    process.send(process.pid(), consts.PLUGIN_TOPICS.RESUME_ANSWERS, {})
 
     while true do
         local result = channel.select({
@@ -739,6 +861,12 @@ local function run(args)
                 end
             elseif topic == consts.PLUGIN_TOPICS.WAKE then
                 handle_wake(payload:data())
+            elseif topic == consts.PLUGIN_TOPICS.RESUME_ANSWERS then
+                if not state.stale_checked then
+                    state.stale_checked = true
+                    settle_stale_running()
+                end
+                resume_pending_answer_sessions()
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
                     state.shutting_down = false
@@ -860,6 +988,7 @@ local function run(args)
                                 error = status_err
                             })
                         end
+                        note_resume_exit(session_id, session_info, target_status)
 
                         -- Invoke on_session_end hook if configured (non-blocking)
                         fire_session_end_hook(state.base_config.on_session_end_func_id, {
@@ -880,22 +1009,9 @@ local function run(args)
                             active_sessions = state.session_count
                         })
 
+                        -- Session status update first, then the closed notification
+                        report_final_status(session_id, target_status, success, err)
                         if state.user_hub_pid then
-                            local error_update = exit_error_payload(session_id, target_status, err)
-                            if error_update then
-                                process.send(state.user_hub_pid :: string,
-                                    consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
-                            end
-                            -- Send session status update first
-                            if success then
-                                process.send(state.user_hub_pid :: string, consts.TOPIC_PREFIXES.SESSION .. session_id, {
-                                    type = consts.UPSTREAM_TYPES.UPDATE,
-                                    session_id = session_id,
-                                    status = target_status
-                                })
-                            end
-
-                            -- Then send session closed notification
                             process.send(state.user_hub_pid :: string, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,
                                 reason = err,
@@ -918,6 +1034,7 @@ local function run(args)
             end
         elseif result.channel == gc_ticker:channel() then
             check_inactive_sessions()
+            resume_pending_answer_sessions()
         end
     end
 

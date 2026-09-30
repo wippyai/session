@@ -133,7 +133,7 @@ entries:
       name: Shared transaction (artifact update + message create)
       type: test
       suite: session
-      comment: Product-level replacement for the deleted P0-11 SQL transaction probe - commit, rollback, and mid-transaction failure across a caller-supplied tx
+      comment: Product-level replacement for the deleted P0-11 SQL transaction probe - commit, rollback, and mid-transaction failure across a caller-supplied tx; tx.run on a raise, nested, and with repository calls that omit opts.tx
     source: file://shared_transaction_test.lua
     modules:
       - sql
@@ -147,6 +147,27 @@ entries:
       session_repo: wippy.session.persist:session_repo
       artifact_repo: wippy.session.persist:artifact_repo
       message_repo: wippy.session.persist:message_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: writer_test
+    kind: function.lua
+    meta:
+      name: Session writer (artifact updates)
+      type: test
+      suite: session
+      comment: update_artifact checks ownership on the caller's transaction and keeps structured update errors
+    source: file://writer_test.lua
+    modules:
+      - uuid
+      - security
+    imports:
+      tx: wippy.session.persist:tx
+      writer: wippy.session.persist:writer
+      artifact_repo: wippy.session.persist:artifact_repo
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run

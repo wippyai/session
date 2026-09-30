@@ -59,6 +59,7 @@ entries:
       consts: wippy.session:consts
       command_bus: wippy.session.process:command_bus
       message_handlers: wippy.session.process:message_handlers
+      control_handlers: wippy.session.process:control_handlers
       session: wippy.session.process:session
       state_service: wippy.session.forms:state_service
       prompt_builder: wippy.session:prompt_builder

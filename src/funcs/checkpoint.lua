@@ -1,4 +1,5 @@
 local json = require("json")
+local message_repo = require("message_repo")
 local session = require("session")
 local llm = require("llm")
 local prompt = require("prompt")
@@ -12,6 +13,9 @@ type CheckpointResult = {
         total_tokens: number,
     }?,
 }
+
+-- The opening or closing tag of a form answer record, any letter case.
+local FORM_ANSWERS_TAG = "<(/?)([Ww][Ii][Pp][Pp][Yy]%-[Ff][Oo][Rr][Mm]%-[Aa][Nn][Ss][Ww][Ee][Rr][Ss])"
 
 local CONFIG = {
     model = "class:fast",
@@ -179,8 +183,19 @@ local function handle(args)
     local tool_results = {}
 
     for _, msg in ipairs(range_messages) do
-        if msg.type == "user" then
-            table.insert(conversation_parts, "[USER]: " .. (msg.data or ""))
+        if message_repo.is_pending_answer(msg) then
+            -- A form answer accepted during the running turn. Summarizing it
+            -- would put it into the session context the active turn reads.
+        elseif msg.type == "user" then
+            local text = msg.data or ""
+            local metadata = type(msg.metadata) == "table" and msg.metadata or {}
+            if type(metadata.session_form) ~= "table" then
+                -- Only server answer rows carry a real answer record; the same
+                -- tag typed by the user is summarized as the user's text
+                -- (as prompt_builder.neutralize_form_answers does).
+                text = string.gsub(text, FORM_ANSWERS_TAG, "&lt;%1%2")
+            end
+            table.insert(conversation_parts, "[USER]: " .. text)
 
             local metadata = msg.metadata or {}
             if metadata.file_uuids and #metadata.file_uuids > 0 then

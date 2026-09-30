@@ -62,7 +62,9 @@ local consts = {
         SHUTDOWN = "shutdown",
         RESUME = "resume",
         -- Server-side: start a stopped session so it admits a pending form answer.
-        WAKE = "wake"
+        WAKE = "wake",
+        -- Internal: start sessions that still hold unadmitted form answers.
+        RESUME_ANSWERS = "resume_answers"
     },
 
     -- Session Status Constants

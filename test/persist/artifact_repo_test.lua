@@ -565,6 +565,87 @@ local function define_tests()
                 test.eq(found_user.content_version, 2)
             end)
 
+            local function raw_meta(id)
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local rows, query_err = db:query("SELECT meta FROM artifacts WHERE artifact_id = $1", { id })
+                db:release()
+                test.is_nil(query_err)
+                return rows[1] and rows[1].meta
+            end
+
+            local function set_raw_meta(id, meta)
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local _, exec_err = db:execute("UPDATE artifacts SET meta = $1 WHERE artifact_id = $2", { meta, id })
+                db:release()
+                test.is_nil(exec_err)
+            end
+
+            it("keeps a key another writer set between the meta read and the write", function()
+                local id = fresh_artifact("static", { display_type = "inline" })
+                local interleaved = 0
+                local original = artifact_repo._on_meta_read
+                -- Runs on the same connection, after update() read the meta
+                -- and before it writes: stands in for a concurrent writer
+                -- that commits in that window.
+                artifact_repo._on_meta_read = function(conn, artifact_id)
+                    if artifact_id ~= id or interleaved > 0 then return end
+                    interleaved = interleaved + 1
+                    local _, exec_err = sql.builder.update("artifacts")
+                        :set("meta", '{"display_type":"inline","other":"kept"}')
+                        :where("artifact_id = ?", artifact_id)
+                        :run_with(conn):exec()
+                    test.is_nil(exec_err)
+                end
+                local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                artifact_repo._on_meta_read = original
+
+                test.is_nil(err)
+                test.not_nil(result)
+                test.eq(interleaved, 1)
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta.status, "active")
+                test.eq(artifact.meta.other, "kept")
+                test.eq(artifact.meta.display_type, "inline")
+            end)
+
+            it("refuses to patch stored meta that is not valid JSON and leaves it unchanged", function()
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, "{broken")
+
+                local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                test.is_nil(result)
+                test.contains(tostring(err), "meta")
+                test.eq(raw_meta(id), "{broken")
+
+                local removed, remove_err = artifact_repo.update(id, { meta_remove = { "status" } })
+                test.is_nil(removed)
+                test.not_nil(remove_err)
+                test.eq(raw_meta(id), "{broken")
+            end)
+
+            it("keeps empty objects in untouched keys and stores an emptied meta as an object", function()
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, '{"keep":{},"list":[],"session_form":{"submission":{"answers":{}}}}')
+                local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
+                test.is_nil(err)
+                local stored = tostring(raw_meta(id))
+                test.contains(stored, '"keep":{}')
+                test.contains(stored, '"list":[]')
+                test.contains(stored, '"answers":{}')
+
+                local emptied = fresh_artifact("static", { only = "key" })
+                local _, remove_err = artifact_repo.update(emptied, { meta_remove = { "only" } })
+                test.is_nil(remove_err)
+                test.eq(raw_meta(emptied), "{}")
+
+                local was_null = fresh_artifact("static", nil)
+                local _, null_err = artifact_repo.update(was_null, { meta_remove = { "absent" } })
+                test.is_nil(null_err)
+                test.eq(raw_meta(was_null), "{}")
+            end)
+
             it("meta_patch keeps working for inline and view_ref artifacts", function()
                 local inline_id = fresh_artifact("inline", { display_type = "inline" })
                 local inline_result, inline_err = artifact_repo.update(inline_id, {

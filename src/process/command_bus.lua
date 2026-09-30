@@ -69,9 +69,19 @@ function command_bus:queue_op(op)
     return true
 end
 
+-- Held input (typed messages and form answer wake-ups received during a
+-- turn) that the bus has not settled yet.
+function command_bus:has_held()
+    local held = self.context.held
+    return self.context.flush_held ~= nil and type(held) == "table" and #held > 0
+end
+
 function command_bus:is_turn_active()
     if self.state ~= "idle" then return self.state ~= "closed" end
     if self.current_op and self.current_op.starts_turn then return true end
+    -- Input still held from a turn that did not start (see run): later input
+    -- queues behind it, so arrival order holds.
+    if self:has_held() then return true end
     for _, op in ipairs(self.ops) do
         if op.starts_turn or op.type == consts.OP_TYPE.AGENT_STEP
             or op.type == consts.OP_TYPE.AGENT_CONTINUE then
@@ -128,6 +138,13 @@ function command_bus:process_operation(op)
         return { error_handled = true, error_message = err }
     end
     local result, err = handler(self.context, op)
+    if not err and op.user_command and type(result) == "table" and type(result.rejected) == "string" then
+        -- A refusal ("<code>: <message>", see control_handlers) wrote nothing;
+        -- the client still gets an answer to its command.
+        local code, message = string.match(result.rejected, "^([%w_]+): (.*)$")
+        reject_user_command(self, op, code or "REJECTED", message or result.rejected)
+        return result, nil
+    end
     if err then
         if op.user_command then
             reject_user_command(self, op, "HANDLER_ERROR", err)
@@ -166,9 +183,11 @@ function command_bus:enqueue_result(result)
     end
 end
 
-function command_bus:flush_held(run_agent)
+-- phase says where the held input is settled (see session.flush_held):
+-- "step" (between steps of a turn), "turn_end", "stop" or "exit".
+function command_bus:flush_held(run_agent, phase)
     if not self.context.flush_held then return nil, nil end
-    return self.context.flush_held(run_agent)
+    return self.context.flush_held(run_agent, phase)
 end
 
 function command_bus:fail(err, held_already_flushed)
@@ -184,6 +203,10 @@ function command_bus:fail(err, held_already_flushed)
         elseif op.type == consts.OP_TYPE.HANDLE_MESSAGE then
             local handler = self.handlers[op.type]
             if handler then
+                -- The message is kept, but the session is going away: form
+                -- answers stay pending for the next start instead of being
+                -- admitted here with no turn to answer them.
+                op.exiting = true
                 local _, write_err = handler(self.context, op)
                 if write_err then
                     table.insert(failures, tostring(write_err))
@@ -200,7 +223,7 @@ function command_bus:fail(err, held_already_flushed)
         if settle_err then table.insert(failures, tostring(settle_err)) end
     end
     if not held_already_flushed then
-        local _, flush_err = self:flush_held(false)
+        local _, flush_err = self:flush_held(false, "exit")
         if flush_err then table.insert(failures, tostring(flush_err)) end
     end
     self:stop()
@@ -212,18 +235,22 @@ function command_bus:fail(err, held_already_flushed)
     return nil, err
 end
 
+-- Settles the input held during the turn (typed messages and accepted form
+-- answers, in the order they arrived) and starts the next turn for the
+-- latest of them unless the turn was stopped or the session is finishing.
+-- Also runs from idle when held input is left over from a turn that never
+-- started (see run).
 function command_bus:end_turn()
     local stop_id = self.turn_state.stop_request_id
     local turn_id = self.turn_state.id
-    local was_draining = self.state == "draining_stop" or self.state == "draining_finish"
-    local last_id, err, request_id = self:flush_held(not was_draining)
-    if err then return nil, err end
-    -- Form answers accepted during the turn are admitted after the held typed
-    -- input, so they follow it in the history; one step then answers both.
-    if self.context.admit_answers then
-        local answer_id = self.context.admit_answers(not was_draining)
-        if answer_id then last_id = answer_id end
+    local phase = "turn_end"
+    if self.state == "draining_stop" then
+        phase = "stop"
+    elseif self.state == "draining_finish" then
+        phase = "exit"
     end
+    local last_id, err, request_id = self:flush_held(phase == "turn_end", phase)
+    if err then return nil, err end
     local draining = self.state == "draining_stop" or self.state == "draining_finish"
     local settle_ops = self.settle_ops
     self.settle_ops = {}
@@ -256,7 +283,7 @@ function command_bus:run()
         if op then
             self.pending_ops = self.pending_ops - 1
             if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" then
-                local _, flush_err = self:flush_held(true)
+                local _, flush_err = self:flush_held(true, "step")
                 if flush_err then return self:fail(flush_err, true) end
             end
             if self:admitted(op) then
@@ -279,12 +306,18 @@ function command_bus:run()
         elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then
             local _, err = self:end_turn()
             if err then return self:fail(err, true) end
+        elseif self:has_held() then
+            -- An operation that was to start a turn (an answer admission or
+            -- a message) wrote nothing or failed, so input held behind it
+            -- was never settled: settle it now as at the end of a turn.
+            local _, err = self:end_turn()
+            if err then return self:fail(err, true) end
         else
             if self.context.queue_empty_callback then
                 local _, err = self.context.queue_empty_callback()
                 if err then return self:fail(err) end
             end
-            if self.state ~= "closed" and #self.ops == 0 then
+            if self.state ~= "closed" and #self.ops == 0 and not self:has_held() then
                 self.wake:receive()
                 self.wake_pending = false
             end

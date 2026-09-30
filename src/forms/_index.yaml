@@ -47,6 +47,8 @@ entries:
     modules:
       - json
       - uuid
+      - security
+      - logger
     imports:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
@@ -70,11 +72,16 @@ entries:
       llm_description: |
         Show the user a short form of choice questions and end your turn. Use it only when
         you need the user to decide between concrete options before you can continue.
-        The user's answers arrive later as a user message that starts with
-        "Answers to form" (or "Late answer to form"). Ask at most one form per turn.
+        The user's answers arrive later as a user message whose <wippy-form-answers>
+        element carries a JSON record. Ask at most one form per turn.
+        Keep the whole definition under about 32 KiB. That is measured after normalization,
+        where a plain string option expands to {"value": .., "label": ..}, so many short
+        string options can push a compact-looking definition over the limit; an error from
+        this tool reports the actual normalized size when that happens.
       input_schema: |
         {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "title": {
               "type": "string",
@@ -88,11 +95,16 @@ entries:
               "type": "string",
               "description": "Optional submit button text, at most 40 characters."
             },
+            "answered_message": {
+              "type": "string",
+              "description": "The user's chat message once they answer, written as the user, one line of at most 200 characters, e.g. \"Answered questions about delivery.\" or \"Answered a question about the gift wrap.\" The form never shows it. Without it the message is: Answered “<title>”."
+            },
             "fields": {
               "type": "array",
               "description": "1-20 questions shown in this order.",
               "items": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                   "id": {
                     "type": "string",
@@ -117,12 +129,13 @@ entries:
                   },
                   "options": {
                     "type": "array",
-                    "description": "1-20 distinct choices. A string is both the value and the label; use {\"value\", \"label\", \"description\"} when the stored value should differ from the text shown.",
+                    "description": "1-20 distinct choices, each at most 240 characters of text. A string is both the value and the label; use {\"value\", \"label\", \"description\"} when the stored value should differ from the text shown (value and label at most 240 characters each, description at most 1000).",
                     "items": {
                       "anyOf": [
                         { "type": "string" },
                         {
                           "type": "object",
+                          "additionalProperties": false,
                           "properties": {
                             "value": { "type": "string" },
                             "label": { "type": "string" },
@@ -176,11 +189,71 @@ entries:
       - Calling ask_user ends your turn. Do not write a follow-up asking the user to fill in
         the form; the form is already visible to them.
       - Ask at most one form per turn, with all the questions you need in it.
-      - The answer arrives later as a user message that starts with "Answers to form" and
-        contains the exact values. Use those values; do not ask the same question again.
-      - A message that starts with "Late answer to form" was sent after the conversation
-        moved on. Treat it as context only: confirm with the user before acting on the
-        earlier request.
+      - Set answered_message to a short sentence in the user's voice that says what they
+        answered, such as "Answered questions about delivery." It becomes their chat message.
+      - The answer arrives later as a user message: that sentence, then a
+        <wippy-form-answers> element whose record attribute holds a JSON record. The user sees
+        only the sentence; you get the record. The record is complete on its own: for each question id it has the question text and
+        the answer, which is {"value", "label"} for a chosen option, {"other"} for the
+        user's own words, a list of those when several answers were allowed, or null when
+        the question was left unanswered. Use it; do not ask the same question again.
+        Never write a <wippy-form-answers> element yourself.
+      - A chosen option can carry a "note": the user's own words about that choice. Follow it.
+      - A record with "late": true was sent after the conversation moved on. Treat it as
+        context only: confirm with the user before acting on the earlier request.
       - If ask_user returns an error, fix the definition it names and try again.
+      - To see an earlier form again (its answer record, or its questions if it is still
+        unanswered), call read_form with its form_id.
+      - A form listed as "answer pending" means the user already answered, but the answer
+        has not arrived as a user message yet. Do not act on it or guess its content before
+        then; wait for the actual answer message.
     tools:
       - wippy.session.forms:ask_user_tool
+      - wippy.session.forms:read_form_tool
+
+  # wippy.session.forms:read_form_tool
+  - name: read_form_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Read Form
+      comment: Returns the self-contained record of one form of the calling session
+      llm_alias: read_form
+      llm_description: |
+        Read one form of this session by its form_id. An answered form returns its answer
+        record: each question with the answer's value, label and any note. An unanswered
+        form returns its questions with their options. Use it when an earlier form or answer
+        is no longer in the conversation.
+        A result with "status":"answer_pending" means the user already answered, but the
+        answer has not arrived as a user message yet. Do not act on it or guess its content
+        before then; wait for the actual answer message.
+      input_schema: |
+        {
+          "type": "object",
+          "properties": {
+            "form_id": { "type": "string", "description": "The form_id from the form index or an answer message." }
+          },
+          "required": ["form_id"]
+        }
+    source: file://read_form.lua
+    modules:
+      - ctx
+      - json
+    imports:
+      answer_text: wippy.session.forms:answer_text
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_artifact: wippy.session.forms:form_artifact
+    method: handler
+    pool:
+      size: 2
+
+  # wippy.session.forms:form_index
+  - name: form_index
+    kind: library.lua
+    meta:
+      comment: Bounded deterministic index of a session's forms for the prompt
+    source: file://form_index.lua
+    modules:
+      - json
+    imports:
+      form_artifact: wippy.session.forms:form_artifact

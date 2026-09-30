@@ -1,0 +1,31 @@
+version: "1.0"
+namespace: app.api
+
+# Suites for src/api/.
+entries:
+  - name: artifact_state_test
+    kind: function.lua
+    meta:
+      name: Artifact state HTTP adapter
+      type: test
+      suite: session
+      comment: Content-Type gate and capped stream read (the parts of src/api/artifact_state.lua that are genuinely HTTP-layer, not form-layer)
+    source: file://artifact_state_test.lua
+    imports:
+      artifact_state: wippy.session.api:artifact_state
+      test: wippy.test:test
+    method: run
+
+  - name: session_status_test
+    kind: function.lua
+    meta:
+      name: Session status reporting
+      type: test
+      suite: session
+      comment: get_session/list_sessions report a stored running status with no registered process as failed
+    source: file://session_status_test.lua
+    imports:
+      get_session: wippy.session.api:get_session_module
+      list_sessions: wippy.session.api:list_sessions_module
+      test: wippy.test:test
+    method: run

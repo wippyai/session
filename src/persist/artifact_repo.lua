@@ -1,7 +1,6 @@
 local sql = require("sql")
 local json = require("json")
 local time = require("time")
-local consts = require("consts")
 local security = require("security")
 local tx = require("tx")
 
@@ -26,15 +25,9 @@ type ArtifactUpdates = {
 
 local artifact_repo = {}
 
--- Get a database connection
+-- Get a database connection (refused inside tx.run; see tx.connect)
 local function get_db()
-    local DB_RESOURCE, _ = consts.get_db_resource()
-
-    local db, err = sql.get(DB_RESOURCE)
-    if err then
-        return nil, "Failed to connect to database: " .. err
-    end
-    return db
+    return tx.connect()
 end
 
 -- Runs fn(conn) on opts.tx when the caller supplies a transaction (no
@@ -186,6 +179,45 @@ function artifact_repo.get(artifact_id, opts)
     return artifact
 end
 
+-- Conditional writes a meta patch makes before it reports a conflict. Each
+-- attempt that loses to another writer re-reads the meta and merges again.
+local META_PATCH_ATTEMPTS = 5
+
+-- Test seam: when set, called as fn(conn, artifact_id) after a meta patch
+-- has read the current meta and before its conditional write.
+artifact_repo._on_meta_read = nil :: any
+
+-- The stored meta text of an artifact and its decoded object. Returns
+-- (raw, object), or (nil, nil, err) when the row is missing or the stored
+-- value is not a JSON object: patching it would wipe every key.
+local function read_meta(conn, artifact_id)
+    local rows, err = sql.builder.select("meta")
+        :from("artifacts")
+        :where("artifact_id = ?", artifact_id)
+        :limit(1)
+        :run_with(conn):query()
+    if err then
+        return nil, nil, "Failed to read current meta: " .. err
+    end
+    if #rows == 0 then
+        return nil, nil, errors.new({
+            kind = errors.NOT_FOUND,
+            message = "Artifact not found",
+            details = { artifact_id = artifact_id },
+        })
+    end
+
+    local raw = rows[1].meta
+    if raw == nil or raw == "" then
+        return raw, {}
+    end
+    local decoded, decode_err = json.decode(raw :: string)
+    if decode_err or type(decoded) ~= "table" or #decoded > 0 then
+        return nil, nil, "Stored artifact meta is not a JSON object; not patching it"
+    end
+    return raw, decoded
+end
+
 -- Update artifact.
 --
 -- opts (optional):
@@ -199,8 +231,11 @@ end
 -- updates.meta replaces the whole meta object, as before. updates.meta_patch
 -- (table) sets individual keys and updates.meta_remove (list of keys)
 -- deletes individual keys, both read-merge-write against the current meta on
--- the same connection/transaction. meta may not be combined with
--- meta_patch/meta_remove.
+-- the same connection/transaction. The write is conditional on the meta
+-- still being the text that was read, so a patch never drops a key another
+-- writer set in between; on a lost race it reads and merges again. Stored
+-- meta that is not a JSON object is an error, not an empty object. meta may
+-- not be combined with meta_patch/meta_remove.
 --
 -- Returns { artifact_id, updated = true, content_version } on success, read
 -- back on the same connection so the caller always has the value it produced
@@ -220,38 +255,48 @@ function artifact_repo.update(artifact_id, updates, opts)
 
     opts = opts or {}
 
-    local function run_update(conn)
-        -- Resolve the meta value to write: a plain encode for a full replace,
-        -- or a read-merge-write against the current row for a patch/remove.
-        local meta_value = nil
+    local patching = updates.meta_patch ~= nil or updates.meta_remove ~= nil
 
-        if updates.meta ~= nil then
-            if type(updates.meta) == "table" then
-                local encoded, encode_err = json.encode(updates.meta)
-                if encode_err then
-                    return nil, "Failed to encode meta: " .. encode_err
-                end
-                meta_value = encoded
-            else
-                meta_value = updates.meta
+    -- A full replace is encoded once; a patch is merged on every attempt.
+    local replace_value = nil
+    if updates.meta ~= nil then
+        if type(updates.meta) == "table" then
+            local encoded, encode_err = json.encode(updates.meta)
+            if encode_err then
+                return nil, "Failed to encode meta: " .. encode_err
             end
-        elseif updates.meta_patch ~= nil or updates.meta_remove ~= nil then
-            local current_query = sql.builder.select("meta")
-                :from("artifacts")
-                :where("artifact_id = ?", artifact_id)
-                :limit(1)
-            local current_rows, current_err = current_query:run_with(conn):query()
-            if current_err then
-                return nil, "Failed to read current meta: " .. current_err
-            end
+            replace_value = encoded
+        else
+            replace_value = updates.meta
+        end
+    end
 
-            local current_meta = {}
-            if #current_rows > 0 and current_rows[1].meta and current_rows[1].meta ~= "" then
-                local decoded, decode_err = json.decode(current_rows[1].meta :: string)
-                if not decode_err and type(decoded) == "table" then
-                    current_meta = decoded
-                end
-            end
+    local function read_back(conn)
+        local final_rows, final_err = sql.builder.select("content_version")
+            :from("artifacts")
+            :where("artifact_id = ?", artifact_id)
+            :limit(1)
+            :run_with(conn):query()
+        if final_err then
+            return nil, "Failed to read updated artifact: " .. final_err
+        end
+        return {
+            artifact_id = artifact_id,
+            updated = true,
+            content_version = final_rows[1].content_version,
+        }
+    end
+
+    -- One conditional write. Returns (result, err, retry): retry is true when
+    -- only the meta changed since it was read.
+    local function attempt(conn)
+        local meta_value = replace_value
+        local read_raw = nil
+        if patching then
+            local raw, current_meta, read_err = read_meta(conn, artifact_id)
+            if read_err then return nil, read_err end
+            read_raw = raw
+            if artifact_repo._on_meta_read then artifact_repo._on_meta_read(conn, artifact_id) end
 
             if updates.meta_patch then
                 for k, v in pairs(updates.meta_patch) do
@@ -264,11 +309,16 @@ function artifact_repo.update(artifact_id, updates, opts)
                 end
             end
 
-            local encoded, encode_err = json.encode(current_meta)
-            if encode_err then
-                return nil, "Failed to encode meta: " .. encode_err
+            if next(current_meta) == nil then
+                -- An emptied meta is still an object.
+                meta_value = "{}"
+            else
+                local encoded, encode_err = json.encode(current_meta)
+                if encode_err then
+                    return nil, "Failed to encode meta: " .. encode_err
+                end
+                meta_value = encoded
             end
-            meta_value = encoded
         end
 
         -- Build the update query
@@ -299,10 +349,18 @@ function artifact_repo.update(artifact_id, updates, opts)
         update_query = update_query:set("updated_at", time.now():format(time.RFC3339))
 
         -- Add where clause - the conditional update is the CAS winner check
-        -- when a caller supplies expected_version.
+        -- when a caller supplies expected_version, and the lost-update guard
+        -- for a meta patch.
         local where_filters = { sql.builder.expr("artifact_id = ?", artifact_id) }
         if opts.expected_version ~= nil then
             table.insert(where_filters, sql.builder.expr("content_version = ?", opts.expected_version))
+        end
+        if patching then
+            if read_raw == nil then
+                table.insert(where_filters, sql.builder.expr("meta IS NULL"))
+            else
+                table.insert(where_filters, sql.builder.expr("meta = ?", read_raw))
+            end
         end
         update_query = update_query:where(sql.builder.and_(where_filters))
 
@@ -312,47 +370,56 @@ function artifact_repo.update(artifact_id, updates, opts)
             return nil, "Failed to update artifact: " .. exec_err
         end
 
-        if result.rows_affected == 0 then
-            -- No pre-check SELECT: read once, here, only to tell NOT_FOUND
-            -- from a stale expected_version (CONFLICT).
-            local state_query = sql.builder.select("artifact_id", "content_version")
-                :from("artifacts")
-                :where("artifact_id = ?", artifact_id)
-                :limit(1)
-            local state_rows, state_err = state_query:run_with(conn):query()
-            if state_err then
-                return nil, "Failed to verify artifact state: " .. state_err
-            end
-
-            if #state_rows == 0 then
-                return nil, errors.new({
-                    kind = errors.NOT_FOUND,
-                    message = "Artifact not found",
-                    details = { artifact_id = artifact_id },
-                })
-            end
-
-            return nil, errors.new({
-                kind = errors.CONFLICT,
-                message = "Artifact was modified by another update",
-                details = { artifact_id = artifact_id, current_version = state_rows[1].content_version },
-            })
+        if result.rows_affected > 0 then
+            return read_back(conn)
         end
 
-        local final_query = sql.builder.select("content_version")
+        -- Read once, here, to tell NOT_FOUND, a stale expected_version
+        -- (CONFLICT) and a meta changed since it was read (retry) apart.
+        local state_rows, state_err = sql.builder.select("artifact_id", "content_version", "meta")
             :from("artifacts")
             :where("artifact_id = ?", artifact_id)
             :limit(1)
-        local final_rows, final_err = final_query:run_with(conn):query()
-        if final_err then
-            return nil, "Failed to read updated artifact: " .. final_err
+            :run_with(conn):query()
+        if state_err then
+            return nil, "Failed to verify artifact state: " .. state_err
         end
 
-        return {
-            artifact_id = artifact_id,
-            updated = true,
-            content_version = final_rows[1].content_version,
-        }
+        if #state_rows == 0 then
+            return nil, errors.new({
+                kind = errors.NOT_FOUND,
+                message = "Artifact not found",
+                details = { artifact_id = artifact_id },
+            })
+        end
+
+        local state = state_rows[1]
+        if opts.expected_version ~= nil and state.content_version ~= opts.expected_version then
+            return nil, errors.new({
+                kind = errors.CONFLICT,
+                message = "Artifact was modified by another update",
+                details = { artifact_id = artifact_id, current_version = state.content_version },
+            })
+        end
+        if patching and state.meta ~= read_raw then
+            return nil, nil, true
+        end
+
+        -- The row matched but the driver counted no change (some report
+        -- changed rows, not matched rows).
+        return read_back(conn)
+    end
+
+    local function run_update(conn)
+        for _ = 1, META_PATCH_ATTEMPTS do
+            local result, err, retry = attempt(conn)
+            if not retry then return result, err end
+        end
+        return nil, errors.new({
+            kind = errors.CONFLICT,
+            message = "Artifact meta kept changing during the update",
+            details = { artifact_id = artifact_id },
+        })
     end
 
     if opts.tx then

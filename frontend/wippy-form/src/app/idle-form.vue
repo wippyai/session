@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FormState } from '../lib/definition'
-import ChoiceField from './fields/ChoiceField.vue'
+import { ref } from 'vue'
+import ChoiceField from './fields/choice-field.vue'
 
 defineProps<{
   state: FormState
@@ -12,12 +13,21 @@ function formatTime(iso: string | null): string | null {
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
 }
+
+const statusEl = ref<HTMLElement | null>(null)
+
+defineExpose({
+  /** Moves focus to the status text after a successful submit, so focus isn't lost when the form swaps to this read-only view. */
+  focusStatus() {
+    statusEl.value?.focus()
+  },
+})
 </script>
 
 <template>
   <div class="flex flex-col gap-4 min-w-0">
     <div class="flex flex-col gap-1">
-      <h2 class="text-base font-semibold text-surface-900 dark:text-surface-0 break-words">
+      <h2 class="text-base font-semibold text-color break-words">
         {{ state.definition.title }}
       </h2>
       <p
@@ -38,13 +48,23 @@ function formatTime(iso: string | null): string | null {
       :readonly="true"
     />
 
-    <div class="text-xs text-muted-color flex flex-col gap-0.5">
+    <div
+      ref="statusEl"
+      tabindex="-1"
+      class="text-xs text-muted-color flex flex-col gap-0.5 outline-none"
+    >
       <p v-if="state.late">
         Late answer — this was answered after the conversation moved on. The assistant will confirm before
         acting on the earlier request.
       </p>
       <p v-if="state.delivery === 'pending'">
         Submitted. Waiting for the assistant.
+      </p>
+      <p v-else-if="state.delivery === 'running'">
+        The assistant is reading your answer.
+      </p>
+      <p v-else-if="state.delivery === 'interrupted'">
+        The assistant stopped before answering. Send a message to continue.
       </p>
       <p v-if="formatTime(state.submitted_at)">
         Answered {{ formatTime(state.submitted_at) }}

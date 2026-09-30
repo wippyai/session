@@ -1,26 +1,35 @@
 version: "1.0"
 namespace: wippy.session.forms.ui
 
-# Serves the built `wippy-form` web component (frontend/wippy-form/, built by
-# `make build-ui` into dist/ alongside this file) as a view.component. Package
-# metadata (title, props, events) lives in frontend/wippy-form/package.json's
-# `wippy` block and flows through dist/wippy-meta.json (the vite plugin emits
-# it) — this YAML carries only deploy-aware routing, per
-# web_components.spec.md § "Package metadata: source of truth". `directory`
-# below is relative to the MODULE root, not this file's directory. The module
-# root is `src/`: published packs put src/ contents at the root, and local
-# workspace replacements (test/.wippy.yaml, the demo workspace config) point at
-# src/ so the loader does not scan frontend/wippy-form/node_modules.
+# Serves the built `wippy-form` and `wippy-form-answers` web components
+# (frontend/wippy-form/, frontend/wippy-form-answers/, built by
+# `make build-ui` into dist/ and answers-dist/ alongside this file) as
+# view.component entries. Package metadata (title, description, props) is
+# authored once in each package's package.json `wippy` block, per
+# web_components.spec.md § "Package metadata: source of truth" — that block
+# also flows into the built dist/wippy-meta.json (the vite plugin emits it).
+# The `meta` blocks below (title/description/props) are a hand-kept COPY of
+# that same package.json `wippy` block, not this file's own source of
+# truth: registry.entry entries need their metadata inline for the registry
+# system to read, so this YAML restates it alongside package.json rather
+# than deriving it at deploy time. Keep the two in sync by hand when either
+# changes. `directory` below is relative to the MODULE root, not this
+# file's directory. The module root is `src/`: published packs put src/
+# contents at the root, and local workspace replacements (test/.wippy.yaml,
+# the demo workspace config) point at src/ so the loader does not scan
+# frontend/wippy-form*/node_modules.
 
 entries:
   # wippy.session.forms.ui:ui_server
   - name: ui_server
     kind: ns.requirement
     meta:
-      description: HTTP server the wippy-form web component bundle is served from.
+      description: HTTP server the wippy-form and wippy-form-answers web component bundles are served from.
     default: "app:gateway"
     targets:
       - entry: wippy.session.forms.ui:ui_static
+        path: .meta.server
+      - entry: wippy.session.forms.ui:ui_static_answers
         path: .meta.server
 
   # wippy.session.forms.ui:ui_fs
@@ -51,9 +60,128 @@ entries:
     meta:
       type: view.component
       title: Session Form
-      description: Renders a session ask_user form (single/multiple choice with Other) and submits the answer back to the owning session.
+      description: >-
+        Renders one Session ask_user form artifact and submits the answer back to the owning session over the
+        Host's artifact-state API. When every field in `definition` has `type: "choice"` (the only field type V1
+        emits), it renders a Claude-style question card: one question at a time for several-question forms, with
+        a `‹ n/total ›` counter, per-answer notes, an Other free-text row, a review step before sending, and a
+        read-only answered summary afterward. A mixed or non-choice definition falls back to a plain
+        radio/checkbox fields form (kept for V2 standard fields). Inputs: `definition` (the immutable
+        question/option data), `form-version` (schema version gate — an unsupported version disables submission),
+        and `state` (the package-tag lifecycle: "active" while answerable, "idle" once answered). The component
+        owns its own data loading (GET on mount, reload on visibility/session-message/artifact events),
+        submission (request-id reuse, one automatic retry on a no-response network failure, 422 field-error and
+        409 already-submitted handling), and offline detection — the host only needs to mount the tag with these
+        three attributes. Edge cases handled: a stale ("asked earlier") form, a race where another client answers
+        first, a reload that fails while a view is already showing, and an unsupported form-version.
       tag_name: wippy-form
       auto_register: true
       announced: true
       base_path: wippy-session-forms
       entry_point: index.js
+      props:
+        type: object
+        properties:
+          form-version:
+            type: number
+            default: 1
+            description: >-
+              Form definition schema version (currently 1). A value other than 1, from this prop or from the
+              loaded state's own form_version, disables the interactive form and shows a "needs a newer app"
+              notice instead.
+          definition:
+            type: object
+            default: null
+            description: >-
+              Immutable form definition: title, optional description, optional submit_label, optional
+              answered_message (not displayed), and fields (each { id, type: "choice", label, description?,
+              required, options: [{value, label, description?}], multiple, allow_other }). When every field is
+              type "choice" the question-card UI renders; otherwise the radio/checkbox fields form renders.
+          state:
+            type: string
+            default: active
+            description: >-
+              Package-tag lifecycle state mirrored from the artifact: "active" (still answerable) or "idle"
+              (already answered, shown read-only). Changing this prop triggers a reload of the canonical form
+              state from the Host.
+          density:
+            type: string
+            default: compact
+            description: >-
+              Question-card sizing: "compact" (default) or "comfortable", a larger size/spacing scale. Read
+              purely through the :host([density="comfortable"]) CSS selector — no JS reads it — but must be a
+              declared prop so the package-tag mount path can set it as an attribute.
+
+  # wippy.session.forms.ui:ui_fs_answers
+  - name: ui_fs_answers
+    kind: fs.directory
+    meta:
+      comment: Built wippy-form-answers bundle (frontend/wippy-form-answers/, built into src/forms/ui/answers-dist/ by `make build-ui`).
+    base: module
+    directory: forms/ui/answers-dist
+
+  # wippy.session.forms.ui:ui_static_answers
+  - name: ui_static_answers
+    kind: http.static
+    meta:
+      comment: Serves the wippy-form-answers bundle at /wippy-session-form-answers.
+      server: app:gateway
+    fs: wippy.session.forms.ui:ui_fs_answers
+    options:
+      mime_types:
+        .css: text/css
+        .js: application/javascript
+        .map: application/json
+    path: /wippy-session-form-answers
+
+  # wippy.session.forms.ui:wippy_form_answers_view
+  - name: wippy_form_answers_view
+    kind: registry.entry
+    meta:
+      type: view.component
+      title: Session Form Answers
+      description: >-
+        Invisible carrier element. The Session server writes this tag into a user's chat message immediately
+        after they answer a form, carrying the raw JSON answer record (form_id, form_version, title, late,
+        answers) in its `record` attribute — e.g. "Answered questions about the delivery of your order."
+        followed by <wippy-form-answers record='{...}'></wippy-form-answers> (a single-line JSON string; the
+        server escapes ', <, >, and & inside it so it round-trips through HTML attribute parsing intact). The
+        record lives in the attribute, never in text content or children: an element the chat sanitizer strips
+        (e.g. because the Host's components list hasn't picked up this tag yet) or that hasn't finished loading
+        its script (still an unrecognized element) both render nothing when they have no children — but would
+        leak the raw JSON straight to the user if it were text content instead. `record` is declared as a prop
+        specifically so the Host adds it to the sanitizer's allowed attribute list; without that, the attribute
+        would still get stripped even once the tag itself is allowed through. The message is rendered as
+        Markdown then sanitized; the answered-form card already shown above the message is the human-readable
+        summary, so this element's entire purpose is to keep the JSON reachable in the raw message text for the
+        agent to read back on a later turn, while staying invisible to the user under every failure mode. It
+        renders nothing: no <slot> is ever created (so even stray light-DOM content would never project into
+        the shadow root) and :host { display: none; } hides the element outright as defense in depth for the
+        case where it does mount normally. Its only prop is `record` (string), it dispatches no events and opens
+        no network requests, makes no host API calls of its own (its WippyElement base class does subscribe to
+        the Host's @theme broadcast, invisibly, for consistent light/dark handling — that has no visible effect
+        here since the element renders nothing), and exposes no parts, tokens, or classes to restyle — there is
+        nothing to style. Its only public surface is a read-only `answerRecord` getter that parses that attribute and returns
+        the parsed object, or null on empty or invalid JSON; it never throws. The element deliberately owns no
+        `record` property: the Host's chat compiles message HTML as a Vue template, and Vue writes a custom
+        element's prop as a DOM property when one of that name exists, which would swallow the value instead
+        of setting the attribute. Agents must never emit this tag
+        themselves — it is written exclusively by the Session server's message-composition code, never by
+        agent-generated content.
+      tag_name: wippy-form-answers
+      auto_register: true
+      announced: true
+      base_path: wippy-session-form-answers
+      entry_point: index.js
+      props:
+        type: object
+        properties:
+          record:
+            type: string
+            default: ""
+            description: >-
+              The self-contained JSON answer record (form_id, form_version, title, late, answers) as a
+              single-line string, written into this attribute by the Session server immediately after a form
+              is answered. The server escapes ', <, >, and & inside the JSON so the attribute value round-trips
+              through HTML parsing intact; getAttribute('record') returns it already unescaped. Agents never
+              write this attribute themselves.

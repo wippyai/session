@@ -1,6 +1,6 @@
 import type { FormAnswers, FormState, SubmitAccepted, SubmitEnvelope, SubmitResult } from '../lib/definition'
 import * as WippyProxy from '@wippy-fe/proxy'
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useFormSubmit } from './use-form-submit'
 
@@ -172,6 +172,131 @@ describe('useFormSubmit — outcomes', () => {
     expect(outcome).toEqual({ ok: false, message: 'This form cannot be submitted here.' })
     expect(mockArtifactState()).not.toHaveBeenCalled()
     expect(submitFn).not.toHaveBeenCalled()
+  })
+})
+
+describe('useFormSubmit — exhausted-retry copy (item 4)', () => {
+  it('does not say "Retrying…" once the one automatic retry has also failed with no response', async () => {
+    vi.useFakeTimers()
+    try {
+      const submitFn = vi.fn()
+        .mockRejectedValueOnce(hostError(undefined, 'network_error'))
+        .mockRejectedValueOnce(hostError(undefined, 'network_error'))
+      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+
+      const artifactId = ref<string | null>('artifact-1')
+      const { submit } = useFormSubmit(artifactId)
+
+      const outcomePromise = submit(1, 1, answersA)
+      await vi.advanceTimersByTimeAsync(800)
+      const outcome = await outcomePromise
+
+      expect(outcome.ok).toBe(false)
+      expect(outcome.message).toBe('Network problem. Your answer may not have been saved. Check your connection, then select Retry.')
+      expect(outcome.message).not.toContain('Retrying')
+      expect(outcome.retryable).toBe(true)
+      expect(submitFn).toHaveBeenCalledTimes(2)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('useFormSubmit — retry outcome mapping (item 7)', () => {
+  it('maps a 422 on the retry attempt itself to field errors, not a generic message', async () => {
+    vi.useFakeTimers()
+    try {
+      const submitFn = vi.fn()
+        .mockRejectedValueOnce(hostError(undefined, 'network_error'))
+        .mockRejectedValueOnce(Object.assign(hostError(422), {
+          errors: { f1: [{ code: 'required', message: 'Required' }] },
+          formErrors: [],
+        }))
+      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+
+      const artifactId = ref<string | null>('artifact-1')
+      const { submit } = useFormSubmit(artifactId)
+
+      const outcomePromise = submit(1, 1, answersA)
+      await vi.advanceTimersByTimeAsync(800)
+      const outcome = await outcomePromise
+
+      expect(outcome.ok).toBe(false)
+      expect(outcome.fieldErrors).toEqual({ f1: [{ code: 'required', message: 'Required' }] })
+      expect(submitFn).toHaveBeenCalledTimes(2)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not force retryable=true for a definite (non-uncertain) failure on the retry attempt', async () => {
+    vi.useFakeTimers()
+    try {
+      const submitFn = vi.fn()
+        .mockRejectedValueOnce(hostError(undefined, 'network_error'))
+        .mockRejectedValueOnce(hostError(409, 'request_conflict'))
+      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+
+      const artifactId = ref<string | null>('artifact-1')
+      const { submit } = useFormSubmit(artifactId)
+
+      const outcomePromise = submit(1, 1, answersA)
+      await vi.advanceTimersByTimeAsync(800)
+      const outcome = await outcomePromise
+
+      expect(outcome.ok).toBe(false)
+      expect(outcome.code).toBe('request_conflict')
+      // A 409 request_conflict is not something retrying without a change
+      // can fix — offering Retry for it is misleading.
+      expect(outcome.retryable).toBe(false)
+      expect(outcome.message).not.toBe('Network problem. Your answer may not have been saved. Check your connection, then select Retry.')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('useFormSubmit — rebind safety (item 3)', () => {
+  it('drops a result that resolves after the artifact id changed mid-flight', async () => {
+    let resolveSubmit: ((r: SubmitAccepted) => void) | undefined
+    const pending = new Promise<SubmitAccepted>((resolve) => { resolveSubmit = resolve })
+    const submitFn = vi.fn().mockReturnValue(pending)
+    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+
+    const artifactId = ref<string | null>('artifact-1')
+    const { submit } = useFormSubmit(artifactId)
+
+    const outcomePromise = submit(1, 1, answersA)
+    // The Host rebinds this component to a different artifact while the
+    // request is still in flight (e.g. a double-buffered w-page swap).
+    artifactId.value = 'artifact-2'
+    await nextTick()
+    resolveSubmit?.(accepted())
+
+    const outcome = await outcomePromise
+    expect(outcome.ok).toBe(false)
+    expect(outcome.ignored).toBe(true)
+    expect(outcome.accepted).toBeUndefined()
+  })
+
+  it('resets request-id identity once the artifact id changes', async () => {
+    const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
+    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+
+    const artifactId = ref<string | null>('artifact-1')
+    const { submit } = useFormSubmit(artifactId)
+
+    await submit(1, 1, answersA)
+    artifactId.value = 'artifact-2'
+    await nextTick() // let the artifactId watcher run resetIdentity() first
+    await submit(1, 1, answersA)
+
+    const firstId = (submitFn.mock.calls[0][0] as SubmitEnvelope).request_id
+    const secondId = (submitFn.mock.calls[1][0] as SubmitEnvelope).request_id
+    expect(secondId).not.toBe(firstId)
   })
 })
 

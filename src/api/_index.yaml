@@ -85,6 +85,23 @@ entries:
     func: get_artifact_content
     path: /artifact/{id}/content
 
+  # wippy.session.api:artifact_state
+  # Whole-module import of the same source as get_artifact_state and
+  # submit_artifact_state below, for tests: a function.lua entry's require()
+  # gives the bound `method` function, not the table, so the Content-Type
+  # and capped-read helpers (test seams _is_json_content_type,
+  # _read_capped_stream) need a library.lua registration to be reachable.
+  - name: artifact_state
+    kind: library.lua
+    meta:
+      comment: Test-only whole-module import of artifact_state.lua
+    source: file://artifact_state.lua
+    modules:
+      - http
+      - security
+    imports:
+      state_service: wippy.session.forms:state_service
+
   # wippy.session.api:get_artifact_state
   - name: get_artifact_state
     kind: function.lua
@@ -137,6 +154,24 @@ entries:
     func: submit_artifact_state
     path: /artifact/{id}/state
 
+  # wippy.session.api:get_session_module
+  # Whole-module import of the same source as get_session below, for tests:
+  # a function.lua entry's require() gives the bound `method` function, not
+  # the table, so the _reported_status/_lookup_session test seams need a
+  # library.lua registration to be reachable.
+  - name: get_session_module
+    kind: library.lua
+    meta:
+      comment: Test-only whole-module import of get_session.lua
+    source: file://get_session.lua
+    modules:
+      - http
+      - security
+    imports:
+      consts: wippy.session:consts
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+
   # wippy.session.api:get_session
   - name: get_session
     kind: function.lua
@@ -148,6 +183,7 @@ entries:
       - http
       - security
     imports:
+      consts: wippy.session:consts
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
     method: handler
@@ -190,6 +226,21 @@ entries:
     func: list_artifacts
     path: /artifacts
 
+  # wippy.session.api:list_sessions_module
+  # Whole-module import of the same source as list_sessions below, for the
+  # same reason as get_session_module above.
+  - name: list_sessions_module
+    kind: library.lua
+    meta:
+      comment: Test-only whole-module import of list_sessions.lua
+    source: file://list_sessions.lua
+    modules:
+      - http
+      - security
+    imports:
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+
   # wippy.session.api:list_sessions
   - name: list_sessions
     kind: function.lua
@@ -201,6 +252,7 @@ entries:
       - http
       - security
     imports:
+      consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo
     method: handler
     pool:

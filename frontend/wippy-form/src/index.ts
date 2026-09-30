@@ -5,7 +5,7 @@ import type { ComponentProps } from './types'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { define, WippyVueElement } from '@wippy-fe/webcomponent-vue'
 import pkg from '../package.json'
-import AppRoot from './app/WippyForm.vue'
+import AppRoot from './app/wippy-form.vue'
 import { ELEMENT_PROVIDER } from './element-context'
 import stylesText from './styles.css?inline'
 

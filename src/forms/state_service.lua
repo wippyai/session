@@ -1,5 +1,6 @@
 local json = require("json")
 local uuid = require("uuid")
+local security = require("security")
 local consts = require("consts")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
@@ -16,9 +17,10 @@ local session_repo = require("session_repo")
 -- HTTP status and a JSON body string; bodies are composed with explicit
 -- nulls (form_artifact.json_object) because the contract has nullable keys.
 --
--- Acceptance (POST) is one transaction: re-read the form, compute `late`,
--- switch the artifact to idle with the accepted submission (conditional on
--- the expected content_version) and insert the answer as a pending user row.
+-- Acceptance (POST) is one transaction: lock the session row, re-read the
+-- form, decide `late`, insert the answer as a pending user row and switch the
+-- artifact to idle with the accepted submission (conditional on the expected
+-- content_version).
 -- After commit the artifact event is published and the session process is
 -- woken with the row id; the row itself makes the delivery durable.
 
@@ -36,12 +38,23 @@ function state_service._lookup_session(session_id)
     return process.registry.lookup(consts.REGISTRY.SESSION .. session_id)
 end
 
+-- The same session permissions the session reader and writer check: reading
+-- a form needs read access, answering it needs write access.
+function state_service._can_read(session_id)
+    return security.can("read", "session:" .. session_id)
+end
+
+function state_service._can_write(session_id)
+    return security.can("write", "session:" .. session_id)
+end
+
 function state_service._lookup_plugin(user_id)
     return process.registry.lookup(consts.REGISTRY.PLUGIN .. user_id)
 end
 
+-- Returns (ok, err) like process.send.
 function state_service._send(pid, topic, payload)
-    process.send(pid, topic, payload)
+    return process.send(pid, topic, payload)
 end
 
 ---------------------------------------------------------------------------
@@ -102,17 +115,61 @@ local function load_form(user_id, artifact_id)
     return artifact, form
 end
 
--- "pending" while the answer row still waits for admission, else "complete".
-local function delivery_of(submission)
+-- Delivery of an accepted answer, derived from the rows (no stored state):
+--   pending      the answer row waits for admission
+--   complete     admitted, and the agent has replied after it
+--   running      admitted, no reply yet, and a live session process is
+--                running a turn
+--   interrupted  admitted, no reply, and no turn is running: the user
+--                stopped the turn (the answer is delivered; a new message
+--                continues), or it crashed before answering (the stored
+--                status can still say running until the session process
+--                starts again). Also when the answer row is gone from the
+--                history: nothing will answer it.
+local REPLY_SCAN_LIMIT = 50
+
+-- A reply is assistant text, or a turn that ended by asking a new form. Tool
+-- calls alone are not: a turn that crashed or was stopped after one did not
+-- answer.
+local function is_reply(row)
+    if row.type == consts.MSG_TYPE.ASSISTANT then
+        return type(row.data) == "string" and string.find(row.data, "%S") ~= nil
+    end
+    if row.type == consts.MSG_TYPE.FUNCTION then
+        local meta = type(row.metadata) == "table" and row.metadata or {}
+        local operations = type(meta.control_operations) == "table" and meta.control_operations or {}
+        return meta.status == consts.FUNC_STATUS.SUCCESS
+            and type(operations.forms) == "table" and #operations.forms > 0
+    end
+    return false
+end
+
+local function delivery_of(submission, session_id)
     if type(submission) ~= "table" then return nil, nil end
     local row, err = message_repo.get(submission.message_id)
     if not row then
-        if is_not_found(err) then return "complete", nil end
+        if is_not_found(err) then return "interrupted", nil end
         return nil, tostring(err)
     end
     local marker = type(row.metadata) == "table" and row.metadata.session_form or nil
     if type(marker) == "table" and marker.pending == true then return "pending", nil end
-    return "complete", nil
+
+    -- The newest rows after the answer (the answer row among them when few
+    -- follow). A full page means the conversation went on long after it.
+    local later, list_err = message_repo.list_after_message(session_id, row.message_id, REPLY_SCAN_LIMIT)
+    if not later then return nil, tostring(list_err) end
+    if #later >= REPLY_SCAN_LIMIT then return "complete", nil end
+    for _, candidate in ipairs(later) do
+        if candidate.message_id ~= row.message_id and is_reply(candidate) then return "complete", nil end
+    end
+    -- The stored status stays "running" after a crash until the session
+    -- process starts again, so "running" also needs a live session process.
+    local session, session_err = session_repo.get(session_id)
+    if not session then return nil, tostring(session_err) end
+    if session.status == consts.STATUS.RUNNING and state_service._lookup_session(session_id) then
+        return "running", nil
+    end
+    return "interrupted", nil
 end
 
 ---------------------------------------------------------------------------
@@ -122,6 +179,10 @@ end
 function state_service.get_state(user_id, artifact_id)
     local artifact, form, status, body = load_form(user_id, artifact_id)
     if not artifact then return status, body end
+    -- The owner is known at this point, so a refusal reveals nothing new.
+    if not state_service._can_read(artifact.session_id) then
+        return failure(403, "forbidden", "You cannot read forms in this session.")
+    end
 
     local submission = form.meta.submission
     local origin = type(form.meta.origin) == "table" and form.meta.origin or {}
@@ -137,7 +198,7 @@ function state_service.get_state(user_id, artifact_id)
         end
     else
         local delivery_err
-        delivery, delivery_err = delivery_of(submission)
+        delivery, delivery_err = delivery_of(submission, artifact.session_id)
         if delivery_err then return failure(500, "internal", "Failed to read the delivery state") end
     end
 
@@ -214,14 +275,22 @@ local function conflict_extra(artifact)
     }
 end
 
+-- The canonical encoding of valid answers, or nil when they are not valid.
+local function canonical_of(form, answers)
+    local normalized = definition.validate_answers(form.definition, answers)
+    return normalized and definition.encode_answers(form.definition, normalized) or nil
+end
+
 -- Classifies a request against an already accepted submission: an exact
 -- replay (same request id, same normalized answers) gets the original result;
--- anything else is a 409.
-local function against_existing(artifact, form, submission, request_id, canonical)
+-- anything else is a 409. The answers are only validated for a replay
+-- candidate, so an answered form costs no validation work.
+local function against_existing(artifact, form, submission, request_id, answers)
     if submission.request_id == request_id then
         local accepted = definition.encode_answers(form.definition, submission.answers)
+        local canonical = canonical_of(form, answers)
         if canonical and canonical == accepted then
-            local delivery, delivery_err = delivery_of(submission)
+            local delivery, delivery_err = delivery_of(submission, artifact.session_id)
             if delivery_err then return failure(500, "internal", "Failed to read the delivery state") end
             return 200, success_body({
                 artifact_id = artifact.artifact_id, request_id = request_id,
@@ -268,31 +337,43 @@ function state_service.submit(user_id, artifact_id, raw_body)
 
     local artifact, form, status, body = load_form(user_id, artifact_id)
     if not artifact then return status, body end
+    -- The owner is known at this point, so a refusal reveals nothing new.
+    if not state_service._can_write(artifact.session_id) then
+        return failure(403, "forbidden", "You cannot answer forms in this session.")
+    end
 
     local envelope, envelope_err = parse_envelope(raw_body)
     if not envelope then return failure(400, "invalid_request", tostring(envelope_err)) end
     local request_id = envelope.request_id
 
-    local normalized, field_errors, form_errors = definition.validate_answers(form.definition, envelope.answers)
-    local canonical = normalized and definition.encode_answers(form.definition, normalized) or nil
-
+    -- An answered form is settled before the answers are validated: only an
+    -- exact replay (same request id) needs them normalized.
     if type(form.meta.submission) == "table" then
-        return against_existing(artifact, form, form.meta.submission, request_id, canonical)
+        return against_existing(artifact, form, form.meta.submission, request_id, envelope.answers)
     end
     local expected_version = envelope.expected_content_version
     if expected_version ~= nil and (artifact.content_version or 1) ~= expected_version then
         return failure(409, "version_conflict", "The form changed since it was loaded.", conflict_extra(artifact))
     end
+    local normalized, field_errors, form_errors = definition.validate_answers(form.definition, envelope.answers)
     if not normalized then
         return 422, validation_body(field_errors, form_errors)
     end
 
     local message_id, id_err = state_service._new_message_id()
     if not message_id then return failure(500, "internal", "Failed to create the answer id: " .. tostring(id_err)) end
-    local submitted_at = message_date.now()
     local session_id = artifact.session_id
 
     local accepted, accept_err = tx.run(function(dbtx)
+        -- The session row's write lock comes first, so `late` is decided
+        -- against every input written before this answer, and any input
+        -- written after waits for this commit and sorts after the answer.
+        local _, lock_err = message_date.lock_session(dbtx, session_id)
+        if lock_err then
+            if is_not_found(lock_err) then return nil, { status = 404 } end
+            return nil, tostring(lock_err)
+        end
+
         local current, current_err = artifact_repo.get(artifact.artifact_id, { tx = dbtx })
         if not current then
             if is_not_found(current_err) then return nil, { status = 404 } end
@@ -322,14 +403,24 @@ function state_service.submit(user_id, artifact_id, raw_body)
             answers = normalized,
             late = late,
         })
+        local stored: any, message_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER, text, {
+            session_form = {
+                artifact_id = current.artifact_id,
+                submission_id = request_id,
+                late = late,
+                pending = true,
+            },
+        }, { tx = dbtx })
+        if message_err then return nil, tostring(message_err) end
+
         local content, content_err = form_artifact.content_with_state(current_form, form_artifact.STATE.IDLE)
         if not content then return nil, content_err end
-
         local meta = copy_table(current_form.meta)
         meta.submission = {
             request_id = request_id,
             answers = normalized,
-            submitted_at = submitted_at,
+            -- The answer row's own date: its place in the input order.
+            submitted_at = stored.date,
             message_id = message_id,
             late = late,
         }
@@ -348,16 +439,6 @@ function state_service.submit(user_id, artifact_id, raw_body)
             return nil, tostring(update_err)
         end
 
-        local _, message_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER, text, {
-            session_form = {
-                artifact_id = current.artifact_id,
-                submission_id = request_id,
-                late = late,
-                pending = true,
-            },
-        }, { tx = dbtx })
-        if message_err then return nil, tostring(message_err) end
-
         return { content_version = updated.content_version, late = late }
     end)
 
@@ -366,18 +447,27 @@ function state_service.submit(user_id, artifact_id, raw_body)
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
             if accept_err.existing then
                 return against_existing(accept_err.existing, accept_err.form,
-                    accept_err.form.meta.submission, request_id, canonical)
+                    accept_err.form.meta.submission, request_id, envelope.answers)
             end
-            if accept_err.version_conflict then
-                return failure(409, "version_conflict", "The form changed since it was loaded.",
-                    conflict_extra(accept_err.version_conflict))
-            end
+        end
+        -- A concurrent submission may have won while this transaction ran:
+        -- SQLite reports the loser as busy, PostgreSQL as a revision
+        -- conflict. Read the committed state and classify against it.
+        local winner = artifact_repo.get(artifact.artifact_id)
+        local winner_form = winner and form_artifact.parse(winner) or nil
+        if winner_form and type(winner_form.meta.submission) == "table" then
+            return against_existing(winner, winner_form, winner_form.meta.submission, request_id, envelope.answers)
+        end
+        if type(accept_err) == "table" and accept_err.version_conflict then
+            return failure(409, "version_conflict", "The form changed since it was loaded.",
+                conflict_extra(accept_err.version_conflict))
         end
         return failure(500, "internal", "The answer could not be saved. Try again.")
     end
 
     -- Committed. Tell the owner's open tabs, then wake the session process;
-    -- neither is needed for correctness (state refetch, pending-row scans).
+    -- neither is needed for correctness (state refetch, pending-row scans),
+    -- so a failed wake-up does not fail the request.
     local updated_artifact = artifact_repo.get(artifact.artifact_id)
     if updated_artifact then artifact_events.publish_updated(updated_artifact) end
     state_service.wake_session(session_id, message_id, artifact.user_id)
@@ -390,19 +480,29 @@ function state_service.submit(user_id, artifact_id, raw_body)
 end
 
 -- Sends `form_answer` to the session's registered process. When none runs
--- (idle timeout, restart), asks the owner's session plugin to start it; the
--- session admits pending answers on start. With no plugin (the owner has no
--- connection) the answer waits for the next session start.
+-- (idle timeout, restart) or the send fails, asks the owner's session plugin
+-- to start it; the session admits pending answers on start. With no plugin
+-- (the owner has no connection) the answer waits for the next session start
+-- or the plugin's scan. Returns true, or false and why the wake-up was not
+-- delivered.
 function state_service.wake_session(session_id, message_id, owner_id)
     local pid = state_service._lookup_session(session_id)
+    local send_err = nil
     if pid then
-        state_service._send(pid, consts.TOPICS.FORM_ANSWER, { message_id = message_id })
-        return true
+        local _, err = state_service._send(pid, consts.TOPICS.FORM_ANSWER, { message_id = message_id })
+        if not err then return true end
+        send_err = tostring(err)
     end
-    if not owner_id or owner_id == "" then return false end
+    if not owner_id or owner_id == "" then
+        return false, send_err or "no session process and no owner to start one"
+    end
     local plugin = state_service._lookup_plugin(owner_id)
-    if not plugin then return false end
-    state_service._send(plugin, consts.PLUGIN_TOPICS.WAKE, { session_id = session_id, message_id = message_id })
+    if not plugin then
+        return false, send_err or "no session process and no session plugin for the owner"
+    end
+    local _, plugin_err = state_service._send(plugin, consts.PLUGIN_TOPICS.WAKE,
+        { session_id = session_id, message_id = message_id })
+    if plugin_err then return false, tostring(plugin_err) end
     return true
 end
 

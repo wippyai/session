@@ -57,17 +57,24 @@ local function handler()
         return
     end
 
+    -- A foreign artifact and a missing one answer the same way: 404 with a
+    -- generic body. One status for both keeps a probe from telling "not
+    -- mine" apart from "does not exist", and no internal error text (a repo
+    -- error, a session lookup failure) ever reaches the client.
+    local function not_found()
+        res:set_status(http.STATUS.NOT_FOUND)
+        res:set_content_type(http.CONTENT.JSON)
+        res:write_json({
+            success = false,
+            error = "Artifact not found"
+        })
+    end
+
     -- Fetch the artifact from the repository
     local artifact, err = artifact_repo.get(artifact_id)
     if err then
-        -- Handle not found error
         if err:match("not found") then
-            res:set_status(http.STATUS.NOT_FOUND)
-            res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Artifact not found: " .. artifact_id
-            })
+            not_found()
             return
         end
 
@@ -76,7 +83,7 @@ local function handler()
         res:set_content_type(http.CONTENT.JSON)
         res:write_json({
             success = false,
-            error = "Failed to retrieve artifact: " .. err
+            error = "Failed to retrieve artifact"
         })
         return
     end
@@ -89,30 +96,20 @@ local function handler()
             res:set_content_type(http.CONTENT.JSON)
             res:write_json({
                 success = false,
-                error = "Failed to verify artifact ownership: " .. session_err
+                error = "Failed to verify artifact ownership"
             })
             return
         end
 
         -- Verify the session belongs to the authenticated user
         if session.user_id ~= user_id then
-            res:set_status(http.STATUS.FORBIDDEN)
-            res:set_content_type(http.CONTENT.JSON)
-            res:write_json({
-                success = false,
-                error = "Access denied: You don't have permission to access this artifact"
-            })
+            not_found()
             return
         end
     end
 
     if artifact.user_id ~= user_id then
-        res:set_status(http.STATUS.FORBIDDEN)
-        res:set_content_type(http.CONTENT.JSON)
-        res:write_json({
-            success = false,
-            error = "Access denied: You don't have permission to access this artifact"
-        })
+        not_found()
         return
     end
 

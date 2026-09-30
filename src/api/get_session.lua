@@ -2,6 +2,26 @@ local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
+local consts = require("consts")
+
+local get_session = {}
+
+-- Seam for tests.
+function get_session._lookup_session(session_id: string): any
+    return process.registry.lookup(consts.REGISTRY.SESSION .. session_id)
+end
+
+-- A stored "running" status with no registered session process is a crash
+-- the plugin's startup reconciliation has not reached yet. Report it as
+-- failed here so the Host never blocks Send on a session that will not
+-- resume on its own; the stored value is untouched, and the plugin's own
+-- scan still owns recovery.
+local function reported_status(session: any): string
+    if session.status == consts.STATUS.RUNNING and not get_session._lookup_session(session.session_id) then
+        return consts.STATUS.FAILED
+    end
+    return session.status :: string
+end
 
 type GetSessionResponse = {
     success: boolean,
@@ -63,6 +83,7 @@ local function handler()
     local latest_message, _ = message_repo.get_latest(session_id)
     local message_count, _ = message_repo.count_by_session(session_id)
 
+    session.status = reported_status(session)
     session.current_agent = ""
     session.current_model = ""
 
@@ -89,6 +110,7 @@ local function handler()
     res:write_json(response)
 end
 
-return {
-    handler = handler
-}
+get_session.handler = handler
+get_session._reported_status = reported_status
+
+return get_session

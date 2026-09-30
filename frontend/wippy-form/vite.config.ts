@@ -19,11 +19,10 @@ export default defineConfig({
   ],
   build: {
     target: 'esnext',
-    // Built straight into the module's served directory — src/forms/ui/dist
-    // is what src/forms/ui/_index.yaml's fs.directory entry points at, and
-    // what `make build-ui` / `make.ps1 build-ui` runs. No separate copy step.
-    outDir: resolve(__dirname, '../../src/forms/ui/dist'),
-    emptyOutDir: true,
+    // Output path is NOT hardcoded here — the npm `build`/`build:debug`
+    // scripts pass `--outDir ../../src/forms/ui/dist --emptyOutDir` (what
+    // src/forms/ui/_index.yaml's fs.directory entry points at, and what
+    // `make build-ui` / `make.ps1 build-ui` run via `npm run build`).
     lib: {
       entry: resolve(__dirname, 'src/index.ts'),
       name: 'WippyForm',
@@ -37,8 +36,13 @@ export default defineConfig({
       external: [
         'vue',
         'pinia',
+        '@iconify/vue',
         '@wippy-fe/proxy',
       ],
+      // Keeps define(import.meta.url, …) inside the entry chunk — without
+      // this Rollup may hoist it into a facade chunk whose import.meta.url
+      // lacks the ?declare-tag= query, and registration silently no-ops.
+      preserveEntrySignatures: false,
       output: {
         entryFileNames: '[name].js',
         chunkFileNames: '[name]-[hash].js',

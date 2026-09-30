@@ -193,8 +193,10 @@ local function define_tests()
             local row: any = message_repo.get(body.answer_message_id)
             test.eq(row.type, consts.MSG_TYPE.USER)
             test.eq(row.session_id, ctx.session_id)
-            test.eq(string.sub(row.data, 1, 16), "Answers to form ")
-            test.contains(row.data, '"answers":{"delivery":{"other":"Drone"},"extras":["Gift wrap","Receipt"]}')
+            test.eq(string.sub(row.data, 1, 12), "Answered “")
+            test.contains(row.data, "”.\n\n<wippy-form-answers record='{")
+            test.contains(row.data, '"answer":{"other":"Drone"}')
+            test.contains(row.data, '"answer":[{"value":"Gift wrap","label":"Gift wrap"},{"value":"Receipt","label":"Receipt"}]')
             test.eq(row.metadata.session_form.artifact_id, artifact_id)
             test.eq(row.metadata.session_form.submission_id, request_id)
             test.eq(row.metadata.session_form.pending, true)
@@ -241,8 +243,84 @@ local function define_tests()
 
             local admitted = message_handlers.admit_answers(ctx)
             test.eq(admitted, accepted.answer_message_id)
+            local _, stopped = get(artifact_id)
+            test.eq(stopped.delivery, "interrupted", "admitted, no reply, session not running")
+
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            local _, running = get(artifact_id)
+            test.eq(running.delivery, "running", "admitted, no reply yet, turn running")
+
+            -- After a crash the stored status still says running, but no
+            -- session process exists until something reopens the session.
+            local live = state_service._lookup_session
+            state_service._lookup_session = function() return nil end
+            local _, crashed = get(artifact_id)
+            state_service._lookup_session = live
+            test.eq(crashed.delivery, "interrupted", "stored running status with no live session process")
+
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Locker it is.")
             local _, after = get(artifact_id)
-            test.eq(after.delivery, "complete")
+            test.eq(after.delivery, "complete", "the agent replied after the answer")
+        end)
+
+        it("judges staleness by acceptance time, not by where admission moved the answer", function()
+            local ctx = new_session()
+            local first = new_form(ctx)
+            test.eq(post(first, answer()), 200)
+            local second = new_form(ctx)
+            -- The first answer, accepted before the second form existed, is
+            -- admitted now and lands after the second form in the history.
+            test.eq(message_handlers.admit_answers(ctx) ~= nil, true)
+            local _, before = get(second)
+            test.eq(before.stale, false, "an answer accepted earlier does not make a later form stale")
+            ctx.writer:add_message(consts.MSG_TYPE.USER, "Something else")
+            local _, after = get(second)
+            test.eq(after.stale, true)
+        end)
+
+        it("refuses a submit without session write permission and stores nothing", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local original_can = state_service._can_write
+            state_service._can_write = function() return false end
+            local status, body = post(artifact_id, answer())
+            state_service._can_write = original_can
+            test.eq(status, 403)
+            test.eq(body.code, "forbidden")
+            test.eq(artifact_repo.get(artifact_id).content_version, 1)
+            test.eq(#user_rows(ctx.session_id), 0)
+        end)
+
+        it("classifies the loser of a concurrent submit as already_submitted", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local stale_copy = artifact_repo.get(artifact_id)
+            local original_new_id = state_service._new_message_id
+            local original_get = artifact_repo.get
+            local raced = false
+            state_service._new_message_id = function()
+                if not raced then
+                    raced = true
+                    -- The other tab wins between our read and our write.
+                    state_service._new_message_id = original_new_id
+                    test.eq(post(artifact_id, answer(nil, { delivery = "Locker" })), 200)
+                    -- Our transaction still reads the old revision once.
+                    artifact_repo.get = function(id, opts)
+                        if opts and opts.tx then
+                            artifact_repo.get = original_get
+                            return stale_copy
+                        end
+                        return original_get(id, opts)
+                    end
+                end
+                return original_new_id()
+            end
+            local status, body = post(artifact_id, answer(nil, { delivery = "Courier" }))
+            state_service._new_message_id = original_new_id
+            artifact_repo.get = original_get
+            test.eq(status, 409)
+            test.eq(body.code, "already_submitted")
+            test.eq(#user_rows(ctx.session_id), 1, "one answer row")
         end)
 
         it("replays the same request with the original result", function()
@@ -374,11 +452,136 @@ local function define_tests()
             test.eq(status, 200)
             test.eq(body.late, true)
             local row: any = message_repo.get(body.answer_message_id)
-            test.eq(string.sub(row.data, 1, 20), "Late answer to form ")
+            test.contains(row.data, '"late":true,"late_notice":')
             test.eq(row.metadata.session_form.late, true)
             local _, state = get(artifact_id)
             test.eq(state.late, true)
             test.eq(state.stale, false)
+        end)
+
+        it("refuses to read a form without session read access", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local original_can = state_service._can_read
+            state_service._can_read = function() return false end
+            local status, body = get(artifact_id)
+            state_service._can_read = original_can
+            test.eq(status, 403)
+            test.eq(body.code, "forbidden")
+        end)
+
+        it("decides late once, on the acceptance transaction, and keeps text, row and form in step", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            ctx.writer:add_message(consts.MSG_TYPE.USER, "Something else meanwhile")
+            local original_after = message_repo.has_user_input_after
+            local checks = {} :: {any}
+            message_repo.has_user_input_after = function(session_id, after, exclude, opts)
+                table.insert(checks, opts and opts.tx ~= nil)
+                return original_after(session_id, after, exclude, opts)
+            end
+            local status, body = post(artifact_id, answer())
+            message_repo.has_user_input_after = original_after
+            test.eq(status, 200)
+            test.eq(#checks, 1)
+            test.is_true(checks[1], "inside the transaction")
+            test.eq(body.late, true)
+            local row: any = message_repo.get(body.answer_message_id)
+            test.contains(row.data, '"late":true,"late_notice":')
+            test.eq(row.metadata.session_form.late, true)
+            test.eq(artifact_repo.get(artifact_id).meta.session_form.submission.late, true)
+            test.eq(#user_rows(ctx.session_id), 2, "one answer row next to the typed one")
+        end)
+
+        it("records the answer row's own date as the acceptance time", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local _, body = post(artifact_id, answer())
+            local row: any = message_repo.get(body.answer_message_id)
+            local submission = artifact_repo.get(artifact_id).meta.session_form.submission
+            test.eq(submission.submitted_at, row.date)
+        end)
+
+        it("does not validate the answers of a request against an answered form", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            local original_validate = definition.validate_answers
+            local validated = 0
+            definition.validate_answers = function(def, answers)
+                validated = validated + 1
+                return original_validate(def, answers)
+            end
+            local status, body = post(artifact_id, answer(nil, { delivery = { other = string.rep(" ", 4000) } }))
+            definition.validate_answers = original_validate
+            test.eq(status, 409)
+            test.eq(body.code, "already_submitted")
+            test.eq(validated, 0)
+        end)
+
+        it("wakes the plugin when the session process cannot be reached and reports a lost wake-up", function()
+            local sent = {} :: {any}
+            state_service._lookup_session = function() return "stale-pid" end
+            state_service._lookup_plugin = function(owner) return "plugin-" .. owner end
+            state_service._send = function(pid, topic, payload)
+                table.insert(sent, { pid = pid, topic = topic, payload = payload })
+                if pid == "stale-pid" then return nil, "process not found" end
+                return true
+            end
+            local ok = state_service.wake_session("session-x", "answer-x", "owner-x")
+            test.is_true(ok)
+            test.eq(#sent, 2)
+            test.eq(sent[2].pid, "plugin-owner-x")
+            test.eq(sent[2].topic, "wake")
+
+            state_service._lookup_plugin = function() return nil end
+            local lost, why = state_service.wake_session("session-x", "answer-x", "owner-x")
+            test.is_false(lost)
+            test.contains(tostring(why), "process not found")
+        end)
+
+        it("counts only a finished reply as delivery", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local _, accepted = post(artifact_id, answer())
+            message_handlers.admit_answers(ctx)
+            state_service._lookup_session = function() return nil end
+
+            -- A tool call alone is not a reply: the turn stopped or crashed after it.
+            local _, call_ids: any = ctx.writer:add_response("", {}, {
+                { id = "call-1", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            local _, after_call = get(artifact_id)
+            test.eq(after_call.delivery, "interrupted")
+
+            -- A turn that ended by asking a new form did reply.
+            ctx.writer:update_message_meta(call_ids["call-1"], { status = consts.FUNC_STATUS.SUCCESS,
+                control_operations = { forms = { { artifact_id = uuid.v7() } } } })
+            local _, after_form = get(artifact_id)
+            test.eq(after_form.delivery, "complete")
+
+            -- An answer row that is gone from the history is not delivered.
+            message_repo.delete(accepted.answer_message_id)
+            local _, gone = get(artifact_id)
+            test.eq(gone.delivery, "interrupted")
+        end)
+
+        it("reports a failed session read in the delivery state as an error", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            post(artifact_id, answer())
+            message_handlers.admit_answers(ctx)
+            local original_get = session_repo.get
+            session_repo.get = function(session_id, owner)
+                -- The ownership check passes; the delivery lookup fails.
+                if owner == nil then return nil, "database unavailable" end
+                return original_get(session_id, owner)
+            end
+            local status, body = get(artifact_id)
+            session_repo.get = original_get
+            test.eq(status, 500)
+            test.eq(body.code, "internal")
         end)
 
         it("rolls back the artifact when the answer row cannot be written", function()
