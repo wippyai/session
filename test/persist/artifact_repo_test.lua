@@ -646,48 +646,45 @@ local function define_tests()
                 test.eq(raw_meta(was_null), "{}")
             end)
 
-            it("writes top-level keys sorted, keeps untouched keys' text and stores a raw_json value as given", function()
+            it("keeps every key the patch does not name, nested objects and empty lists included", function()
+                -- Another owner's keys: an empty list, an empty object and a
+                -- nested object. Their values survive; the key order inside a
+                -- stored object is not kept, and nothing reads it.
                 local id = fresh_artifact("static", nil)
-                set_raw_meta(id, '{"zeta":{"b":1,"a":2},"alpha":"x"}')
-                local _, err = artifact_repo.update(id, { meta_patch = {
-                    middle = artifact_repo.raw_json('{"value":"v","note":"n"}'),
-                    status = "idle",
-                } })
-                test.is_nil(err)
-                test.eq(raw_meta(id), '{"alpha":"x","middle":{"value":"v","note":"n"},"status":"idle","zeta":{"b":1,"a":2}}')
-                local artifact: any = artifact_repo.get(id)
-                test.eq(artifact.meta.middle.note, "n")
-                test.eq(artifact.meta.zeta.a, 2)
-
-                -- A later patch of other keys leaves that text alone.
-                local _, remove_err = artifact_repo.update(id, { meta_remove = { "alpha" } })
-                test.is_nil(remove_err)
-                test.eq(raw_meta(id), '{"middle":{"value":"v","note":"n"},"status":"idle","zeta":{"b":1,"a":2}}')
-            end)
-
-            it("splits stored meta with spacing, escapes and brackets inside strings", function()
-                local id = fresh_artifact("static", nil)
-                set_raw_meta(id, [[ { "a\"b" : "x}{[\\" , "n" : -1.5e3 , "t":true,"z":null, "arr":[1,{"k":"]"}] } ]])
+                set_raw_meta(id, '{"owner":{"list":[],"empty":{},"nested":{"deep":{"items":[1,2],"flag":true},'
+                    .. '"name":"x"}},"note":"kept"}')
                 local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
                 test.is_nil(err)
-                test.eq(raw_meta(id), [[{"a\"b":"x}{[\\","arr":[1,{"k":"]"}],"n":-1.5e3,"status":"idle","t":true,"z":null}]])
-                local artifact: any = artifact_repo.get(id)
-                test.eq(artifact.meta['a"b'], "x}{[\\")
-                test.eq(artifact.meta.arr[2].k, "]")
 
-                -- An empty meta that json.encode once stored as "[]".
+                local stored = tostring(raw_meta(id))
+                test.contains(stored, '"list":[]')
+                test.contains(stored, '"empty":{}')
+                test.contains(stored, '"items":[1,2]')
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta.status, "idle")
+                test.eq(artifact.meta.note, "kept")
+                test.eq(artifact.meta.owner.nested.name, "x")
+                test.eq(artifact.meta.owner.nested.deep.flag, true)
+                test.eq(artifact.meta.owner.nested.deep.items[2], 2)
+                test.eq(#artifact.meta.owner.list, 0)
+
+                -- A later removal of another key leaves them as they are.
+                local _, remove_err = artifact_repo.update(id, { meta_remove = { "note" } })
+                test.is_nil(remove_err)
+                local after = tostring(raw_meta(id))
+                test.contains(after, '"list":[]')
+                test.contains(after, '"empty":{}')
+                test.is_false(string.find(after, '"note"', 1, true) ~= nil)
+                local reread: any = artifact_repo.get(id)
+                test.eq(reread.meta.owner.nested.deep.items[1], 1)
+                test.eq(reread.meta.owner.nested.deep.flag, true)
+
+                -- An empty meta stored as "[]" is patched as an empty object.
                 local legacy = fresh_artifact("static", nil)
                 set_raw_meta(legacy, "[]")
                 local _, legacy_err = artifact_repo.update(legacy, { meta_patch = { status = "idle" } })
                 test.is_nil(legacy_err)
                 test.eq(raw_meta(legacy), '{"status":"idle"}')
-            end)
-
-            it("replaces meta with sorted top-level keys", function()
-                local id = fresh_artifact("static", nil)
-                local _, err = artifact_repo.update(id, { meta = { status = "idle", icon = "star", content_type = "x" } })
-                test.is_nil(err)
-                test.eq(raw_meta(id), '{"content_type":"x","icon":"star","status":"idle"}')
             end)
 
             it("meta_patch keeps working for inline and view_ref artifacts", function()

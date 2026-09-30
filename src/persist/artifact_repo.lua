@@ -30,139 +30,6 @@ local function get_db()
     return tx.connect()
 end
 
----------------------------------------------------------------------------
--- Stored meta text
---
--- Meta is stored with its top-level keys in sorted order, so equal meta is
--- stored as equal text; json.encode alone gives no fixed key order. A patch
--- rewrites only the keys it sets or removes: every other key keeps its
--- stored text exactly. A value with a canonical layout of its own (a session
--- form writes its answers in definition order) is passed as
--- artifact_repo.raw_json(text) and stored as exactly that text.
----------------------------------------------------------------------------
-
-local RAW_JSON = {}
-
--- Wraps JSON text so a meta write stores it as given instead of encoding it.
-function artifact_repo.raw_json(text: string): any
-    return setmetatable({ text = text }, RAW_JSON)
-end
-
-local function encode_member(value: any): (string?, string?)
-    if type(value) == "table" and getmetatable(value) == RAW_JSON then
-        return value.text :: string, nil
-    end
-    local encoded, err = json.encode(value)
-    if err then return nil, tostring(err) end
-    return encoded, nil
-end
-
--- Object text from { [key] = value text }, keys sorted; "{}" when empty.
-local function join_members(members: {[string]: string}): string
-    local keys = {}
-    for key in pairs(members) do table.insert(keys, key) end
-    table.sort(keys)
-    local parts = {}
-    for _, key in ipairs(keys) do
-        table.insert(parts, (json.encode(key)) .. ":" .. members[key])
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-end
-
--- Encodes a whole meta table. A table with keys that are not all strings
--- is not an object; it is encoded as before, by json.encode.
-local function encode_meta(meta: any): (string?, string?)
-    local members: {[string]: string} = {}
-    for key, value in pairs(meta) do
-        if type(key) ~= "string" then
-            local encoded, err = json.encode(meta)
-            if err then return nil, tostring(err) end
-            return encoded, nil
-        end
-        local encoded, err = encode_member(value)
-        if not encoded then return nil, err end
-        members[key] = encoded
-    end
-    return join_members(members), nil
-end
-
-local function skip_space(text: string, index: integer): integer
-    local _, last = string.find(text, "^%s*", index)
-    return (last or index - 1) + 1
-end
-
--- Index of the closing quote of the JSON string opening at `index`.
-local function string_end(text: string, index: integer): integer?
-    local position = index + 1
-    while true do
-        local found = string.find(text, '["\\]', position)
-        if not found then return nil end
-        if string.sub(text, found, found) == '"' then return found end
-        position = found + 2
-    end
-end
-
--- Index of the last character of the JSON value starting at `index`.
-local function value_end(text: string, index: integer): integer?
-    local first = string.sub(text, index, index)
-    if first == '"' then return string_end(text, index) end
-    if first == "{" or first == "[" then
-        local depth = 0
-        local position = index
-        while true do
-            local found = string.find(text, '["{}%[%]]', position)
-            if not found then return nil end
-            local char = string.sub(text, found, found)
-            if char == '"' then
-                local closing = string_end(text, found)
-                if not closing then return nil end
-                position = closing + 1
-            else
-                depth = depth + ((char == "{" or char == "[") and 1 or -1)
-                if depth == 0 then return found end
-                position = found + 1
-            end
-        end
-    end
-    local _, last = string.find(text, "^[%w%.%+%-]+", index)
-    return last
-end
-
--- The members of stored meta text as { [key] = value text }, each value
--- exactly as stored. The text has already been decoded as a JSON object, so
--- this only finds where each member starts and ends. Returns nil when it
--- cannot, and the patch is refused.
-local function object_members(text: string?): {[string]: string}?
-    local members: {[string]: string} = {}
-    if text == nil or text == "" then return members end
-    -- json.encode wrote an empty meta table as "[]".
-    if string.match(text, "^%s*%[%s*%]%s*$") then return members end
-    local index = skip_space(text, 1)
-    if string.sub(text, index, index) ~= "{" then return nil end
-    index = skip_space(text, index + 1)
-    if string.sub(text, index, index) == "}" then return members end
-    while true do
-        if string.sub(text, index, index) ~= '"' then return nil end
-        local key_last = string_end(text, index)
-        if not key_last then return nil end
-        -- Decoded inside an object, so escapes in the key are read as JSON.
-        local wrapped = json.decode("{" .. string.sub(text, index, key_last) .. ":0}")
-        local key = type(wrapped) == "table" and next(wrapped) or nil
-        if type(key) ~= "string" then return nil end
-        index = skip_space(text, key_last + 1)
-        if string.sub(text, index, index) ~= ":" then return nil end
-        index = skip_space(text, index + 1)
-        local last = value_end(text, index)
-        if not last then return nil end
-        members[key] = string.sub(text, index, last)
-        index = skip_space(text, last + 1)
-        local separator = string.sub(text, index, index)
-        if separator == "}" then return members end
-        if separator ~= "," then return nil end
-        index = skip_space(text, index + 1)
-    end
-end
-
 -- Runs fn(conn) on opts.tx when the caller supplies a transaction (no
 -- acquire/release), otherwise on a pooled connection released afterwards.
 local function with_connection(opts, fn)
@@ -202,9 +69,9 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
     local meta_json = nil
     if meta then
         if type(meta) == "table" then
-            local encoded, err = encode_meta(meta)
-            if not encoded then
-                return nil, "Failed to encode meta: " .. tostring(err)
+            local encoded, err = json.encode(meta)
+            if err then
+                return nil, "Failed to encode meta: " .. err
             end
             meta_json = encoded
         else
@@ -364,13 +231,11 @@ end
 -- updates.meta replaces the whole meta object, as before. updates.meta_patch
 -- (table) sets individual keys and updates.meta_remove (list of keys)
 -- deletes individual keys, both read-merge-write against the current meta on
--- the same connection/transaction. Keys the patch does not name keep their
--- stored text; a patch value made with artifact_repo.raw_json is stored as
--- that text. The write is conditional on the meta still being the text that
--- was read, so a patch never drops a key another writer set in between; on a
--- lost race it reads and merges again. Stored meta that is not a JSON object
--- is an error, not an empty object. meta may not be combined with
--- meta_patch/meta_remove.
+-- the same connection/transaction. The write is conditional on the meta
+-- still being the text that was read, so a patch never drops a key another
+-- writer set in between; on a lost race it reads and merges again. Stored
+-- meta that is not a JSON object is an error, not an empty object. meta may
+-- not be combined with meta_patch/meta_remove.
 --
 -- Returns { artifact_id, updated = true, content_version } on success, read
 -- back on the same connection so the caller always has the value it produced
@@ -396,9 +261,9 @@ function artifact_repo.update(artifact_id, updates, opts)
     local replace_value = nil
     if updates.meta ~= nil then
         if type(updates.meta) == "table" then
-            local encoded, encode_err = encode_meta(updates.meta)
-            if not encoded then
-                return nil, "Failed to encode meta: " .. tostring(encode_err)
+            local encoded, encode_err = json.encode(updates.meta)
+            if encode_err then
+                return nil, "Failed to encode meta: " .. encode_err
             end
             replace_value = encoded
         else
@@ -428,37 +293,31 @@ function artifact_repo.update(artifact_id, updates, opts)
         local meta_value = replace_value
         local read_raw = nil
         if patching then
-            local raw, _, read_err = read_meta(conn, artifact_id)
+            local raw, current_meta, read_err = read_meta(conn, artifact_id)
             if read_err then return nil, read_err end
             read_raw = raw
             if artifact_repo._on_meta_read then artifact_repo._on_meta_read(conn, artifact_id) end
 
-            -- Untouched keys keep their stored text; only patched keys are
-            -- encoded. An emptied meta is still an object ("{}").
-            local members = object_members(raw)
-            if not members then
-                return nil, "Stored artifact meta could not be split into keys; not patching it"
-            end
             if updates.meta_patch then
                 for k, v in pairs(updates.meta_patch) do
-                    local encoded, encode_err = encode_member(v)
-                    if not encoded then
-                        return nil, "Failed to encode meta: " .. tostring(encode_err)
-                    end
-                    members[k] = encoded
+                    current_meta[k] = v
                 end
             end
             if updates.meta_remove then
                 for _, k in ipairs(updates.meta_remove) do
-                    members[k] = nil
+                    current_meta[k] = nil
                 end
             end
-            meta_value = join_members(members)
-            -- The members were spliced as text: never store text that does
-            -- not read back as an object.
-            local check, check_err = json.decode(meta_value)
-            if check_err or type(check) ~= "table" then
-                return nil, "Patched artifact meta is not valid JSON; not storing it"
+
+            if next(current_meta) == nil then
+                -- An emptied meta is still an object.
+                meta_value = "{}"
+            else
+                local encoded, encode_err = json.encode(current_meta)
+                if encode_err then
+                    return nil, "Failed to encode meta: " .. encode_err
+                end
+                meta_value = encoded
             end
         end
 
