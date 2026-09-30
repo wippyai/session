@@ -46,3 +46,21 @@ describe('QuestionCardSummary — required indicator hidden on the read-only ans
     expect(wrapper.text()).toContain('Skipped')
   })
 })
+
+describe('QuestionCardSummary — form-level description (same gap as the active card)', () => {
+  it('shows the form-level description, muted, with backticks as inline code', () => {
+    const withFormDescription: FormState = {
+      ...baseState,
+      definition: { ...baseState.definition, description: 'Answers go straight to `ops`.' },
+    }
+    const wrapper = mount(QuestionCardSummary, { props: { state: withFormDescription }, global: { plugins: [PrimeVuePlugin] } })
+    const description = wrapper.find('.w-form__form-description')
+    expect(description.exists()).toBe(true)
+    expect(description.find('code').text()).toBe('ops')
+  })
+
+  it('renders no form-description element when the definition has none', () => {
+    const wrapper = mount(QuestionCardSummary, { props: { state: baseState }, global: { plugins: [PrimeVuePlugin] } })
+    expect(wrapper.find('.w-form__form-description').exists()).toBe(false)
+  })
+})

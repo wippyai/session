@@ -182,6 +182,38 @@ describe('useFormState — visibility restore (item 2)', () => {
   })
 })
 
+describe('useFormState — Host reconnect (item 7)', () => {
+  it('reloads when the proxy reports @reconnect, so the form does not stay stale through a server restart', async () => {
+    const getFn = vi.fn().mockResolvedValue(state())
+    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+
+    mountHarness('artifact-1')
+    await flushPromises()
+    expect(getFn).toHaveBeenCalledTimes(1)
+
+    const reconnectCall = vi.mocked(WippyProxy.on).mock.calls.find(([topic]) => topic === '@reconnect')
+    expect(reconnectCall).toBeDefined()
+    const onReconnect = reconnectCall?.[1] as unknown as () => void
+
+    onReconnect()
+    await flushPromises()
+    expect(getFn).toHaveBeenCalledTimes(2)
+  })
+
+  it('unsubscribes from @reconnect on unmount', async () => {
+    const unsubscribe = vi.fn()
+    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === '@reconnect' ? unsubscribe : () => {}) as never)
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(state()), submit: vi.fn() })
+
+    const wrapper = mountHarness('artifact-1')
+    await flushPromises()
+    expect(unsubscribe).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('useFormState — rebind race (item 1)', () => {
   it('drops a GET for the previous artifact that resolves only after the id has already moved on', async () => {
     let resolveA: ((s: FormState) => void) | undefined

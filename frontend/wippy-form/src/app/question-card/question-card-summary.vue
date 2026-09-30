@@ -27,6 +27,7 @@ function formatTime(iso: string | null): string | null {
 
 const cardPart = computed(() => partClass('card', 'answered'))
 const titlePart = computed(() => partClass('title'))
+const formDescriptionPart = computed(() => partClass('form-description'))
 const summaryPart = computed(() => partClass('summary'))
 const itemPart = computed(() => partClass('summary-item'))
 const questionPart = computed(() => partClass('summary-question'))
@@ -66,6 +67,13 @@ defineExpose({
         aria-hidden="true"
       />
       {{ state.definition.title }}
+    </p>
+    <p
+      v-if="state.definition.description"
+      :part="formDescriptionPart.part"
+      :class="formDescriptionPart.class"
+    >
+      <QuestionCardRichText :text="state.definition.description" />
     </p>
 
     <dl

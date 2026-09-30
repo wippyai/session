@@ -10,6 +10,7 @@ import { partClass } from '../../lib/part-class'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardQuestion from './question-card-question.vue'
 import QuestionCardReview from './question-card-review.vue'
+import QuestionCardRichText from './question-card-rich-text.vue'
 
 /**
  * The interactive question card — the question-card counterpart of
@@ -129,6 +130,7 @@ defineExpose({
 
 const cardPart = computed(() => partClass('card'))
 const titlePart = computed(() => partClass('title'))
+const formDescriptionPart = computed(() => partClass('form-description'))
 
 function focusOn(target: FocusTarget | string) {
   const root = cardRoot.value
@@ -305,7 +307,6 @@ function onKeydown(event: KeyboardEvent) {
     </Message>
 
     <p
-      v-if="controller.multi"
       :part="titlePart.part"
       :class="titlePart.class"
     >
@@ -314,6 +315,13 @@ function onKeydown(event: KeyboardEvent) {
         aria-hidden="true"
       />
       {{ state.definition.title }}
+    </p>
+    <p
+      v-if="state.definition.description"
+      :part="formDescriptionPart.part"
+      :class="formDescriptionPart.class"
+    >
+      <QuestionCardRichText :text="state.definition.description" />
     </p>
 
     <QuestionCardHeader

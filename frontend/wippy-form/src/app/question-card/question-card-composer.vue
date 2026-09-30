@@ -27,6 +27,10 @@ const props = defineProps<{
   enabled: boolean
   /** Value for the textarea's `data-focus` attribute — how the keyboard/focus layer finds this control. */
   dataFocus: string
+  /** True while a `role="alert"` error (too-long, or a server field error) applies to this textarea. */
+  invalid?: boolean
+  /** Id(s) of the `role="alert"` element(s) that explain `invalid` — set on the textarea's `aria-describedby`. */
+  describedBy?: string
 }>()
 
 const emit = defineEmits<{
@@ -68,6 +72,8 @@ function onKeydown(event: KeyboardEvent) {
       auto-resize
       :placeholder="placeholder"
       :aria-label="label"
+      :aria-invalid="invalid ? 'true' : undefined"
+      :aria-describedby="describedBy"
       enterkeyhint="send"
       :data-focus="dataFocus"
       @update:model-value="(v) => emit('update:modelValue', String(v ?? ''))"

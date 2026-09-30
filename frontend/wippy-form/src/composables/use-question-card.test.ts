@@ -140,6 +140,20 @@ describe('useQuestionCard — single question, several answers', () => {
     c.activate(q, 1)
     expect(c.ans(q).chosen).toEqual(['b'])
   })
+
+  it('activate() on a row whose OWN note is open still ticks it (M16: was silently dropped)', () => {
+    const onSubmit = vi.fn()
+    const c = useQuestionCard(multiDef, null, onSubmit)
+    const q = multiDef.fields[0]
+    c.toggleNote(q, 'a', true)
+    c.setNote(q, 'a', 'full value please')
+    c.activate(q, 0) // click the row/checkbox for 'a' while its own note is still open
+    expect(c.ans(q).chosen).toEqual(['a'])
+    expect(c.ans(q).noteOpen).toBe('a') // the note stays open, not silently closed either
+    c.answers[q.id].other = 'also a card'
+    c.sendOther(q)
+    expect(onSubmit).toHaveBeenCalledWith({ f1: [{ value: 'a', note: 'full value please' }, { other: 'also a card' }] })
+  })
 })
 
 describe('useQuestionCard — several questions', () => {

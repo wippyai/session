@@ -86,7 +86,8 @@ Each part has a matching class `w-form__<part>`. A state adds a part `<part>-<st
 | Part | States | What it is |
 | --- | --- | --- |
 | `card` | `answered` | The whole card (active view has no state; the post-submit summary carries `answered`) |
-| `title` | | Form title (several questions; also the summary's title, with a check icon) |
+| `title` | | Form title — shown on every active card (single or several questions) and on the summary's title, with a check icon |
+| `form-description` | | The form's own `FormDefinition.description`, when set — shown under the title, muted, on both the active card and the summary |
 | `header` | `single` | Counter, question and actions line |
 | `nav`, `prev`, `counter`, `next` | | The `‹ n/total ›` pill and its buttons |
 | `question` | | Question text |
@@ -119,7 +120,7 @@ Each part has a matching class `w-form__<part>`. A state adds a part `<part>-<st
 | Attribute | Values | Notes |
 | --- | --- | --- |
 | `density` | `compact` (default), `comfortable` | Set by the host app; read purely via the `:host([density="comfortable"])` CSS selector — no JS reads it |
-| `card-state` | `active`, `review`, `answered` | Reflected by the component; read-only for styling. Named `card-state`, not `state` — `state` is already this element's own observed prop (`"active" \| "idle"`, the package-tag lifecycle mirrored from the artifact); reflecting under that same name previously fought with the prop and misfired a reload on every review/collapse change (fixed — see `use-host-reflection.ts`) |
+| `card-state` | `active`, `review`, `answered`, `unsupported` | Reflected by the component; read-only for styling. Named `card-state`, not `state` — `state` is already this element's own observed prop (`"active" \| "idle"`, the package-tag lifecycle mirrored from the artifact); reflecting under that same name previously fought with the prop and misfired a reload on every review/collapse change (fixed — see `use-host-reflection.ts`). `unsupported` takes priority over every other value: an unrecognized `form-version` (from the prop or the loaded state) never renders an interactive/submittable card, so styling must not keep reporting `active` for it |
 | `collapsed` | present or absent | Reflected by the component; only while the card is active |
 
 Reflection lives in `src/composables/use-host-reflection.ts`, applied from `wippy-form.vue` (it needs the raw custom-element reference, injected via `ELEMENT_PROVIDER` in `src/element-context.ts`, the same mechanism `useArtifactId` uses).

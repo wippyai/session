@@ -22,3 +22,17 @@ declare module '@wippy-fe/proxy' {
     submit: (envelope: SubmitEnvelope) => Promise<SubmitResult>
   }
 }
+
+// `on('@reconnect', …)` in `src/composables/use-form-state.ts` deliberately
+// gets NO augmentation here: `on` is exported as a `const` of a generic
+// function type, not an ambient `function` declaration, so a same-named
+// `export function on(...)` in a `declare module '@wippy-fe/proxy'` block
+// does not add an overload to it the way `artifactState` above does — it
+// was tried and reverted, since it replaced `on`'s merged call signature
+// outright and broke type-checking for every OTHER topic in this package.
+// The `'@reconnect'` call site types itself honestly instead: its callback
+// is declared with its real shape (`() => void`, no payload), which is
+// structurally assignable to the installed types' catch-all `(data:
+// WsMessage) => void` fallback for a topic they don't list yet — no cast to
+// `any` needed. Revisit once the installed `@wippy-fe/proxy` types list
+// `'@reconnect'` for real.

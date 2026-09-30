@@ -272,9 +272,10 @@ describe('WippyForm — unsupported form-version contract (item 12)', () => {
     const submitFn = vi.fn()
     mockArtifactState().mockReturnValue({ get: getFn, submit: submitFn })
 
+    const element = elementWithArtifactId('artifact-1')
     const wrapper = mountWippyForm(
       { formVersion: 2, definition: choiceDefinition, state: 'active' },
-      elementWithArtifactId('artifact-1'),
+      element,
     )
     await flushPromises()
     await wrapper.vm.$nextTick()
@@ -282,6 +283,9 @@ describe('WippyForm — unsupported form-version contract (item 12)', () => {
     expect(wrapper.text()).toContain('This form needs a newer version of the app.')
     expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
     expect(submitFn).not.toHaveBeenCalled()
+    // card-state must reflect "unsupported", not keep reporting "active"
+    // for a card that never actually renders interactively (item 12).
+    expect(element.getAttribute('card-state')).toBe('unsupported')
   })
 
   it('never renders the submittable form when the loaded state\'s form_version is not 1', async () => {
@@ -289,9 +293,10 @@ describe('WippyForm — unsupported form-version contract (item 12)', () => {
     const submitFn = vi.fn()
     mockArtifactState().mockReturnValue({ get: getFn, submit: submitFn })
 
+    const element = elementWithArtifactId('artifact-1')
     const wrapper = mountWippyForm(
       { formVersion: 1, definition: choiceDefinition, state: 'active' },
-      elementWithArtifactId('artifact-1'),
+      element,
     )
     await flushPromises()
     await wrapper.vm.$nextTick()
@@ -299,6 +304,7 @@ describe('WippyForm — unsupported form-version contract (item 12)', () => {
     expect(wrapper.text()).toContain('This form needs a newer version of the app.')
     expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
     expect(submitFn).not.toHaveBeenCalled()
+    expect(element.getAttribute('card-state')).toBe('unsupported')
   })
 })
 
@@ -461,6 +467,38 @@ describe('WippyForm — answered elsewhere', () => {
     const notice = wrapper.find('[role="status"]')
     expect(notice.text()).toContain('already answered elsewhere')
     expect(wrapper.text()).toContain('Option B')
+  })
+
+  it('moves focus to the read-only view\'s status text after losing the race (M07: was left on <body>)', async () => {
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(activeState())
+      .mockResolvedValue(activeState({ status: 'idle', data: { f1: 'b' }, submitted_at: '2026-01-01T00:00:00.000Z', delivery: 'complete' }))
+    const conflict = Object.assign(new Error('This form was already answered.'), {
+      name: 'ArtifactStateError',
+      status: 409,
+      code: 'already_submitted',
+    })
+    const submitFn = vi.fn().mockRejectedValue(conflict)
+    mockArtifactState().mockReturnValue({ get: getFn, submit: submitFn })
+
+    const wrapper = mountWippyForm(
+      { formVersion: 1, definition: choiceDefinition, state: 'active' },
+      elementWithArtifactId('artifact-1'),
+      { attachToBody: true },
+    )
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('.w-form__option').trigger('click')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    const statusEl = wrapper.find('[tabindex="-1"]')
+    expect(statusEl.exists()).toBe(true)
+    expect(document.activeElement).toBe(statusEl.element)
+    expect(document.activeElement).not.toBe(document.body)
+    wrapper.unmount()
   })
 })
 

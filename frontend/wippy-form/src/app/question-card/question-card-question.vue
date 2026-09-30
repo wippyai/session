@@ -69,6 +69,21 @@ const otherEnabled = computed(() => {
 // 1,000), so a too-long Other answer is caught before a round trip
 // instead of only surfacing as a 422.
 const otherTooLong = computed(() => isOtherTextTooLong(answerState().other))
+const otherErrorId = `${props.qid}-other-err`
+// Links the Other textarea's aria-invalid/aria-describedby to whichever
+// role="alert" text actually applies to it right now — the too-long notice
+// and/or the question's server/validation error (`displayError`, already
+// shown in the Message with id `${qid}-err`) — instead of leaving both
+// alerts unlinked to any control (M05).
+const otherDescribedBy = computed(() => {
+  const ids: string[] = []
+  if (otherTooLong.value)
+    ids.push(otherErrorId)
+  if (displayError.value)
+    ids.push(`${props.qid}-err`)
+  return ids.join(' ') || undefined
+})
+const otherInvalid = computed(() => otherTooLong.value || !!displayError.value)
 
 function onOtherWrapperClick(event: MouseEvent) {
   const target = event.target as HTMLElement
@@ -141,6 +156,8 @@ function onOtherWrapperClick(event: MouseEvent) {
         label="Your own answer"
         :send-label="question.multiple ? 'Send the ticked answers' : 'Send this answer'"
         :enabled="otherEnabled && !disabled && !otherTooLong"
+        :invalid="otherInvalid"
+        :described-by="otherDescribedBy"
         data-focus="other"
         @update:model-value="(v) => { answerState().other = v }"
         @send="controller.sendOther(question)"
@@ -155,6 +172,7 @@ function onOtherWrapperClick(event: MouseEvent) {
       <span v-else />
       <p
         v-if="otherTooLong"
+        :id="otherErrorId"
         :part="errorPart.part"
         :class="errorPart.class"
         role="alert"

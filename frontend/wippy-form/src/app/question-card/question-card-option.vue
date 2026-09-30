@@ -3,7 +3,7 @@ import type { FormFieldOption } from '../../lib/definition'
 import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import { partClass } from '../../lib/part-class'
 import { plainText } from '../../lib/rich-text'
 import QuestionCardComposer from './question-card-composer.vue'
@@ -51,6 +51,9 @@ const notePart = computed(() => partClass('option-note'))
 const togglePart = computed(() => partClass('note-toggle', props.note && 'has-note', props.editing && 'editing'))
 const keyPart = computed(() => partClass('option-key'))
 const errorPart = computed(() => partClass('error'))
+// Links the note textarea's aria-invalid/aria-describedby to its own
+// too-long notice — previously an unlinked role="alert" paragraph (M05).
+const noteErrorId = `${useId()}-note-err`
 
 function onRowClick(event: MouseEvent) {
   if (props.disabled)
@@ -79,6 +82,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
       :class="mainPart.class"
       :role="multiple ? 'checkbox' : 'radio'"
       :aria-checked="selected ? 'true' : 'false'"
+      :aria-disabled="disabled ? 'true' : undefined"
       tabindex="0"
       :data-focus="`opt-${index}`"
       :aria-keyshortcuts="keyLabel ? `${keyLabel} Shift+${keyLabel} N` : 'N'"
@@ -156,6 +160,8 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
         :label="`Note for ${plainText(option.label)}`"
         :send-label="noteSendLabel"
         :enabled="!noteTooLong && !disabled"
+        :invalid="noteTooLong"
+        :described-by="noteTooLong ? noteErrorId : undefined"
         :data-focus="`note-${option.value}`"
         @update:model-value="(v) => emit('update:noteDraft', v)"
         @send="emit('send-note')"
@@ -163,6 +169,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
       />
       <p
         v-if="noteTooLong"
+        :id="noteErrorId"
         :part="errorPart.part"
         :class="errorPart.class"
         role="alert"

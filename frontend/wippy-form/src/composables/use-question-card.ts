@@ -246,9 +246,16 @@ export function useQuestionCard(
       return
     }
     const value = q.options[i].value
-    // A note editor already open on this answer eats the click/number —
-    // focus moves into the note instead of committing.
-    if (a.noteOpen === value) {
+    // A note editor already open on THIS row, for a single-choice question,
+    // would otherwise commit-and-advance immediately via the plain-`chosen`
+    // branch below — eat the click/number and move focus into the note
+    // instead, so the note-in-progress isn't abandoned mid-edit. Multi-choice
+    // never auto-commits from `activate()` (only `commit()`/Enter do), so a
+    // tick is always safe to apply even while that same row's note is open —
+    // gating it here too silently dropped the tick (clicking the row, or its
+    // checkbox, while its own note was open did nothing) until the next
+    // question/Other commit fired and read a `chosen` that was never updated.
+    if (a.noteOpen === value && !q.multiple) {
       requestFocus(`note-${value}`)
       return
     }

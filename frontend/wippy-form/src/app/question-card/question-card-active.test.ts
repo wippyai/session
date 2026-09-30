@@ -133,11 +133,22 @@ describe('QuestionCardActive — offline indicator and blocked answering (P2 tra
     expect(notice.exists()).toBe(true)
     expect(notice.text()).toContain('You are offline. Your choices are kept.')
 
+    // Rows silently ignoring clicks (via JS) is not enough — assistive tech
+    // needs the disabled state marked on the control itself (item 5).
+    const row = wrapper.find('[role="radio"]')
+    expect(row.attributes('aria-disabled')).toBe('true')
+
     await wrapper.find('.w-form__option').trigger('click')
     expect(wrapper.emitted('submit')).toBeUndefined()
 
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit2', key: '2' })
     expect(wrapper.emitted('submit')).toBeUndefined()
+  })
+
+  it('does not mark answer rows aria-disabled while online and idle', () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const row = wrapper.find('[role="radio"]')
+    expect(row.attributes('aria-disabled')).toBeUndefined()
   })
 })
 
@@ -148,6 +159,7 @@ describe('QuestionCardActive — blocked while a submit is already in flight (it
 
     expect(wrapper.find('.w-form').attributes('aria-busy')).toBe('true')
     expect(wrapper.text()).toContain('Sending your answer…')
+    expect(wrapper.find('[role="radio"]').attributes('aria-disabled')).toBe('true')
 
     await wrapper.find('.w-form__option').trigger('click')
     expect(wrapper.emitted('submit')).toBeUndefined()
@@ -189,6 +201,33 @@ describe('QuestionCardActive — keyboard boundaries (item 6)', () => {
   })
 })
 
+describe('QuestionCardActive — form title and description (the one-question card was missing both)', () => {
+  it('shows the form title on a single-question card, not only a several-question one', () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const title = wrapper.find('.w-form__title')
+    expect(title.exists()).toBe(true)
+    expect(title.text()).toContain('Deploy')
+  })
+
+  it('shows the form-level description, in the muted style, with backticks rendered as inline code', () => {
+    const withFormDescription: FormDefinition = {
+      ...singleQuestionDef,
+      description: 'Uses the `staging` cluster only.',
+    }
+    const wrapper = mountCard(withFormDescription)
+    const description = wrapper.find('.w-form__form-description')
+    expect(description.exists()).toBe(true)
+    expect(description.attributes('part')).toBe('form-description')
+    expect(description.find('code').exists()).toBe(true)
+    expect(description.find('code').text()).toBe('staging')
+  })
+
+  it('renders no form-description element when the definition has none', () => {
+    const wrapper = mountCard(singleQuestionDef)
+    expect(wrapper.find('.w-form__form-description').exists()).toBe(false)
+  })
+})
+
 describe('QuestionCardActive — field description', () => {
   const withDescription: FormDefinition = {
     title: 'Deploy',
@@ -225,6 +264,63 @@ describe('QuestionCardActive — 422 field errors', () => {
     vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('That choice is no longer available.')
+  })
+})
+
+describe('QuestionCardActive — length-error and server-error linking (M05: alerts were not linked to the textarea)', () => {
+  it('links the Other textarea to its own too-long alert via aria-describedby/aria-invalid', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const other = wrapper.find('textarea.w-form__other-input')
+    await other.setValue('x'.repeat(2001))
+
+    expect(other.attributes('aria-invalid')).toBe('true')
+    const describedBy = other.attributes('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    const errorEl = wrapper.find(`#${describedBy}`)
+    expect(errorEl.exists()).toBe(true)
+    expect(errorEl.text()).toContain('Use at most 2,000 characters.')
+  })
+
+  it('is not marked invalid while the Other textarea is empty', () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const other = wrapper.find('textarea.w-form__other-input')
+    expect(other.attributes('aria-invalid')).toBeUndefined()
+    expect(other.attributes('aria-describedby')).toBeUndefined()
+  })
+
+  it('links a note textarea to its own too-long alert via aria-describedby/aria-invalid', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await wrapper.vm.$nextTick()
+
+    const note = wrapper.find('textarea.w-form__note-input')
+    expect(note.exists()).toBe(true)
+    await note.setValue('x'.repeat(1001))
+
+    expect(note.attributes('aria-invalid')).toBe('true')
+    const describedBy = note.attributes('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    const errorEl = wrapper.find(`#${describedBy}`)
+    expect(errorEl.exists()).toBe(true)
+    expect(errorEl.text()).toContain('Use at most 1,000 characters.')
+  })
+
+  it('links the Other textarea to the question\'s server error once one is set', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
+    vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
+    await wrapper.vm.$nextTick()
+
+    // The options group already points its own aria-describedby at the
+    // question's error Message — the Other textarea must reference that
+    // same id too, not just the group as a whole.
+    const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
+    expect(groupErrorId).toBeTruthy()
+
+    const other = wrapper.find('textarea.w-form__other-input')
+    expect(other.attributes('aria-invalid')).toBe('true')
+    const describedBy = (other.attributes('aria-describedby') ?? '').split(' ')
+    expect(describedBy).toContain(groupErrorId)
   })
 })
 

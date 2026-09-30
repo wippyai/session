@@ -226,6 +226,14 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       void runLoad()
   })
 
+  // Fires after the Host's WebSocket reconnects following a disconnect (no
+  // payload) — without this, the card stayed stale through a server
+  // restart: a reload only otherwise happens on an artifact/session event
+  // delivered over that same (just-dropped) socket, or on the next
+  // visibility restore, neither of which fires on its own once the socket
+  // comes back up on an already-visible tab.
+  const unsubscribeReconnect = on('@reconnect', () => { void runLoad() })
+
   onUnmounted(() => {
     generation++
     if (retryTimer)
@@ -236,6 +244,7 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
     unsubscribeSessionMessages?.()
     unsubscribeSessionMessages = null
     unsubscribeVisibility()
+    unsubscribeReconnect()
   })
 
   async function refresh(): Promise<FormState | null> {

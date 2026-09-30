@@ -94,11 +94,16 @@ const allChoice = computed(() => {
 const questionCardState = ref<'active' | 'review'>('active')
 const questionCardCollapsed = ref(false)
 const hostState = computed<HostState>(() => {
+  // Takes priority over everything else: an unsupported form-version never
+  // renders an interactive/submittable card (see the v-else-if chain
+  // below), so styling must not keep reporting "active" for it either.
+  if (unsupportedVersion.value)
+    return 'unsupported'
   if (state.value?.status === 'idle')
     return 'answered'
   return allChoice.value ? questionCardState.value : 'active'
 })
-const hostCollapsed = computed(() => allChoice.value && state.value?.status === 'active' && questionCardCollapsed.value)
+const hostCollapsed = computed(() => !unsupportedVersion.value && allChoice.value && state.value?.status === 'active' && questionCardCollapsed.value)
 useHostReflection(hostState, hostCollapsed)
 
 async function handleSubmit(answers: FormAnswers) {
@@ -146,7 +151,12 @@ async function handleSubmit(answers: FormAnswers) {
 
   if (outcome.code === 'already_submitted') {
     answeredElsewhere.value = true
-    reload()
+    // Await the reload (not fire-and-forget `reload()`) before scheduling
+    // the focus move: `state.value` is still "active" until this resolves,
+    // so the read-only view (and `idleFormRef`) does not exist yet — a
+    // `nextTick` issued before the await landed found `idleFormRef` still
+    // null and silently focused nothing, leaving focus on <body>.
+    await refresh()
     void nextTick(() => idleFormRef.value?.focusStatus())
     return
   }
