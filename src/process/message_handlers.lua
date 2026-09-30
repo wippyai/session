@@ -725,7 +725,6 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
-local UUID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 local MAX_FILE_UUIDS = 100
 
 -- The client's attachment ids, kept only when they are a list of UUID
@@ -739,7 +738,7 @@ local function file_uuids_of(value: any): {string}?
     local out: {string} = {}
     for index = 1, count do
         local item = value[index]
-        if type(item) ~= "string" or not string.match(item, UUID_PATTERN) then return nil end
+        if type(item) ~= "string" or not string.match(item, consts.UUID_PATTERN) then return nil end
         out[index] = item
     end
     return out

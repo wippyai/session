@@ -359,7 +359,6 @@ end
 -- created_cursor) are written in one transaction, so a failure leaves no
 -- form behind and the input stays held. Success asks process_tools to end
 -- the turn instead of running another agent step.
-local ARTIFACT_ID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 
 -- Unanswered forms a session may hold; above it the agent must resolve or
 -- supersede older forms (nothing is deleted silently).
@@ -396,7 +395,7 @@ function control_handlers.control_forms(ctx, op)
         if not def then
             return reject("invalid_definition", "Invalid form definition:\n" .. definition.format_errors(def_errors))
         end
-        if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, ARTIFACT_ID_PATTERN) then
+        if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, consts.UUID_PATTERN) then
             return reject("invalid_request", "Form artifact id is missing or invalid.")
         end
         if ctx.form_turn_id == op.turn_id then

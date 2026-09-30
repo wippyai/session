@@ -46,6 +46,10 @@ local consts = {
         SESSION_ID = "wippy.session.process:session",
     },
 
+    -- A whole string in the canonical UUID text form (8-4-4-4-12 hex digits),
+    -- for ids the session mints or accepts from a client or a tool.
+    UUID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$",
+
     -- Process registry name prefixes: "session.<session_id>" for a running
     -- session, "session_plugin.<user_id>" for the user's session plugin.
     REGISTRY = {
