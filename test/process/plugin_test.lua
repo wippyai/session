@@ -1574,6 +1574,7 @@ local function define_tests()
             test.not_nil(update)
             test.eq(update.status, consts.STATUS.IDLE)
             test.is_true(update.interaction.can_send)
+            test.is_nil(upstream_error(run, "stop-hub"), "a user Stop is not reported as an error")
             cleanup_session_fixture(session_id, context_id)
         end)
 

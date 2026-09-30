@@ -142,9 +142,11 @@ end
 -- interaction-aware client would keep Send disabled while the only way to
 -- continue is to send a message (the plugin reopens a session on its first
 -- message, and a session process always starts idle). Nothing in the session
--- failed; its turn was interrupted from outside. The clients still get the
--- recovery notice, and a form answer the turn did not answer reads as
--- interrupted ("send a message to continue", state_service.delivery_of).
+-- failed; its turn was interrupted from outside. A form answer the turn did
+-- not answer reads as interrupted ("send a message to continue",
+-- state_service.delivery_of). Clients get the recovery notice only when the
+-- runtime stopped (settle_stale_running); a Stop the user asked for is not
+-- reported as an error.
 local function settle_interrupted(session_id: string, user_id: string)
     return settle_session(session_id, user_id, consts.STATUS.IDLE, true)
 end
@@ -1043,7 +1045,6 @@ local function run(args)
                         end
 
                         -- Update session status in database based on termination reason
-                        local enforced = stop_enforced(session_info)
                         local target_status, success, status_err, recovery_err, interaction =
                             finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error)
                         if recovery_err then
@@ -1079,8 +1080,10 @@ local function run(args)
                             active_sessions = state.session_count
                         })
 
-                        -- Session status update first, then the closed notification
-                        report_final_status(session_id, target_status, success, err, interaction, enforced)
+                        -- Session status update first, then the closed notification.
+                        -- An enforced Stop is what the user asked for, so it
+                        -- publishes the idle status without the recovery error.
+                        report_final_status(session_id, target_status, success, err, interaction, false)
                         if state.user_hub_pid then
                             publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,
