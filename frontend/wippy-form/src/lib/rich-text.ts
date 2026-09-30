@@ -33,3 +33,16 @@ export function richSegments(text: string): RichSegment[] {
 export function plainText(text: string): string {
   return String(text).replaceAll('`', '')
 }
+
+/**
+ * Splits free text into lines on any line-break style, for rendering each on
+ * its own line via a real `<br>` between them — never CSS `white-space`
+ * (which depends on a stylesheet the consuming page controls and may not
+ * have loaded) and never HTML/markup interpretation of the text itself. A
+ * multi-line "Other" answer (the textarea allows Shift+Enter) otherwise
+ * round-trips its `\n` through storage and the server but renders on one
+ * line wherever it is shown back (the review step, the answered summary).
+ */
+export function textLines(text: string): string[] {
+  return String(text).split(/\r\n|\r|\n/)
+}

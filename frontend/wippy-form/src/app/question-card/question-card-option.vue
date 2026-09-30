@@ -32,6 +32,14 @@ const props = defineProps<{
   noteTooLong: boolean
   /** True while offline or a submit is already in flight — blocks the row click and the note composer's send. */
   disabled?: boolean
+  /**
+   * Single-choice (`role="radio"`) only: true when this is the ONE row the
+   * roving tabindex currently sits on (WAI-ARIA radio group pattern — the
+   * group is a single Tab stop, arrow keys move within it). Ignored for
+   * `multiple` (checkbox) rows, which stay individually tabbable — see
+   * `tabindex` below.
+   */
+  rovingTabbable?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -83,7 +91,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
       :role="multiple ? 'checkbox' : 'radio'"
       :aria-checked="selected ? 'true' : 'false'"
       :aria-disabled="disabled ? 'true' : undefined"
-      tabindex="0"
+      :tabindex="multiple || rovingTabbable ? 0 : -1"
       :data-focus="`opt-${index}`"
       :aria-keyshortcuts="keyLabel ? `${keyLabel} Shift+${keyLabel} N` : 'N'"
     >
@@ -95,6 +103,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
           v-if="multiple"
           :model-value="selected"
           binary
+          readonly
           size="small"
           :tabindex="-1"
           aria-hidden="true"

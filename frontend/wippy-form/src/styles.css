@@ -144,6 +144,17 @@
   color: var(--_accent);
   flex: none;
 }
+/*
+ * Round B item 6: sat directly on the question line, no gap — the "shown
+ * under the title, muted" the README's parts table already documented was
+ * never actually wired in. Same scale/color as `.w-form__description` /
+ * `.w-form__hint` below (the field-level equivalent), not a one-off value.
+ */
+.w-form__form-description {
+  margin: 0 0 8px;
+  font-size: var(--_small);
+  color: var(--_muted);
+}
 
 /* ---------- Header: nav / question / actions ---------- */
 .w-form__header {
@@ -393,8 +404,22 @@ span.w-form__option-mark {
 }
 
 /* ---------- Error / keys / footer ---------- */
+/*
+ * Shared by the question-level `Message severity="error"` (already themed
+ * by PrimeVue's own error styling) AND the plain `role="alert"` length
+ * errors below the note/Other boxes (question-card-option.vue,
+ * question-card-question.vue) — those stay plain elements, not `Message`s,
+ * because PrimeVue's `Message` sets `inheritAttrs: false` and would
+ * silently drop the `:id` their `aria-describedby` linking depends on
+ * (round A M05). `color` here is what actually marks them as errors for a
+ * sighted user (D27-style contrast gap otherwise — round B A04): the same
+ * danger token `.w-form__footer-text` and
+ * `.w-form__review-item--missing .w-form__review-answer` already use, not
+ * a local color hack.
+ */
 .w-form__error {
   margin: 6px 0 0;
+  color: var(--_danger);
 }
 .w-form__keys {
   margin: 8px 0 0;

@@ -37,7 +37,7 @@ const banner = ref<{ message: string, retryable?: boolean } | null>(null)
 // Survives the swap to the read-only view, which is where a lost race ends up.
 const answeredElsewhere = ref(false)
 watch(artifactId, () => { answeredElsewhere.value = false })
-const activeFormRef = ref<{ setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void, retry: () => void } | null>(null)
+const activeFormRef = ref<{ setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void, retry: () => void, hasUnsentInput?: () => boolean } | null>(null)
 const idleFormRef = ref<{ focusStatus: () => void } | null>(null)
 
 // Set synchronously right before `handleSubmit`'s own accepted-branch
@@ -51,8 +51,17 @@ let suppressAnsweredElsewhereWatch = false
 // instance ever attempting a submit itself — e.g. the `artifact:<id>`
 // relay event firing while the user still has an in-progress, unsent
 // answer. Silently swapping to the read-only summary would drop that
-// in-progress answer with no explanation, so this is treated the same as
-// losing our own submit race: the same "answered elsewhere" notice.
+// in-progress answer with no explanation, so that case is treated the same
+// as losing our own submit race: the same "answered elsewhere" notice.
+//
+// A PASSIVE instance — this copy was never touched, nothing chosen/typed —
+// has nothing to lose, so the notice would be false: it reads as "your
+// answer was not sent" when no answer was ever attempted (round B finding
+// F-1). Gated on `hasUnsentInput()` (read synchronously here, before the
+// active view unmounts on the next render — this watcher runs pre-flush).
+// A form flavor with no exposed `hasUnsentInput` (should not happen; both
+// ActiveForm and QuestionCardActive provide one) falls back to the old,
+// safer-to-over-notify behavior rather than silently going quiet.
 watch(() => state.value?.status, (status, previousStatus) => {
   if (status !== 'idle' || previousStatus !== 'active')
     return
@@ -60,7 +69,9 @@ watch(() => state.value?.status, (status, previousStatus) => {
     suppressAnsweredElsewhereWatch = false
     return
   }
-  answeredElsewhere.value = true
+  const hadUnsentInput = activeFormRef.value?.hasUnsentInput?.() ?? true
+  if (hadUnsentInput)
+    answeredElsewhere.value = true
 })
 
 // The contract check ("form-version") applies before anything else: the
@@ -99,7 +110,16 @@ const hostState = computed<HostState>(() => {
   // below), so styling must not keep reporting "active" for it either.
   if (unsupportedVersion.value)
     return 'unsupported'
-  if (state.value?.status === 'idle')
+  // `state` is only ever null before the artifact's first GET has resolved
+  // — the template shows <wippy-loading> for exactly this window (see the
+  // `v-else-if="status === 'loading' || status === 'idle'"` branch below).
+  // Without this check, `card-state` fell through to `questionCardState`'s
+  // default ("active") here too, so styling reported an interactive card
+  // for the ~tens of milliseconds before the GET actually landed and any
+  // options existed to interact with (round B item 7).
+  if (state.value === null)
+    return 'loading'
+  if (state.value.status === 'idle')
     return 'answered'
   return allChoice.value ? questionCardState.value : 'active'
 })

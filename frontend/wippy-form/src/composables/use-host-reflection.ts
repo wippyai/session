@@ -2,7 +2,7 @@ import type { Ref } from 'vue'
 import { inject, watchEffect } from 'vue'
 import { ELEMENT_PROVIDER } from '../element-context'
 
-export type HostState = 'active' | 'review' | 'answered' | 'unsupported'
+export type HostState = 'loading' | 'active' | 'review' | 'answered' | 'unsupported'
 
 /**
  * Reflects the question-card's `card-state`/`collapsed` host attributes onto

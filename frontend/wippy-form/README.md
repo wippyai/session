@@ -120,7 +120,7 @@ Each part has a matching class `w-form__<part>`. A state adds a part `<part>-<st
 | Attribute | Values | Notes |
 | --- | --- | --- |
 | `density` | `compact` (default), `comfortable` | Set by the host app; read purely via the `:host([density="comfortable"])` CSS selector — no JS reads it |
-| `card-state` | `active`, `review`, `answered`, `unsupported` | Reflected by the component; read-only for styling. Named `card-state`, not `state` — `state` is already this element's own observed prop (`"active" \| "idle"`, the package-tag lifecycle mirrored from the artifact); reflecting under that same name previously fought with the prop and misfired a reload on every review/collapse change (fixed — see `use-host-reflection.ts`). `unsupported` takes priority over every other value: an unrecognized `form-version` (from the prop or the loaded state) never renders an interactive/submittable card, so styling must not keep reporting `active` for it |
+| `card-state` | `loading`, `active`, `review`, `answered`, `unsupported` | Reflected by the component; read-only for styling. Named `card-state`, not `state` — `state` is already this element's own observed prop (`"active" \| "idle"`, the package-tag lifecycle mirrored from the artifact); reflecting under that same name previously fought with the prop and misfired a reload on every review/collapse change (fixed — see `use-host-reflection.ts`). `unsupported` takes priority over every other value: an unrecognized `form-version` (from the prop or the loaded state) never renders an interactive/submittable card, so styling must not keep reporting `active` for it. `loading` covers only the window before the artifact's first GET resolves (no `state` loaded yet, `<wippy-loading>` shown instead of the card) — it used to fall through to `active` there, reporting an interactive card for the tens of milliseconds before any options existed to interact with |
 | `collapsed` | present or absent | Reflected by the component; only while the card is active |
 
 Reflection lives in `src/composables/use-host-reflection.ts`, applied from `wippy-form.vue` (it needs the raw custom-element reference, injected via `ELEMENT_PROVIDER` in `src/element-context.ts`, the same mechanism `useArtifactId` uses).
@@ -133,10 +133,11 @@ Reflection lives in `src/composables/use-host-reflection.ts`, applied from `wipp
 | Shift+1–9, or N on a focused row | Outside inputs | Opens the note for that answer |
 | Enter | In Other or a note | Sends (single answer or Other); in a note on a several-answer question, saves the note and ticks that answer |
 | Shift+Enter | In Other or a note | New line |
-| Escape | In Other or a note | Leaves the box; a note closes and keeps its text |
+| Escape | In Other or a note | Leaves the box. In a note, this only closes the editor — the draft is not cleared: it is already saved into that answer's note as each keystroke is typed (`setNote`), stays under the row (collapsed, read-only) once closed, and is sent with the answer, overwritten by further edits, or cleared by removing the tick/leaving the question unanswered — never discarded by Escape itself. Verified in `question-card-active.test.ts` ("Escape in a note"). |
 | Enter or Space | On an answer row | Same as a click; on several answers, Enter sends the ticked set (with an inline error if nothing is ticked and Other is empty), Space ticks |
 | ↑ / ↓ | On answers | Move between answer rows and the Other box |
 | ← / → | On answers, several questions | Previous/next question |
+| Tab / Shift+Tab | A single-answer question | The row group is ONE Tab stop (WAI-ARIA radio group pattern, roving `tabindex`): Tab moves past the whole group, not row by row. ↑/↓ move between rows inside it; whichever row last had focus — the chosen one once something is chosen, otherwise the first — is where Tab lands next time. A several-answer question's rows stay individual Tab stops (checkbox semantics; no roving) |
 
 Keys only work while focus is inside the card, so typing in the surrounding chat box never picks an answer.
 

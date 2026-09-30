@@ -201,6 +201,31 @@ describe('QuestionCardActive — keyboard boundaries (item 6)', () => {
   })
 })
 
+describe('QuestionCardActive — Escape in a note (round B, item 8: documented, verified no data loss)', () => {
+  it('closes the note editor but keeps the typed draft, shown back under the row', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await wrapper.vm.$nextTick()
+
+    const note = wrapper.find('textarea.w-form__note-input')
+    await note.setValue('leave at the door')
+    await note.trigger('keydown', { key: 'Escape' })
+    await wrapper.vm.$nextTick()
+
+    // The editor closed...
+    expect(wrapper.find('.w-form__option--editing').exists()).toBe(false)
+    // ...but the draft was not cleared — it shows back under the row, and
+    // nothing was submitted (Escape leaves the box, it does not answer).
+    expect(wrapper.find('.w-form__option-note').text()).toContain('leave at the door')
+    expect(wrapper.emitted('submit')).toBeUndefined()
+
+    // Reopening the note (Shift+1 again) shows the same text still there.
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await wrapper.vm.$nextTick()
+    expect((wrapper.find('textarea.w-form__note-input').element as HTMLTextAreaElement).value).toBe('leave at the door')
+  })
+})
+
 describe('QuestionCardActive — form title and description (the one-question card was missing both)', () => {
   it('shows the form title on a single-question card, not only a several-question one', () => {
     const wrapper = mountCard(singleQuestionDef)
@@ -322,6 +347,51 @@ describe('QuestionCardActive — length-error and server-error linking (M05: ale
     const describedBy = (other.attributes('aria-describedby') ?? '').split(' ')
     expect(describedBy).toContain(groupErrorId)
   })
+
+  // PrimeVue's `Message` sets `inheritAttrs: false`. vue-test-utils mounts
+  // with its OWN <transition> stub by default, which renders as a real DOM
+  // element (<transition-stub>) that captures $attrs regardless of the
+  // wrapped component's own inheritAttrs setting — so the test above proves
+  // the STRING ids match, but not that the id actually lands on anything in
+  // a real (non-test-stub) render. This one mounts with the real
+  // <transition> (global.stubs.transition: false, matching an actual
+  // browser) and resolves the id through `document.getElementById` to prove
+  // it names a real element, not a dangling reference the browser would
+  // silently fail to link.
+  it('the error id an Other/radiogroup aria-describedby points at resolves to a real element in an UNSTUBBED render (not just a matching string)', async () => {
+    const wrapper = mount(QuestionCardActive, {
+      props: {
+        state: makeState(singleQuestionDef),
+        submitting: false,
+        banner: null,
+      },
+      attachTo: document.body,
+      global: { plugins: [PrimeVuePlugin], stubs: { transition: false } },
+    })
+    try {
+      const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
+      vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
+      await wrapper.vm.$nextTick()
+
+      const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
+      expect(groupErrorId).toBeTruthy()
+
+      // Scoped to THIS wrapper's own rendered tree, not the global
+      // `document` — this file's other tests mount with `attachTo:
+      // document.body` too and none of them unmount afterward, so stale
+      // elements from earlier tests (whose Vue `useId()` counter can
+      // collide with this one's, since each `mount()` starts a fresh app
+      // instance) can otherwise still be sitting in `document.body` and
+      // `document.getElementById` would find the WRONG, stale one.
+      const target = wrapper.element.querySelector(`#${groupErrorId}`)
+      expect(target).not.toBeNull()
+      expect(target?.getAttribute('role')).toBe('alert')
+      expect(target?.textContent).toContain('That choice is no longer available.')
+    }
+    finally {
+      wrapper.unmount()
+    }
+  })
 })
 
 describe('QuestionCardActive — several questions', () => {
@@ -416,5 +486,112 @@ describe('QuestionCardActive — several questions', () => {
     expect(missingRow.exists()).toBe(true)
     expect(document.activeElement).toBe(missingRow.element)
     expect(document.activeElement).not.toBe(document.body)
+  })
+})
+
+describe('QuestionCardActive — checkbox visual state follows the model (round B, item 2: F-3)', () => {
+  // Round B found: ticking a row's checkbox with the mouse while that row's
+  // own note is open leaves aria-checked="true" (driven by our own
+  // `selected` prop) but the nested PrimeVue Checkbox's own visual mark
+  // empty (data-p-checked="false") — the row and its Checkbox disagree.
+  // The row already marks the Checkbox purely decorative (tabindex="-1"
+  // aria-hidden="true") and drives every answer through its own click
+  // handler (`onRowClick` -> `activate()`), but the Checkbox is still fully
+  // interactive underneath: PrimeVue wires its native <input>'s own
+  // `change` event to its own internal `d_value`/`writeValue` machinery,
+  // which can update the visual mark independently of the `selected` prop
+  // we pass it. A real mouse click fires both that native `change` AND the
+  // row's bubbled `click` in close succession — browser-timing-dependent
+  // and not reproducible through jsdom's simplified event dispatch — but
+  // firing the native `change` alone (bypassing the row's click handler
+  // entirely) isolates the exact mechanism: PrimeVue's own internal toggle
+  // running independent of the model we own. That is the divergence this
+  // item asks to close.
+  it('does not let the checkbox\'s own native change event move its visual mark independently of the selected prop', async () => {
+    const wrapper = mountCard(twoQuestionDef)
+    // Reach f2 (multi-choice, two options, no Other).
+    await wrapper.findAll('.w-form__option')[0].trigger('click')
+    await wrapper.vm.$nextTick()
+
+    // Open the first option's note (the repro's starting state).
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await wrapper.vm.$nextTick()
+    const row = wrapper.find('.w-form__option--editing')
+    expect(row.exists()).toBe(true)
+
+    // Not yet ticked: our own model and the Checkbox agree, both unselected.
+    expect(wrapper.find('[role="checkbox"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.find('.w-form__option-mark').attributes('data-p-checked')).toBe('false')
+
+    // Fire only the checkbox's native `change` event — the DOM event
+    // PrimeVue's own Checkbox listens to internally — without going
+    // through the row's `click` handler (which owns ticking via
+    // `activate()`). `selected` (and so `chosen`) is untouched.
+    const checkboxInput = row.find('input[type="checkbox"]')
+    const checkboxEl = checkboxInput.element as HTMLInputElement
+    checkboxEl.checked = true
+    await checkboxInput.trigger('change')
+    await wrapper.vm.$nextTick()
+
+    // The row's own aria-checked (still driven directly by `selected`,
+    // which nothing here changed) must agree with the nested Checkbox's own
+    // visual state — it must stay unselected, not flip on its own.
+    expect(row.attributes('part')).not.toContain('option-selected')
+    expect(wrapper.find('[role="checkbox"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.find('.w-form__option-mark').attributes('data-p-checked')).toBe('false')
+  })
+})
+
+describe('QuestionCardActive — single-choice is one Tab stop with a roving tabindex (round B, item 5)', () => {
+  it('starts with tabindex=0 on the first row and -1 on the rest, for a single-choice (radio) question', () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const rows = wrapper.findAll('[role="radio"]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].attributes('tabindex')).toBe('0')
+    expect(rows[1].attributes('tabindex')).toBe('-1')
+  })
+
+  it('moves the roving tabindex (not just focus) when arrow keys move between rows', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    const rows = wrapper.findAll('[role="radio"]')
+    await rows[0].trigger('keydown', { key: 'ArrowDown' })
+    await wrapper.vm.$nextTick()
+
+    const rowsAfter = wrapper.findAll('[role="radio"]')
+    expect(rowsAfter[0].attributes('tabindex')).toBe('-1')
+    expect(rowsAfter[1].attributes('tabindex')).toBe('0')
+  })
+
+  it('puts the roving tabindex on the already-chosen row when returning to an earlier single-choice question from the review step', async () => {
+    const wrapper = mountCard(twoQuestionDef)
+    // Answer f1 with "No" (index 1), then reach the review via f2.
+    const f1Rows = wrapper.findAll('[role="radio"]')
+    await f1Rows[1].trigger('click')
+    await wrapper.vm.$nextTick()
+    await wrapper.find('.w-form__option').trigger('click') // f2, multi: tick one option
+    await wrapper.vm.$nextTick()
+    await wrapper.find('[data-focus="send"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.w-form__review').exists()).toBe(true)
+
+    // "Question 1: change the answer" returns to f1.
+    await wrapper.find('[data-focus="review-item-0"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    const rows = wrapper.findAll('[role="radio"]')
+    expect(rows[0].attributes('tabindex')).toBe('-1')
+    expect(rows[1].attributes('tabindex')).toBe('0') // "No" — the stored answer.
+  })
+
+  it('leaves every row its own Tab stop (tabindex=0) for a multi-choice (checkbox) question — no roving', async () => {
+    const wrapper = mountCard(twoQuestionDef)
+    // Reach f2 (multi-choice).
+    await wrapper.findAll('.w-form__option')[0].trigger('click')
+    await wrapper.vm.$nextTick()
+
+    const rows = wrapper.findAll('[role="checkbox"]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].attributes('tabindex')).toBe('0')
+    expect(rows[1].attributes('tabindex')).toBe('0')
   })
 })

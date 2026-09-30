@@ -3,6 +3,7 @@ import type { AnswerDisplayItem } from '../../lib/answers'
 import { Icon } from '@iconify/vue'
 import { computed } from 'vue'
 import { partClass } from '../../lib/part-class'
+import { textLines } from '../../lib/rich-text'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
 /** One field's answered items — shared by the review step and the post-submit summary. */
@@ -26,7 +27,18 @@ const ownPart = computed(() => partClass('answer-own'))
       <span
         :part="ownPart.part"
         :class="ownPart.class"
-      >Own answer: </span>{{ item.label }}
+      >Own answer: </span>
+      <!--
+        Free text, split on line breaks and joined back with real <br>s —
+        never a `\n` left in a single text node (CSS `white-space` would
+        depend on a stylesheet the consuming page may not have loaded) and
+        never HTML/markup parsed from the user's own text (round B item 3).
+      -->
+      <!-- eslint-disable-next-line vue/singleline-html-element-content-newline -->
+      <template
+        v-for="(line, li) in textLines(item.label)"
+        :key="li"
+      ><br v-if="li > 0">{{ line }}</template>
     </template>
     <QuestionCardRichText
       v-else

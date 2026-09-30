@@ -126,6 +126,20 @@ defineExpose({
   retry() {
     emit('submit', controller.buildAnswers())
   },
+  /**
+   * True once ANY question has a chosen/ticked answer, a note, or Other
+   * text that has not yet been sent — a saved-but-never-submitted draft.
+   * `wippy-form.vue` reads this before showing the "answered elsewhere"
+   * notice for a background state flip (another tab/client answering the
+   * same artifact): a passive copy that never touched this card must just
+   * switch to the read-only summary, not claim an answer went unsent when
+   * nothing was ever entered (round B finding F-1).
+   */
+  hasUnsentInput(): boolean {
+    return Object.values(controller.answers).some(a =>
+      a.chosen.length > 0 || a.other.trim() !== '' || Object.values(a.notes).some(n => n.trim() !== ''),
+    )
+  },
 })
 
 const cardPart = computed(() => partClass('card'))

@@ -266,6 +266,33 @@ describe('WippyForm — rebind to a different artifact (item 1)', () => {
   })
 })
 
+describe('WippyForm — card-state during the initial load (round B, item 7: was a ~25ms "active" flash)', () => {
+  it('reflects "loading", not "active", while the very first GET is still pending', async () => {
+    let resolveGet: ((s: FormState) => void) | undefined
+    const pending = new Promise<FormState>((resolve) => { resolveGet = resolve })
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockReturnValue(pending), submit: vi.fn() })
+
+    const element = elementWithArtifactId('artifact-1')
+    const wrapper = mountWippyForm(
+      { formVersion: 1, definition: choiceDefinition, state: 'active' },
+      element,
+    )
+    await flushPromises()
+
+    // Nothing has loaded yet — the wippy-loading placeholder is what's
+    // actually shown — so styling must not claim an interactive "active"
+    // card exists before there is one to interact with.
+    expect(wrapper.find('wippy-loading').exists()).toBe(true)
+    expect(element.getAttribute('card-state')).toBe('loading')
+
+    resolveGet?.(activeState())
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(element.getAttribute('card-state')).toBe('active')
+  })
+})
+
 describe('WippyForm — unsupported form-version contract (item 12)', () => {
   it('never renders the submittable form when the form-version prop is not 1', async () => {
     const getFn = vi.fn().mockResolvedValue(activeState())
@@ -502,8 +529,8 @@ describe('WippyForm — answered elsewhere', () => {
   })
 })
 
-describe('WippyForm — background swap to answered explains the drop (item 10)', () => {
-  it('shows the "answered elsewhere" notice when a background reload — not our own submit — flips the form to idle', async () => {
+describe('WippyForm — background swap to answered explains the drop (item 10; gated by unsent input, round B finding F-1)', () => {
+  it('does NOT show the "answered elsewhere" notice for a passive copy — never touched, nothing to lose — when a background reload flips it to idle', async () => {
     const getFn = vi.fn()
       .mockResolvedValueOnce(activeState())
       .mockResolvedValue(activeState({ status: 'idle', data: { f1: 'b' }, submitted_at: '2026-01-01T00:00:00.000Z', delivery: 'complete' }))
@@ -518,8 +545,41 @@ describe('WippyForm — background swap to answered explains the drop (item 10)'
     await wrapper.vm.$nextTick()
 
     // Someone else answers this same artifact from another tab/client — a
-    // background reload (the artifact:<id> relay event), not anything this
-    // instance itself submitted.
+    // background reload (the artifact:<id> relay event) — while THIS
+    // instance was never touched: nothing chosen, no note, no Other text.
+    const artifactEventCall = vi.mocked(WippyProxy.on).mock.calls.find(([topic]) => topic === 'artifact:artifact-1')
+    const onArtifactEvent = artifactEventCall?.[1] as () => void
+    onArtifactEvent()
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(submitFn).not.toHaveBeenCalled()
+    // A passive copy just switches to the read-only summary — claiming
+    // "your answer was not sent" would be false; nothing was ever entered.
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Option B')
+  })
+
+  it('DOES show the "answered elsewhere" notice when a background reload flips an instance that had an unsent (ticked, not yet submitted) answer', async () => {
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(activeState({ definition: multiChoiceDefinition }))
+      .mockResolvedValue(activeState({ definition: multiChoiceDefinition, status: 'idle', data: { f1: 'b' }, submitted_at: '2026-01-01T00:00:00.000Z', delivery: 'complete' }))
+    const submitFn = vi.fn()
+    mockArtifactState().mockReturnValue({ get: getFn, submit: submitFn })
+
+    const wrapper = mountWippyForm(
+      { formVersion: 1, definition: multiChoiceDefinition, state: 'active' },
+      elementWithArtifactId('artifact-1'),
+    )
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    // Ticking a multi-choice option does not auto-submit — it is a genuine
+    // unsent draft at the moment the background reload lands.
+    await wrapper.find('.w-form__option').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.w-form__option--selected').exists()).toBe(true)
+
     const artifactEventCall = vi.mocked(WippyProxy.on).mock.calls.find(([topic]) => topic === 'artifact:artifact-1')
     const onArtifactEvent = artifactEventCall?.[1] as () => void
     onArtifactEvent()

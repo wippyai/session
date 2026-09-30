@@ -4,7 +4,7 @@ import type { FormField } from '../../lib/definition'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { Icon } from '@iconify/vue'
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
 import { isNoteTextTooLong, isOtherTextTooLong } from '../../lib/answers'
 import { partClass } from '../../lib/part-class'
@@ -90,6 +90,35 @@ function onOtherWrapperClick(event: MouseEvent) {
   if (!target.closest('.w-form__composer'))
     props.controller.requestFocus('other')
 }
+
+/**
+ * Roving tabindex for a single-choice (`role="radio"`) question — the
+ * WAI-ARIA radio group pattern: the group is ONE Tab stop, and arrow keys
+ * (already handled in question-card-active.vue's keydown handler, which
+ * moves DOM focus between rows) move within it. `question-card-option.vue`
+ * stays the one place that decides `tabindex` (0 for multi-choice rows
+ * always; for a radio row, 0 only for the index this ref names). Reset
+ * whenever the QUESTION changes (this component persists across question-to
+ * -question navigation, only its `question` prop changes) to the already-
+ * chosen option, or the first row if none is chosen yet.
+ */
+const rovingIndex = ref(0)
+watch(() => props.question.id, () => {
+  if (props.question.multiple)
+    return
+  const a = answerState()
+  const chosenIndex = a.useOther ? -1 : props.question.options.findIndex(o => o.value === a.chosen[0])
+  rovingIndex.value = chosenIndex >= 0 ? chosenIndex : 0
+}, { immediate: true })
+
+/** Any option row actually receiving DOM focus (click, arrow-key `.focus()`, or Tab) moves the roving stop with it. */
+function onOptionsFocusIn(event: FocusEvent) {
+  if (props.question.multiple)
+    return
+  const focusAttr = (event.target as HTMLElement)?.dataset?.focus ?? ''
+  if (focusAttr.startsWith('opt-'))
+    rovingIndex.value = Number(focusAttr.slice(4))
+}
 </script>
 
 <template>
@@ -122,6 +151,7 @@ function onOtherWrapperClick(event: MouseEvent) {
     :role="question.multiple ? 'group' : 'radiogroup'"
     :aria-labelledby="qid"
     :aria-describedby="`${qid}-err`"
+    @focusin="onOptionsFocusIn"
   >
     <QuestionCardOption
       v-for="(option, i) in question.options"
@@ -136,6 +166,7 @@ function onOtherWrapperClick(event: MouseEvent) {
       :key-label="keyLabelFor(i)"
       :note-too-long="isNoteTextTooLong(controller.ans(question).notes[option.value] || '')"
       :disabled="!!disabled"
+      :roving-tabbable="i === rovingIndex"
       @activate="controller.activate(question, i)"
       @toggle-note="controller.toggleNote(question, option.value)"
       @update:note-draft="(v) => controller.setNote(question, option.value, v)"

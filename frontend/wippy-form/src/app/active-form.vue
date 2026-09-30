@@ -115,7 +115,15 @@ watch(() => props.banner, (banner) => {
     statusMessage.value = banner.message
 })
 
-defineExpose({ setServerErrors, retry: () => emit('submit', currentAnswers()) })
+defineExpose({
+  setServerErrors,
+  retry: () => emit('submit', currentAnswers()),
+  // See QuestionCardActive's own `hasUnsentInput` (round B finding F-1):
+  // any field whose current draft would actually serialize to something
+  // counts as unsent input a background "answered elsewhere" swap would
+  // otherwise silently discard without explanation.
+  hasUnsentInput: () => Object.keys(currentAnswers()).length > 0,
+})
 </script>
 
 <template>
