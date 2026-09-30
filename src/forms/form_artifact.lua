@@ -88,23 +88,4 @@ function form_artifact.content_with_state(form: any, state: string): (string?, s
     return form_artifact.build_content(form.definition, state)
 end
 
--- Encodes an object with keys in the given order. Each entry is
--- { key, value } or { key, raw = "<json>" }; a nil value is written as JSON
--- null, which json.encode cannot express (no null sentinel, probe J5).
-function form_artifact.json_object(entries: {any}): string
-    local parts = {}
-    for _, entry in ipairs(entries) do
-        local encoded
-        if entry.raw ~= nil then
-            encoded = entry.raw
-        elseif entry[2] == nil then
-            encoded = "null"
-        else
-            encoded = json.encode(entry[2])
-        end
-        table.insert(parts, (json.encode(entry[1])) .. ":" .. tostring(encoded))
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-end
-
 return form_artifact

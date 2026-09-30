@@ -5,6 +5,7 @@ local consts = require("consts")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
 local answer_text = require("answer_text")
+local ordered_json = require("ordered_json")
 local tx = require("tx")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
@@ -15,7 +16,7 @@ local session_repo = require("session_repo")
 -- Form state behind GET/POST /artifact/{id}/state (the HTTP handlers in
 -- src/api/artifact_state.lua are thin adapters). Every function returns an
 -- HTTP status and a JSON body string; bodies are composed with explicit
--- nulls (form_artifact.json_object) because the contract has nullable keys.
+-- nulls (ordered_json.object) because the contract has nullable keys.
 --
 -- Acceptance (POST) is one transaction: lock the session row, re-read the
 -- form, decide `late`, insert the answer as a pending user row and switch the
@@ -68,7 +69,7 @@ local function error_body(code, message, extra)
         { "message", message },
     }
     for _, entry in ipairs(extra or {}) do table.insert(entries, entry) end
-    return form_artifact.json_object(entries)
+    return ordered_json.object(entries)
 end
 
 local function failure(status, code, message, extra)
@@ -202,7 +203,7 @@ function state_service.get_state(user_id, artifact_id)
         if delivery_err then return failure(500, "internal", "Failed to read the delivery state") end
     end
 
-    return 200, form_artifact.json_object({
+    return 200, ordered_json.object({
         { "form_version", definition.FORM_VERSION },
         { "artifact_id", artifact.artifact_id },
         { "session_id", artifact.session_id },
@@ -255,7 +256,7 @@ local function parse_envelope(raw_body)
 end
 
 local function success_body(r)
-    return form_artifact.json_object({
+    return ordered_json.object({
         { "success", true },
         { "artifact_id", r.artifact_id },
         { "request_id", r.request_id },
@@ -320,10 +321,10 @@ local function validation_body(field_errors, form_errors)
     for id in pairs(field_errors or {}) do table.insert(ids, id) end
     table.sort(ids)
     for _, id in ipairs(ids) do table.insert(field_entries, { id, field_errors[id] }) end
-    local errors_json = form_artifact.json_object(field_entries)
+    local errors_json = ordered_json.object(field_entries)
     local form_errors_json = "[]"
     if form_errors and #form_errors > 0 then form_errors_json = json.encode(form_errors) end
-    return form_artifact.json_object({
+    return ordered_json.object({
         { "success", false },
         { "code", "validation_failed" },
         { "message", "Some answers are not valid." },

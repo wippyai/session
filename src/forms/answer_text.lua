@@ -1,5 +1,5 @@
-local json = require("json")
 local definition = require("definition")
+local ordered_json = require("ordered_json")
 
 -- Builds the text of the user message that carries an accepted form answer
 -- (spec section 13). The server writes it from the immutable definition and
@@ -81,10 +81,6 @@ local function attribute_safe(encoded: string): string
     return escaped
 end
 
-local function enc(value: any): string
-    return (json.encode(value))
-end
-
 local function option_labels(field: any): {[string]: string}
     local labels: {[string]: string} = {}
     for _, option in ipairs(field.options) do labels[option.value] = option.label end
@@ -94,13 +90,14 @@ end
 -- One chosen item as the agent reads it (fixed key order).
 local function record_item(labels: {[string]: string}, item: any): string
     if type(item) == "string" then
-        return "{\"value\":" .. enc(item) .. ",\"label\":" .. enc(labels[item] or item) .. "}"
+        return ordered_json.object({ { "value", item }, { "label", labels[item] or item } })
     end
     if item.value ~= nil then
-        return "{\"value\":" .. enc(item.value) .. ",\"label\":" .. enc(labels[item.value] or item.value)
-            .. ",\"note\":" .. enc(item.note) .. "}"
+        return ordered_json.object({
+            { "value", item.value }, { "label", labels[item.value] or item.value }, { "note", item.note },
+        })
     end
-    return "{\"other\":" .. enc(item.other) .. "}"
+    return ordered_json.object({ { "other", item.other } })
 end
 
 -- Self-contained answer record: every question with its text and the
@@ -109,7 +106,7 @@ end
 -- nil), late }
 function answer_text.record_json(params: any): string
     local def = params.definition
-    local parts = {}
+    local questions = {}
     for _, field in ipairs(def.fields) do
         local labels = option_labels(field)
         local value = params.answers and params.answers[field.id]
@@ -117,39 +114,43 @@ function answer_text.record_json(params: any): string
         if value ~= nil and definition.is_array(value) then
             local items = {}
             for _, item in ipairs(value) do table.insert(items, record_item(labels, item)) end
-            answer = "[" .. table.concat(items, ",") .. "]"
+            answer = ordered_json.array(items)
         elseif value ~= nil then
             answer = record_item(labels, value)
         end
-        table.insert(parts, enc(field.id) .. ":{\"question\":" .. enc(field.label) .. ",\"answer\":" .. answer .. "}")
+        table.insert(questions, { field.id, raw = ordered_json.object({
+            { "question", field.label }, { "answer", raw = answer },
+        }) })
     end
-    local late = ",\"late\":false"
-    if params.late then
-        late = ",\"late\":true,\"late_notice\":" .. enc(answer_text.LATE_NOTICE)
-    end
-    return "{\"form_id\":" .. enc(tostring(params.artifact_id))
-        .. ",\"form_version\":" .. tostring(definition.FORM_VERSION)
-        .. ",\"title\":" .. enc(def.title)
-        .. late
-        .. ",\"answers\":{" .. table.concat(parts, ",") .. "}}"
+    local entries = {
+        { "form_id", tostring(params.artifact_id) },
+        { "form_version", definition.FORM_VERSION },
+        { "title", def.title },
+        { "late", params.late == true },
+    }
+    if params.late then table.insert(entries, { "late_notice", answer_text.LATE_NOTICE }) end
+    table.insert(entries, { "answers", raw = ordered_json.object(questions) })
+    return ordered_json.object(entries)
 end
 
 -- The questions of an unanswered form with their options, so an agent that
 -- lost the original tool call can still restate them.
 function answer_text.questions_json(def: any): string
-    local parts = {}
+    local questions = {}
     for _, field in ipairs(def.fields) do
         local options = {}
         for _, option in ipairs(field.options) do
-            table.insert(options, "{\"value\":" .. enc(option.value) .. ",\"label\":" .. enc(option.label) .. "}")
+            table.insert(options, ordered_json.object({ { "value", option.value }, { "label", option.label } }))
         end
-        table.insert(parts, enc(field.id) .. ":{\"question\":" .. enc(field.label)
-            .. ",\"multiple\":" .. tostring(field.multiple == true)
-            .. ",\"required\":" .. tostring(field.required == true)
-            .. ",\"allow_other\":" .. tostring(field.allow_other == true)
-            .. ",\"options\":[" .. table.concat(options, ",") .. "]}")
+        table.insert(questions, { field.id, raw = ordered_json.object({
+            { "question", field.label },
+            { "multiple", field.multiple == true },
+            { "required", field.required == true },
+            { "allow_other", field.allow_other == true },
+            { "options", raw = ordered_json.array(options) },
+        }) })
     end
-    return "{" .. table.concat(parts, ",") .. "}"
+    return ordered_json.object(questions)
 end
 
 -- The sentence the user sees: the agent's answered_message, or a neutral one

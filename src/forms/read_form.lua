@@ -1,8 +1,8 @@
 local ctx = require("ctx")
-local json = require("json")
 local answer_text = require("answer_text")
 local artifact_repo = require("artifact_repo")
 local form_artifact = require("form_artifact")
+local ordered_json = require("ordered_json")
 
 -- The read_form tool: the self-contained record of one form of the calling
 -- session. An answered form gives the same record as its answer message
@@ -16,6 +16,9 @@ local form_artifact = require("form_artifact")
 -- it now and again when it arrives as the next user message. The session
 -- passes the forms with such answers in the call context (session_forms, see
 -- message_handlers.process_tools); without that list no answer is shown.
+
+local PENDING_NOTE = "The user answered this form. The answer arrives as a user message after this turn;"
+    .. " do not act on it before then."
 
 local function calling_session_id()
     local run = ctx.get("agent_run")
@@ -51,22 +54,30 @@ local function handler(params: any)
 
     local submission = type(form.meta.submission) == "table" and form.meta.submission or nil
     if not submission then
-        return { message = "{\"status\":\"unanswered\",\"form_id\":" .. (json.encode(artifact.artifact_id))
-            .. ",\"title\":" .. (json.encode(form.definition.title))
-            .. ",\"questions\":" .. answer_text.questions_json(form.definition) .. "}" }
+        return { message = ordered_json.object({
+            { "status", "unanswered" },
+            { "form_id", artifact.artifact_id },
+            { "title", form.definition.title },
+            { "questions", raw = answer_text.questions_json(form.definition) },
+        }) }
     end
     if answer_pending(artifact.artifact_id) then
-        return { message = "{\"status\":\"answer_pending\",\"form_id\":" .. (json.encode(artifact.artifact_id))
-            .. ",\"title\":" .. (json.encode(form.definition.title))
-            .. ",\"note\":\"The user answered this form. The answer arrives as a user message after this turn;"
-            .. " do not act on it before then.\"}" }
+        return { message = ordered_json.object({
+            { "status", "answer_pending" },
+            { "form_id", artifact.artifact_id },
+            { "title", form.definition.title },
+            { "note", PENDING_NOTE },
+        }) }
     end
     -- A late record carries its own late_notice.
-    return { message = "{\"status\":\"answered\",\"answered_at\":" .. (json.encode(tostring(submission.submitted_at)))
-        .. ",\"form\":" .. answer_text.record_json({
+    return { message = ordered_json.object({
+        { "status", "answered" },
+        { "answered_at", tostring(submission.submitted_at) },
+        { "form", raw = answer_text.record_json({
             artifact_id = artifact.artifact_id, definition = form.definition,
             answers = submission.answers, late = submission.late == true,
-        }) .. "}" }
+        }) },
+    }) }
 end
 
 return { handler = handler }

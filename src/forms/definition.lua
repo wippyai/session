@@ -1,4 +1,5 @@
 local json = require("json")
+local ordered_json = require("ordered_json")
 
 -- Session forms V1 contract: the definition an agent authors (choice fields
 -- only) and the answers a user submits for it.
@@ -705,12 +706,12 @@ local function encode_value(value: any): string
     if is_array(value) and #value > 0 then
         local parts = {}
         for _, item in ipairs(value) do table.insert(parts, encode_value(item)) end
-        return "[" .. table.concat(parts, ",") .. "]"
+        return ordered_json.array(parts)
     end
     if value.value ~= nil then
-        return "{\"value\":" .. (json.encode(value.value)) .. ",\"note\":" .. (json.encode(value.note)) .. "}"
+        return ordered_json.object({ { "value", value.value }, { "note", value.note } })
     end
-    return "{\"other\":" .. (json.encode(value.other)) .. "}"
+    return ordered_json.object({ { "other", value.other } })
 end
 
 -- Canonical JSON of normalized answers: keys in definition order, `{}` when
@@ -718,14 +719,14 @@ end
 -- Equal answers always produce the same string, so it also serves as the
 -- replay comparison key.
 function definition.encode_answers(def: any, answers: any): string
-    local parts = {}
+    local entries = {}
     for _, field in ipairs(def.fields) do
         local value = answers and answers[field.id]
         if value ~= nil then
-            table.insert(parts, (json.encode(field.id)) .. ":" .. encode_value(value))
+            table.insert(entries, { field.id, raw = encode_value(value) })
         end
     end
-    return "{" .. table.concat(parts, ",") .. "}"
+    return ordered_json.object(entries)
 end
 
 definition.is_array = is_array
