@@ -8,6 +8,7 @@ local start_tokens = require("start_tokens")
 local consts = require("consts")
 local input_policy = require("input_policy")
 local session_status = require("session_status")
+local form_recovery = require("form_recovery")
 local funcs = require("funcs")
 local message_repo = require("message_repo")
 local reader = require("reader")
@@ -106,7 +107,7 @@ local function recover_session_calls(session_id)
     local session_reader, open_err = reader.open(session_id)
     if open_err then return nil, open_err end
     local anchor = session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
-    return message_repo.recover_pending(session_id, anchor)
+    return message_repo.recover_pending(session_id, anchor, form_recovery.settle_call)
 end
 
 -- Stores `target_status` with the interaction recovery gives it, after

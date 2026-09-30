@@ -171,17 +171,23 @@ local function not_found(artifact_id)
     })
 end
 
+-- The artifact `artifact_id`, or nil without an error when there is none.
+--
+-- opts.tx (optional): read on this caller-supplied transaction.
+function artifact_repo.find(artifact_id, opts)
+    if not artifact_id or artifact_id == "" then
+        return nil, "Artifact ID is required"
+    end
+    return with_connection(opts, function(conn)
+        return read_artifact(conn, artifact_id)
+    end)
+end
+
 -- Get an artifact by ID.
 --
 -- opts.tx (optional): read on this caller-supplied transaction.
 function artifact_repo.get(artifact_id, opts)
-    if not artifact_id or artifact_id == "" then
-        return nil, "Artifact ID is required"
-    end
-
-    local artifact: any, err = with_connection(opts, function(conn)
-        return read_artifact(conn, artifact_id)
-    end)
+    local artifact, err = artifact_repo.find(artifact_id, opts)
     if err then
         return nil, err
     end

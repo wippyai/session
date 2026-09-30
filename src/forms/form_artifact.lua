@@ -81,6 +81,13 @@ function form_artifact.parse(artifact: any): (any, string?)
     }, nil
 end
 
+-- The ask_user tool result for a created form. Recovery settles a call
+-- whose form was committed with the same text (form_recovery).
+function form_artifact.created_message(title: string, artifact_id: string): string
+    return string.format('Form "%s" was created as %s. Its answer will arrive as a user message.',
+        title, artifact_id)
+end
+
 -- Content JSON with props.state replaced, everything else kept.
 function form_artifact.content_with_state(form: any, state: string): (string?, string?)
     return form_artifact.build_content(form.definition, state)

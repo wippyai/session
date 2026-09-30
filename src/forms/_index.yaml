@@ -187,6 +187,7 @@ entries:
       - uuid
     imports:
       definition: wippy.session.forms:definition
+      form_artifact: wippy.session.forms:form_artifact
     method: handler
     pool:
       size: 2
@@ -268,6 +269,18 @@ entries:
     method: handler
     pool:
       size: 2
+
+  # wippy.session.forms:form_recovery
+  - name: form_recovery
+    kind: library.lua
+    meta:
+      comment: Settles a pending ask_user call whose form was committed, for message_repo.recover_pending
+    source: file://form_recovery.lua
+    imports:
+      consts: wippy.session:consts
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
 
   # wippy.session.forms:form_index
   - name: form_index

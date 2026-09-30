@@ -8,6 +8,8 @@ local tx = require("tx")
 local writer = require("writer")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
+local artifact_repo = require("artifact_repo")
+local form_recovery = require("form_recovery")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
@@ -1043,6 +1045,8 @@ local function define_tests()
                 test.eq((rest :: any)[2], third)
             end)
 
+            -- Recovery with the forms step the session process passes
+            -- (form_recovery.settle_call).
             describe("recover_pending and committed forms", function()
                 local function pending_form_call(session_id, artifact_id)
                     local session_writer: any = writer.new(session_id)
@@ -1068,7 +1072,7 @@ local function define_tests()
                     local message_id, call_id = pending_form_call(session_id, artifact_id)
                     insert_artifact(session_id, artifact_id, form_meta(call_id, message_id))
 
-                    local recovered, err = message_repo.recover_pending(session_id)
+                    local recovered, err = message_repo.recover_pending(session_id, nil, form_recovery.settle_call)
                     test.is_nil(err)
                     test.eq(recovered, 1)
                     local row: any = message_repo.get(message_id)
@@ -1082,7 +1086,7 @@ local function define_tests()
                     local message_id = pending_form_call(session_id, artifact_id)
                     insert_artifact(session_id, artifact_id, form_meta("call-other", uuid.v7()))
 
-                    local recovered, err = message_repo.recover_pending(session_id)
+                    local recovered, err = message_repo.recover_pending(session_id, nil, form_recovery.settle_call)
                     test.is_nil(err)
                     test.eq(recovered, 1)
                     local row: any = message_repo.get(message_id)
@@ -1096,10 +1100,10 @@ local function define_tests()
                     local message_id, call_id = pending_form_call(session_id, artifact_id)
                     insert_artifact(session_id, artifact_id, form_meta(call_id, message_id))
 
-                    local original = message_repo._form_artifact
-                    message_repo._form_artifact = function() return nil, "database unavailable" end
-                    local recovered, err = message_repo.recover_pending(session_id)
-                    message_repo._form_artifact = original
+                    local original = artifact_repo.find
+                    artifact_repo.find = function() return nil, "database unavailable" end
+                    local recovered, err = message_repo.recover_pending(session_id, nil, form_recovery.settle_call)
+                    artifact_repo.find = original
 
                     test.is_nil(recovered)
                     test.contains(tostring(err), "database unavailable")

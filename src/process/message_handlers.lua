@@ -1675,7 +1675,7 @@ function message_handlers.process_tools(ctx, op)
                 local rejected = nil
                 -- Set once this call's form is committed. The form names the
                 -- call as its origin, so from then on a failure leaves the call
-                -- pending: recovery (message_repo.recover_pending) settles it as
+                -- pending: recovery (form_recovery.settle_call) settles it as
                 -- created. Marking it an error would make the agent ask again
                 -- and leave two forms.
                 local form_committed = false

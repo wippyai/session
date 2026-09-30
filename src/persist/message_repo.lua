@@ -68,81 +68,28 @@ function message_repo.create_batch(session_id, rows)
     return result, nil, dates
 end
 
--- A pending call whose control operations created a session form that was
--- committed (the process stopped after storing the form but before settling
--- the call). Returns the form's artifact row ({ artifact_id, title }), nil
--- when there is no such form, or nil and an error when the lookup failed:
--- recovery then stops and runs again later instead of reporting the call as
--- interrupted while its form exists.
-local function committed_form_of(row)
-    local operations = row.metadata.control_operations
-    local forms = type(operations) == "table" and operations.forms or nil
-    local first = type(forms) == "table" and forms[1] or nil
-    if type(first) ~= "table" or type(first.artifact_id) ~= "string" then return nil end
-
-    local artifact, err = message_repo._form_artifact(first.artifact_id, row.session_id)
-    if err then return nil, err end
-    if not artifact then return nil end
-
-    -- The form's server-written origin must name this call. A call cannot
-    -- claim a form that another call created.
-    local origin = form_meta.origin(form_meta.of(artifact.meta))
-    if origin.tool_message_id ~= row.message_id then return nil end
-    if origin.call_id ~= nil and origin.call_id ~= row.metadata.call_id then return nil end
-    return artifact
-end
-
--- The artifact `artifact_id` of `session_id` with its meta decoded, nil when
--- there is none, or nil and an error. A meta that does not decode reads as
--- none. Replaceable in tests.
-function message_repo._form_artifact(artifact_id, session_id)
-    local db, err = get_db()
-    if err then return nil, err end
-    local rows, query_err = sql.builder.select("artifact_id", "title", "meta")
-        :from("artifacts")
-        :where(sql.builder.and_({
-            sql.builder.expr("artifact_id = ?", artifact_id),
-            sql.builder.expr("session_id = ?", session_id),
-        }))
-        :limit(1)
-        :run_with(db):query()
-    db:release()
-    if query_err then return nil, "Failed to read form artifact: " .. tostring(query_err) end
-    if #rows == 0 then return nil end
-    local artifact = rows[1]
-    if type(artifact.meta) == "string" and artifact.meta ~= "" then
-        local decoded, decode_err = json.decode(artifact.meta :: string)
-        artifact.meta = not decode_err and decoded or nil
-    end
-    return artifact
-end
-
-function message_repo.recover_pending(session_id, anchor_id)
+-- Settles the calls an interrupted turn left pending, in the session's rows
+-- after `anchor_id` (every row when it is nil). Returns how many it settled.
+--
+-- settle (optional): settle(row) is asked first about each pending call row
+-- and returns the metadata that settles it when the call's effect is known
+-- to have completed, nil when it is not, or nil and an error, which stops
+-- recovery so that it runs again later. A call nothing settles is reported
+-- as interrupted with an unknown outcome.
+function message_repo.recover_pending(session_id, anchor_id, settle)
     local recovered = 0
     local function recover_rows(rows)
         for _, row in ipairs(rows or {}) do
-            local form = nil
-            if row.type == consts.MSG_TYPE.FUNCTION and type(row.metadata) == "table"
-                and row.metadata.status == consts.FUNC_STATUS.PENDING then
-                local form_err
-                form, form_err = committed_form_of(row)
-                if form_err then return nil, form_err end
-            end
-            if form then
-                -- The form exists and is visible, so the call succeeded;
-                -- reporting it as interrupted would make the agent ask again.
-                local _, update_err = message_repo.update_metadata(row.message_id, {
-                    status = consts.FUNC_STATUS.SUCCESS,
-                    result = { message = string.format(
-                        'Form "%s" was created as %s. Its answer will arrive as a user message.',
-                        form.title, form.artifact_id) }
-                })
-                if update_err then return nil, update_err end
-                recovered = recovered + 1
-            elseif (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+            if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
                 or row.type == consts.MSG_TYPE.DELEGATION)
                 and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
-                local _, update_err = message_repo.update_metadata(row.message_id, {
+                local update = nil
+                if settle then
+                    local settle_err
+                    update, settle_err = settle(row)
+                    if settle_err then return nil, settle_err end
+                end
+                local _, update_err = message_repo.update_metadata(row.message_id, update or {
                     status = consts.FUNC_STATUS.ERROR,
                     result = "interrupted, outcome unknown"
                 })

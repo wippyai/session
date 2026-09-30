@@ -64,6 +64,8 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_recovery: wippy.session.forms:form_recovery
       message_date: wippy.session.persist:message_date
       tx: wippy.session.persist:tx
       writer: wippy.session.persist:writer

@@ -1,5 +1,6 @@
 local uuid = require("uuid")
 local definition = require("definition")
+local form_artifact = require("form_artifact")
 
 -- The ask_user tool. It only validates and normalizes the definition and
 -- hands it to the session process as a `_control.forms` operation; the
@@ -18,8 +19,7 @@ local function handler(params: any)
     end
 
     return {
-        message = string.format('Form "%s" was created as %s. Its answer will arrive as a user message.',
-            normalized.title, artifact_id),
+        message = form_artifact.created_message(normalized.title, artifact_id),
         _control = {
             forms = {
                 { artifact_id = artifact_id, definition = normalized },

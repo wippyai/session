@@ -130,6 +130,7 @@ entries:
       tools: wippy.agent.discovery:tools
       input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
+      form_recovery: wippy.session.forms:form_recovery
     method: run
 
   # wippy.session.process:plugin
@@ -156,6 +157,7 @@ entries:
       start_tokens: wippy.session:start_tokens
       input_policy: wippy.session.process:input_policy
       session_status: wippy.session.process:session_status
+      form_recovery: wippy.session.forms:form_recovery
       reader: wippy.session.persist:reader
       message_repo: wippy.session.persist:message_repo
     method: run

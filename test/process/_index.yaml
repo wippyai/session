@@ -92,6 +92,7 @@ entries:
       prompt_builder: wippy.session:prompt_builder
       artifact_repo: wippy.session.persist:artifact_repo
       message_repo: wippy.session.persist:message_repo
+      form_recovery: wippy.session.forms:form_recovery
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
       reader: wippy.session.persist:reader
