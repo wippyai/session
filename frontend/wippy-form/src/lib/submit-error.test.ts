@@ -1,19 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { classifySubmitError, validationErrorsOf } from './submit-error'
 
-/** Builds a Host `ArtifactStateError`-shaped Error, as `@wippy-fe/proxy` throws it. */
+/** Realm-stable brand the Host stamps on every `ArtifactStateError` — see `submit-error.ts`. */
+const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
+
+/** Builds a Host `ArtifactStateError`-shaped, branded Error, as `@wippy-fe/proxy` throws it. */
 function hostError(status: number | undefined, code?: string, extra?: {
   errors?: Record<string, { code: string, message: string }[]>
   formErrors?: { code: string, message: string }[]
 }) {
   const err = new Error('host rejected the submission') as Error & {
-    name: string
     status?: number
     code?: string
     errors?: Record<string, { code: string, message: string }[]>
     formErrors?: { code: string, message: string }[]
   }
   err.name = 'ArtifactStateError'
+  ;(err as unknown as Record<symbol, boolean>)[ARTIFACT_STATE_ERROR_BRAND] = true
   err.status = status
   err.code = code
   if (extra?.errors)
@@ -70,10 +73,21 @@ describe('classifySubmitError', () => {
     expect(result.shouldReload).toBe(false)
   })
 
-  it('classifies a 429 as rate_limited and retryable', () => {
-    const result = classifySubmitError(hostError(429))
-    expect(result.code).toBe('rate_limited')
-    expect(result.retryable).toBe(true)
+  it('classifies a 413 (payload too large) as unknown, not retryable, using the server message', () => {
+    const err = hostError(413, 'payload_too_large')
+    err.message = 'The request body is too large.'
+    const result = classifySubmitError(err)
+    expect(result.code).toBe('unknown')
+    expect(result.message).toBe('The request body is too large.')
+    expect(result.retryable).toBe(false)
+    expect(result.uncertain).toBe(false)
+    expect(result.shouldReload).toBe(false)
+  })
+
+  it('classifies a 415 (unsupported media type) as unknown and not retryable', () => {
+    const result = classifySubmitError(hostError(415, 'unsupported_media_type'))
+    expect(result.code).toBe('unknown')
+    expect(result.retryable).toBe(false)
     expect(result.uncertain).toBe(false)
     expect(result.shouldReload).toBe(false)
   })
@@ -101,22 +115,17 @@ describe('classifySubmitError', () => {
     expect(result.retryable).toBe(true)
   })
 
-  it('treats a raw Axios error with a request but no response as uncertain', () => {
-    const result = classifySubmitError({ request: {}, message: 'Network Error' })
-    expect(result.code).toBe('network_error')
-    expect(result.uncertain).toBe(true)
-  })
-
-  it('still classifies a raw Axios-shaped error (not the Host wrapper)', () => {
-    const axiosError = {
+  it('does not special-case an unbranded, Axios-shaped error — the Host client never throws one', () => {
+    const axiosShaped = {
       response: {
         status: 401,
         data: { code: 'unauthorized', message: 'nope' },
       },
     }
-    const result = classifySubmitError(axiosError)
-    expect(result.code).toBe('auth')
-    expect(result.retryable).toBe(false)
+    const result = classifySubmitError(axiosShaped)
+    expect(result.code).toBe('unknown')
+    expect(result.message).toBe('Could not submit this form.')
+    expect(result.retryable).toBe(true)
     expect(result.uncertain).toBe(false)
   })
 
@@ -147,9 +156,9 @@ describe('validationErrorsOf', () => {
     expect(validationErrorsOf(hostError(409, 'request_conflict'))).toBeNull()
   })
 
-  it('returns null for a raw Axios-shaped error, even with status 422', () => {
-    const axiosError = { response: { status: 422, data: {} } }
-    expect(validationErrorsOf(axiosError)).toBeNull()
+  it('returns null for an unbranded, Axios-shaped error, even with status 422', () => {
+    const axiosShaped = { response: { status: 422, data: {} } }
+    expect(validationErrorsOf(axiosShaped)).toBeNull()
   })
 
   it('returns null for a non-Error rejection', () => {

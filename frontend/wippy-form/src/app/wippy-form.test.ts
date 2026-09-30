@@ -14,6 +14,9 @@ vi.mock('@wippy-fe/proxy', () => ({
   on: vi.fn(() => () => {}),
 }))
 
+/** Realm-stable brand the Host stamps on every `ArtifactStateError` — see `lib/submit-error.ts`. */
+const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
+
 function mockArtifactState() {
   return vi.mocked(WippyProxy.artifactState)
 }
@@ -197,7 +200,7 @@ const multiChoiceDefinition = {
   ],
 }
 
-describe('WippyForm — background reload keeps the form mounted (item 1)', () => {
+describe('WippyForm — background reload keeps the form mounted', () => {
   it('does not remount the form or clear a selected answer when the artifact event fires again', async () => {
     const getFn = vi.fn().mockResolvedValue(activeState({ definition: multiChoiceDefinition }))
     mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -229,7 +232,7 @@ describe('WippyForm — background reload keeps the form mounted (item 1)', () =
   })
 })
 
-describe('WippyForm — rebind to a different artifact (item 1)', () => {
+describe('WippyForm — rebind to a different artifact', () => {
   it('discards a stale GET for the old artifact once the Host rebinds the element to a new one', async () => {
     let resolveA: ((s: FormState) => void) | undefined
     const pendingA = new Promise<FormState>((resolve) => { resolveA = resolve })
@@ -266,7 +269,7 @@ describe('WippyForm — rebind to a different artifact (item 1)', () => {
   })
 })
 
-describe('WippyForm — card-state during the initial load (round B, item 7: was a ~25ms "active" flash)', () => {
+describe('WippyForm — card-state during the initial load does not briefly flash "active"', () => {
   it('reflects "loading", not "active", while the very first GET is still pending', async () => {
     let resolveGet: ((s: FormState) => void) | undefined
     const pending = new Promise<FormState>((resolve) => { resolveGet = resolve })
@@ -293,7 +296,7 @@ describe('WippyForm — card-state during the initial load (round B, item 7: was
   })
 })
 
-describe('WippyForm — unsupported form-version contract (item 12)', () => {
+describe('WippyForm — unsupported form-version contract', () => {
   it('never renders the submittable form when the form-version prop is not 1', async () => {
     const getFn = vi.fn().mockResolvedValue(activeState())
     const submitFn = vi.fn()
@@ -311,7 +314,7 @@ describe('WippyForm — unsupported form-version contract (item 12)', () => {
     expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
     expect(submitFn).not.toHaveBeenCalled()
     // card-state must reflect "unsupported", not keep reporting "active"
-    // for a card that never actually renders interactively (item 12).
+    // for a card that never actually renders interactively.
     expect(element.getAttribute('card-state')).toBe('unsupported')
   })
 
@@ -335,7 +338,7 @@ describe('WippyForm — unsupported form-version contract (item 12)', () => {
   })
 })
 
-describe('WippyForm — offline (item 6)', () => {
+describe('WippyForm — offline', () => {
   it('shows a polite offline notice and blocks submission until back online', async () => {
     const getFn = vi.fn().mockResolvedValue(activeState())
     const submitFn = vi.fn().mockResolvedValue({
@@ -379,13 +382,14 @@ describe('WippyForm — offline (item 6)', () => {
   })
 })
 
-describe('WippyForm — exhausted-retry copy never sticks as "Retrying…" (P2 tracker line 107a)', () => {
+describe('WippyForm — exhausted-retry copy never sticks as "Retrying…"', () => {
   it('shows the final error and a working Retry once the one automatic retry has also failed, never "Retrying…"', async () => {
     vi.useFakeTimers()
     try {
       const getFn = vi.fn().mockResolvedValue(activeState())
       const networkError = Object.assign(new Error('no response'), {
         name: 'ArtifactStateError',
+        [ARTIFACT_STATE_ERROR_BRAND]: true,
         status: undefined,
         code: 'network_error',
       })
@@ -424,7 +428,7 @@ describe('WippyForm — exhausted-retry copy never sticks as "Retrying…" (P2 t
   })
 })
 
-describe('WippyForm — focus after a successful submit (item 8)', () => {
+describe('WippyForm — focus after a successful submit', () => {
   it('moves focus to the read-only view\'s status text so focus is not lost', async () => {
     // Realistic server behavior: the initial GET returns the active
     // (unanswered) form; the background reload fired after acceptance
@@ -472,6 +476,7 @@ describe('WippyForm — answered elsewhere', () => {
       .mockResolvedValue(activeState({ status: 'idle', data: { f1: 'b' }, submitted_at: '2026-01-01T00:00:00.000Z', delivery: 'complete' }))
     const conflict = Object.assign(new Error('This form was already answered.'), {
       name: 'ArtifactStateError',
+      [ARTIFACT_STATE_ERROR_BRAND]: true,
       status: 409,
       code: 'already_submitted',
     })
@@ -496,12 +501,13 @@ describe('WippyForm — answered elsewhere', () => {
     expect(wrapper.text()).toContain('Option B')
   })
 
-  it('moves focus to the read-only view\'s status text after losing the race (M07: was left on <body>)', async () => {
+  it('moves focus to the read-only view\'s status text after losing the race, instead of leaving it on <body>', async () => {
     const getFn = vi.fn()
       .mockResolvedValueOnce(activeState())
       .mockResolvedValue(activeState({ status: 'idle', data: { f1: 'b' }, submitted_at: '2026-01-01T00:00:00.000Z', delivery: 'complete' }))
     const conflict = Object.assign(new Error('This form was already answered.'), {
       name: 'ArtifactStateError',
+      [ARTIFACT_STATE_ERROR_BRAND]: true,
       status: 409,
       code: 'already_submitted',
     })
@@ -529,7 +535,7 @@ describe('WippyForm — answered elsewhere', () => {
   })
 })
 
-describe('WippyForm — background swap to answered explains the drop (item 10; gated by unsent input, round B finding F-1)', () => {
+describe('WippyForm — background swap to answered explains the drop, gated by unsent input', () => {
   it('does NOT show the "answered elsewhere" notice for a passive copy — never touched, nothing to lose — when a background reload flips it to idle', async () => {
     const getFn = vi.fn()
       .mockResolvedValueOnce(activeState())

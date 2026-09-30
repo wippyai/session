@@ -21,10 +21,14 @@ function artifactClient(submit: ReturnType<typeof vi.fn>) {
   }
 }
 
-/** Host `ArtifactStateError`-shaped rejection, as classified by submit-error.ts. */
+/** Realm-stable brand the Host stamps on every `ArtifactStateError` — see `submit-error.ts`. */
+const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
+
+/** Host `ArtifactStateError`-shaped, branded rejection, as classified by submit-error.ts. */
 function hostError(status: number | undefined, code?: string) {
-  const err = new Error('rejected') as Error & { name: string, status?: number, code?: string }
+  const err = new Error('rejected') as Error & { status?: number, code?: string }
   err.name = 'ArtifactStateError'
+  ;(err as unknown as Record<symbol, boolean>)[ARTIFACT_STATE_ERROR_BRAND] = true
   err.status = status
   err.code = code
   return err
@@ -175,7 +179,7 @@ describe('useFormSubmit — outcomes', () => {
   })
 })
 
-describe('useFormSubmit — exhausted-retry copy (item 4)', () => {
+describe('useFormSubmit — exhausted-retry copy', () => {
   it('does not say "Retrying…" once the one automatic retry has also failed with no response', async () => {
     vi.useFakeTimers()
     try {
@@ -203,7 +207,7 @@ describe('useFormSubmit — exhausted-retry copy (item 4)', () => {
   })
 })
 
-describe('useFormSubmit — retry outcome mapping (item 7)', () => {
+describe('useFormSubmit — retry outcome mapping', () => {
   it('maps a 422 on the retry attempt itself to field errors, not a generic message', async () => {
     vi.useFakeTimers()
     try {
@@ -259,7 +263,7 @@ describe('useFormSubmit — retry outcome mapping (item 7)', () => {
   })
 })
 
-describe('useFormSubmit — rebind safety (item 3)', () => {
+describe('useFormSubmit — rebind safety', () => {
   it('drops a result that resolves after the artifact id changed mid-flight', async () => {
     let resolveSubmit: ((r: SubmitAccepted) => void) | undefined
     const pending = new Promise<SubmitAccepted>((resolve) => { resolveSubmit = resolve })

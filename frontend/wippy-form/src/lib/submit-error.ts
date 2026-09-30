@@ -4,7 +4,6 @@ export type SubmitErrorCode
     | 'request_conflict'
     | 'already_submitted'
     | 'version_conflict'
-    | 'rate_limited'
     | 'server_error'
     | 'network_error'
     | 'unknown'
@@ -20,18 +19,28 @@ export interface ClassifiedSubmitError {
   shouldReload: boolean
 }
 
-interface AxiosLikeError {
-  response?: {
-    status: number
-    data?: { code?: string, message?: string }
-  }
-  request?: unknown
-  message?: string
-}
+/**
+ * Realm-stable brand the Host's `ArtifactStateError` carries on every
+ * instance (`@wippy-fe/proxy`'s `artifact-state.ts`). `Symbol.for` reads
+ * from the global symbol registry keyed by string, so this matches an
+ * error thrown by any bundle's own compiled copy of the Host's proxy, not
+ * just one that happens to share this file's module graph — the same
+ * reason the Host itself exports `isArtifactStateError` instead of relying
+ * on `instanceof`.
+ *
+ * The published `@wippy-fe/proxy` version this component currently builds
+ * against does not export `isArtifactStateError` yet, so the brand is
+ * checked directly here rather than guessing the error's shape from its
+ * fields (`name`, `'status' in err`, …) or accepting a raw Axios error —
+ * the Host client never throws one; every failure, including a network
+ * error, is wrapped into `ArtifactStateError` before it reaches this
+ * component. Once the published types export `isArtifactStateError`, this
+ * local check can be replaced with that import.
+ */
+const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
 
-/** Shape of the Host's `ArtifactStateError` (`@wippy-fe/proxy`). */
+/** Shape of the Host's `ArtifactStateError` (`@wippy-fe/proxy`), once branded. */
 interface HostStateError {
-  name?: string
   status?: number
   code?: string
   message?: string
@@ -39,29 +48,20 @@ interface HostStateError {
   formErrors?: { code: string, message: string }[]
 }
 
-function isAxiosLike(err: unknown): err is AxiosLikeError {
-  return !!err && typeof err === 'object' && ('response' in err || 'request' in err)
-}
-
 function isHostStateError(err: unknown): err is HostStateError {
-  return err instanceof Error && (err.name === 'ArtifactStateError' || 'status' in err || 'formErrors' in err)
+  return typeof err === 'object' && err !== null && (err as Record<PropertyKey, unknown>)[ARTIFACT_STATE_ERROR_BRAND] === true
 }
 
 /**
  * Normalize a rejection to `{ status, code, message, noResponse }`. The Host
  * client throws `ArtifactStateError` with top-level `status`/`code` and marks
- * a request that got no response with `code: 'network_error'`; a raw Axios
- * error is still accepted. `noResponse` is true only when the request was
- * sent and no response arrived, the one outcome where the server may or may
- * not have committed.
+ * a request that got no response with `code: 'network_error'`. `noResponse`
+ * is true only when the request was sent and no response arrived, the one
+ * outcome where the server may or may not have committed.
  */
 function readFailure(err: unknown): { status?: number, code?: string, message?: string, known: boolean, noResponse: boolean } {
   if (isHostStateError(err))
     return { status: err.status, code: err.code, message: err.message, known: true, noResponse: err.status === undefined && err.code === 'network_error' }
-  if (isAxiosLike(err)) {
-    const noResponse = err.response === undefined && err.request !== undefined
-    return { status: err.response?.status, code: err.response?.data?.code, message: err.response?.data?.message ?? err.message, known: true, noResponse }
-  }
   return { known: false, message: err instanceof Error ? err.message : undefined, noResponse: false }
 }
 
@@ -75,11 +75,15 @@ export function validationErrorsOf(err: unknown): { errors: Record<string, { cod
 /**
  * Classifies a submit failure by the state API's POST status and error
  * code (401, 404, 409 with `already_submitted` / `version_conflict` /
- * `request_conflict`, 422, 429, 5xx, no response). `submit()` in `use-form-submit.ts` uses `uncertain` to
- * decide whether a single automatic same-request-id retry is safe (no
- * response reached the client — the server may or may not have committed),
- * and `shouldReload` to tell the caller to refetch canonical state after a
- * conflict another writer already won.
+ * `request_conflict`, 5xx, no response). 400/403/413/415 and any other
+ * status the spec documents but this component has no dedicated copy for
+ * fall through to the generic `unknown` case below, using the server's own
+ * message when it sent one. `submit()` in `use-form-submit.ts` checks
+ * `validationErrorsOf()` first, so a 422 never reaches this function in
+ * practice. `uncertain` decides whether a single automatic same-request-id
+ * retry is safe (no response reached the client — the server may or may
+ * not have committed), and `shouldReload` tells the caller to refetch
+ * canonical state after a conflict another writer already won.
  */
 export function classifySubmitError(err: unknown): ClassifiedSubmitError {
   const failure = readFailure(err)
@@ -109,8 +113,6 @@ export function classifySubmitError(err: unknown): ClassifiedSubmitError {
         return { code: 'version_conflict', message: 'This form changed. Reloading the latest version.', retryable: false, uncertain: false, shouldReload: true }
       return { code: 'request_conflict', message: 'That answer no longer matches this attempt. Change something and try again.', retryable: false, uncertain: false, shouldReload: false }
     }
-    if (status === 429)
-      return { code: 'rate_limited', message: 'Too many attempts. Wait a moment and try again.', retryable: true, uncertain: false, shouldReload: false }
     if (status >= 500)
       return { code: 'server_error', message: 'The server could not save this. Try again.', retryable: true, uncertain: false, shouldReload: false }
     return { code: 'unknown', message: failure.message ?? 'Could not submit this form.', retryable: false, uncertain: false, shouldReload: false }
