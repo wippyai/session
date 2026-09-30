@@ -3,6 +3,19 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: session_status_test
+    kind: function.lua
+    meta:
+      name: Session status reporting
+      type: test
+      suite: session
+      comment: A stored running status with no registered process reads as idle, with the interaction recovery will store
+    source: file://session_status_test.lua
+    imports:
+      session_status: wippy.session.process:session_status
+      test: wippy.test:test
+    method: run
+
   - name: stop_control_test
     kind: function.lua
     meta:

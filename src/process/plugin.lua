@@ -7,6 +7,7 @@ local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
 local input_policy = require("input_policy")
+local session_status = require("session_status")
 local funcs = require("funcs")
 local message_repo = require("message_repo")
 local reader = require("reader")
@@ -831,8 +832,7 @@ local function run(args)
             end
             for _, session in ipairs(page.sessions or {}) do
                 local session_id = tostring(session.session_id)
-                if not state.active_sessions[session_id]
-                    and not process.registry.lookup(consts.REGISTRY.SESSION .. session_id) then
+                if not state.active_sessions[session_id] and session_status.is_stale_running(session) then
                     local target_status, stored, status_err, recovery_err, interaction =
                         settle_interrupted(session_id, state.user_id :: string)
                     if recovery_err or status_err then

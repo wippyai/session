@@ -13,6 +13,7 @@ local artifact_events = require("artifact_events")
 local message_repo = require("message_repo")
 local message_date = require("message_date")
 local session_repo = require("session_repo")
+local session_status = require("session_status")
 
 -- Form state behind GET/POST /artifact/{id}/state (the HTTP handlers in
 -- src/api/artifact_state.lua are thin adapters). Every function returns an
@@ -154,13 +155,12 @@ local function delivery_of(submission, session_id)
     for _, candidate in ipairs(later) do
         if candidate.message_id ~= row.message_id and is_reply(candidate) then return "complete", nil end
     end
-    -- The stored status stays "running" after a crash until the session
-    -- process starts again, so "running" also needs a live session process.
+    -- A stored "running" status with no live session process is a stopped
+    -- turn, not a running one (session_status).
     local session, session_err = session_repo.get(session_id)
     if not session then return nil, tostring(session_err) end
-    if session.status == consts.STATUS.RUNNING and state_service._lookup_session(session_id) then
-        return "running", nil
-    end
+    local status = session_status.effective(session, state_service._lookup_session)
+    if status == consts.STATUS.RUNNING then return "running", nil end
     return "interrupted", nil
 end
 

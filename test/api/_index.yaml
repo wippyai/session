@@ -39,17 +39,3 @@ entries:
       wait_for_boot: app:wait_for_boot
       test: wippy.test:test
     method: run
-
-  - name: session_status_test
-    kind: function.lua
-    meta:
-      name: Session status reporting
-      type: test
-      suite: session
-      comment: get_session/list_sessions report a stored running status with no registered process as idle, with the interaction recovery will store
-    source: file://session_status_test.lua
-    imports:
-      get_session: wippy.session.api:get_session_module
-      list_sessions: wippy.session.api:list_sessions_module
-      test: wippy.test:test
-    method: run

@@ -80,6 +80,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       message_date: wippy.session.persist:message_date
       session_repo: wippy.session.persist:session_repo
+      session_status: wippy.session.process:session_status
 
   # wippy.session.forms:ask_user_tool
   - name: ask_user_tool
