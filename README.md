@@ -157,5 +157,45 @@ Only `session:`-prefixed topics are relayed to clients.
 - SQLite does not cascade artifact deletion with its session. Orphaned rows
   remain listable, and fetching one returns HTTP 500.
 
+## Session Forms
+
+Session forms let an agent ask the user structured choice questions with the
+`ask_user` tool and get the answer back as an ordinary user message. A form
+is stored as a `wippy-component-tag-1.0` artifact (see Artifacts above) with
+one extra metadata key, `meta.session_form`; no new SQL table is used.
+
+### Enable
+
+Add the trait to an agent:
+
+```yaml
+traits:
+  - id: wippy.session.forms:ask_user
+```
+
+The agent gets `ask_user` (create a form; ends the turn) and `read_form`
+(read an earlier form's questions, or its answer record, by `form_id`). Every
+agent, with or without the trait, gets a bounded index of the session's forms
+injected into its prompt so it can find a form id without the trait.
+
+### API
+
+`GET` / `POST /api/v1/artifact/{id}/state` reads a form's canonical state and
+accepts its answer. Both are served by `wippy.session.forms:state_service`
+behind the thin HTTP adapter in `src/api/artifact_state.lua`. A submission
+commits the accepted answer and its user message in one transaction, then
+wakes the owning session process; a missed wake-up is recovered from the
+stored row on the next session start.
+
+V1 supports choice fields only: single selection, multiple selection,
+optional/required, notes on a chosen option, and a free-text "Other" answer.
+
+See [Session Forms (framework)](https://docs.wippy.ai/en/framework/session-forms)
+for the full `ask_user` / `read_form` contract, the answer record shape, late
+answers, and how an answer is admitted into the conversation, and
+[Session Forms (frontend)](https://docs.wippy.ai/en/frontend/micro-frontends/session-forms)
+for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
+from the browser side.
+
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases
