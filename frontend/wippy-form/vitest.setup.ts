@@ -1,3 +1,12 @@
+import { enableAutoUnmount } from '@vue/test-utils'
+import { afterEach } from 'vitest'
+
+// Unmount every mounted wrapper after each test. Many suites mount with
+// `attachTo: document.body`; without this their DOM stays in the body for
+// the rest of the file, and a global `document` query can find another
+// test's element (separately mounted apps can reuse the same `useId()` ids).
+enableAutoUnmount(afterEach)
+
 /**
  * Vitest global setup. Runs before any test module is loaded.
  *
