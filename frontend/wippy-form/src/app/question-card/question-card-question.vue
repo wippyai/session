@@ -6,7 +6,7 @@ import Message from 'primevue/message'
 import { Icon } from '@iconify/vue'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
-import { isNoteTextTooLong, isOtherTextTooLong } from '../../lib/answers'
+import { isNoteTextTooLong, isOtherTextTooLong, trimAnswerText } from '../../lib/answers'
 import { partClass } from '../../lib/part-class'
 import QuestionCardComposer from './question-card-composer.vue'
 import QuestionCardOption from './question-card-option.vue'
@@ -57,12 +57,12 @@ function answerState() {
 
 const otherRowPart = computed(() => {
   const a = answerState()
-  const selected = props.question.multiple ? a.other.trim() !== '' : (a.useOther && a.done)
+  const selected = props.question.multiple ? trimAnswerText(a.other) !== '' : (a.useOther && a.done)
   return partClass('option', 'other', selected && 'selected')
 })
 const otherEnabled = computed(() => {
   const a = answerState()
-  return a.other.trim() !== '' || (props.question.multiple && a.chosen.length > 0)
+  return trimAnswerText(a.other) !== '' || (props.question.multiple && a.chosen.length > 0)
 })
 // Client-side mirror of the server's 2,000-code-point Other limit — the
 // same pre-check the note composer already applies (isNoteTextTooLong,
@@ -74,7 +74,7 @@ const otherErrorId = `${props.qid}-other-err`
 // role="alert" text actually applies to it right now — the too-long notice
 // and/or the question's server/validation error (`displayError`, already
 // shown in the Message with id `${qid}-err`) — instead of leaving both
-// alerts unlinked to any control (M05).
+// alerts unlinked to any control.
 const otherDescribedBy = computed(() => {
   const ids: string[] = []
   if (otherTooLong.value)
@@ -160,7 +160,7 @@ function onOptionsFocusIn(event: FocusEvent) {
       :index="i"
       :multiple="question.multiple"
       :selected="question.multiple ? controller.ans(question).chosen.includes(option.value) : (!controller.ans(question).useOther && controller.ans(question).chosen[0] === option.value)"
-      :note="(controller.ans(question).notes[option.value] || '').trim()"
+      :note="trimAnswerText(controller.ans(question).notes[option.value] || '')"
       :editing="controller.ans(question).noteOpen === option.value"
       :note-draft="controller.ans(question).notes[option.value] || ''"
       :key-label="keyLabelFor(i)"

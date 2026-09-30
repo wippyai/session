@@ -1,7 +1,7 @@
 import type { AnswerDraft } from './answers'
 import type { FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
-import { answerDisplayItems, buildNotedValue, fieldsWithBlankOther, fieldsWithOverlongOtherText, isNoteTextTooLong, isOtherTextTooLong, missingRequiredFields, noteTextLength, otherTextLength, serializeAnswers, serializeFieldAnswer } from './answers'
+import { answerDisplayItems, buildNotedValue, fieldsWithBlankOther, fieldsWithOverlongOtherText, isNoteTextTooLong, isOtherTextTooLong, missingRequiredFields, noteTextLength, serializeAnswers, serializeFieldAnswer, trimAnswerText } from './answers'
 
 const definition: FormDefinition = {
   title: 'Form',
@@ -93,15 +93,38 @@ describe('serializeFieldAnswer — multiple choice', () => {
   })
 })
 
-describe('otherTextLength — Unicode code points, not UTF-16 code units (item 10)', () => {
+describe('noteTextLength — Unicode code points, not UTF-16 code units', () => {
   it('counts an astral emoji as one code point even though it is a UTF-16 surrogate pair', () => {
     const emoji = '😀' // 2 UTF-16 code units, 1 code point
     expect(emoji.length).toBe(2)
-    expect(otherTextLength(emoji)).toBe(1)
+    expect(noteTextLength(emoji)).toBe(1)
   })
 })
 
-describe('isOtherTextTooLong (item 10)', () => {
+describe('trimAnswerText — matches the server\'s trim set exactly', () => {
+  // Built from code points rather than literal characters in source, since
+  // an ideographic space and a zero-width space are both visually silent
+  // and easy to lose or mis-paste in a diff.
+  const ideographicSpace = String.fromCharCode(0x3000) // Unicode Zs (Space_Separator) — real whitespace
+  const zeroWidthSpace = String.fromCharCode(0x200B) // Unicode Cf (Format) — not whitespace
+
+  it('strips U+3000 IDEOGRAPHIC SPACE: it is real Unicode whitespace', () => {
+    expect(trimAnswerText(ideographicSpace + ideographicSpace)).toBe('')
+    expect(trimAnswerText(`${ideographicSpace}hi${ideographicSpace}`)).toBe('hi')
+  })
+
+  it('does NOT strip U+200B ZERO WIDTH SPACE: Unicode format characters are not whitespace', () => {
+    expect(trimAnswerText(zeroWidthSpace)).toBe(zeroWidthSpace)
+    expect(trimAnswerText(`${zeroWidthSpace}hi${zeroWidthSpace}`)).toBe(`${zeroWidthSpace}hi${zeroWidthSpace}`)
+  })
+
+  it('so a field whose only content is U+3000 counts as blank Other text, but U+200B does not', () => {
+    expect(fieldsWithBlankOther(definition, { f1: { other: ideographicSpace } })).toEqual(['f1'])
+    expect(fieldsWithBlankOther(definition, { f1: { other: zeroWidthSpace } })).toEqual([])
+  })
+})
+
+describe('isOtherTextTooLong', () => {
   it('trims outer whitespace before checking the limit', () => {
     const padded = ` ${'a'.repeat(2000)} `
     expect(isOtherTextTooLong(padded)).toBe(false)
@@ -115,7 +138,7 @@ describe('isOtherTextTooLong (item 10)', () => {
   })
 })
 
-describe('fieldsWithOverlongOtherText (item 10)', () => {
+describe('fieldsWithOverlongOtherText', () => {
   it('reports a single-choice field whose trimmed Other text exceeds the limit', () => {
     const field = definition.fields[0]
     const draft: AnswerDraft = { [field.id]: { other: `${'😀'.repeat(2001)}` } }
@@ -134,7 +157,7 @@ describe('fieldsWithOverlongOtherText (item 10)', () => {
   })
 })
 
-describe('serializeFieldAnswer — no silent truncation (item 10)', () => {
+describe('serializeFieldAnswer — no silent truncation', () => {
   it('passes trimmed Other text through unchanged, without slicing it to 2,000 characters', () => {
     const field = definition.fields[0]
     const long = 'a'.repeat(2500)
@@ -175,8 +198,8 @@ describe('buildNotedValue (question-card notes)', () => {
   })
 })
 
-describe('noteTextLength / isNoteTextTooLong (note limit, item: server 1,000-code-point cap)', () => {
-  it('counts code points like otherTextLength, with emoji as one code point', () => {
+describe('noteTextLength / isNoteTextTooLong (note limit, server 1,000-code-point cap)', () => {
+  it('counts code points the same way for notes as for Other text, with emoji as one code point', () => {
     expect(noteTextLength('😀')).toBe(1)
   })
 

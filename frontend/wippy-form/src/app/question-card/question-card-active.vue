@@ -6,6 +6,7 @@ import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
+import { trimAnswerText } from '../../lib/answers'
 import { partClass } from '../../lib/part-class'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardQuestion from './question-card-question.vue'
@@ -38,9 +39,9 @@ const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
 const SUBMITTING_MESSAGE = 'Sending your answer…'
 
 // Submitting while offline, or while a previous submit is still in flight,
-// can only fail or double-post (see use-online-status.ts and spec item 2 —
-// a second pick while `submitting` got a 409 "answered elsewhere"). The
-// same guard ActiveForm.vue applies via its Submit button's :disabled. Here
+// can only fail or double-post (see use-online-status.ts — a second pick
+// while `submitting` got a 409 "answered elsewhere"). The same guard
+// ActiveForm.vue applies via its Submit button's :disabled. Here
 // submission can be triggered straight from a row click/number key
 // (single-question, no explicit button), so the guard lives at the
 // controller's own submit callback rather than only on a button.
@@ -133,11 +134,11 @@ defineExpose({
    * notice for a background state flip (another tab/client answering the
    * same artifact): a passive copy that never touched this card must just
    * switch to the read-only summary, not claim an answer went unsent when
-   * nothing was ever entered (round B finding F-1).
+   * nothing was ever entered.
    */
   hasUnsentInput(): boolean {
     return Object.values(controller.answers).some(a =>
-      a.chosen.length > 0 || a.other.trim() !== '' || Object.values(a.notes).some(n => n.trim() !== ''),
+      a.chosen.length > 0 || trimAnswerText(a.other) !== '' || Object.values(a.notes).some(n => trimAnswerText(n) !== ''),
     )
   },
 })
@@ -274,7 +275,7 @@ function onKeydown(event: KeyboardEvent) {
   }
   if (event.key === 'Enter' && q.multiple && !(target as HTMLElement)?.matches?.('button')) {
     event.preventDefault()
-    if (a.chosen.length > 0 || a.other.trim())
+    if (a.chosen.length > 0 || trimAnswerText(a.other))
       controller.commit(q)
     else {
       controller.error.value = 'Tick at least one answer, or type your own.'

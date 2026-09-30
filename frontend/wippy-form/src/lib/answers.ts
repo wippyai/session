@@ -30,14 +30,9 @@ function codePointLength(raw: string): number {
   return Array.from(raw).length
 }
 
-/** @deprecated kept as a named export for existing callers/tests — same as `codePointLength`. */
-export function otherTextLength(raw: string): number {
-  return codePointLength(raw)
-}
-
 /** True once the trimmed "Other" text exceeds the server's 2,000-code-point limit. */
 export function isOtherTextTooLong(raw: string): boolean {
-  return codePointLength(raw.trim()) > OTHER_TEXT_MAX
+  return codePointLength(trimAnswerText(raw)) > OTHER_TEXT_MAX
 }
 
 /** Counts a note's Unicode code points the same way the server does (see `codePointLength`). */
@@ -47,7 +42,22 @@ export function noteTextLength(raw: string): number {
 
 /** True once the trimmed note exceeds the server's 1,000-code-point limit. */
 export function isNoteTextTooLong(raw: string): boolean {
-  return codePointLength(raw.trim()) > NOTE_TEXT_MAX
+  return codePointLength(trimAnswerText(raw)) > NOTE_TEXT_MAX
+}
+
+/**
+ * The one client-side trim rule for every blank/length check on free-text
+ * answer content — an "Other" answer or a note — used here and by every
+ * question-card call site that needs to know whether such text is blank.
+ * Plain `String.prototype.trim()`, matching the server's own trim rule, so
+ * a string that trims blank here also trims blank there and vice versa.
+ * `trim()` strips ECMAScript `WhiteSpace` (e.g. U+3000 IDEOGRAPHIC SPACE, a
+ * real space character) but leaves Unicode's own zero-width characters
+ * alone (e.g. U+200B ZERO WIDTH SPACE is not whitespace and still counts
+ * as content) — see `answers.test.ts`.
+ */
+export function trimAnswerText(raw: string): string {
+  return raw.trim()
 }
 
 /**
@@ -57,12 +67,12 @@ export function isNoteTextTooLong(raw: string): boolean {
  * `fieldsWithOverlongOtherText`) so the UI can ask the user to shorten it.
  */
 function normalizeOtherText(raw: string): string {
-  return raw.trim()
+  return trimAnswerText(raw)
 }
 
 /** Same trimming rule as `normalizeOtherText`, named for notes at call sites. */
 export function normalizeNote(raw: string): string {
-  return raw.trim()
+  return trimAnswerText(raw)
 }
 
 /**

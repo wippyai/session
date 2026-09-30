@@ -2,6 +2,7 @@
 import type { AnswerDisplayItem } from '../../lib/answers'
 import { Icon } from '@iconify/vue'
 import { computed } from 'vue'
+import { trimAnswerText } from '../../lib/answers'
 import { partClass } from '../../lib/part-class'
 import { textLines } from '../../lib/rich-text'
 import QuestionCardRichText from './question-card-rich-text.vue'
@@ -32,7 +33,7 @@ const ownPart = computed(() => partClass('answer-own'))
         Free text, split on line breaks and joined back with real <br>s —
         never a `\n` left in a single text node (CSS `white-space` would
         depend on a stylesheet the consuming page may not have loaded) and
-        never HTML/markup parsed from the user's own text (round B item 3).
+        never HTML/markup parsed from the user's own text.
       -->
       <!-- eslint-disable-next-line vue/singleline-html-element-content-newline -->
       <template
@@ -45,7 +46,7 @@ const ownPart = computed(() => partClass('answer-own'))
       :text="item.label"
     />
     <span
-      v-if="(item.note || '').trim()"
+      v-if="trimAnswerText(item.note || '')"
       :part="notePart.part"
       :class="notePart.class"
     >
@@ -53,7 +54,7 @@ const ownPart = computed(() => partClass('answer-own'))
         icon="tabler:note"
         aria-hidden="true"
       />
-      <span>{{ item.note!.trim() }}</span>
+      <span>{{ trimAnswerText(item.note!) }}</span>
     </span>
   </span>
 </template>

@@ -2,7 +2,7 @@ import type { ComputedRef, Ref } from 'vue'
 import type { AnswerDisplayItem } from '../lib/answers'
 import type { FieldAnswer, FormAnswers, FormDefinition, FormField, SingleFieldAnswer } from '../lib/definition'
 import { computed, reactive, ref } from 'vue'
-import { answerDisplayItems, buildNotedValue } from '../lib/answers'
+import { answerDisplayItems, buildNotedValue, trimAnswerText } from '../lib/answers'
 import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText } from '../lib/definition'
 
 /** One question's in-progress answer while the card is active (not yet submitted). */
@@ -55,8 +55,7 @@ export const MAX_KEYED_ROWS = 9
 
 /**
  * Interactive state machine for the question card, mirroring the approved
- * prototype's `WippyForm` class (`.local/work/session-forms/design/
- * 2026-09-30-question-card-v2.html`) but as a Vue composable: reactive
+ * prototype's `WippyForm` class but as a Vue composable: reactive
  * per-question answer state, question navigation (single question ->
  * immediate submit; several questions -> advance to the next unseen
  * question, then a review step), notes, and Other. DOM focus movement is
@@ -102,7 +101,7 @@ export function useQuestionCard(
       }
       const useOther = answerHasOther(existing)
       const other = answerOtherText(existing)
-      const done = chosen.length > 0 || (useOther && other.trim() !== '')
+      const done = chosen.length > 0 || (useOther && trimAnswerText(other) !== '')
       const state: QuestionAnswerState = { chosen, other, useOther, notes, noteOpen: null, done }
       return [field.id, state]
     })),
@@ -115,8 +114,8 @@ export function useQuestionCard(
   function hasContent(q: FormField): boolean {
     const a = ans(q)
     return q.multiple
-      ? (a.chosen.length > 0 || a.other.trim() !== '')
-      : (a.chosen.length > 0 || (a.useOther && a.other.trim() !== ''))
+      ? (a.chosen.length > 0 || trimAnswerText(a.other) !== '')
+      : (a.chosen.length > 0 || (a.useOther && trimAnswerText(a.other) !== ''))
   }
 
   function answered(q: FormField): boolean {
@@ -163,12 +162,13 @@ export function useQuestionCard(
       const list: SingleFieldAnswer[] = q.options
         .filter(o => a.chosen.includes(o.value))
         .map(o => buildNotedValue(o.value, a.notes[o.value] ?? ''))
-      if (a.other.trim())
-        list.push({ other: a.other.trim() })
+      const otherText = trimAnswerText(a.other)
+      if (otherText)
+        list.push({ other: otherText })
       return list.length > 0 ? list : undefined
     }
     if (a.useOther)
-      return { other: a.other.trim() }
+      return { other: trimAnswerText(a.other) }
     if (a.chosen[0])
       return buildNotedValue(a.chosen[0], a.notes[a.chosen[0]] ?? '')
     return undefined
@@ -308,7 +308,7 @@ export function useQuestionCard(
 
   function sendOther(q: FormField) {
     const a = ans(q)
-    const text = a.other.trim()
+    const text = trimAnswerText(a.other)
     if (q.multiple) {
       if (!text && a.chosen.length === 0)
         return
