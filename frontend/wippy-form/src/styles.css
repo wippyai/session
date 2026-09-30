@@ -404,20 +404,42 @@ span.w-form__option-mark {
 
 /* ---------- Error / keys / footer ---------- */
 /*
- * Shared by the question-level `Message severity="error"` (already themed
- * by PrimeVue's own error styling) AND the plain `role="alert"` length
- * errors below the note/Other boxes (question-card-option.vue,
- * question-card-question.vue) — those stay plain elements, not `Message`s,
- * because PrimeVue's `Message` sets `inheritAttrs: false` and would
- * silently drop the `:id` their `aria-describedby` linking depends on.
- * `color` here is what actually marks them as errors for a sighted user
- * (text alone is not enough contrast against the surrounding copy): the
- * same danger token `.w-form__footer-text` and
- * `.w-form__review-item--missing .w-form__review-answer` already use, not
- * a local color hack.
+ * Shared by the question-level `Message severity="error"` (see below) AND
+ * the plain `role="alert"` length errors below the note/Other boxes
+ * (question-card-option.vue, question-card-question.vue) — those stay
+ * plain elements, not `Message`s, because PrimeVue's `Message` sets
+ * `inheritAttrs: false` and would silently drop the `:id` their
+ * aria-describedby linking depends on.
  */
 .w-form__error {
   margin: 6px 0 0;
+}
+/*
+ * `color` applies ONLY outside a PrimeVue `Message` (severity="error"),
+ * i.e. only to the plain `role="alert"` elements above, which have no
+ * theme styling of their own and need an explicit color to read as an
+ * error (text alone is not enough contrast against the surrounding copy):
+ * the same danger token `.w-form__footer-text` and
+ * `.w-form__review-item--missing .w-form__review-answer` already use, not
+ * a local color hack.
+ *
+ * A `Message` already carries its OWN severity color via the theme's
+ * `.p-message-error`/`.p-message-simple` classes — `:not(.p-message)`
+ * leaves that alone rather than adding a second, competing `color` (a
+ * `.p-*` override is against the rules anyway, see never-do.md). It would
+ * not even help: audited against the actual theme tokens
+ * (`@wippy-fe/theme/theme-config.css`, `--p-danger-500` /
+ * `color-mix(in srgb, var(--p-danger) 80%, black)` for `-600`) and
+ * confirmed against a live capture, the theme's OWN `Message`
+ * severity="error" variant="simple" text is already below WCAG 1.4.3's
+ * 4.5:1 in both themes on this card's background: light `text-danger-500`
+ * rgb(239,68,68) on rgb(251,247,255) = 3.56:1; dark `text-danger-600`
+ * rgb(191,54,54) on the Message's own translucent red box rgb(83,46,64) =
+ * 2.07:1 (2.42:1 against the plain card). That gap is the theme's own
+ * Message coloring, not this module's — a theme-level contrast fix, like
+ * the radio/checkbox one above, deferred rather than patched locally.
+ */
+.w-form__error:not(.p-message) {
   color: var(--_danger);
 }
 .w-form__keys {

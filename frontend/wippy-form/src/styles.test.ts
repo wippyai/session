@@ -22,9 +22,22 @@ function ruleBody(selectorPattern: string): string {
 // so this is styled with the same danger token the rest of the card already
 // uses for errors (`.w-form__footer-text`, `.w-form__review-item--missing
 // .w-form__review-answer`), not a local color hack.
+//
+// `color` is scoped to `:not(.p-message)`: a `Message` already carries its
+// own severity color from the theme's `.p-message-error`/`.p-message-simple`
+// classes, so adding a second, competing `color` here would be exactly the
+// raw-theme-fighting the compliance rules reject — and would not even help,
+// since the theme's own colors there are themselves below 4.5:1 in both
+// themes (see the comment at the rule itself for the audited numbers).
 describe('styles.css — length-error text uses the theme error token, not the default text color', () => {
-  it('.w-form__error sets color to the shared --_danger token', () => {
+  it('.w-form__error (margin only) sets no color of its own', () => {
     const body = ruleBody('\\.w-form__error')
+    expect(body).not.toMatch(/color:/)
+    expect(body).toMatch(/margin:/)
+  })
+
+  it('.w-form__error:not(.p-message) sets color to the shared --_danger token — the plain role="alert" case, never a Message', () => {
+    const body = ruleBody('\\.w-form__error:not\\(\\.p-message\\)')
     expect(body).toMatch(/color:\s*var\(--_danger\)/)
   })
 
