@@ -837,7 +837,7 @@ local function define_tests()
 
         describe("dates, anchors and form answers", function()
             local owned = {}
-            local PENDING_META = '{"session_form":{"artifact_id":"%s","pending":true,"submission_id":"r"}}'
+            local PENDING_META = '{"session_form":{"artifact_id":"%s","pending":true}}'
             -- A typed message whose client data (file_uuids) carries a
             -- session_form object: it must never pass for a server answer.
             local LOOKALIKE_META = '{"file_uuids":{"session_form":{"artifact_id":"x","pending":true}}}'

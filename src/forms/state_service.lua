@@ -398,11 +398,11 @@ function state_service.submit(user_id, artifact_id, raw_body)
             answers = normalized,
             late = late,
         })
+        -- The row's marker: which form it answers, and that the session has
+        -- not admitted it yet.
         local stored: any, message_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER, text, {
             session_form = {
                 artifact_id = current.artifact_id,
-                submission_id = request_id,
-                late = late,
                 pending = true,
             },
         }, { tx = dbtx })
