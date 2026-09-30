@@ -442,21 +442,18 @@ end
 --
 -- Placement relative to `start_id`, the ordinary row that starts the turn (a
 -- typed message, or an admitted answer), which the first step passes:
---   - a row accepted before it goes before it. This is the case upstream
---     0.6.3 describes: steering left pending by a stopped or recovered turn
---     is included when the user starts another turn, ahead of the new
---     message.
---   - a row accepted after it goes after it. Upstream anchored every pending
---     row to the last row before the turn's first message, so a message typed
---     after that one, while its turn was admitted but its first step had not
---     built the prompt yet (the step waits behind any operation queued ahead
---     of it), reached the model before the message the user sent first. That
---     contradicts the documented rule that steering is included "in persisted
---     message order": the first message is persisted before it. Forms make the
---     case common, because a turn can start at an admitted answer while the
---     user keeps typing, but the rule does not depend on forms.
+--   - a row accepted before it goes before it: steering left pending by a
+--     stopped or recovered turn is included when the user starts another
+--     turn, ahead of the new message.
+--   - a row accepted after it goes after it. Steering is included in
+--     persisted message order, and a message typed while the turn's first
+--     step has not built the prompt yet (the step waits behind any operation
+--     queued ahead of it) was persisted after the message that starts the
+--     turn, so it must not reach the model before that message. A turn that
+--     starts at an admitted form answer while the user keeps typing hits
+--     this often, but the rule does not depend on forms.
 -- On later steps (no `start_id`) every due row goes after the latest ordinary
--- row, as upstream does.
+-- row.
 local function steering_updates(scan, start_id)
     local updates = {}
     for _, entry in ipairs(scan.pending) do
@@ -512,7 +509,7 @@ function message_handlers.apply_pending_inputs(ctx, new_user_id)
 end
 
 -- Whether the current turn ended by creating a form (control_forms keys its
--- one-form-per-turn marker by the same turn id). D11: such a turn takes no
+-- one-form-per-turn marker by the same turn id). Such a turn takes no
 -- further step; steering that is still pending starts the next turn instead
 -- (session.flush_held).
 function message_handlers.ended_by_form(ctx): boolean

@@ -493,7 +493,7 @@ local function define_tests()
             test.eq(answers.must[1].note, ZWSP, "U+200B is not trimmed")
         end)
 
-        it("finishes fast on a pathological whitespace run instead of hanging (H3)", function()
+        it("finishes fast on a pathological whitespace run instead of hanging", function()
             local time = require("time")
             local huge_padded = "x" .. string.rep(" ", 60000) .. "y"
             local huge_blank = string.rep(" ", 60000)
@@ -513,8 +513,8 @@ local function define_tests()
             test.eq(other_blank_code, "too_long")
             test.eq(note_code, "too_long")
             test.eq(note_blank_code, "too_long")
-            -- The old quadratic trim cost about 2e9 steps on one such value
-            -- (H3); a linear trim plus the raw-byte cap finish in well under
+            -- A backtracking trim pattern costs about 2e9 steps on one such
+            -- value; a linear trim plus the raw-byte cap finish in well under
             -- a second for all four.
             test.is_true(elapsed:milliseconds() < 2000,
                 string.format("expected well under 2000ms, took %.2fms", elapsed:milliseconds()))
@@ -621,7 +621,7 @@ local function define_tests()
             -- when a caller (e.g. state_service's stored submission.answers)
             -- json.encodes it directly instead of going through
             -- encode_answers: a plain {} is indistinguishable from an empty
-            -- array (probe J5) and would otherwise serialize as [].
+            -- array and would otherwise serialize as [].
             test.eq((json.encode(answers)), "{}")
         end)
     end)

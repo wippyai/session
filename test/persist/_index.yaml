@@ -136,7 +136,7 @@ entries:
       name: Shared transaction (artifact update + message create)
       type: test
       suite: session
-      comment: Product-level replacement for the deleted P0-11 SQL transaction probe - commit, rollback, and mid-transaction failure across a caller-supplied tx; tx.run on a raise, nested, and with repository calls that omit opts.tx
+      comment: Commit, rollback, and mid-transaction failure across a caller-supplied tx; tx.run on a raise, nested, and with repository calls that omit opts.tx
     source: file://shared_transaction_test.lua
     modules:
       - sql

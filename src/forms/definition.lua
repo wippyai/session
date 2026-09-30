@@ -10,8 +10,8 @@ local ordered_json = require("ordered_json")
 --
 -- Answers are validated one field at a time with explicit checks rather than
 -- one json.validate call over the whole object: the runtime validator names
--- only the first violation of a document (probe J2), and an empty Lua table
--- is indistinguishable from an empty array (probe J5).
+-- only the first violation of a document, and an empty Lua table is
+-- indistinguishable from an empty array.
 
 local definition = {}
 
@@ -65,7 +65,7 @@ local function is_array(value: any): boolean
 end
 
 -- A decoded JSON object: a table whose keys are all strings. An empty table
--- passes both is_array and is_object (J5); callers decide what empty means.
+-- passes both is_array and is_object; callers decide what empty means.
 local function is_object(value: any): boolean
     if type(value) ~= "table" then return false end
     for key in pairs(value) do
@@ -640,7 +640,7 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
     local form_errors = {}
     -- table.create(0, n) (Wippy extension) forces json.encode to read this
     -- as an object, not an array: a plain {} is indistinguishable from an
-    -- empty array (probe J5), so an all-optional unanswered form would
+    -- empty array, so an all-optional unanswered form would
     -- otherwise store/serialize submission.answers as [] instead of {}.
     local normalized = table.create(0, #def.fields)
 

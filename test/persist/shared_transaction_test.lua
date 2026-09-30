@@ -1,5 +1,4 @@
--- Product-level replacement for test/probes/sql_transaction_probe_test.lua
--- (P0-11). Exercises the real call paths that share a transaction: an
+-- Exercises the real call paths that share a transaction: an
 -- artifact_repo.update(..., { tx = ... }) and a message_repo.create(...,
 -- { tx = ... }) run on the same tx.run(fn) transaction, committing or
 -- rolling back together. The tx.run block covers fn raising, a nested

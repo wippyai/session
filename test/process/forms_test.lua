@@ -685,7 +685,7 @@ local function define_tests()
                 test.eq(status, 200)
                 test.eq(json.decode(tostring(body)).stale, false)
 
-                -- The form ends the turn (D11): no continuation step for the
+                -- The form ends the turn: no continuation step for the
                 -- steering. The next turn starts at the steered message. Its
                 -- request was answered when the message was stored.
                 local finished = reach_boundary(ctx, bus)

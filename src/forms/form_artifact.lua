@@ -35,7 +35,7 @@ function form_artifact.build_content(def: any, state: string): (string?, string?
 end
 
 -- The initial meta.session_form object. `submission` stays absent (JSON
--- null) until an answer is accepted: Lua has no null sentinel (probe J5).
+-- null) until an answer is accepted: Lua has no null sentinel.
 function form_artifact.new_meta(origin: any): any
     return {
         version = form_artifact.META_VERSION,
