@@ -2,6 +2,7 @@ local ctx = require("ctx")
 local answer_text = require("answer_text")
 local artifact_repo = require("artifact_repo")
 local form_artifact = require("form_artifact")
+local form_meta = require("form_meta")
 local ordered_json = require("ordered_json")
 
 -- The read_form tool: the self-contained record of one form of the calling
@@ -52,7 +53,7 @@ local function handler(params: any)
         return nil, "Not a form: " .. tostring(parse_err)
     end
 
-    local submission = type(form.meta.submission) == "table" and form.meta.submission or nil
+    local submission = form_meta.submission(form.meta)
     if not submission then
         return { message = ordered_json.object({
             { "status", "unanswered" },

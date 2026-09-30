@@ -4,6 +4,7 @@ local security = require("security")
 local consts = require("consts")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
+local form_meta = require("form_meta")
 local answer_text = require("answer_text")
 local ordered_json = require("ordered_json")
 local tx = require("tx")
@@ -152,8 +153,7 @@ local function delivery_of(submission, session_id)
         if is_not_found(err) then return "interrupted", nil end
         return nil, tostring(err)
     end
-    local marker = type(row.metadata) == "table" and row.metadata.session_form or nil
-    if type(marker) == "table" and marker.pending == true then return "pending", nil end
+    if message_repo.is_pending_answer(row) then return "pending", nil end
 
     -- The newest rows after the answer (the answer row among them when few
     -- follow). A full page means the conversation went on long after it.
@@ -185,12 +185,11 @@ function state_service.get_state(user_id, artifact_id)
         return failure(403, "forbidden", "You cannot read forms in this session.")
     end
 
-    local submission = form.meta.submission
-    local origin = type(form.meta.origin) == "table" and form.meta.origin or {}
+    local submission = form_meta.submission(form.meta)
+    local origin = form_meta.origin(form.meta)
     local stale = false
     local delivery = nil
-    if type(submission) ~= "table" then
-        submission = nil
+    if not submission then
         if type(origin.created_cursor) == "string" and origin.created_cursor ~= "" then
             local moved_on, stale_err = message_repo.has_user_input_after(
                 artifact.session_id, origin.created_cursor, artifact.artifact_id)
@@ -352,8 +351,9 @@ function state_service.submit(user_id, artifact_id, raw_body)
 
     -- An answered form is settled before the answers are validated: only an
     -- exact replay (same request id) needs them normalized.
-    if type(form.meta.submission) == "table" then
-        return against_existing(artifact, form, form.meta.submission, request_id, envelope.answers)
+    local existing = form_meta.submission(form.meta)
+    if existing then
+        return against_existing(artifact, form, existing, request_id, envelope.answers)
     end
     local expected_version = envelope.expected_content_version
     if expected_version ~= nil and (artifact.content_version or 1) ~= expected_version then
@@ -385,14 +385,14 @@ function state_service.submit(user_id, artifact_id, raw_body)
         end
         local current_form, parse_err = form_artifact.parse(current)
         if not current_form then return nil, tostring(parse_err) end
-        if type(current_form.meta.submission) == "table" then
+        if form_meta.submission(current_form.meta) then
             return nil, { existing = current, form = current_form }
         end
         if expected_version ~= nil and (current.content_version or 1) ~= expected_version then
             return nil, { version_conflict = current }
         end
 
-        local origin = type(current_form.meta.origin) == "table" and current_form.meta.origin or {}
+        local origin = form_meta.origin(current_form.meta)
         local late = false
         if type(origin.created_cursor) == "string" and origin.created_cursor ~= "" then
             local moved_on, stale_err = message_repo.has_user_input_after(
@@ -451,7 +451,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
             if accept_err.existing then
                 return against_existing(accept_err.existing, accept_err.form,
-                    accept_err.form.meta.submission, request_id, envelope.answers)
+                    form_meta.submission(accept_err.form.meta), request_id, envelope.answers)
             end
         end
         -- A concurrent submission may have won while this transaction ran:
@@ -459,8 +459,9 @@ function state_service.submit(user_id, artifact_id, raw_body)
         -- conflict. Read the committed state and classify against it.
         local winner = artifact_repo.get(artifact.artifact_id)
         local winner_form = winner and form_artifact.parse(winner) or nil
-        if winner_form and type(winner_form.meta.submission) == "table" then
-            return against_existing(winner, winner_form, winner_form.meta.submission, request_id, envelope.answers)
+        local won = winner_form and form_meta.submission(winner_form.meta) or nil
+        if won then
+            return against_existing(winner, winner_form, won, request_id, envelope.answers)
         end
         if type(accept_err) == "table" and accept_err.version_conflict then
             return failure(409, "version_conflict", "The form changed since it was loaded.",

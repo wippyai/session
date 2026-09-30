@@ -101,6 +101,7 @@ entries:
       tx: wippy.session.persist:tx
       message_date: wippy.session.persist:message_date
       input_metadata: wippy.session:input_metadata
+      form_meta: wippy.session.forms:form_meta
 
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo

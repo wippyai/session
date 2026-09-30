@@ -1,17 +1,18 @@
 local json = require("json")
 local definition = require("definition")
+local form_meta = require("form_meta")
 
 -- The stored representation of a session form: an inline artifact whose
 -- content is the component-tag package for <wippy-form>, plus one metadata
 -- key, meta.session_form (version, origin binding, and the accepted
--- submission once answered).
+-- submission once answered; read it through form_meta).
 
 local form_artifact = {}
 
 form_artifact.SPECIFICATION = "wippy-component-tag-1.0"
 form_artifact.TAG_NAME = "wippy-form"
-form_artifact.META_KEY = "session_form"
-form_artifact.META_VERSION = 1
+form_artifact.META_KEY = form_meta.KEY
+form_artifact.META_VERSION = form_meta.VERSION
 
 form_artifact.STATE = {
     ACTIVE = "active",
@@ -46,11 +47,8 @@ end
 -- { definition, state, meta } or nil plus a reason when the artifact is not
 -- a supported form.
 function form_artifact.parse(artifact: any): (any, string?)
-    if type(artifact) ~= "table" or type(artifact.meta) ~= "table" then
-        return nil, "Artifact is not a form"
-    end
-    local meta = artifact.meta[form_artifact.META_KEY]
-    if type(meta) ~= "table" or meta.version ~= form_artifact.META_VERSION then
+    local meta = type(artifact) == "table" and form_meta.of(artifact.meta) or nil
+    if not meta or meta.version ~= form_artifact.META_VERSION then
         return nil, "Artifact is not a form"
     end
     if type(artifact.content) ~= "string" or artifact.content == "" then

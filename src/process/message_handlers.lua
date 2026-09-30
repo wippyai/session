@@ -12,6 +12,7 @@ local control_handlers = require("control_handlers")
 local message_repo = require("message_repo")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
+local form_index = require("form_index")
 local logger = require("logger"):named("session.forms")
 
 type SessionContext = {
@@ -931,10 +932,9 @@ end
 function message_handlers.publish_admitted(rows: {any}?)
     if not rows then return end
     for _, row in ipairs(rows) do
-        local metadata: any = type(row) == "table" and row.metadata or nil
-        local form: any = type(metadata) == "table" and metadata.session_form or nil
-        if type(form) == "table" and type(form.artifact_id) == "string" then
-            local form_artifact = artifact_repo.get(form.artifact_id)
+        local form_id = type(row) == "table" and message_repo.answer_form_id(row) or nil
+        if form_id then
+            local form_artifact = artifact_repo.get(form_id)
             if form_artifact then artifact_events.publish_updated(form_artifact) end
         end
     end
@@ -1087,15 +1087,13 @@ end
 -- see yet. nil when unknown (then read_form refuses to show answers).
 local function pending_form_answers(ctx)
     if type(ctx.session_id) ~= "string" or ctx.session_id == "" then return nil end
-    local rows, err = message_repo.list_pending_answers(ctx.session_id, 200)
-    if not rows then
+    if type(ctx.reader) ~= "table" or type(ctx.reader.artifacts) ~= "function" then return nil end
+    local artifacts, list_err = ctx.reader:artifacts():all()
+    local forms, err = nil, list_err
+    if artifacts then forms, err = form_index.pending_answers(ctx.session_id, artifacts) end
+    if not forms then
         logger:warn("pending form answer scan failed", { session_id = ctx.session_id, error = tostring(err) })
         return nil
-    end
-    local forms = {}
-    for _, row in ipairs(rows) do
-        local form = type(row.metadata) == "table" and row.metadata.session_form or nil
-        if type(form) == "table" and type(form.artifact_id) == "string" then forms[form.artifact_id] = true end
     end
     return forms
 end

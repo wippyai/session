@@ -16,6 +16,13 @@ entries:
     modules:
       - json
 
+  # wippy.session.forms:form_meta
+  - name: form_meta
+    kind: library.lua
+    meta:
+      comment: Accessors for the form record in artifact meta (meta.session_form); imports nothing, so persistence can use it
+    source: file://form_meta.lua
+
   # wippy.session.forms:definition
   - name: definition
     kind: library.lua
@@ -37,6 +44,7 @@ entries:
       - json
     imports:
       definition: wippy.session.forms:definition
+      form_meta: wippy.session.forms:form_meta
 
   # wippy.session.forms:answer_text
   - name: answer_text
@@ -63,6 +71,7 @@ entries:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
       form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
       answer_text: wippy.session.forms:answer_text
       ordered_json: wippy.session.forms:ordered_json
       tx: wippy.session.persist:tx
@@ -253,6 +262,7 @@ entries:
       answer_text: wippy.session.forms:answer_text
       artifact_repo: wippy.session.persist:artifact_repo
       form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
       ordered_json: wippy.session.forms:ordered_json
     method: handler
     pool:
@@ -267,4 +277,5 @@ entries:
     modules:
       - json
     imports:
-      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
+      message_repo: wippy.session.persist:message_repo

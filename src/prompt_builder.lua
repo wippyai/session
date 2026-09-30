@@ -354,16 +354,11 @@ local function forms_index_of(session: any): (string?, string?)
         return nil, "Failed to load forms: " .. tostring(err)
     end
     local pending = {}
-    if form_index.has_answers(artifacts) and type(session.session_id) == "string" then
-        local rows, pending_err = message_repo.list_pending_answers(session.session_id, form_index.MAX_PENDING_SCAN)
-        if not rows then
+    if type(session.session_id) == "string" then
+        local pending_err
+        pending, pending_err = form_index.pending_answers(session.session_id, artifacts)
+        if not pending then
             return nil, "Failed to load pending form answers: " .. tostring(pending_err)
-        end
-        for _, row in ipairs(rows) do
-            local form = type(row.metadata) == "table" and row.metadata.session_form or nil
-            if type(form) == "table" and type(form.artifact_id) == "string" then
-                pending[form.artifact_id] = true
-            end
         end
     end
     return form_index.build(artifacts, { pending_answers = pending }), nil

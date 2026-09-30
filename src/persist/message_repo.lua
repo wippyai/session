@@ -5,6 +5,7 @@ local consts = require("consts")
 local tx = require("tx")
 local message_date = require("message_date")
 local input_metadata = require("input_metadata")
+local form_meta = require("form_meta")
 
 type Message = {
     message_id: string,
@@ -85,9 +86,8 @@ local function committed_form_of(row)
 
     -- The form's server-written origin must name this call. A call cannot
     -- claim a form that another call created.
-    local form = type(artifact.meta) == "table" and artifact.meta.session_form or nil
-    local origin = type(form) == "table" and form.origin or nil
-    if type(origin) ~= "table" or origin.tool_message_id ~= row.message_id then return nil end
+    local origin = form_meta.origin(form_meta.of(artifact.meta))
+    if origin.tool_message_id ~= row.message_id then return nil end
     if origin.call_id ~= nil and origin.call_id ~= row.metadata.call_id then return nil end
     return artifact
 end
@@ -973,6 +973,17 @@ end
 -- the active turn must not see input accepted after it started.
 message_repo.is_pending_answer = is_pending_answer
 
+-- Whether a history row (metadata decoded) is a server-written form answer,
+-- admitted or not. Only these carry a real answer record.
+message_repo.is_form_answer = is_form_answer
+
+-- The id of the form a form answer row answers, or nil for any other row.
+function message_repo.answer_form_id(row)
+    if not is_form_answer(row) then return nil end
+    local form_id = row.metadata.session_form.artifact_id
+    return type(form_id) == "string" and form_id or nil
+end
+
 -- Runs `build()` (a select that includes `<prefix>message_id`) page by page
 -- in (date, message_id) order and calls visit(row) for each row until it
 -- returns true. Returns true when visit stopped the scan, false when the rows
@@ -1194,9 +1205,8 @@ function message_repo.has_user_input_after(session_id, after_date, exclude_artif
         if row.artifact_id ~= exclude_artifact_id then
             local meta = row.meta
             if type(meta) == "string" then meta = json.decode(meta :: string) end
-            local form = type(meta) == "table" and meta.session_form or nil
-            local submission = type(form) == "table" and form.submission or nil
-            if type(submission) == "table" and type(submission.submitted_at) == "string"
+            local submission = form_meta.submission(form_meta.of(meta))
+            if submission and type(submission.submitted_at) == "string"
                 and accepted_after(submission.submitted_at, after_date) then
                 return true
             end

@@ -1,5 +1,6 @@
 local test = require("test")
 local form_index = require("form_index")
+local message_repo = require("message_repo")
 
 local function unanswered(n)
     return {
@@ -51,6 +52,30 @@ local function define_tests()
             test.contains(text, "- answered: \"Form 1\" form_id=b-001")
             test.is_true(form_index.has_answers(artifacts))
             test.is_false(form_index.has_answers({ unanswered(1) }))
+        end)
+
+        it("reads pending answer rows only when a form holds an answer", function()
+            local original = message_repo.list_pending_answers
+            local scans = 0
+            message_repo.list_pending_answers = function(session_id, limit)
+                scans = scans + 1
+                test.eq(session_id, "s-1")
+                test.eq(limit, form_index.MAX_PENDING_SCAN)
+                return {
+                    { type = "user", metadata = { session_form = { artifact_id = "b-002", pending = true } } },
+                    { type = "user", metadata = { file_uuids = {} } },
+                }
+            end
+
+            local none, none_err = form_index.pending_answers("s-1", { unanswered(1) })
+            local some, some_err = form_index.pending_answers("s-1", { unanswered(1), answered(2) })
+            message_repo.list_pending_answers = original
+
+            test.is_nil(none_err)
+            test.is_nil(next(none or { x = true }), "no answered form: an empty set")
+            test.is_nil(some_err)
+            test.is_true((some :: any)["b-002"])
+            test.eq(scans, 1, "the rows are read only for the session with an answered form")
         end)
 
         it("stays within 8 KiB and is the same for the same rows", function()

@@ -6,6 +6,7 @@ local artifact_events = require("artifact_events")
 local tx = require("tx")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
+local form_meta = require("form_meta")
 local input_policy = require("input_policy")
 
 type ArtifactData = {
@@ -276,7 +277,7 @@ function control_handlers.control_artifacts(ctx, op)
             -- A session form's content, answers and origin binding are
             -- server-authored; an agent changes a question by asking a new form.
             local target = artifact_repo.get(artifact_data.id)
-            if target and type(target.meta) == "table" and target.meta[form_artifact.META_KEY] ~= nil then
+            if target and form_meta.of(target.meta) then
                 return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
             end
         end
@@ -369,8 +370,8 @@ local function count_unresolved_forms(session_id)
     if not artifacts then return nil, err end
     local count = 0
     for _, artifact in ipairs(artifacts) do
-        local form = type(artifact.meta) == "table" and artifact.meta[form_artifact.META_KEY] or nil
-        if type(form) == "table" and type(form.submission) ~= "table" then count = count + 1 end
+        local form = form_meta.of(artifact.meta)
+        if form and not form_meta.submission(form) then count = count + 1 end
     end
     return count
 end

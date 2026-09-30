@@ -57,6 +57,7 @@ entries:
       tx: wippy.session.persist:tx
       definition: wippy.session.forms:definition
       form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
       input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:message_handlers
@@ -86,6 +87,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       artifact_repo: wippy.session.persist:artifact_repo
       artifact_events: wippy.session.persist:artifact_events
+      form_index: wippy.session.forms:form_index
 
   - name: input_policy
     kind: library.lua
