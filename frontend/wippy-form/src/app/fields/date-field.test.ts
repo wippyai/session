@@ -3,7 +3,7 @@ import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { flushPromises, mount } from '@vue/test-utils'
 import userEvent from '@testing-library/user-event'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import DateField from './date-field.vue'
 import FormFieldControl from './form-field.vue'
 
@@ -626,5 +626,195 @@ describe('date field: the theme observer', () => {
     expect(released()).toBe(1)
     await wrapper.setProps({ disabled: false })
     expect(observed()).toBe(2)
+  })
+})
+
+describe('date field: focus when the calendar closes', () => {
+  /*
+   * PrimeVue puts focus on the box with `input.focus()` when a day is picked,
+   * but its own delayed re-focus of the calendar's cells (a
+   * `setTimeout(updateFocus, 0)` queued by every render of the picker, which
+   * only skips a cell when `overlay.contains(document.activeElement)`) can run
+   * after that and put focus on the first day cell. Inside the component's
+   * shadow root `document.activeElement` is the shadow host, so the check never
+   * sees the box, and when the calendar closes a moment later the browser drops
+   * focus to the page. These tests run in a shadow root with fake timers, as the
+   * web component does, and drive the keyboard path the calendar offers.
+   */
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  const hosts: HTMLElement[] = []
+
+  afterEach(() => {
+    hosts.splice(0).forEach(host => host.remove())
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  const ERROR: FieldError[] = [{ code: 'required', message: 'Choose a date.' }]
+
+  /**
+   * The field in a shadow root, with a button beside it to move focus to, and a way to re-render the field.
+   * It keeps the real Transition: the picker reports `hide` from its leave hook, and the stub Test Utils
+   * puts in its place by default never runs it.
+   */
+  function mountView() {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    hosts.push(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    const container = document.createElement('div')
+    container.setAttribute('data-wippy-theme-root', '')
+    const elsewhere = document.createElement('button')
+    elsewhere.textContent = 'Elsewhere'
+    shadow.append(container, elsewhere)
+    const wrapper = mount(DateField, {
+      props: {
+        field,
+        modelValue: '2026-10-15',
+        errors: [],
+        disabled: false,
+        readonly: false,
+        'onUpdate:modelValue': (value: FieldAnswer | undefined) => { void wrapper.setProps({ modelValue: value }) },
+      },
+      global: { plugins: [PrimeVuePlugin], stubs: { transition: false } },
+      attachTo: container,
+    })
+    return {
+      shadow,
+      elsewhere,
+      input: () => shadow.querySelector('input') as HTMLInputElement,
+      focused: () => shadow.activeElement,
+      /** The form re-rendering the field a moment after something happened to it. */
+      rerender: async () => {
+        await wrapper.setProps({ errors: wrapper.props('errors').length > 0 ? [] : ERROR })
+      },
+    }
+  }
+
+  type View = ReturnType<typeof mountView>
+
+  function press(target: Element | null, code: string) {
+    target?.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true, cancelable: true }))
+  }
+
+  /** ArrowDown in the box opens the calendar. */
+  async function openCalendar(view: View) {
+    await nextTick()
+    view.input().focus()
+    press(view.input(), 'ArrowDown')
+    await nextTick()
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(view.shadow.querySelector('.p-datepicker-panel'), 'the calendar is open').not.toBeNull()
+  }
+
+  /** A second ArrowDown moves focus from the box into the days. */
+  async function openIntoDays(view: View) {
+    await openCalendar(view)
+    press(view.input(), 'ArrowDown')
+    expect(view.focused()?.closest('.p-datepicker-panel'), 'focus is in the calendar').not.toBeNull()
+  }
+
+  /**
+   * Waits out the delay after a pick (the calendar closes 150 ms after it) and the render that removes it.
+   * The renders the last key queued run first, as they do in a browser, where microtasks run before any timer.
+   */
+  async function settle() {
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(1000)
+    await nextTick()
+  }
+
+  /** A mouse press somewhere outside the field, which is what closes the calendar for a mouse user. */
+  function pressOutside(target: Element) {
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }))
+  }
+
+  function expectClosed(view: View) {
+    expect(view.shadow.querySelector('.p-datepicker-panel'), 'the calendar has closed').toBeNull()
+  }
+
+  it('puts focus on the box after a day is picked from the keyboard', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    press(view.focused(), 'ArrowRight')
+    press(view.focused(), 'Enter')
+    await settle()
+    expectClosed(view)
+    expect(view.input().value).toBe('2026-10-02')
+    expect(view.focused()).toBe(view.input())
+  })
+
+  it('puts focus on the box after a keyboard pick even when the form re-renders the field just after it', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    press(view.focused(), 'ArrowRight')
+    press(view.focused(), 'Enter')
+    await nextTick()
+    // Two renders of the picker before its zero-delay re-focus timers run: the first
+    // timer consumes the picker's "do not focus" flag, the second focuses a day cell.
+    await view.rerender()
+    await vi.advanceTimersByTimeAsync(20)
+    expect(view.focused()?.closest('.p-datepicker-panel'), 'PrimeVue has moved focus into the calendar').not.toBeNull()
+    await settle()
+    expectClosed(view)
+    expect(view.focused()).toBe(view.input())
+  })
+
+  it('puts focus on the box after Escape closes the calendar from a day', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    press(view.focused(), 'Escape')
+    await settle()
+    expectClosed(view)
+    expect(view.input().value).toBe('2026-10-15')
+    expect(view.focused()).toBe(view.input())
+  })
+
+  it('does not scroll the page when it gives the box focus back', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    const focus = vi.spyOn(view.input(), 'focus')
+    press(view.focused(), 'ArrowRight')
+    press(view.focused(), 'Enter')
+    await nextTick()
+    await view.rerender()
+    await settle()
+    expect(focus.mock.calls.some(([options]) => options?.preventScroll === true)).toBe(true)
+  })
+
+  it('leaves focus where the user put it when they moved it before the calendar closed', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    view.elsewhere.focus()
+    pressOutside(view.elsewhere)
+    await settle()
+    expectClosed(view)
+    expect(view.focused()).toBe(view.elsewhere)
+  })
+
+  it('does not take focus when nothing in the form had it as the calendar closed', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    ;(view.focused() as HTMLElement).blur()
+    expect(view.focused()).toBeNull()
+    pressOutside(view.elsewhere)
+    await settle()
+    expectClosed(view)
+    expect(view.focused()).toBeNull()
+  })
+
+  it('leaves focus on the control Tab moves it to when the calendar closes as the box is left', async () => {
+    const view = mountView()
+    await openCalendar(view)
+    // Tab from the box closes the calendar; the browser then moves focus on, here to the button beside the form.
+    press(view.input(), 'Tab')
+    view.elsewhere.focus()
+    await settle()
+    expectClosed(view)
+    expect(view.focused()).toBe(view.elsewhere)
   })
 })

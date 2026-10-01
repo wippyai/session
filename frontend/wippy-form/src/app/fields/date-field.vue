@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ComponentPublicInstance } from 'vue'
 import type { DateFormField, FieldAnswer, FieldError } from '../../lib/definition'
 import DatePicker from 'primevue/datepicker'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -53,6 +54,14 @@ import FieldShell from './field-shell.vue'
  * state of the `field-input` part, which the stylesheet bounds to
  * `--wippy-form-date-width` (full width only on a narrower form). The calendar
  * is not overridden; it follows the control.
+ *
+ * Where focus goes when the calendar closes: to the box, when it is still in the
+ * calendar (`onCalendarHide`). A pick or Escape from a day hands focus to the
+ * box, but the picker's own delayed re-focus of its day cells can run after that
+ * and take it back (inside a shadow root its "focus is already in the calendar"
+ * check reads `document.activeElement`, which is the shadow host), and when the
+ * calendar then closes the browser drops focus to the page. Focus that has
+ * already moved on (a click elsewhere, Tab) is left where it is.
  */
 const props = defineProps<{
   field: DateFormField
@@ -191,6 +200,25 @@ function onBlur(event: { originalEvent: Event, value: string }) {
 const inputPart = computed(() => partClass('field-input', 'date'))
 const calendarPart = computed(() => partClass('field-calendar'))
 
+const picker = ref<ComponentPublicInstance | null>(null)
+
+// The calendar is closing, and its panel is still in the page for this one
+// moment (the picker emits `hide` as the leave starts). A mouse click outside
+// has moved focus already and a Tab has moved it on, so only focus that is
+// still inside the panel is acted on: it is about to be dropped to the page.
+// It is given to the box. `document.activeElement` is no use for the check
+// inside a shadow root (it is the shadow host), so the root's own is read.
+// `preventScroll`: a page scrolled away closes the calendar too, and focusing
+// the box must not scroll it back.
+function onCalendarHide() {
+  const box = (picker.value?.$el as HTMLElement | undefined)?.querySelector('input')
+  if (!box)
+    return
+  const focused = (box.getRootNode() as Document | ShadowRoot).activeElement
+  if (focused?.closest(`.${calendarPart.value.class}`))
+    box.focus({ preventScroll: true })
+}
+
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 // The theme class of the container, for the calendar (see above).
 // Only while a calendar can open: not for a read-only or disabled field.
@@ -231,6 +259,7 @@ defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })
   >
     <template #default="{ id, describedBy, invalid }">
       <DatePicker
+        ref="picker"
         :model-value="pickerModel"
         :input-id="id"
         update-model-type="string"
@@ -251,6 +280,7 @@ defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })
         @click="onBoxClick"
         @input="onTyped"
         @blur="onBlur"
+        @hide="onCalendarHide"
       />
     </template>
   </FieldShell>
