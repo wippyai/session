@@ -330,6 +330,18 @@ local function define_tests()
                 return ""
             end
 
+            -- Waits for the clients to be told the title: the session row is
+            -- written first, and the update reaches the clients after it.
+            local function announced_title(events: any): any
+                for _ = 1, 100 do
+                    for _, update in ipairs(events.updates) do
+                        if update.title then return update.title end
+                    end
+                    time.sleep("50ms")
+                end
+                return nil
+            end
+
             it("stores the first form without waiting for the session title", function()
                 local ctx, events = new_ctx("")
                 ctx.run_in_background = session.run_in_background
@@ -347,11 +359,7 @@ local function define_tests()
                 test.eq(stored_title(ctx), "Parcel delivery", "the title is still generated, beside the turn")
                 test.eq(table.concat(order, ", "), "tool round done, title returned")
                 test.eq(#calls, 1)
-                local announced = nil
-                for _, update in ipairs(events.updates) do
-                    if update.title then announced = update.title end
-                end
-                test.eq(announced, "Parcel delivery")
+                test.eq(announced_title(events), "Parcel delivery")
             end)
         end)
 
