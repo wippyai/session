@@ -19,7 +19,7 @@ const answersB: FormAnswers = { f1: 'b' }
 
 beforeEach(resetProxyMock)
 
-describe('useFormSubmit — request id issuance', () => {
+describe('useFormSubmit: request id issuance', () => {
   it('reuses the same request_id across attempts when the answers are unchanged', async () => {
     const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
@@ -69,7 +69,7 @@ describe('useFormSubmit — request id issuance', () => {
   })
 })
 
-describe('useFormSubmit — outcomes', () => {
+describe('useFormSubmit: outcomes', () => {
   it('returns fieldErrors/formErrors for a 422 rejection, with no retry', async () => {
     const submitFn = vi.fn().mockRejectedValue(
       hostError(422, undefined, {
@@ -142,7 +142,7 @@ describe('useFormSubmit — outcomes', () => {
   })
 })
 
-describe('useFormSubmit — exhausted-retry copy', () => {
+describe('useFormSubmit: exhausted-retry copy', () => {
   it('does not say "Retrying…" once the one automatic retry has also failed with no response', async () => {
     vi.useFakeTimers()
     try {
@@ -170,7 +170,7 @@ describe('useFormSubmit — exhausted-retry copy', () => {
   })
 })
 
-describe('useFormSubmit — retry outcome mapping', () => {
+describe('useFormSubmit: retry outcome mapping', () => {
   it('maps a 422 on the retry attempt itself to field errors, not a generic message', async () => {
     vi.useFakeTimers()
     try {
@@ -225,7 +225,7 @@ describe('useFormSubmit — retry outcome mapping', () => {
   })
 })
 
-describe('useFormSubmit — rebind safety', () => {
+describe('useFormSubmit: rebind safety', () => {
   it('drops a result that resolves after the artifact id changed mid-flight', async () => {
     let resolveSubmit: ((r: SubmitAccepted) => void) | undefined
     const pending = new Promise<SubmitAccepted>((resolve) => { resolveSubmit = resolve })
@@ -266,7 +266,7 @@ describe('useFormSubmit — rebind safety', () => {
   })
 })
 
-describe('useFormSubmit — older Host without the artifactState export', () => {
+describe('useFormSubmit: older Host without the artifactState export', () => {
   it('returns the documented message and calls nothing when @wippy-fe/proxy has no artifactState export', async () => {
     setArtifactStateExport(undefined)
     const artifactId = ref<string | null>('artifact-1')

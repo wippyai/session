@@ -1,15 +1,9 @@
 /**
- * Vitest global setup. Runs before any test module is loaded.
- *
- * `@wippy-fe/webcomponent-core` reads several `@wippy-fe/proxy` getters
- * (`api`, `host`, `config`, ...) at module-evaluation time to re-export
- * them as named bindings. Those getters throw immediately unless
- * `window.__WIPPY_APP_API__` / `window.__WIPPY_APP_CONFIG__` are already
- * present — normally injected by the Host before proxy.js loads. Mirrors
- * the stub in the sibling `wippy-form` package's own `vitest.setup.ts`,
- * trimmed further: this component never calls any host API surface, so
- * the stub only needs to keep the unrelated import graph from crashing
- * on load.
+ * `@wippy-fe/webcomponent-core` reads several getters of `@wippy-fe/proxy`
+ * (`api`, `host`, `config`) when it is evaluated. The getters throw unless
+ * `window.__WIPPY_APP_API__` and `window.__WIPPY_APP_CONFIG__` exist, and the
+ * Host normally injects them before proxy.js loads. This stub only keeps that
+ * import graph from failing. The `wippy-form` package has the same file.
  */
 if (typeof window !== 'undefined') {
   const w = window as unknown as Record<string, unknown>
@@ -55,17 +49,9 @@ if (typeof window !== 'undefined') {
     }
   }
 
-  // jsdom 25.0.1's `attachInternals()` returns an `ElementInternals` with no
-  // `.states` property at all (verified empirically: `'states' in internals`
-  // is `false` — the CustomStateSet part of the ElementInternals spec isn't
-  // implemented yet). `WippyElement`'s base class (connectedCallback /
-  // disconnectedCallback) unconditionally calls
-  // `this._internals.states.add/delete/clear(...)` to track its
-  // loading/ready/error lifecycle, which throws `Cannot read properties of
-  // undefined (reading 'add')` the instant any WippyElement subclass is
-  // connected to the DOM in this environment. Same class of gap as the
-  // ResizeObserver stub above — patch the missing piece with a real `Set`
-  // rather than avoid connecting the element in tests.
+  // jsdom 25 returns an `ElementInternals` without `.states`, which the
+  // `WippyElement` base class calls when it connects and disconnects, so a
+  // real `Set` is added.
   if (typeof HTMLElement !== 'undefined' && typeof HTMLElement.prototype.attachInternals === 'function') {
     const nativeAttachInternals = HTMLElement.prototype.attachInternals
     HTMLElement.prototype.attachInternals = function (this: HTMLElement) {

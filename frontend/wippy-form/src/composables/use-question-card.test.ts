@@ -36,7 +36,7 @@ const twoQDef: FormDefinition = {
   ],
 }
 
-describe('useQuestionCard — single question, single answer', () => {
+describe('useQuestionCard: single question, single answer', () => {
   it('activate() on an option immediately submits', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(singleDef, null, onSubmit)
@@ -44,7 +44,7 @@ describe('useQuestionCard — single question, single answer', () => {
     expect(onSubmit).toHaveBeenCalledWith({ f1: 'a' })
   })
 
-  it('activate() with that row\'s note editor open does not commit — it focuses the note', () => {
+  it('activate() with that row\'s note editor open does not commit: it focuses the note', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(singleDef, null, onSubmit)
     const q = singleDef.fields[0]
@@ -113,7 +113,7 @@ describe('useQuestionCard — single question, single answer', () => {
   })
 })
 
-describe('useQuestionCard — single question, several answers', () => {
+describe('useQuestionCard: single question, several answers', () => {
   it('activate() ticks and unticks without submitting', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(multiDef, null, onSubmit)
@@ -171,7 +171,7 @@ describe('useQuestionCard — single question, several answers', () => {
   })
 })
 
-describe('useQuestionCard — several questions', () => {
+describe('useQuestionCard: several questions', () => {
   it('advances to the next unseen question on commit, then to review once every question is seen', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(twoQDef, null, onSubmit)
@@ -220,13 +220,13 @@ describe('useQuestionCard — several questions', () => {
   })
 })
 
-describe('useQuestionCard — commits an unsent multi-choice tick on navigating away', () => {
+describe('useQuestionCard: commits an unsent multi-choice tick on navigating away', () => {
   it('counts a ticked-but-never-sent answer as answered once the user leaves the question', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     c.activate(twoQDef.fields[0], 0) // Q1 (single) answers and advances to Q2
     expect(c.index.value).toBe(1)
 
-    c.activate(twoQDef.fields[1], 0) // tick Q2's first option — no footer Send, no Enter
+    c.activate(twoQDef.fields[1], 0) // tick Q2's first option, no footer Send, no Enter
     expect(c.ans(twoQDef.fields[1]).chosen).toEqual(['x'])
     expect(c.answerItemsFor(twoQDef.fields[1])).toBeNull() // not yet committed
 
@@ -244,7 +244,7 @@ describe('useQuestionCard — commits an unsent multi-choice tick on navigating 
   })
 })
 
-describe('useQuestionCard — a single-answer note send on a several-question card', () => {
+describe('useQuestionCard: a single-answer note send on a several-question card', () => {
   it('leaves focus to the move to the next question, not the row the note was on', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     const q1 = twoQDef.fields[0]
@@ -256,7 +256,7 @@ describe('useQuestionCard — a single-answer note send on a several-question ca
   })
 })
 
-describe('useQuestionCard — review focus on a missing required answer', () => {
+describe('useQuestionCard: review focus on a missing required answer', () => {
   it('targets the first missing question\'s review row, not the disabled "send-all"', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     c.go(2) // straight to review without answering the required Q1
@@ -274,7 +274,7 @@ describe('useQuestionCard — review focus on a missing required answer', () => 
   })
 })
 
-describe('useQuestionCard — the polite live region', () => {
+describe('useQuestionCard: the polite live region', () => {
   it('speaks the step a moment after it changes, and quiet() empties it so it stops describing a step that was sent from', () => {
     vi.useFakeTimers()
     try {
@@ -324,7 +324,7 @@ describe('useQuestionCard — the polite live region', () => {
   })
 })
 
-describe('useQuestionCard — hydrating from a previously loaded answer', () => {
+describe('useQuestionCard: hydrating from a previously loaded answer', () => {
   it('reads back a plain value, a {value, note}, and an {other} shape', () => {
     const def: FormDefinition = {
       title: 'T',

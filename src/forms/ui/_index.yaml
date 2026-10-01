@@ -1,23 +1,11 @@
 version: "1.0"
 namespace: wippy.session.forms.ui
 
-# Serves the built `wippy-form` and `wippy-form-answers` web components
-# (frontend/wippy-form/, frontend/wippy-form-answers/, built by
-# `make build-ui` into dist/ and answers-dist/ alongside this file) as
-# view.component entries. Package metadata (title, description, props) is
-# authored once in each package's package.json `wippy` block, per
-# web_components.spec.md § "Package metadata: source of truth" — that block
-# also flows into the built dist/wippy-meta.json (the vite plugin emits it).
-# The `meta` blocks below (title/description/props) are a hand-kept COPY of
-# that same package.json `wippy` block, not this file's own source of
-# truth: registry.entry entries need their metadata inline for the registry
-# system to read, so this YAML restates it alongside package.json rather
-# than deriving it at deploy time. Keep the two in sync by hand when either
-# changes. `directory` below is relative to the MODULE root, not this
-# file's directory. The module root is `src/`: published packs put src/
-# contents at the root, and local workspace replacements (test/.wippy.yaml,
-# the demo workspace config) point at src/ so the loader does not scan
-# frontend/wippy-form*/node_modules.
+# Serves the built wippy-form and wippy-form-answers web components as view.component
+# entries. `directory` is relative to the module root (`src/`), not to this file.
+# The `meta` title, description and props of each entry copy that package's
+# package.json, and the dist directories come from `make build-ui`.
+# `scripts/check-ui.mjs` fails when either differs from its source.
 
 entries:
   # wippy.session.forms.ui:ui_server
@@ -132,33 +120,11 @@ entries:
       type: view.component
       title: Session Form Answers
       description: >-
-        Invisible carrier element. The Session server writes this tag into a user's chat message immediately
-        after they answer a form, carrying the raw JSON answer record (form_id, form_version, title, late,
-        answers) in its `record` attribute — e.g. `Answered questions about the delivery of your order.`
-        followed by `<wippy-form-answers record='{...}'></wippy-form-answers>` (a single-line JSON string; the
-        server escapes `'`, `<`, `>`, and `&` inside it so it round-trips through HTML attribute parsing
-        intact). The record lives in the attribute, never in text content or children: an element that the
-        chat sanitizer strips (e.g. because the Host's components list hasn't picked up this tag yet) or that
-        hasn't finished loading its script (still an unrecognized element) both render nothing when they have
-        no children — but would leak the raw JSON straight to the user if it were text content instead.
-        `record` is declared as a prop specifically so the Host adds it to the sanitizer's allowed attribute
-        list; without that, the attribute would still get stripped even once the tag itself is allowed
-        through. The message is rendered as Markdown then sanitized; the answered-form card already shown
-        above the message is the human-readable summary, so this element's entire purpose is to keep the JSON
-        reachable in the raw message text for the agent to read back on a later turn, while staying invisible
-        to the user under every failure mode. It renders nothing: no `<slot>` is ever created (so even stray
-        light-DOM content would never project into the shadow root) and `:host { display: none; }` hides the
-        element outright as defense in depth for the case where it does mount normally. Its only prop is
-        `record` (string), it dispatches no events and opens no network requests, makes no host API calls of
-        its own (its WippyElement base class does subscribe to the Host's @theme broadcast, invisibly, for
-        consistent light/dark handling — that has no visible effect here since the element renders nothing),
-        and exposes no parts, tokens, or classes to restyle — there is nothing to style. Its only public
-        surface is a read-only `answerRecord` getter that parses that attribute and returns the parsed object,
-        or `null` on empty or invalid JSON; it never throws. The element deliberately owns no `record`
-        property: the Host's chat compiles message HTML as a Vue template, and Vue writes a custom element's
-        prop as a DOM property when one of that name exists, which would swallow the value instead of setting
-        the attribute. Agents must never emit this tag themselves — it is written exclusively by the Session
-        server's message-composition code, never by agent-generated content.
+        Invisible carrier element. The Session server writes it into a user's chat message after a
+        form is answered, with the JSON answer record (`form_id`, `form_version`, `title`, `late`,
+        `answers`) in the `record` attribute. It renders nothing, so the record stays in the raw
+        message text for the agent. `record` is declared as a prop so the Host's sanitizer keeps the
+        attribute. Agents must never write this tag.
       tag_name: wippy-form-answers
       auto_register: true
       announced: true
@@ -171,8 +137,8 @@ entries:
             type: string
             default: ""
             description: >-
-              The self-contained JSON answer record (form_id, form_version, title, late, answers) as a
-              single-line string, written into this attribute by the Session server immediately after a form
-              is answered. The server escapes `'`, `<`, `>`, and `&` inside the JSON so the attribute value
-              round-trips through HTML parsing intact; getAttribute('record') returns it already unescaped.
-              Agents never write this attribute themselves.
+              The self-contained JSON answer record (form_id, form_version, title, late, answers) as
+              a single-line string, written into this attribute by the Session server immediately
+              after a form is answered. The server escapes `'`, `<`, `>`, and `&` inside the JSON so
+              the attribute value round-trips through HTML parsing intact; getAttribute('record')
+              returns it already unescaped. Agents never write this attribute themselves.

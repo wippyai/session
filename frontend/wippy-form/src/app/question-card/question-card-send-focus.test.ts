@@ -370,12 +370,10 @@ describe('"Send" on a several-answer question: a failed send keeps focus on it',
 
 describe('the send buttons look disabled while the card is blocked: the theme defines the `p-disabled` marker they carry', () => {
   // `aria-disabled` has no look of its own, so the buttons carry the theme's
-  // `p-disabled` marker instead of the `disabled` attribute. The component's
-  // stylesheet never styles `.p-*` (the compliance gate forbids it), so the
-  // dimming has to come from the theme the Host serves as `primeVueCssUrl`
-  // (`@styles/primevue/tailwind.css`, which imports the theme's `common.css`
-  // first). If the theme stopped defining it, the buttons would look enabled
-  // while inert, and this fails instead.
+  // `p-disabled` marker. The component's stylesheet has no `.p-*` rules, so the
+  // dimming comes from the theme's `common.css`, which the Host serves as
+  // `primeVueCssUrl`. If the theme stops defining the marker, the buttons look
+  // enabled while inert, and this test fails.
   it('common.css dims `.p-disabled` (opacity-60) and makes it inert to the pointer', () => {
     // Positive control: the file was really read (the stylesheet import is stubbed to '' otherwise).
     expect(commonCss.length).toBeGreaterThan(0)

@@ -1,18 +1,7 @@
 @import "@wippy-fe/theme/theme-config.css";
 @import 'tailwind.css';
 
-/*
- * The unchecked radio/checkbox/input-edge contrast issue (theme
- * surface-300/700 borders, about 1.3-1.4:1, short of the 3:1 target) used
- * to have a fix here as a raw `.p-radiobutton` / `.p-checkbox` override
- * (module CSS must never carry `.p-*` rules — that shadows the
- * facade/theme layer, see never-do.md). That fix is deferred to a later
- * theme-level change (facade `custom_css`), not shipped yet — until then
- * this module uses the theme as-is, with no local `.p-*` override and no
- * workaround.
- */
-
-/* Never overflow the chat column; long labels/descriptions must wrap. */
+/* Long labels and descriptions wrap instead of overflowing the chat column. */
 :host,
 [data-wippy-theme-root] {
   max-width: 100%;
@@ -42,7 +31,7 @@
   --_accent: var(--wippy-form-accent, var(--p-primary-color));
   --_accent-soft: var(--wippy-form-accent-soft, var(--p-highlight-background));
   --_on-accent: var(--wippy-form-accent-contrast, var(--p-primary-contrast-color));
-  /* Border of a review row with a missing required answer. Not a text colour: error text uses the theme's severity utilities (see "Error / keys / footer"). */
+  /* Border of a review row with a missing required answer. The hex is a fallback for host-less dev, where no theme is loaded. */
   --_danger: var(--wippy-form-danger, var(--p-danger-500, #b91c1c));
   --_focus: var(--wippy-form-focus, var(--_accent));
   --_key-border: var(--wippy-form-key-border, color-mix(in srgb, var(--p-text-muted-color) 55%, var(--p-content-border-color)));
@@ -55,6 +44,7 @@
   --_gap: var(--wippy-form-gap, 4px);
   --_key: var(--wippy-form-key-size, 20px);
 
+  /* Content-sized, with no height: 100%, so the card does not stretch in a taller container. */
   display: block;
   container-type: inline-size;
 }
@@ -72,14 +62,7 @@
   display: flex;
   flex-direction: column;
 }
-/*
- * The card never takes focus on its own (design decision), but it DOES
- * receive it programmatically — collapsing it, or Escape inside the Other
- * box, both move focus to the card root (`focusOn('card')` in
- * question-card-active.vue). `outline: none` above with no replacement left
- * that landing spot invisible; this restores a visible ring for exactly
- * that case.
- */
+/* The card root takes focus by script, after a collapse or after Escape in the Other box, so it shows a ring. */
 .w-form:focus-visible {
   outline: 2px solid var(--_focus);
   outline-offset: 2px;
@@ -94,7 +77,7 @@
   overflow-wrap: anywhere;
 }
 
-/* ---------- Title (several questions) ---------- */
+/* ---------- Title ---------- */
 .w-form__title {
   margin: 0 0 6px;
   font-size: var(--_small);
@@ -109,12 +92,7 @@
   color: var(--_accent);
   flex: none;
 }
-/*
- * Spacing and muted color for the form-level description, so it reads as
- * "shown under the title, muted" the way the README's parts table already
- * documents. Same scale/color as `.w-form__description` / `.w-form__hint`
- * below (the field-level equivalent), not a one-off value.
- */
+/* The form description sits under the title, in the scale of the field description and hint. */
 .w-form__form-description {
   margin: 0 0 8px;
   font-size: var(--_small);
@@ -143,14 +121,7 @@
   border-radius: 999px;
   background: var(--_row);
 }
-/*
- * Box sizing (width/height) comes from the PrimeVue Button `size="small"`
- * prop on these components (question-card-header.vue), not a CSS override
- * — out-specifying `.p-button` to force a size is the same shadowing the
- * "no raw `.p-*` rules" rule forbids, just reached through a two-class
- * ancestor selector instead of a `.p-*` one. Only the icon color, which
- * PrimeVue's own `text` variant does not set, belongs here.
- */
+/* The Button size comes from its `size="small"` prop, so only the icon colour, which the `text` variant does not set, is set here. */
 .w-form .w-form__prev,
 .w-form .w-form__next {
   color: var(--_muted);
@@ -189,7 +160,7 @@
   gap: 2px;
 }
 .w-form .w-form__collapse {
-  /* Sizing: the Button's own `size="small"` prop — see the comment above `.w-form__prev`. */
+  /* Sized by the Button's `size="small"` prop. */
   color: var(--_muted);
 }
 
@@ -255,9 +226,7 @@
   font-weight: 500;
   overflow-wrap: anywhere;
   display: inline-flex;
-  /* `center`, not `baseline` — the checkbox/check-mark has no text
-     baseline of its own, so `baseline` alignment left it sitting high
-     against the label text (verified against a live capture). */
+  /* `center`, because the checkbox and the check mark have no text baseline to align to. */
   align-items: center;
   gap: 7px;
 }
@@ -272,9 +241,7 @@
   color: var(--_accent);
   flex: none;
 }
-/* Sizes only the single-choice check-mark <span> — the several-answer mark
-   is a real PrimeVue Checkbox (`size="small"`, a <div> root), which must
-   size itself from its own prestyle, not be fought over here. */
+/* Sizes only the single-choice check mark. The several-answer mark is a PrimeVue Checkbox, which sizes itself. */
 span.w-form__option-mark {
   width: 15px;
   height: 15px;
@@ -302,7 +269,7 @@ span.w-form__option-mark {
   flex: none;
 }
 .w-form .w-form__note-toggle {
-  /* Sizing: the Button's own `size="small"` prop — see the comment above `.w-form__prev`. */
+  /* Sized by the Button's `size="small"` prop. */
   color: var(--_muted);
   opacity: 0;
 }
@@ -317,13 +284,7 @@ span.w-form__option-mark {
   color: var(--_accent);
 }
 @media (hover: none) {
-  /*
-   * Same selector shape (`.w-form .w-form__note-toggle`, two classes) as
-   * the resting-state rule above — a single-class `.w-form__note-toggle`
-   * selector here LOSES to that rule's opacity:0 on specificity alone
-   * regardless of source order (0,1,0 vs 0,2,0), which left the note
-   * toggle invisible on touch devices (no `:hover` to reveal it).
-   */
+  /* The same two-class selector as the resting rule above, which a single-class selector would lose to on specificity. Touch devices have no hover to reveal the toggle. */
   .w-form .w-form__note-toggle {
     opacity: 1;
   }
@@ -361,63 +322,25 @@ span.w-form__option-mark {
   color: var(--_on-accent);
 }
 
-/* ---------- Composer (Other / note joined input) — see question-card-composer.vue ---------- */
+/* ---------- Composer: the note and Other input ---------- */
 .w-form__composer--note {
   grid-column: 1 / -1;
   margin-top: 6px;
 }
 .w-form__note-input,
 .w-form__other-input {
-  /*
-   * `@wippy-fe/theme/primevue/inputgroup.css` only grows `.p-inputtext` /
-   * `.p-inputwrapper` children to fill the joined input (`flex-auto
-   * w-[1%]`) — a bare `Textarea`'s own class, `.p-textarea`, isn't in that
-   * selector, so without this the box sat at its intrinsic (~150px)
-   * width (confirmed against a live capture: text wrapped onto 3 lines,
-   * the row's right two-thirds stayed empty). `flex: 1 1 auto` plus
-   * `min-width: 0` is the same "grow to fill, then wrap" behavior, via
-   * our own BEM class — not a `.p-*` override.
-   */
+  /* The theme's inputgroup.css grows only `.p-inputtext` and `.p-inputwrapper` to fill a group, not the `.p-textarea` of a bare Textarea. These two lines make it fill the row and wrap. */
   flex: 1 1 auto;
   min-width: 0;
   max-height: 10em;
 }
 
 /* ---------- Error / keys / footer ---------- */
-/*
- * Shared by the question-level `Message severity="error"` (see below) AND
- * the plain `role="alert"` length errors below the note/Other boxes
- * (question-card-option.vue, question-card-question.vue) — those stay
- * plain elements, not `Message`s, because PrimeVue's `Message` sets
- * `inheritAttrs: false` and would silently drop the `:id` their
- * aria-describedby linking depends on.
- */
+/* Shared by the question error and the length alerts under the note and Other boxes. */
 .w-form__error {
   margin: 6px 0 0;
 }
-/*
- * No rule in this file colours error or warning TEXT. Error text is coloured
- * by the theme's severity utilities on the text element itself, one constant
- * per severity in src/lib/error-text.ts (`ERROR_TEXT_CLASS` =
- * `text-danger-600 dark:text-danger-400`;
- * `WARN_TEXT_CLASS` = `text-warn-700 dark:text-warn-400`), because the colours
- * that used to live here and in the theme's own `Message` are below WCAG
- * 1.4.3's 4.5:1 for small text in at least one theme: `--wippy-form-danger`
- * (`--p-danger-500`) 3.6:1 on the card in both themes; `Message` error/simple
- * `danger-500` rgb(239,68,68) on rgb(251,247,255) 3.56:1 light and
- * `danger-600` on the Message's own translucent red box rgb(82,45,64) 2.1:1
- * dark; the retryable `warn` banner 4.0:1 light and 3.9:1 dark. The utilities
- * give 5.0:1 to 5.2:1 light and 6.8:1 to 9.0:1 dark (computed from the theme
- * tokens in src/lib/error-text.test.ts). They sit on the TEXT inside a PrimeVue
- * `Message` (field error, submit-failure banner, form-level notice), so the
- * `Message` keeps its box, outline and `role="alert"`, and on the plain
- * `role="alert"` length errors, the review footer and a missing answer's
- * "Not answered yet". Fixing the `Message` colours themselves is a theme-level
- * change, tracked separately and NOT patched here with a `.p-*` rule.
- *
- * `--wippy-form-danger` is kept for the one non-text use left: the border of a
- * review row whose required answer is missing.
- */
+/* No rule here colours error or warning text. The text takes the severity utilities of src/lib/error-text.ts. `--wippy-form-danger` is only the border of a review row with a missing answer. */
 .w-form__keys {
   margin: 8px 0 0;
   font-size: 12px;
@@ -543,18 +466,7 @@ span.w-form__option-mark {
   margin: 0;
   font-weight: 500;
 }
-/*
- * `.w-form__status` is the landing spot on the read-only answered summary
- * (question-card-summary.vue): it is focused after a successful submit so
- * focus is not lost when the form swaps views (`tabindex="-1"`, focusable by
- * script only). It is a status line, not a control, so it shows the theme's own
- * focus ring — the width, style, colour and offset every PrimeVue control uses
- * (`--p-focus-ring-*`, defined by theme-config.css) — instead of the card's
- * heavier 2px selection ring, and the ring hugs the text (`fit-content`)
- * instead of spanning the whole card. The literal fallbacks are the theme's own
- * defaults, for host-less dev only. `--wippy-form-focus` still overrides the
- * colour.
- */
+/* The status line takes focus by script after a send. It shows the theme's focus ring (`--p-focus-ring-*`, which `--wippy-form-focus` can recolour), and the ring hugs the text instead of spanning the card. The literal fallbacks are the theme's defaults, for host-less dev. */
 .w-form__status {
   margin: 10px 0 0;
   width: fit-content;

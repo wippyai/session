@@ -35,7 +35,7 @@ function mountCard(definition: FormDefinition, props: { offline?: boolean, submi
   })
 }
 
-describe('QuestionCardActive — styling API surface', () => {
+describe('QuestionCardActive: styling API surface', () => {
   it('the root carries the w-form class and the card part', () => {
     const wrapper = mountCard(singleQuestionDef)
     const root = wrapper.find('.w-form')
@@ -65,7 +65,7 @@ describe('QuestionCardActive — styling API surface', () => {
   })
 })
 
-describe('QuestionCardActive — single question, single answer', () => {
+describe('QuestionCardActive: single question, single answer', () => {
   it('clicking a row answers and submits the whole form', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.findAll('.w-form__option')[0].trigger('click')
@@ -74,13 +74,13 @@ describe('QuestionCardActive — single question, single answer', () => {
 
   it('pressing a row\'s number key answers it', async () => {
     const wrapper = mountCard(singleQuestionDef)
-    // A real digit keypress carries both — `.key` is what the handler
+    // A real digit keypress carries both, `.key` is what the handler
     // actually reads for a plain (non-Shift) digit.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit2', key: '2' })
     expect(wrapper.emitted('submit')?.[0]).toEqual([{ f1: 'no' }])
   })
 
-  it('Other stays focus-only while empty — Enter does not send', async () => {
+  it('Other stays focus-only while empty: Enter does not send', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('.w-form__other-input')
     await other.trigger('keydown', { key: 'Enter' })
@@ -96,7 +96,7 @@ describe('QuestionCardActive — single question, single answer', () => {
   })
 })
 
-describe('QuestionCardActive — offline indicator and blocked answering', () => {
+describe('QuestionCardActive: offline indicator and blocked answering', () => {
   it('shows a visible offline notice and blocks a row click and a number key from answering', async () => {
     const wrapper = mountCard(singleQuestionDef, { offline: true })
 
@@ -122,7 +122,7 @@ describe('QuestionCardActive — offline indicator and blocked answering', () =>
   })
 })
 
-describe('QuestionCardActive — blocked while a submit is already in flight', () => {
+describe('QuestionCardActive: blocked while a submit is already in flight', () => {
   it('marks the card aria-busy and blocks a row click and a number key from submitting again', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.setProps({ submitting: true })
@@ -139,7 +139,7 @@ describe('QuestionCardActive — blocked while a submit is already in flight', (
   })
 })
 
-describe('QuestionCardActive — keyboard boundaries', () => {
+describe('QuestionCardActive: keyboard boundaries', () => {
   it('a digit typed into Other does not answer the question', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('textarea.w-form__other-input')
@@ -149,9 +149,8 @@ describe('QuestionCardActive — keyboard boundaries', () => {
 
   it('a numpad digit reported with NumLock off (its `.key` is an arrow, not a digit) does not answer', async () => {
     const wrapper = mountCard(singleQuestionDef)
-    // With NumLock off, the physical Numpad2 key's `.code` is still
-    // `Numpad2`, but the browser reports `.key` as `ArrowDown` — matching
-    // on `.code` (the old behavior) misread this as "answer option 2".
+    // With NumLock off the key's `.code` is still `Numpad2` and its `.key` is
+    // `ArrowDown`. The handler reads `.key`, so this is navigation, not answer 2.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Numpad2', key: 'ArrowDown' })
     expect(wrapper.emitted('submit')).toBeUndefined()
   })
@@ -171,7 +170,7 @@ describe('QuestionCardActive — keyboard boundaries', () => {
   })
 })
 
-describe('QuestionCardActive — Escape in a note closes it without losing the draft', () => {
+describe('QuestionCardActive: Escape in a note closes it without losing the draft', () => {
   it('closes the note editor but keeps the typed draft, shown back under the row', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
@@ -184,7 +183,7 @@ describe('QuestionCardActive — Escape in a note closes it without losing the d
 
     // The editor closed...
     expect(wrapper.find('.w-form__option--editing').exists()).toBe(false)
-    // ...but the draft was not cleared — it shows back under the row, and
+    // ...but the draft was not cleared, it shows back under the row, and
     // nothing was submitted (Escape leaves the box, it does not answer).
     expect(wrapper.find('.w-form__option-note').text()).toContain('leave at the door')
     expect(wrapper.emitted('submit')).toBeUndefined()
@@ -196,7 +195,7 @@ describe('QuestionCardActive — Escape in a note closes it without losing the d
   })
 })
 
-describe('QuestionCardActive — form title and description', () => {
+describe('QuestionCardActive: form title and description', () => {
   it('shows the form title on a single-question card, not only a several-question one', () => {
     const wrapper = mountCard(singleQuestionDef)
     const title = wrapper.find('.w-form__title')
@@ -223,7 +222,7 @@ describe('QuestionCardActive — form title and description', () => {
   })
 })
 
-describe('QuestionCardActive — field description', () => {
+describe('QuestionCardActive: field description', () => {
   const withDescription: FormDefinition = {
     title: 'Deploy',
     fields: [{
@@ -252,7 +251,7 @@ describe('QuestionCardActive — field description', () => {
   })
 })
 
-describe('QuestionCardActive — 422 field errors', () => {
+describe('QuestionCardActive: 422 field errors', () => {
   it('setServerErrors shows the message on the question that owns the field', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void }
@@ -262,7 +261,7 @@ describe('QuestionCardActive — 422 field errors', () => {
   })
 })
 
-describe('QuestionCardActive — length-error and server-error alerts are linked to the textarea', () => {
+describe('QuestionCardActive: length-error and server-error alerts are linked to the textarea', () => {
   it('links the Other textarea to its own too-long alert via aria-describedby/aria-invalid', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('textarea.w-form__other-input')
@@ -338,17 +337,17 @@ describe('QuestionCardActive — length-error and server-error alerts are linked
   })
 })
 
-describe('QuestionCardActive — several questions', () => {
+describe('QuestionCardActive: several questions', () => {
   it('answering advances to the next question, shows the counter, then review, then sends', async () => {
     const wrapper = mountCard(twoQuestionDef)
     expect(wrapper.text()).toContain('1/2')
 
-    // Q1: single-choice — click answers and advances.
+    // Q1: single-choice, click answers and advances.
     await wrapper.findAll('.w-form__option')[0].trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('2/2')
 
-    // Q2: multi-choice — tick one, then send via the footer button (no Other on this field).
+    // Q2: multi-choice, tick one, then send via the footer button (no Other on this field).
     await wrapper.find('.w-form__option').trigger('click')
     await wrapper.vm.$nextTick()
     const sendBtn = wrapper.find('[data-focus="send"]')
@@ -424,7 +423,7 @@ describe('QuestionCardActive — several questions', () => {
     expect(wrapper.text()).toContain('Review')
     expect(wrapper.text()).toContain('still needs an answer')
 
-    // A disabled "Send answers" cannot take focus — it must have landed on
+    // A disabled "Send answers" cannot take focus, it must have landed on
     // Q2's own review row instead of silently falling through to <body>.
     const missingRow = wrapper.find('[data-focus="review-item-1"]')
     expect(missingRow.exists()).toBe(true)
@@ -433,7 +432,7 @@ describe('QuestionCardActive — several questions', () => {
   })
 })
 
-describe('QuestionCardActive — checkbox visual state follows the model', () => {
+describe('QuestionCardActive: checkbox visual state follows the model', () => {
   // PrimeVue's Checkbox listens to its own native `change` event and can update
   // its mark independently of the `selected` prop. A real click fires that event
   // and the row's `click` together, which jsdom cannot reproduce, so the test
@@ -469,7 +468,7 @@ describe('QuestionCardActive — checkbox visual state follows the model', () =>
   })
 })
 
-describe('QuestionCardActive — single-choice is one Tab stop with a roving tabindex', () => {
+describe('QuestionCardActive: single-choice is one Tab stop with a roving tabindex', () => {
   it('starts with tabindex=0 on the first row and -1 on the rest, for a single-choice (radio) question', () => {
     const wrapper = mountCard(singleQuestionDef)
     const rows = wrapper.findAll('[role="radio"]')
@@ -507,10 +506,10 @@ describe('QuestionCardActive — single-choice is one Tab stop with a roving tab
 
     const rows = wrapper.findAll('[role="radio"]')
     expect(rows[0].attributes('tabindex')).toBe('-1')
-    expect(rows[1].attributes('tabindex')).toBe('0') // "No" — the stored answer.
+    expect(rows[1].attributes('tabindex')).toBe('0') // "No", the stored answer.
   })
 
-  it('leaves every row its own Tab stop (tabindex=0) for a multi-choice (checkbox) question — no roving', async () => {
+  it('leaves every row its own Tab stop (tabindex=0) for a multi-choice (checkbox) question: no roving', async () => {
     const wrapper = mountCard(twoQuestionDef)
     // Reach f2 (multi-choice).
     await wrapper.findAll('.w-form__option')[0].trigger('click')

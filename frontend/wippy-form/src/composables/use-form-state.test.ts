@@ -22,7 +22,7 @@ function mountHarness(artifactId: string | null) {
 
 beforeEach(resetProxyMock)
 
-describe('useFormState — background reload vs first load', () => {
+describe('useFormState: background reload vs first load', () => {
   it('only sets status to "loading" for the artifact\'s first load, not a later background reload', async () => {
     const getFn = vi.fn().mockResolvedValue(formState())
     artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -34,7 +34,7 @@ describe('useFormState — background reload vs first load', () => {
     expect((wrapper.vm as unknown as { status: string }).status).toBe('loaded')
 
     // A background reload (artifact event) must not flip status back to
-    // "loading" — the caller keeps rendering the current state untouched.
+    // "loading", the caller keeps rendering the current state untouched.
     ;(wrapper.vm as unknown as { reload: () => void }).reload()
     expect((wrapper.vm as unknown as { status: string }).status).toBe('loaded')
     await flushPromises()
@@ -56,13 +56,13 @@ describe('useFormState — background reload vs first load', () => {
     vm.reload()
     await flushPromises()
 
-    expect(vm.status).toBe('loaded') // unchanged — no full error screen
+    expect(vm.status).toBe('loaded') // unchanged, no full error screen
     expect(vm.state).not.toBeNull() // the view is still there to render
     expect(vm.reloadError).toBe('network down')
   })
 })
 
-describe('useFormState — retry after a failed background refresh', () => {
+describe('useFormState: retry after a failed background refresh', () => {
   it('retries once after a delay and clears the notice when that load succeeds', async () => {
     vi.useFakeTimers()
     try {
@@ -101,7 +101,7 @@ describe('useFormState — retry after a failed background refresh', () => {
   })
 })
 
-describe('useFormState — reload coalescing', () => {
+describe('useFormState: reload coalescing', () => {
   it('coalesces reload calls made while a load is already in flight into a single follow-up load', async () => {
     let resolveFirst: ((s: FormState) => void) | undefined
     const first = new Promise<FormState>((resolve) => { resolveFirst = resolve })
@@ -121,12 +121,12 @@ describe('useFormState — reload coalescing', () => {
     await flushPromises()
     await flushPromises()
 
-    // The initial load + exactly one coalesced follow-up — not four.
+    // The initial load + exactly one coalesced follow-up, not four.
     expect(getFn).toHaveBeenCalledTimes(2)
   })
 })
 
-describe('useFormState — visibility restore', () => {
+describe('useFormState: visibility restore', () => {
   it('reloads once when the proxy reports the document becoming visible again', async () => {
     const getFn = vi.fn().mockResolvedValue(formState())
     artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -149,7 +149,7 @@ describe('useFormState — visibility restore', () => {
   })
 })
 
-describe('useFormState — Host reconnect', () => {
+describe('useFormState: Host reconnect', () => {
   it('reloads when the proxy reports @reconnect, so the form does not stay stale through a server restart', async () => {
     const getFn = vi.fn().mockResolvedValue(formState())
     artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
@@ -181,7 +181,7 @@ describe('useFormState — Host reconnect', () => {
   })
 })
 
-describe('useFormState — rebind race', () => {
+describe('useFormState: rebind race', () => {
   it('drops a GET for the previous artifact that resolves only after the id has already moved on', async () => {
     let resolveA: ((s: FormState) => void) | undefined
     const pendingA = new Promise<FormState>((resolve) => { resolveA = resolve })
@@ -204,15 +204,14 @@ describe('useFormState — rebind race', () => {
     await flushPromises()
     await flushPromises()
 
-    // Must reflect artifact-2 — never the late artifact-1 response, which
-    // would otherwise let a stale definition/content_version briefly show
-    // (and be submittable) under the new artifact id.
+    // artifact-2 is shown. The late artifact-1 response would otherwise show a stale
+    // definition and content_version, and make them submittable, under the new id.
     expect(vm.state?.artifact_id).toBe('artifact-2')
     expect(getFn).toHaveBeenCalledTimes(2)
   })
 })
 
-describe('useFormState — refresh() awaits a coalesced load', () => {
+describe('useFormState: refresh() awaits a coalesced load', () => {
   it('resolves with the freshest state, not a stale value, when called while a load is already in flight', async () => {
     let resolveFirst: ((s: FormState) => void) | undefined
     const first = new Promise<FormState>((resolve) => { resolveFirst = resolve })
@@ -232,7 +231,7 @@ describe('useFormState — refresh() awaits a coalesced load', () => {
     const result = await refreshPromise
 
     // Must be the coalesced follow-up load's result, not the load that was
-    // already in flight when refresh() was called — otherwise the delivery
+    // already in flight when refresh() was called, otherwise the delivery
     // nudge reads a stale `delivery: 'pending'` and sends a needless
     // session_open even though the answer was already admitted.
     expect(result?.delivery).toBe('complete')
@@ -240,7 +239,7 @@ describe('useFormState — refresh() awaits a coalesced load', () => {
   })
 })
 
-describe('useFormState — newer session messages', () => {
+describe('useFormState: newer session messages', () => {
   const SESSION_TOPIC = 'session:session-1:message:*'
 
   const sessionListener = () => listenerFor<(message: { data?: { type?: string } }) => void>(SESSION_TOPIC)
@@ -284,7 +283,7 @@ describe('useFormState — newer session messages', () => {
   })
 })
 
-describe('useFormState — session status change (e.g. a Stop that settles the turn with no reply)', () => {
+describe('useFormState: session status change (e.g. a Stop that settles the turn with no reply)', () => {
   const STATUS_TOPIC = 'session:session-1'
 
   const statusListener = () => listenerFor<(message: unknown) => void>(STATUS_TOPIC)
@@ -303,7 +302,7 @@ describe('useFormState — session status change (e.g. a Stop that settles the t
     expect(onStatus).toBeDefined()
 
     // The session-level topic carries no `type` to filter on (unlike
-    // message:*) — any event on it is a reason to reload.
+    // message:*), any event on it is a reason to reload.
     onStatus?.({ data: { status: 'idle' } })
     await flushPromises()
     expect(getFn).toHaveBeenCalledTimes(2)

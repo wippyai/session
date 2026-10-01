@@ -60,7 +60,7 @@ describe('useHostReflection', () => {
     expect(() => mount(harness)).not.toThrow()
   })
 
-  it('never writes the observed `state` prop attribute — only `card-state` — to avoid triggering a reload loop', async () => {
+  it('never writes the observed `state` prop attribute: only `card-state`, to avoid triggering a reload loop', async () => {
     const el = document.createElement('wippy-form')
     const { wrapper, state } = mountReflection(el)
     await wrapper.vm.$nextTick()
@@ -68,7 +68,7 @@ describe('useHostReflection', () => {
     await wrapper.vm.$nextTick()
 
     // `state` is the wippy-form custom element's own observed prop
-    // attribute (active/idle lifecycle) — the reflection must never touch
+    // attribute (active/idle lifecycle), the reflection must never touch
     // it, or the Host's prop-change watcher (use-form-state.ts) sees a
     // spurious change and reloads.
     expect(el.hasAttribute('state')).toBe(false)

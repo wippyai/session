@@ -91,7 +91,7 @@ describe('classifySubmitError', () => {
     expect(result.retryable).toBe(true)
   })
 
-  it('does not special-case an unbranded, Axios-shaped error — the Host client never throws one', () => {
+  it('does not special-case an unbranded, Axios-shaped error: the Host client never throws one', () => {
     const axiosShaped = {
       response: {
         status: 401,

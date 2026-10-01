@@ -6,7 +6,7 @@ import QuestionCardAnswerItems from './question-card-answer-items.vue'
 // not collapse onto one line in the review step and the answered card,
 // even though the stored value keeps the "\n". Both surfaces render
 // through this shared component, so the fix belongs here.
-describe('QuestionCardAnswerItems — an own (Other) answer keeps its line breaks', () => {
+describe('QuestionCardAnswerItems: an own (Other) answer keeps its line breaks', () => {
   it('renders a <br> between lines instead of collapsing them onto one line', () => {
     const wrapper = mount(QuestionCardAnswerItems, {
       props: { items: [{ label: 'text me\nafter 6', own: true }] },
@@ -16,7 +16,7 @@ describe('QuestionCardAnswerItems — an own (Other) answer keeps its line break
     expect(wrapper.text()).toContain('after 6')
     expect(wrapper.find('br').exists()).toBe(true)
     // The line break is a real element, not collapsed whitespace in one
-    // text node — innerHTML shows the two lines split around a <br>.
+    // text node, innerHTML shows the two lines split around a <br>.
     expect(wrapper.html()).toMatch(/text me<br[^>]*>after 6/)
   })
 
