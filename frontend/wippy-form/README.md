@@ -214,10 +214,14 @@ A convenience mirror of the server's rules, run on submit so an obvious mistake 
 | Type | Checks (code) |
 | --- | --- |
 | all | Required: no non-whitespace content, no number, an unchecked checkbox (`required`) |
-| `text`, `textarea` | Control characters, tab and line feed allowed in a textarea only (`invalid_text`); `min_length` (`too_short`); `max_length`, default 500 for text and 8,000 for a textarea, never above 2,000 and 8,000 (`too_long`), counted in code points; text only: `pattern`, matched against the whole value, skipped when the browser cannot compile it (`pattern_mismatch`) |
+| `text`, `textarea` | Control characters, tab and line feed allowed in a textarea only (`invalid_text`); `min_length` (`too_short`); `max_length`, default 500 for text and 8,000 for a textarea, never above 2,000 and 8,000 (`too_long`), counted in code points. A text field's `pattern` is not checked here (see "Pattern" below) |
 | `email` | ASCII address, one `@`, dot-atom local part up to 64, DNS-label domain with a dot, 254 in all (`invalid_email`) |
 | `number` | Strict text (`invalid_number`); at most 1e12 in absolute value (`invalid_number`); `integer` (`not_integer`); `min`, `max` (`below_min`, `above_max`); `step` from `min`, else from 0, with exact decimal arithmetic and no tolerance (`not_on_step`) |
 | `date` | A real calendar day written `YYYY-MM-DD`, years 0001 to 9999, not trimmed (`invalid_date`); `min`, `max` inclusive (`below_min`, `above_max`) |
+
+### Pattern: checked on submit by the server, never in the browser
+
+A `text` field may carry a `pattern` (a full-match expression). The component does not evaluate it. The pattern is written by the agent, and a browser regular-expression engine backtracks: an overlapping repeat such as `(a|a)*b` or `a*a*a*a*b` against a 2,000-character answer can freeze the user's tab, and the accepted pattern subset does not rule those out. The server checks the pattern with a linear-time engine (RE2), so it is the only place the pattern runs. A value that does not match is sent like any other, and the server answers `422` with `pattern_mismatch` under that field's id. The form shows it exactly like a client error: the message under the field, linked to the real input by `aria-describedby`, the field marked invalid (`aria-invalid`, the `field-invalid` part), focus on the first invalid field, and what the user typed kept in the box. Any other per-field code in a `422` is shown the same way, and `form_errors` appear under the fields. The only cost is one round trip for a pattern mistake, which the server's message names. `src/lib/scalar-answers.ts` builds no regular expression from a definition, and `src/lib/scalar-answers.test.ts` fails if that changes.
 
 ### Tokens
 
@@ -273,4 +277,4 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 
 - The error text and the "(required)" marker take their colour from the theme's severity utilities (contrast-tuned for light and dark), not from `--wippy-form-danger`.
 - The unchecked checkbox and input edge contrast is the theme's (decision D27, deferred to a theme-level fix); there is no local `.p-*` override.
-- A browser that cannot compile a `pattern` skips that check; the server still enforces it.
+- A `pattern` mistake is only reported after submit (by the server), not as the user types; see "Pattern" above.
