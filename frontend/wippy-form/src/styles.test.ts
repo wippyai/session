@@ -87,9 +87,25 @@ describe('styles.css — fields form tokens and parts', () => {
     expect(ruleBody('\\.w-form__field-note')).toMatch(/color:\s*var\(--_muted\)/)
   })
 
-  it('lifts the calendar\'s inline minimum width through its own class, so it is not as wide as the whole form', () => {
-    // PrimeVue writes `min-width` inline on the panel; only an important rule beats that.
-    expect(ruleBody('\\.w-form__field-calendar')).toMatch(/min-width:\s*0\s*!important/)
+  // The theme makes the popup calendar at least as wide as its input, so the
+  // way to a calendar of a sensible size is a date box of a sensible size, not
+  // an override of the overlay.
+  it('bounds the date control to its own width token, full width only when the form is narrower', () => {
+    expect(ruleBody(':host')).toMatch(/--_date-width:\s*var\(--wippy-form-date-width,\s*20rem\)/)
+    const body = ruleBody('\\.w-form__field-input--date')
+    expect(body).toMatch(/width:\s*min\(100%,\s*var\(--_date-width\)\)/)
+    expect(body).toMatch(/max-width:\s*100%/)
+  })
+
+  it('does not override the calendar: no rule names it, and the only !important left is the reduced-motion one', () => {
+    const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(withoutComments).not.toMatch(/field-calendar/)
+    expect(withoutComments).not.toMatch(/min-width:\s*0\s*!important/)
+    // Every rule that carries !important, by selector.
+    const important = [...withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => body.includes('!important'))
+      .map(([, selector]) => selector.trim())
+    expect(important).toEqual(['.w-form *'])
   })
 
   it('has no raw .p-* rule for the PrimeVue inputs (comments aside)', () => {

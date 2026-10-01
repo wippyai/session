@@ -47,6 +47,12 @@ import FieldShell from './field-shell.vue'
  * That layer is a sibling of the themed container, so the calendar would not
  * follow a forced Light or Dark theme; it carries the container's theme class
  * itself (`useThemeModeClass`).
+ *
+ * The theme opens the calendar at least as wide as the date control, so the
+ * control is not left as wide as the whole form: the picker carries the `date`
+ * state of the `field-input` part, which the stylesheet bounds to
+ * `--wippy-form-date-width` (full width only on a narrower form). The calendar
+ * is not overridden; it follows the control.
  */
 const props = defineProps<{
   field: DateFormField
@@ -181,7 +187,8 @@ function onBlur(event: { originalEvent: Event, value: string }) {
   })
 }
 
-const inputPart = computed(() => partClass('field-input'))
+// The `date` state is what the stylesheet bounds the control's width by.
+const inputPart = computed(() => partClass('field-input', 'date'))
 const calendarPart = computed(() => partClass('field-calendar'))
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)

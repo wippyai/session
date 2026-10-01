@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import DateField from './date-field.vue'
+import FormFieldControl from './form-field.vue'
 
 /*
  * The date box is typed into one key at a time. These tests drive it the way
@@ -232,6 +233,23 @@ async function openCalendar(wrapper: Mounted['wrapper']) {
   await wrapper.find('button[aria-haspopup="dialog"]').trigger('click')
   await nextTick()
 }
+
+describe('date field: width of the control', () => {
+  // The stylesheet bounds the control through this part and class (see
+  // styles.test.ts); without them the date box would fill the whole form and
+  // so would the calendar the theme opens at least as wide as it.
+  it('names the picker as the date state of the input part and class, which the stylesheet bounds in width', () => {
+    const { wrapper } = mountField()
+    const picker = wrapper.find('.p-datepicker')
+    expect(picker.attributes('part')?.split(' ')).toEqual(['field-input', 'field-input-date'])
+    expect(picker.classes()).toEqual(expect.arrayContaining(['w-form__field-input', 'w-form__field-input--date']))
+  })
+
+  it('leaves the input fields of other types without the date state', () => {
+    const wrapper = mount(FormFieldControl, { props: { field: { id: 'a', type: 'text', label: 'A', required: false }, modelValue: undefined, errors: [], disabled: false, readonly: false }, global: { plugins: [PrimeVuePlugin] } })
+    expect(wrapper.find('input').attributes('part')).toBe('field-input')
+  })
+})
 
 describe('date field: calendar', () => {
   it('puts a day picked in the calendar in the draft and the box', async () => {

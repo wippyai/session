@@ -59,6 +59,7 @@
   --_key: var(--wippy-form-key-size, var(--_d-key));
   --_field-gap: var(--wippy-form-field-gap, var(--_d-field-gap));
   --_label-weight: var(--wippy-form-label-weight, 500);
+  --_date-width: var(--wippy-form-date-width, 20rem);
 
   /* Compact density internals (density="comfortable" below overrides these). */
   --_d-size: 14px;
@@ -692,20 +693,17 @@ span.w-form__option-mark {
   min-width: 0;
 }
 /*
- * The date picker's calendar. PrimeVue opens it at least as wide as the whole
- * date control and writes that as an inline `min-width`, which for a
- * full-width box is the whole form (1,796px at 1920). The calendar's own
- * width is enough, so the inline minimum is lifted here; only `!important`
- * can beat an inline style. The class is our own, on the panel through the
- * picker's pass-through (the `field-calendar` part).
- *
- * TODO(D36): a stopgap. A theme-level rule for the width of the calendar panel
- * is planned (the theme plugin owns the overlay layer the panel lives in), and
- * this local rule goes away with it, in the same release step that deletes
- * `use-theme-mode-class.ts` when `@wippy-fe/theme` >= 0.0.61 is the dependency.
+ * The date control. A date does not need the width of the whole form, and the
+ * theme opens the popup calendar at least as wide as the input it belongs to
+ * (so a form-wide box made a form-wide calendar). The control is bounded to its
+ * own width, full width only where the form is narrower than that, and the
+ * calendar follows it. The class is on the picker through the `date` state of
+ * the `field-input` part; the calendar itself (the `field-calendar` part) is
+ * left to the theme.
  */
-.w-form__field-calendar {
-  min-width: 0 !important;
+.w-form__field-input--date {
+  width: min(100%, var(--_date-width));
+  max-width: 100%;
 }
 
 @container (max-width: 520px) {

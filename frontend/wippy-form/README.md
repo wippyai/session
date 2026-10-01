@@ -239,12 +239,13 @@ A `text` field may carry a `pattern` (a full-match expression). The component do
 
 ### Tokens
 
-All the shared tokens of the question card apply to the root (`--wippy-form-font`, `-font-size`, `-small-size`, `-question-size`, `-question-weight` for the title, `-surface`, `-border`, `-radius`, `-padding`, `-text`, `-text-muted`, `-focus`). Two tokens are new:
+All the shared tokens of the question card apply to the root (`--wippy-form-font`, `-font-size`, `-small-size`, `-question-size`, `-question-weight` for the title, `-surface`, `-border`, `-radius`, `-padding`, `-text`, `-text-muted`, `-focus`). Three tokens are new:
 
 | Token | Default (as coded) | Used for |
 | --- | --- | --- |
 | `--wippy-form-field-gap` | 16px compact / 20px comfortable | Space between fields, and between the form's header, fields, errors and button |
 | `--wippy-form-label-weight` | `500` | Field label weight |
+| `--wippy-form-date-width` | `20rem` | Width of the date control, which is full width only when the form is narrower than that. The theme opens the calendar at least as wide as the control, so the calendar follows this width; set it larger to get a wider box and calendar |
 
 The inputs themselves are PrimeVue controls, so their surface, border and focus styling is the theme's (there are no input tokens, and no `.p-*` override).
 
@@ -264,8 +265,8 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 | `field-marker` | | The "(required)" text, shown on an editable required field |
 | `field-description` | | The field's own description |
 | `field-control` | | Wrapper around the control |
-| `field-input` | | The PrimeVue control: the input, the textarea, the checkbox, the date picker |
-| `field-calendar` | | The date picker's calendar panel (class `w-form__field-calendar`). It opens in the theme plugin's overlay layer, not inside the form, so it is never clipped by the message around a short form; it carries the form's `w-theme-dark` or `w-theme-light` class, so it follows the theme |
+| `field-input` | `date` (on the date picker) | The PrimeVue control: the input, the textarea, the checkbox, the date picker. The `date` state is what `--wippy-form-date-width` bounds |
+| `field-calendar` | | The date picker's calendar panel (class `w-form__field-calendar`). It opens in the theme plugin's overlay layer, not inside the form, so it is never clipped by the message around a short form; it carries the form's `w-theme-dark` or `w-theme-light` class, so it follows the theme. Its width follows the date control (see `--wippy-form-date-width`); no rule in this package overrides it |
 | `field-error` | | The error list; linked to the control by `aria-describedby` |
 | `field-value` | `empty` | The stored answer in the read-only view ("Skipped" when empty) |
 | `field-note` | | The note on a chosen option in the read-only view |
@@ -296,6 +297,6 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 - A `pattern` mistake is only reported after submit (by the server), not as the user types; see "Pattern" above.
 - The calendar's day cells have no accessible name beyond the day number (PrimeVue's default); the panel itself is a dialog labelled "Choose Date". Not changed here.
 - The calendar carries the form's theme class by a small observer (`src/composables/use-theme-mode-class.ts`, installed only while the date field is editable) because the theme plugin's overlay layer is a sibling of the themed container and does not get the class itself. `appendTo="self"` would put the calendar inside the themed container, but the message bubble around a form clips it (a one-question form showed about a quarter of the calendar), and `@wippy-fe/theme` documents it as the wrong setting. This is temporary (decision D36): from Host 1.0.61 / `@wippy-fe/theme` 0.0.61 the plugin's layer follows the theme class of the overlay's trigger. When this package's theme dependency moves to 0.0.61 or later, the composable, its test file and its call in `date-field.vue` (with the calendar theme-class tests) are deleted.
-- PrimeVue writes an inline `min-width` on the calendar equal to the width of the whole date control (the whole form for a full-width box). `.w-form__field-calendar` lifts it with `min-width: 0 !important`, the only way to beat an inline style. This local rule is a stopgap too: a theme-level rule for the calendar's width is planned, and this one goes away with it (same release step as the observer above).
+- The theme (and PrimeVue's own alignment of an overlay) opens the calendar at least as wide as the date control, which used to make it as wide as the whole form. The date control is now bounded to `--wippy-form-date-width` (20rem), so the calendar follows that width on its own; there is no override of the calendar and no `!important` in `styles.css` for it (`styles.test.ts` checks both).
 - The calendar cannot show a year below 100: PrimeVue reads one as a two-digit year, so the calendar opens on 19xx or 20xx for such a date. The box and the saved answer keep the year as typed.
 - In the Dark theme the textarea is darker than the single-line inputs. Both are the same PrimeVue components this form uses for the other fields; the difference is in the theme's own styles (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`), so it is a theme-level change, not something to override here.
