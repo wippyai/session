@@ -3,6 +3,7 @@ import type { FormState } from '../lib/definition'
 import { computed, ref } from 'vue'
 import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
+import FormAnsweredStatus from './form-answered-status.vue'
 import FormHeader from './form-header.vue'
 
 /**
@@ -15,23 +16,15 @@ defineProps<{
   state: FormState
 }>()
 
-function formatTime(iso: string | null): string | null {
-  if (!iso)
-    return null
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
-}
-
-const statusEl = ref<HTMLElement | null>(null)
+const statusRef = ref<InstanceType<typeof FormAnsweredStatus> | null>(null)
 
 const rootPart = computed(() => partAttrs('card', 'answered'))
 const fieldsPart = computed(() => partAttrs('fields'))
-const statusPart = computed(() => partAttrs('status'))
 
 defineExpose({
   /** Moves focus to the status text after a successful submit, so focus isn't lost when the form swaps to this read-only view. */
   focusStatus() {
-    statusEl.value?.focus()
+    statusRef.value?.focus()
   },
 })
 </script>
@@ -56,28 +49,9 @@ defineExpose({
       :readonly="true"
     />
 
-    <div
-      ref="statusEl"
-      tabindex="-1"
-      :part="statusPart.part"
-      :class="statusPart.class"
-    >
-      <p v-if="state.late">
-        Late answer — this was answered after the conversation moved on. The assistant will confirm before
-        acting on the earlier request.
-      </p>
-      <p v-if="state.delivery === 'pending'">
-        Submitted. Waiting for the assistant.
-      </p>
-      <p v-else-if="state.delivery === 'running'">
-        The assistant is reading your answer.
-      </p>
-      <p v-else-if="state.delivery === 'interrupted'">
-        The assistant stopped before answering. Send a message to continue.
-      </p>
-      <p v-if="formatTime(state.submitted_at)">
-        Answered {{ formatTime(state.submitted_at) }}
-      </p>
-    </div>
+    <FormAnsweredStatus
+      ref="statusRef"
+      :state="state"
+    />
   </div>
 </template>
