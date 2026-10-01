@@ -61,21 +61,16 @@ entries:
       type: view.component
       title: Session Form
       description: >-
-        Renders one Session `ask_user` form artifact and submits the answer back to the owning session over
-        the Host's artifact-state API. When every field in `definition` has `type: "choice"` (the only field
-        type V1 emits), it renders a Claude-style question card: one question at a time for several-question
-        forms, with a `‹ n/total ›` counter, per-answer notes, an Other free-text row, a review step before
-        sending, and a read-only answered summary afterward. A mixed or non-choice definition falls back to a
-        plain radio/checkbox fields form (kept for V2 standard fields). Inputs: `definition` (the immutable
-        question/option data), `form-version` (schema version gate — an unsupported version disables
-        submission), and `state` (the package-tag lifecycle: "active" while answerable, "idle" once answered).
-        The component owns its own data loading (GET on mount, reload on visibility/session-message/artifact
-        events), submission (request-id reuse, one automatic retry on a no-response network failure, 422
-        field-error and 409 already-submitted handling), and offline detection — the host only needs to mount
-        the tag with these three attributes. Edge cases handled: a stale ("asked earlier") form, a race where
-        another client answers first, a reload that fails while a view is already showing, and an unsupported
-        form-version. Agents must never write the `<wippy-form>` tag themselves, because it is created only
-        through the Session `ask_user` tool and never from agent-generated content.
+        Renders one Session `ask_user` form as a question card and sends the answer back to the
+        owning session through the Host's artifact-state API. Each question supports per-answer
+        notes and, when the definition allows it, an Other free-text row. A form with several
+        questions shows one at a time, with a counter and a review step before sending. Once the
+        answer is accepted, the card becomes a read-only summary. The inputs are `definition` (the
+        questions and options), `form-version` (a version other than 1 disables submission), and
+        `state` (`active` while the form can be answered, `idle` after it was answered). The
+        component loads and submits by itself, so the tag only needs these attributes. Agents must
+        never write the `<wippy-form>` tag, because it is created only through the Session
+        `ask_user` tool.
       tag_name: wippy-form
       auto_register: true
       announced: true
@@ -88,32 +83,33 @@ entries:
             type: number
             default: 1
             description: >-
-              Form definition schema version (currently 1). A value other than 1, from this prop or from the
-              loaded state's own `form_version`, disables the interactive form and shows the notice "This form
-              needs a newer version of the app." instead.
+              Form definition schema version (currently 1). A value other than 1, from this prop or
+              from the loaded state's own `form_version`, disables the interactive form and shows
+              the notice "This form needs a newer version of the app." instead.
           definition:
             type: object
             default: null
             description: >-
-              Immutable form definition: `title`, optional `description`, optional `submit_label`, optional
-              `answered_message` (not displayed), and `fields` (each `{ id, type: "choice", label,
-              description?, required, options: [{value, label, description?}], multiple, allow_other }`). When
-              every field is `type: "choice"` the question-card UI renders; otherwise the radio/checkbox
-              fields form renders.
+              The questions to ask: `title`, optional `description`, and `fields`, a list of choice
+              questions, each `{ id, type: "choice", label, description?, required, options:
+              [{value, label, description?}], multiple, allow_other }`. Optional `submit_label` and
+              `answered_message` are accepted and not shown. A definition with no fields shows an
+              error message.
           state:
             type: string
             default: active
             description: >-
-              Package-tag lifecycle state mirrored from the artifact: "active" (still answerable) or "idle"
-              (already answered, shown read-only). Changing this prop triggers a reload of the canonical form
-              state from the Host.
+              Package-tag lifecycle state mirrored from the artifact: "active" (still answerable) or
+              "idle" (already answered, shown read-only). Changing this prop triggers a reload of
+              the canonical form state from the Host.
           density:
             type: string
             default: compact
             description: >-
-              Question-card sizing: "compact" (default) or "comfortable", a larger size/spacing scale. Read
-              purely through the `:host([density="comfortable"])` CSS selector — no JS reads it — but must be
-              a declared prop so the package-tag mount path can set it as an attribute.
+              Question-card sizing: "compact" (default) or "comfortable", a larger size/spacing
+              scale. Read purely through the `:host([density="comfortable"])` CSS selector — no JS
+              reads it — but must be a declared prop so the package-tag mount path can set it as an
+              attribute.
 
   # wippy.session.forms.ui:ui_fs_answers
   - name: ui_fs_answers

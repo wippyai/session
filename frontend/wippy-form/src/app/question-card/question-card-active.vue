@@ -1,31 +1,27 @@
 <script setup lang="ts">
 import type { FocusTarget } from '../../composables/use-question-card'
 import type { FieldError, FormAnswers, FormState } from '../../lib/definition'
+import type { SubmitBanner } from '../../lib/submit-error'
 import { Icon } from '@iconify/vue'
-import Button from 'primevue/button'
-import Message from 'primevue/message'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
 import { trimAnswerText } from '../../lib/answers'
-import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
+import FormMessage from '../form-message.vue'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardQuestion from './question-card-question.vue'
 import QuestionCardReview from './question-card-review.vue'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
 /**
- * The interactive question card — the question-card counterpart of
- * `ActiveForm.vue`, swapped in by `wippy-form.vue` when every field in the
- * definition is `type: 'choice'`. Owns the card's own interaction state via
- * `useQuestionCard` and forwards to the SAME submit pipeline `ActiveForm`
- * uses (`@submit`), so request-id reuse, the automatic no-response retry,
- * and 422/409 handling in `wippy-form.vue` all keep working unchanged.
+ * The interactive question card. It owns the interaction state through
+ * `useQuestionCard` and hands the finished answers to `wippy-form.vue` with
+ * `submit`, which sends them and reports the outcome back through the props.
  */
 const props = defineProps<{
   state: FormState
   submitting: boolean
-  banner: { message: string, retryable?: boolean } | null
+  banner: SubmitBanner | null
   offline?: boolean
 }>()
 
@@ -39,13 +35,9 @@ const emit = defineEmits<{
 const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
 const SUBMITTING_MESSAGE = 'Sending your answer…'
 
-// Submitting while offline, or while a previous submit is still in flight,
-// can only fail or double-post (see use-online-status.ts — a second pick
-// while `submitting` got a 409 "answered elsewhere"). The same guard
-// ActiveForm.vue applies via its Submit button's :disabled. Here
-// submission can be triggered straight from a row click/number key
-// (single-question, no explicit button), so the guard lives at the
-// controller's own submit callback rather than only on a button.
+// A submit while offline can only fail, and a second one while the first is in
+// flight gets a 409. A single question submits straight from a row click or a
+// number key, with no button to disable, so the guard sits on the callback.
 const controller = useQuestionCard(props.state.definition, props.state.data, (answers) => {
   if (props.offline || props.submitting)
     return
@@ -70,9 +62,8 @@ watch(() => props.submitting, (sending) => {
     controller.quiet()
 })
 
-// 422 field errors from the server, by field id — the question-card
-// equivalent of ActiveForm's fieldErrors, shown on the question that owns
-// the field; a several-question card jumps there.
+// 422 field errors from the server, by field id. They show on the question that
+// owns the field, and a card with several questions jumps there.
 const serverFieldErrors = ref<Record<string, string>>({})
 const serverFormErrors = ref<string[]>([])
 
@@ -108,16 +99,10 @@ const cardErrorIds = computed(() => [
   props.banner ? bannerId : '',
 ].filter(Boolean).join(' ') || undefined)
 
-// The banner's text follows its severity, the same as its box: a retryable
-// failure is a warning (`warn`), anything else an error. Colour on the text,
-// not the `Message` (see lib/error-text.ts).
-const bannerTextClass = computed(() => props.banner?.retryable ? WARN_TEXT_CLASS : ERROR_TEXT_CLASS)
-
-// A changed answer clears that question's own server error — the same
-// "the next submit re-checks it" contract ActiveForm.vue's updateField()
-// applies. Snapshotted per field (not a raw deep watch on the reactive
-// answers object, which can't tell old from new since it's the same mutated
-// proxy) so only the field that actually changed loses its error.
+// A changed answer clears that question's own server error, and the next submit
+// checks it again. The snapshot is per field because a deep watch on the
+// reactive answers cannot tell old from new, so only a field that changed
+// loses its error.
 watch(
   () => Object.fromEntries(props.state.definition.fields.map(f => [f.id, JSON.stringify(controller.ans(f))])),
   (curr, prev) => {
@@ -130,8 +115,6 @@ watch(
     )
     if (changedIds.size === 0)
       return
-    // Rebuilt rather than `delete`d (no-dynamic-delete) — the same
-    // filter-and-rebuild shape ActiveForm.vue's updateField() uses.
     serverFieldErrors.value = Object.fromEntries(
       Object.entries(serverFieldErrors.value).filter(([id]) => !changedIds.has(id)),
     )
@@ -376,14 +359,13 @@ function onKeydown(event: KeyboardEvent) {
       {{ SUBMITTING_MESSAGE }}
     </p>
 
-    <Message
+    <FormMessage
       v-if="generalServerError"
       :id="generalErrorId"
       severity="error"
-      :closable="false"
     >
-      <span :class="ERROR_TEXT_CLASS">{{ generalServerError }}</span>
-    </Message>
+      {{ generalServerError }}
+    </FormMessage>
 
     <p
       :part="titlePart.part"
@@ -416,25 +398,15 @@ function onKeydown(event: KeyboardEvent) {
       @toggle-collapse="toggleCollapse"
     />
 
-    <Message
+    <FormMessage
       v-if="banner"
       :id="bannerId"
       :severity="banner.retryable ? 'warn' : 'error'"
-      :closable="false"
+      :retry="banner.retryable"
+      @retry="emit('retry')"
     >
-      <div class="flex items-center gap-2">
-        <span :class="bannerTextClass">{{ banner.message }}</span>
-        <Button
-          v-if="banner.retryable"
-          type="button"
-          link
-          size="small"
-          @click="emit('retry')"
-        >
-          Retry
-        </Button>
-      </div>
-    </Message>
+      {{ banner.message }}
+    </FormMessage>
 
     <template v-if="!controller.collapsed.value">
       <QuestionCardReview

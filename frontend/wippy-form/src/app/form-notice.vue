@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import type { FormDefinition } from '../lib/definition'
-import Message from 'primevue/message'
+import type { MessageSeverity } from '../lib/error-text'
 import ChoiceField from './fields/choice-field.vue'
+import FormMessage from './form-message.vue'
 
+/** The form's questions with their options disabled, under a message saying why it cannot be answered here. */
 defineProps<{
   definition: FormDefinition
+  severity: MessageSeverity
+  message: string
 }>()
 </script>
 
@@ -26,17 +30,10 @@ defineProps<{
       v-for="field in definition.fields"
       :key="field.id"
       :field="field"
-      :model-value="undefined"
-      :errors="[]"
-      :disabled="true"
-      :readonly="true"
     />
 
-    <Message
-      severity="secondary"
-      :closable="false"
-    >
-      This form cannot be submitted here.
-    </Message>
+    <FormMessage :severity="severity">
+      {{ message }}
+    </FormMessage>
   </div>
 </template>

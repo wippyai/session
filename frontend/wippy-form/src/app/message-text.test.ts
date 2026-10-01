@@ -1,4 +1,4 @@
-import type { FormDefinition, FormState } from '../lib/definition'
+import type { FormDefinition } from '../lib/definition'
 import type { ComponentProps } from '../types'
 import { mount } from '@vue/test-utils'
 import * as WippyProxy from '@wippy-fe/proxy'
@@ -8,18 +8,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 import { ELEMENT_PROVIDER } from '../element-context'
 import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../lib/error-text'
-import ActiveForm from './active-form.vue'
-import NeedsNewerHostNotice from './needs-newer-host-notice.vue'
+import FormNotice from './form-notice.vue'
 import WippyForm from './wippy-form.vue'
 
 /**
- * The text of every PrimeVue `Message` outside the question card (the form's own
- * notices and the fields form's banner) takes the theme's severity utilities, one
- * constant per severity (`lib/error-text.ts`), exactly like the question card's
- * messages do: the `Message` keeps its box, and the text inside it has to be 4.5:1
- * in both themes, which the theme's own `Message` colours are not (EE2-2461).
- * Secondary notices ("cannot be submitted here", "was answered") are
- * already above 4.5:1 and keep the theme's colour.
+ * The text of every PrimeVue `Message` outside the question card takes the theme's
+ * severity utilities from `lib/error-text.ts`, as the question card's messages do.
+ * Secondary notices ("cannot be submitted here", "was answered") are above 4.5:1
+ * already and keep the theme colour.
  */
 
 vi.mock('@wippy-fe/proxy', () => ({
@@ -30,21 +26,6 @@ vi.mock('@wippy-fe/proxy', () => ({
 const definition: FormDefinition = {
   title: 'Question',
   fields: [{ id: 'f1', type: 'choice', label: 'Pick one', required: true, options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }], multiple: false, allow_other: false }],
-}
-
-const state: FormState = {
-  form_version: 1,
-  artifact_id: 'artifact-1',
-  session_id: 'session-1',
-  status: 'active',
-  stale: false,
-  late: false,
-  content_version: 1,
-  definition,
-  data: null,
-  submitted_at: null,
-  answer_message_id: null,
-  delivery: null,
 }
 
 function carries(el: Element, classes: string): boolean {
@@ -88,40 +69,28 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
-describe('ActiveForm (fields form) banner text follows its severity', () => {
-  it('draws a non-retryable (error) banner in the error utilities', () => {
-    const wrapper = mount(ActiveForm, { props: { state, submitting: false, banner: { message: 'You are signed out. Sign in again, then retry.', retryable: false } }, global: { plugins: [PrimeVuePlugin] } })
-    const text = textElement(wrapper.element, 'You are signed out. Sign in again, then retry.')
-    expect(carries(text, ERROR_TEXT_CLASS)).toBe(true)
-    expect(carries(text, WARN_TEXT_CLASS)).toBe(false)
-    expect(text.closest('[role="alert"]')?.classList.contains('p-message-error')).toBe(true)
-  })
-
-  it('draws a retryable (warn) banner in the warn utilities and keeps its Retry button', () => {
-    const wrapper = mount(ActiveForm, { props: { state, submitting: false, banner: { message: 'The server could not save this. Try again.', retryable: true } }, global: { plugins: [PrimeVuePlugin] } })
-    const text = textElement(wrapper.element, 'The server could not save this. Try again.')
-    expect(carries(text, WARN_TEXT_CLASS)).toBe(true)
-    expect(carries(text, ERROR_TEXT_CLASS)).toBe(false)
-    const message = text.closest('[role="alert"]') as HTMLElement
-    expect(message.classList.contains('p-message-warn')).toBe(true)
-    expect(Array.from(message.querySelectorAll('button')).some(b => b.textContent?.trim() === 'Retry')).toBe(true)
-  })
-})
-
-describe('NeedsNewerHostNotice', () => {
-  it('draws the "needs a newer Web Host" warning in the warn utilities', () => {
-    const wrapper = mount(NeedsNewerHostNotice, { props: { definition }, global: { plugins: [PrimeVuePlugin] } })
-    const text = textElement(wrapper.element, 'This form needs a newer Web Host. If you already answered it, your answer is in the chat.')
+describe('FormNotice', () => {
+  it('draws a warn message in the warn utilities', () => {
+    const wrapper = mount(FormNotice, { props: { definition, severity: 'warn', message: 'This form needs a newer Web Host.' }, global: { plugins: [PrimeVuePlugin] } })
+    const text = textElement(wrapper.element, 'This form needs a newer Web Host.')
     expect(carries(text, WARN_TEXT_CLASS)).toBe(true)
     expect(text.closest('[role="alert"]')?.classList.contains('p-message-warn')).toBe(true)
   })
 
-  it('leaves the secondary "was answered" notice on the theme colour', () => {
-    const wrapper = mount(NeedsNewerHostNotice, { props: { definition, answered: true }, global: { plugins: [PrimeVuePlugin] } })
+  it('leaves a secondary message on the theme colour', () => {
+    const wrapper = mount(FormNotice, { props: { definition, severity: 'secondary', message: 'This form was answered.' }, global: { plugins: [PrimeVuePlugin] } })
     const message = wrapper.find('[role="alert"]')
-    expect(message.exists()).toBe(true)
     expect(message.classes()).toContain('p-message-secondary')
     expect(message.element.querySelector('[class*="text-danger"], [class*="text-warn"]')).toBeNull()
+  })
+
+  it('shows the questions with their options disabled', () => {
+    const wrapper = mount(FormNotice, { props: { definition, severity: 'secondary', message: 'Not here.' }, global: { plugins: [PrimeVuePlugin] } })
+    expect(wrapper.text()).toContain('Question')
+    expect(wrapper.text()).toContain('Pick one')
+    const options = wrapper.findAll('input[type="radio"]')
+    expect(options).toHaveLength(2)
+    expect(options.every(o => (o.element as HTMLInputElement).disabled)).toBe(true)
   })
 })
 

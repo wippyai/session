@@ -56,20 +56,15 @@ export interface QuestionCardController {
 export const MAX_KEYED_ROWS = 9
 
 /**
- * Interactive state machine for the question card, mirroring the approved
- * prototype's `WippyForm` class but as a Vue composable: reactive
- * per-question answer state, question navigation (single question ->
- * immediate submit; several questions -> advance to the next unseen
- * question, then a review step), notes, and Other. DOM focus movement is
- * NOT done here — `focusTarget`/`focusSeq` name the intent (`focusSeq`
- * increments on every request, even a repeat, so the view's watcher always
- * fires) and the view (which owns the actual elements) performs the
- * `.focus()` call.
+ * Interaction state of the question card: the answer in progress for each
+ * question, navigation (a single question submits at once, several advance to
+ * the next unseen question and then to a review step), notes and Other. Focus
+ * is not moved here. `focusTarget` names where it should go next and
+ * `focusSeq` increments on every request, even a repeat, so the view's
+ * watcher always fires and makes the `.focus()` call.
  *
- * `definition` and `initialData` are read once, at creation — the same
- * "hydrate on mount, don't re-sync on background prop changes" contract
- * `ActiveForm.vue`'s own `reactive(draftFromAnswers(...))` already uses, so
- * an in-progress answer survives a background reload of `state`.
+ * `definition` and `initialData` are read once, when the card is created, so
+ * an answer in progress survives a background reload of `state`.
  */
 export function useQuestionCard(
   definition: FormDefinition,

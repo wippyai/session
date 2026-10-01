@@ -1,34 +1,26 @@
 <script setup lang="ts">
 import type { HostState } from '../composables/use-host-reflection'
 import type { FormAnswers } from '../lib/definition'
-import Button from 'primevue/button'
-import Message from 'primevue/message'
+import type { SubmitBanner } from '../lib/submit-error'
 import { computed, nextTick, ref, watch } from 'vue'
-import { useComponentEvents, useComponentProps, useComponentPropsErrors } from '../constants'
 import { useDeliveryNudge } from '../composables/use-delivery-nudge'
 import { useFormState } from '../composables/use-form-state'
 import { useFormSubmit } from '../composables/use-form-submit'
 import { useHostReflection } from '../composables/use-host-reflection'
 import { useOnlineStatus } from '../composables/use-online-status'
+import { useComponentEvents, useComponentProps, useComponentPropsErrors } from '../constants'
 import { useArtifactId } from '../element-context'
-import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../lib/error-text'
-import ActiveForm from './active-form.vue'
-import IdleForm from './idle-form.vue'
-import NeedsNewerHostNotice from './needs-newer-host-notice.vue'
-import NoArtifactNotice from './no-artifact-notice.vue'
+import { CANNOT_SUBMIT_MESSAGE, LOAD_FAILED_MESSAGE, NEEDS_NEWER_HOST_MESSAGE, SUBMIT_FAILED_MESSAGE } from '../lib/messages'
+import FormMessage from './form-message.vue'
+import FormNotice from './form-notice.vue'
 import QuestionCardActive from './question-card/question-card-active.vue'
 import QuestionCardSummary from './question-card/question-card-summary.vue'
 
 const RELOAD_FAILED_NOTICE = 'Could not refresh this form. Showing what you last saw.'
-// Covers two different histories with one notice: our own submit attempt
-// losing a race (rejected, e.g. a 409 already_submitted) and a background
-// reload finding unsent local content that was never submitted at all.
-// "was not sent" (the old wording) reads as false for the second case —
-// nothing was ever sent there. "draft" is accurate either way: a rejected
-// attempt and an untouched local pick are both still just a draft once
-// another answer has already been saved.
+// Covers a rejected submit (409) and a background reload that finds unsent local input.
 const ANSWERED_ELSEWHERE_NOTICE = 'This form was already answered elsewhere, so your draft was not saved. The saved answer is shown below.'
-/** The only `form_version` this component knows how to render interactively (see `unsupportedVersion` below). */
+const ANSWERED_IN_CHAT_MESSAGE = 'This form was answered. Your answer is in the chat.'
+const NEEDS_NEWER_HOST_NOTICE = `${NEEDS_NEWER_HOST_MESSAGE} If you already answered it, your answer is in the chat.`
 const SUPPORTED_FORM_VERSION = 1
 
 const props = useComponentProps()
@@ -38,12 +30,10 @@ const artifactId = useArtifactId()
 
 const definition = computed(() => props.value.definition)
 const statePropTrigger = computed(() => props.value.state)
-// The package-tag `state` prop is stored in the artifact content and flipped
-// to `idle` in the same transaction that accepts an answer (form_artifact
-// content_with_state), so `idle` reliably means "an answer was accepted".
-// It is the only signal an old Host (no artifact-state API) leaves us for
-// telling an answered card from an open one; `active` proves nothing (the
-// Host's copy of the content may predate the answer).
+// The `state` prop becomes `idle` in the same transaction that accepts an
+// answer, so `idle` means an answer was accepted. `active` proves nothing: the
+// Host's copy of the content may predate the answer. Without the artifact-state
+// API this prop is the only way to tell an answered form from an open one.
 const answeredPerHostProp = computed(() => statePropTrigger.value === 'idle')
 
 const { status, state, errorMessage, reloadError, reload, refresh } = useFormState(artifactId, statePropTrigger)
@@ -51,35 +41,21 @@ useDeliveryNudge(state, refresh)
 const { submitting, submit } = useFormSubmit(artifactId)
 const { isOnline } = useOnlineStatus(() => reload())
 
-const banner = ref<{ message: string, retryable?: boolean } | null>(null)
-// Survives the swap to the read-only view, which is where a lost race ends up.
+const banner = ref<SubmitBanner | null>(null)
+// Survives the swap to the summary, which is where a lost race ends up.
 const answeredElsewhere = ref(false)
 watch(artifactId, () => { answeredElsewhere.value = false })
-const activeFormRef = ref<{ setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void, retry: () => void, hasUnsentInput?: () => boolean } | null>(null)
-const idleFormRef = ref<{ focusStatus: () => void } | null>(null)
+const cardRef = ref<InstanceType<typeof QuestionCardActive> | null>(null)
+const summaryRef = ref<InstanceType<typeof QuestionCardSummary> | null>(null)
 
-// Set synchronously right before `handleSubmit`'s own accepted-branch
-// assignment to `state.value` so the active->idle watcher below (which
-// explains an EXTERNAL answer-elsewhere swap) does not also fire for a
-// transition WE caused by submitting successfully.
+// Set before our own accepted submit flips `state` to idle, so the watcher below
+// does not report that change as an answer from elsewhere.
 let suppressAnsweredElsewhereWatch = false
 
-// A background reload/event (another tab or client answering the same
-// artifact first) can flip `state` from active to idle without this
-// instance ever attempting a submit itself — e.g. the `artifact:<id>`
-// relay event firing while the user still has an in-progress, unsent
-// answer. Silently swapping to the read-only summary would drop that
-// in-progress answer with no explanation, so that case is treated the same
-// as losing our own submit race: the same "answered elsewhere" notice.
-//
-// A PASSIVE instance — this copy was never touched, nothing chosen/typed —
-// has nothing to lose, so the notice would be false: it would claim a
-// draft was not saved when there was no draft at all. Gated on
-// `hasUnsentInput()` (read synchronously here, before the
-// active view unmounts on the next render — this watcher runs pre-flush).
-// A form flavor with no exposed `hasUnsentInput` (should not happen; both
-// ActiveForm and QuestionCardActive provide one) falls back to the old,
-// safer-to-over-notify behavior rather than silently going quiet.
+// A background reload can flip `state` to idle because another tab or client
+// answered first. A card holding unsent input says its draft was dropped. A card
+// nothing was entered into has nothing to explain. The input is read before the
+// card unmounts, which is why this watcher runs before the render.
 watch(() => state.value?.status, (status, previousStatus) => {
   if (status !== 'idle' || previousStatus !== 'active')
     return
@@ -87,68 +63,43 @@ watch(() => state.value?.status, (status, previousStatus) => {
     suppressAnsweredElsewhereWatch = false
     return
   }
-  const hadUnsentInput = activeFormRef.value?.hasUnsentInput?.() ?? true
-  if (hadUnsentInput)
+  if (cardRef.value?.hasUnsentInput())
     answeredElsewhere.value = true
 })
 
-// The contract check ("form-version") applies before anything else: the
-// package-tag prop is known immediately (no need to wait for GET), and once
-// state is loaded its own `form_version` is checked too. Either source
-// being anything other than 1 means an interactive ActiveForm must never be
-// rendered — a v-else-if branch below, not a submit-time guard, since the
-// Host's `Submit` button must simply not exist.
+// A form version other than 1, named by the prop or by the loaded state, never
+// gets an interactive card.
 const unsupportedVersion = computed(() => {
   const propVersion = props.value.formVersion
   if (propVersion !== undefined && propVersion !== SUPPORTED_FORM_VERSION)
     return true
   const stateVersion = state.value?.form_version
-  if (stateVersion !== undefined && stateVersion !== SUPPORTED_FORM_VERSION)
-    return true
-  return false
+  return stateVersion !== undefined && stateVersion !== SUPPORTED_FORM_VERSION
 })
 
-// Routing: a definition where every field is `type: 'choice'` (the only
-// field type V1 emits) renders the question card; anything else (a future
-// mixed/non-choice V2 definition) falls back to the plain radio/checkbox
-// fields form, which stays fully supported for that case.
-const allChoice = computed(() => {
-  const fields = definition.value?.fields
-  return !!fields && fields.length > 0 && fields.every(f => f.type === 'choice')
-})
-
-// Host attribute reflection (`card-state`, `collapsed`) only makes sense for
-// the question card — the plain fields form has no review/collapse concept,
-// so it just tracks active vs. answered.
-const questionCardState = ref<'active' | 'review'>('active')
-const questionCardCollapsed = ref(false)
-const hostState = computed<HostState>(() => {
-  // Takes priority over everything else: an unsupported form-version never
-  // renders an interactive/submittable card (see the v-else-if chain
-  // below), so styling must not keep reporting "active" for it either.
-  if (unsupportedVersion.value)
-    return 'unsupported'
-  // Same priority for a Host that predates the artifact-state API: `status`
-  // flips to 'unsupported' the moment `useFormState` finds no `artifactState`
-  // export on the proxy (see use-form-state.ts), before any GET is even
-  // attempted — `state` then stays null forever for this instance, so
-  // without this check it would otherwise read as 'loading' indefinitely.
+// Shown with the definition's questions disabled when the form cannot be answered here.
+const notice = computed(() => {
   if (status.value === 'unsupported')
+    return answeredPerHostProp.value
+      ? { severity: 'secondary', message: ANSWERED_IN_CHAT_MESSAGE } as const
+      : { severity: 'warn', message: NEEDS_NEWER_HOST_NOTICE } as const
+  if (!artifactId.value)
+    return { severity: 'secondary', message: CANNOT_SUBMIT_MESSAGE } as const
+  return null
+})
+
+const cardStep = ref<'active' | 'review'>('active')
+const cardCollapsed = ref(false)
+// `unsupported` outranks every other value because no interactive card renders for it.
+// `loading` covers the time before the first GET resolves.
+const hostState = computed<HostState>(() => {
+  if (unsupportedVersion.value || status.value === 'unsupported')
     return 'unsupported'
-  // `state` is only ever null before the artifact's first GET has resolved
-  // — the template shows <wippy-loading> for exactly this window (see the
-  // `v-else-if="status === 'loading' || status === 'idle'"` branch below).
-  // Without this check, `card-state` fell through to `questionCardState`'s
-  // default ("active") here too, so styling reported an interactive card
-  // for the ~tens of milliseconds before the GET actually landed and any
-  // options existed to interact with.
   if (state.value === null)
     return 'loading'
-  if (state.value.status === 'idle')
-    return 'answered'
-  return allChoice.value ? questionCardState.value : 'active'
+  return state.value.status === 'idle' ? 'answered' : cardStep.value
 })
-const hostCollapsed = computed(() => !unsupportedVersion.value && allChoice.value && state.value?.status === 'active' && questionCardCollapsed.value)
+const hostCollapsed = computed(() => !unsupportedVersion.value && state.value?.status === 'active' && cardCollapsed.value)
 useHostReflection(hostState, hostCollapsed)
 
 async function handleSubmit(answers: FormAnswers) {
@@ -157,17 +108,12 @@ async function handleSubmit(answers: FormAnswers) {
   banner.value = null
   const outcome = await submit(state.value.form_version, state.value.content_version, answers)
 
-  // The artifact was rebound to a different id while this request was in
-  // flight (e.g. the double-buffered w-page swapped content underneath
-  // this instance) — this result belongs to a form that is no longer ours.
+  // The element was rebound to another artifact while this request was in flight.
   if (outcome.ignored)
     return
 
   if (outcome.ok && outcome.accepted) {
     const accepted = outcome.accepted
-    // This active->idle transition is OUR OWN successful submit, not an
-    // externally observed "answered elsewhere" swap — the watcher above
-    // must not also fire for it.
     suppressAnsweredElsewhereWatch = true
     state.value = {
       ...state.value,
@@ -180,86 +126,65 @@ async function handleSubmit(answers: FormAnswers) {
       delivery: accepted.delivery,
     }
     emit('answer-submitted', { requestId: accepted.request_id, answerMessageId: accepted.answer_message_id, late: accepted.late })
-    // Move focus to the read-only view so it isn't lost when the form swaps
-    // out from under the user's last interaction (the Submit button).
-    void nextTick(() => idleFormRef.value?.focusStatus())
-    // Refresh in the background for the canonical submitted_at / normalized
-    // data the accepted response itself doesn't carry.
+    // The submit button is gone with the card, so focus moves to the summary.
+    void nextTick(() => summaryRef.value?.focusStatus())
+    // The accepted response lacks the canonical `submitted_at` and normalized data.
     reload()
     return
   }
 
   if (outcome.fieldErrors || outcome.formErrors) {
-    activeFormRef.value?.setServerErrors(outcome.fieldErrors, outcome.formErrors)
+    cardRef.value?.setServerErrors(outcome.fieldErrors, outcome.formErrors)
     return
   }
 
   if (outcome.code === 'already_submitted') {
     answeredElsewhere.value = true
-    // Await the reload (not fire-and-forget `reload()`) before scheduling
-    // the focus move: `state.value` is still "active" until this resolves,
-    // so the read-only view (and `idleFormRef`) does not exist yet — a
-    // `nextTick` issued before the await landed found `idleFormRef` still
-    // null and silently focused nothing, leaving focus on <body>.
+    // The summary exists only once the reload has replaced the active state.
     await refresh()
-    void nextTick(() => idleFormRef.value?.focusStatus())
+    void nextTick(() => summaryRef.value?.focusStatus())
     return
   }
 
   if (outcome.shouldReload)
     reload()
 
-  banner.value = { message: outcome.message ?? 'Could not submit this form.', retryable: outcome.retryable }
+  banner.value = { message: outcome.message ?? SUBMIT_FAILED_MESSAGE, retryable: outcome.retryable }
 }
 
 function handleRetry() {
-  activeFormRef.value?.retry()
+  cardRef.value?.retry()
 }
 </script>
 
 <template>
-  <div class="p-3 max-w-full min-w-0">
-    <Message
+  <div class="max-w-full min-w-0">
+    <FormMessage
       v-if="propErrors.length > 0"
       severity="error"
-      :closable="false"
     >
-      <span :class="ERROR_TEXT_CLASS">Invalid form configuration.</span>
-    </Message>
+      Invalid form configuration.
+    </FormMessage>
 
-    <Message
-      v-else-if="!definition"
+    <FormMessage
+      v-else-if="!definition?.fields?.length"
       severity="error"
-      :closable="false"
     >
-      <span :class="ERROR_TEXT_CLASS">This form has no definition to render.</span>
-    </Message>
+      This form has no definition to render.
+    </FormMessage>
 
-    <Message
+    <FormMessage
       v-else-if="unsupportedVersion"
       severity="warn"
-      :closable="false"
     >
-      <span :class="WARN_TEXT_CLASS">This form needs a newer version of the app.</span>
-    </Message>
+      This form needs a newer version of the app.
+    </FormMessage>
 
-    <!--
-      Checked BEFORE the artifact-id branch below: a Host that predates the
-      artifact-state API never sets `data-wippy-artifact-id` either, so
-      checking `!artifactId` first made this branch unreachable on every
-      published older Host — every card fell through to the generic "cannot
-      be submitted here" notice with no hint that a Web Host update was the
-      actual fix (EE2-2461 / F-P4-1).
-    -->
-    <NeedsNewerHostNotice
-      v-else-if="status === 'unsupported'"
+    <FormNotice
+      v-else-if="notice"
       :definition="definition"
-      :answered="answeredPerHostProp"
-    />
-
-    <NoArtifactNotice
-      v-else-if="!artifactId"
-      :definition="definition"
+      :severity="notice.severity"
+      :message="notice.message"
     />
 
     <template v-else-if="state">
@@ -270,42 +195,21 @@ function handleRetry() {
         {{ RELOAD_FAILED_NOTICE }}
       </p>
 
-      <!--
-        `:key="artifactId"` on all four branches below: defense in depth
-        alongside the `generation` bump in use-form-state.ts. Even with that
-        fix, keying by artifact id guarantees Vue fully discards and
-        recreates the active/idle component (and its own local interaction
-        state — the question card's ticks/notes/review position) on a
-        rebind, rather than patching the existing instance in place should
-        `state`'s shape otherwise look compatible across two different
-        artifacts.
-      -->
+      <!-- Keyed by the artifact, so a rebind discards the card and the draft it holds. -->
       <QuestionCardActive
-        v-if="state.status === 'active' && allChoice"
-        :key="artifactId"
-        ref="activeFormRef"
+        v-if="state.status === 'active'"
+        :key="state.artifact_id"
+        ref="cardRef"
         :state="state"
         :submitting="submitting"
         :banner="banner"
         :offline="!isOnline"
         @submit="handleSubmit"
         @retry="handleRetry"
-        @update:state="(v) => { questionCardState = v }"
-        @update:collapsed="(v) => { questionCardCollapsed = v }"
+        @update:state="(v) => { cardStep = v }"
+        @update:collapsed="(v) => { cardCollapsed = v }"
       />
-      <ActiveForm
-        v-else-if="state.status === 'active'"
-        :key="artifactId"
-        ref="activeFormRef"
-        :state="state"
-        :submitting="submitting"
-        :banner="banner"
-        :offline="!isOnline"
-        @submit="handleSubmit"
-        @retry="handleRetry"
-      />
-
-      <template v-else-if="state.status === 'idle'">
+      <template v-else>
         <p
           v-if="answeredElsewhere"
           role="status"
@@ -314,15 +218,8 @@ function handleRetry() {
           {{ ANSWERED_ELSEWHERE_NOTICE }}
         </p>
         <QuestionCardSummary
-          v-if="allChoice"
-          :key="artifactId"
-          ref="idleFormRef"
-          :state="state"
-        />
-        <IdleForm
-          v-else
-          :key="artifactId"
-          ref="idleFormRef"
+          :key="state.artifact_id"
+          ref="summaryRef"
           :state="state"
         />
       </template>
@@ -334,28 +231,13 @@ function handleRetry() {
       title="Loading form…"
     />
 
-    <!--
-      No `status === 'unsupported'` branch here: that case is now handled by
-      the NeedsNewerHostNotice branch above, before the `!artifactId` check
-      and before `state` is even considered — reaching this far down the
-      chain already implies `status !== 'unsupported'`.
-    -->
-    <Message
+    <FormMessage
       v-else-if="status === 'error'"
       severity="error"
-      :closable="false"
+      retry
+      @retry="reload"
     >
-      <div class="flex items-center gap-2">
-        <span :class="ERROR_TEXT_CLASS">{{ errorMessage || 'Could not load this form.' }}</span>
-        <Button
-          type="button"
-          link
-          size="small"
-          @click="reload"
-        >
-          Retry
-        </Button>
-      </div>
-    </Message>
+      {{ errorMessage || LOAD_FAILED_MESSAGE }}
+    </FormMessage>
   </div>
 </template>

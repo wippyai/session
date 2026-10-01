@@ -7,13 +7,7 @@ import { partClass } from '../../lib/part-class'
 import QuestionCardAnswerItems from './question-card-answer-items.vue'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
-/**
- * Read-only, post-submit view of a question-card form — the question-card
- * counterpart of `IdleForm.vue`, swapped in by `wippy-form.vue` once
- * `state.status === 'idle'` for an all-`choice` definition. Keeps the same
- * delivery-status copy (`pending`/`running`/`interrupted`, late-answer
- * notice, "Answered at …") `IdleForm.vue` shows.
- */
+/** The read-only card shown once the form is answered: each answer, then the delivery status and the time it was answered. */
 const props = defineProps<{
   state: FormState
 }>()

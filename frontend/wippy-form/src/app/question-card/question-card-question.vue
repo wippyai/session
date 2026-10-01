@@ -6,7 +6,7 @@ import Message from 'primevue/message'
 import { Icon } from '@iconify/vue'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
-import { isNoteTextTooLong, isOtherTextTooLong, trimAnswerText } from '../../lib/answers'
+import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX, trimAnswerText } from '../../lib/answers'
 import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardComposer from './question-card-composer.vue'
@@ -76,7 +76,7 @@ const otherEnabled = computed(() => {
 // same pre-check the note composer already applies (isNoteTextTooLong,
 // 1,000), so a too-long Other answer is caught before a round trip
 // instead of only surfacing as a 422.
-const otherTooLong = computed(() => isOtherTextTooLong(answerState().other))
+const otherTooLong = computed(() => exceedsLength(answerState().other, OTHER_TEXT_MAX))
 const otherErrorId = `${props.qid}-other-err`
 const errorId = `${props.qid}-err`
 
@@ -190,7 +190,7 @@ function onOptionsFocusIn(event: FocusEvent) {
       :editing="controller.ans(question).noteOpen === option.value"
       :note-draft="controller.ans(question).notes[option.value] || ''"
       :key-label="keyLabelFor(i)"
-      :note-too-long="isNoteTextTooLong(controller.ans(question).notes[option.value] || '')"
+      :note-too-long="exceedsLength(controller.ans(question).notes[option.value] || '', NOTE_TEXT_MAX)"
       :disabled="!!disabled"
       :described-by="errorIds"
       :invalid="!!displayError"

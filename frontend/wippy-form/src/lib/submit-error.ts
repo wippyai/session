@@ -19,6 +19,12 @@ export interface ClassifiedSubmitError {
   shouldReload: boolean
 }
 
+/** A failed submit as the card shows it. */
+export interface SubmitBanner {
+  message: string
+  retryable?: boolean
+}
+
 /**
  * Realm-stable brand the Host's `ArtifactStateError` carries on every
  * instance (`@wippy-fe/proxy`'s `artifact-state.ts`). `Symbol.for` reads

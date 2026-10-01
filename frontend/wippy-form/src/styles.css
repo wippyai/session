@@ -416,7 +416,7 @@ span.w-form__option-mark {
  * No rule in this file colours error or warning TEXT. Error text is coloured
  * by the theme's severity utilities on the text element itself, one constant
  * per severity in src/lib/error-text.ts (`ERROR_TEXT_CLASS` =
- * `text-danger-600 dark:text-danger-400`, the classes the fields form uses;
+ * `text-danger-600 dark:text-danger-400`;
  * `WARN_TEXT_CLASS` = `text-warn-700 dark:text-warn-400`), because the colours
  * that used to live here and in the theme's own `Message` are below WCAG
  * 1.4.3's 4.5:1 for small text in at least one theme: `--wippy-form-danger`

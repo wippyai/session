@@ -4,7 +4,6 @@ import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../../lib/error-text'
-import ChoiceField from '../fields/choice-field.vue'
 import QuestionCardActive from './question-card-active.vue'
 
 /**
@@ -409,23 +408,11 @@ describe('QuestionCardActive: focus after a failed send that started in a note',
   })
 })
 
-describe('QuestionCardActive: error text takes the same theme severity utilities as the fields form', () => {
-  // Same semantics, same looks: the V2 fields form draws a field error as plain
-  // text with the theme's severity utilities. The question card keeps its
-  // PrimeVue `Message` (box, role, id, parts) and gives the TEXT inside it those
-  // same utilities, because the `Message`'s own text colour is below WCAG
-  // 1.4.3's 4.5:1 in at least one theme (EE2-2461 F-RC-2).
-
-  /** The utilities the fields form puts on its field errors, read from the real component rather than copied here. */
-  function fieldsFormErrorUtilities(): string[] {
-    const wrapper = mount(ChoiceField, {
-      props: { field: multiDef.fields[0], modelValue: undefined, errors: [{ code: 'required', message: 'Choose an answer.' }], disabled: false, readonly: false },
-      global: { plugins: [PrimeVuePlugin] },
-    })
-    const classes = wrapper.find('ul').classes().filter(c => /^(?:dark:)?text-danger-/.test(c))
-    wrapper.unmount()
-    return classes
-  }
+describe('QuestionCardActive: error text takes the theme severity utilities', () => {
+  // The `Message` keeps its box, role, id and parts. The text inside it takes
+  // the utilities, because the `Message`'s own text colour is below 4.5:1
+  // contrast in at least one theme.
+  const errorUtilities = ERROR_TEXT_CLASS.split(' ')
 
   /** The element that holds `message` as its own text (no child elements), i.e. the text the reader sees. */
   function textElement(root: Element, message: string): HTMLElement {
@@ -435,18 +422,13 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
     return found
   }
 
-  it('reads the fields form\'s utilities from the real component: the severity pair for light and dark', () => {
-    // Positive control for the helper below: it finds real classes.
-    expect(fieldsFormErrorUtilities().sort()).toEqual(['dark:text-danger-400', 'text-danger-600'])
-  })
-
   it('draws a field error in them, inside the Message that keeps its parts, class, role and id', async () => {
     const wrapper = mountCard(singleDef)
     ;(wrapper.vm as unknown as CardVm).setServerErrors({ f1: [{ code: 'invalid', message: FIELD_ERROR }] })
     await flushPromises()
 
     const text = textElement(wrapper.element, FIELD_ERROR)
-    for (const utility of fieldsFormErrorUtilities())
+    for (const utility of errorUtilities)
       expect(text.classList.contains(utility)).toBe(true)
     expect(text.getAttribute('style')).toBeNull()
 
@@ -465,7 +447,7 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
     await flushPromises()
 
     const text = textElement(wrapper.element, 'You are signed out. Sign in again, then retry.')
-    for (const utility of fieldsFormErrorUtilities())
+    for (const utility of errorUtilities)
       expect(text.classList.contains(utility)).toBe(true)
     expect(text.closest('[role="alert"]')?.classList.contains('p-message-error')).toBe(true)
   })
@@ -480,7 +462,7 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
     for (const utility of WARN_TEXT_CLASS.split(' '))
       expect(text.classList.contains(utility)).toBe(true)
     // ...and none of the danger pair.
-    for (const utility of fieldsFormErrorUtilities())
+    for (const utility of errorUtilities)
       expect(text.classList.contains(utility)).toBe(false)
     const message = text.closest('[role="alert"]') as HTMLElement
     expect(message.classList.contains('p-message-warn')).toBe(true)
@@ -505,7 +487,7 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
     await flushPromises()
 
     const text = textElement(wrapper.element, FORM_ERROR)
-    for (const utility of fieldsFormErrorUtilities())
+    for (const utility of errorUtilities)
       expect(text.classList.contains(utility)).toBe(true)
     expect(text.closest('[role="alert"]')?.classList.contains('p-message-error')).toBe(true)
   })
@@ -517,10 +499,8 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
 })
 
 describe('QuestionCardActive: the rest of the error text takes the severity utilities, not a stylesheet colour', () => {
-  // The length notices, the review footer and a missing answer's "Not answered
-  // yet" used to read `--wippy-form-danger` (3.6:1 on the card in both themes).
-  // Their rules no longer set a colour (styles.test.ts), so the utilities on the
-  // element are the only thing that makes them an error colour (EE2-2461).
+  // Their stylesheet rules set no colour (styles.test.ts), so the utilities on
+  // the element are the only thing that makes them an error colour.
 
   function hasErrorText(el: Element | null | undefined): boolean {
     return !!el && ERROR_TEXT_CLASS.split(' ').every(c => el.classList.contains(c))
