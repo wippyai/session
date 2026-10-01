@@ -26,7 +26,7 @@ local wait_for_boot = require("wait_for_boot")
 -- Session forms inside the session process, on the real database: creation
 -- through the ask_user tool and the `_control.forms` effect in
 -- process_tools, the one-form-per-turn guard, ending the turn, the failure
--- row rewrite (F05), and admission of accepted answers (idle, during a turn
+-- row rewrite, and admission of accepted answers (idle, during a turn
 -- in acceptance order with steered typed input, after a stop, on finish,
 -- and by the startup/end-of-turn scans), plus what the prompt and read_form
 -- show of an answer that is not admitted yet.
@@ -249,24 +249,27 @@ local function define_tests()
         describe("title generation beside the first form", function()
             -- A new session's first agent step queues the title check ahead
             -- of its tool round (message_handlers.agent_step: a checkpoint
-            -- must land before the next step). The title is a model call of
-            -- several seconds; the tool round that stores the form must not
-            -- wait for it (live: every first form appeared 6-10 s late).
-            local TITLE_DELAY_MS = 1500
+            -- must land before the next step). The title is a model call, and
+            -- the tool round that stores the form must not wait for it.
             local original_funcs = nil
 
             before_each(function() original_funcs = session_handlers._funcs end)
             after_each(function() session_handlers._funcs = original_funcs end)
 
-            -- A title function that takes TITLE_DELAY_MS, like the model call
-            -- the real one makes.
-            local function slow_title(calls: {any})
+            -- A title function that returns only after the test sends on
+            -- `release`, so the order of the two ends comes from the test and
+            -- not from the clock. The timer keeps a title run in place from
+            -- hanging the suite: it would return before the tool round ends.
+            local function gated_title(calls: {any}, release: any, order: {string})
                 session_handlers._funcs = { new = function()
                     return {
                         with_context = function(self) return self end,
                         call = function(_self, _function_id, args)
                             table.insert(calls, args)
-                            time.sleep(tostring(TITLE_DELAY_MS) .. "ms")
+                            local timer = time.timer("5s")
+                            channel.select({ release:case_receive(), timer:channel():case_receive() })
+                            timer:stop()
+                            table.insert(order, "title returned")
                             return { title = "Parcel delivery" }
                         end,
                     }
@@ -275,10 +278,10 @@ local function define_tests()
 
             -- The operations of a first agent step that called ask_user, in
             -- the order agent_step queues them, run the way the command bus
-            -- loop runs them. Returns the milliseconds from the start until
-            -- the tool round (which stores the form) has finished.
-            local function first_step_with_form(ctx): number
-                ctx.config.title_function_id = "app:slow_title"
+            -- loop runs them. Records "tool round done" in `order` once the
+            -- tool round (which stores the form) has finished.
+            local function first_step_with_form(ctx, order: {string})
+                ctx.config.title_function_id = "app:gated_title"
                 ctx.writer:add_message(consts.MSG_TYPE.USER, "Deliver my parcel")
                 local call_id = "call-" .. uuid.v7()
                 local _, ids: any, store_err = ctx.writer:add_response("", {}, {
@@ -297,8 +300,6 @@ local function define_tests()
                 bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, session_handlers.check_background_triggers)
                 bus:mount_op_handler(consts.OP_TYPE.GENERATE_TITLE, session_handlers.generate_title)
                 bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
-                local started = time.now()
-                local tools_done_at = nil :: any
                 bus:enqueue_result({ next_ops = {
                     { type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, tokens = { prompt_tokens = 10 },
                         message_id = "user-message" },
@@ -314,11 +315,9 @@ local function define_tests()
                     bus.pending_ops = bus.pending_ops - 1
                     local result: any, err = bus:process_operation(op)
                     test.is_nil(err)
-                    if op.type == consts.OP_TYPE.PROCESS_TOOLS then tools_done_at = time.now() end
+                    if op.type == consts.OP_TYPE.PROCESS_TOOLS then table.insert(order, "tool round done") end
                     bus:enqueue_result(result)
                 end
-                test.not_nil(tools_done_at)
-                return tonumber(tools_done_at:sub(started):milliseconds()) or 0
             end
 
             -- Waits for a background title to reach the session row.
@@ -335,14 +334,18 @@ local function define_tests()
                 local ctx, events = new_ctx("")
                 ctx.run_in_background = session.run_in_background
                 local calls = {}
-                slow_title(calls)
+                local order = {} :: {string}
+                local release = channel.new(1)
+                gated_title(calls, release, order)
 
-                local elapsed = first_step_with_form(ctx)
+                first_step_with_form(ctx, order)
 
                 test.eq(#artifact_repo.list_by_session(ctx.session_id), 1)
-                test.lt(elapsed, TITLE_DELAY_MS / 2, "the form was stored " .. tostring(elapsed)
-                    .. " ms after the step; the title takes " .. tostring(TITLE_DELAY_MS) .. " ms")
+                test.eq(table.concat(order, ", "), "tool round done",
+                    "the form was stored while the title call was still waiting")
+                release:send(true)
                 test.eq(stored_title(ctx), "Parcel delivery", "the title is still generated, beside the turn")
+                test.eq(table.concat(order, ", "), "tool round done, title returned")
                 test.eq(#calls, 1)
                 local announced = nil
                 for _, update in ipairs(events.updates) do
