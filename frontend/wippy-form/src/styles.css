@@ -423,21 +423,21 @@ span.w-form__option-mark {
  * `.w-form__review-item--missing .w-form__review-answer` already use, not
  * a local color hack.
  *
- * A `Message` already carries its OWN severity color via the theme's
- * `.p-message-error`/`.p-message-simple` classes — `:not(.p-message)`
+ * A `Message` carries its OWN severity color via the theme's
+ * `.p-message-error`/`.p-message-simple` classes, and `:not(.p-message)`
  * leaves that alone rather than adding a second, competing `color` (a
- * `.p-*` override is against the rules anyway, see never-do.md). It would
- * not even help: audited against the actual theme tokens
- * (`@wippy-fe/theme/theme-config.css`, `--p-danger-500` /
- * `color-mix(in srgb, var(--p-danger) 80%, black)` for `-600`) and
- * confirmed against a live capture, the theme's OWN `Message`
- * severity="error" variant="simple" text is already below WCAG 1.4.3's
- * 4.5:1 in both themes on this card's background: light `text-danger-500`
- * rgb(239,68,68) on rgb(251,247,255) = 3.56:1; dark `text-danger-600`
- * rgb(191,54,54) on the Message's own translucent red box rgb(83,46,64) =
- * 2.07:1 (2.42:1 against the plain card). That gap is the theme's own
- * Message coloring, not this module's — a theme-level contrast fix, like
- * the radio/checkbox one above, deferred rather than patched locally.
+ * `.p-*` override is against the rules anyway, see never-do.md). Those theme
+ * colors are below WCAG 1.4.3's 4.5:1 for small text in at least one theme
+ * (`Message` error/simple: `danger-500` rgb(239,68,68) on rgb(251,247,255) =
+ * 3.56:1 light, `danger-600` rgb(191,54,54) on the Message's own translucent
+ * red box rgb(82,45,64) = 2.1:1 dark; the retryable `warn` banner: 4.0:1 light,
+ * 3.9:1 dark). Fixing the `Message` colors is a theme-level change, tracked
+ * separately and NOT patched here with a `.p-*` rule. Instead the question card
+ * puts the theme's severity utilities on the TEXT inside its field error,
+ * submit-failure banner and form-level notice (`ERROR_TEXT_CLASS` in
+ * src/lib/error-text.ts, the same `text-danger-600 dark:text-danger-400` the
+ * fields form uses): 5.2:1 light, 6.4:1 to 7.9:1 dark, and the `Message` keeps
+ * its box, outline and `role="alert"`.
  */
 .w-form__error:not(.p-message) {
   color: var(--_danger);

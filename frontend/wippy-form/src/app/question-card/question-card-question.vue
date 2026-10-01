@@ -7,6 +7,7 @@ import { Icon } from '@iconify/vue'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
 import { isNoteTextTooLong, isOtherTextTooLong, trimAnswerText } from '../../lib/answers'
+import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardComposer from './question-card-composer.vue'
 import QuestionCardOption from './question-card-option.vue'
@@ -282,7 +283,7 @@ function onOptionsFocusIn(event: FocusEvent) {
     :class="errorPart.class"
     role="alert"
   >
-    {{ displayError }}
+    <span :class="ERROR_TEXT_CLASS">{{ displayError }}</span>
   </Message>
   <p
     v-else

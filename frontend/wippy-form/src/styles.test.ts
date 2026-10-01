@@ -26,9 +26,11 @@ function ruleBody(selectorPattern: string): string {
 // `color` is scoped to `:not(.p-message)`: a `Message` already carries its
 // own severity color from the theme's `.p-message-error`/`.p-message-simple`
 // classes, so adding a second, competing `color` here would be exactly the
-// raw-theme-fighting the compliance rules reject — and would not even help,
-// since the theme's own colors there are themselves below 4.5:1 in both
-// themes (see the comment at the rule itself for the audited numbers).
+// raw-theme-fighting the compliance rules reject. The theme's own Message
+// colors are below 4.5:1 in at least one theme (see the comment at the rule
+// itself for the audited numbers); the question card fixes the text inside its
+// Messages with the theme's severity utilities instead (`ERROR_TEXT_CLASS`,
+// asserted in question-card-errors.test.ts), never with a `.p-*` rule.
 describe('styles.css — length-error text uses the theme error token, not the default text color', () => {
   it('.w-form__error (margin only) sets no color of its own', () => {
     const body = ruleBody('\\.w-form__error')
@@ -44,6 +46,14 @@ describe('styles.css — length-error text uses the theme error token, not the d
   it('--_danger itself resolves through a semantic theme var, never a raw hex as the primary fallback (existing contract)', () => {
     const body = ruleBody(':host')
     expect(body).toMatch(/--_danger:\s*var\(--wippy-form-danger,\s*var\(--p-danger-500/)
+  })
+})
+
+describe('styles.css — no rule fights the theme\'s Message colours', () => {
+  it('has no `.p-message*` rule (the question card colours the text inside the Message with utilities instead); only the `:not(.p-message)` guard on the plain alerts', () => {
+    const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(rules).toMatch(/:not\(\.p-message\)/)
+    expect(rules.replace(/:not\(\.p-message\)/g, '')).not.toMatch(/\.p-message/)
   })
 })
 

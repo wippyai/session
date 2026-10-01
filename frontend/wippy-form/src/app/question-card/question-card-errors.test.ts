@@ -3,6 +3,7 @@ import type { FormDefinition, FormState } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
+import ChoiceField from '../fields/choice-field.vue'
 import QuestionCardActive from './question-card-active.vue'
 
 /**
@@ -404,6 +405,96 @@ describe('QuestionCardActive: focus after a failed send that started in a note',
     expect(wrapper.element.contains(focused)).toBe(true)
     expect(focused.getAttribute('role')).toBe('radio')
     expect(focused.dataset.focus).toBe('opt-0')
+  })
+})
+
+describe('QuestionCardActive: error text takes the same theme severity utilities as the fields form', () => {
+  // Same semantics, same looks: the V2 fields form draws a field error as plain
+  // text with the theme's severity utilities. The question card keeps its
+  // PrimeVue `Message` (box, role, id, parts) and gives the TEXT inside it those
+  // same utilities, because the `Message`'s own text colour is below WCAG
+  // 1.4.3's 4.5:1 in at least one theme (EE2-2461 F-RC-2).
+
+  /** The utilities the fields form puts on its field errors, read from the real component rather than copied here. */
+  function fieldsFormErrorUtilities(): string[] {
+    const wrapper = mount(ChoiceField, {
+      props: { field: multiDef.fields[0], modelValue: undefined, errors: [{ code: 'required', message: 'Choose an answer.' }], disabled: false, readonly: false },
+      global: { plugins: [PrimeVuePlugin] },
+    })
+    const classes = wrapper.find('ul').classes().filter(c => /^(?:dark:)?text-danger-/.test(c))
+    wrapper.unmount()
+    return classes
+  }
+
+  /** The element that holds `message` as its own text (no child elements), i.e. the text the reader sees. */
+  function textElement(root: Element, message: string): HTMLElement {
+    const found = Array.from(root.querySelectorAll<HTMLElement>('*')).find(el => el.children.length === 0 && el.textContent?.trim() === message)
+    if (!found)
+      throw new Error(`no element holds exactly "${message}"`)
+    return found
+  }
+
+  it('reads the fields form\'s utilities from the real component: the severity pair for light and dark', () => {
+    // Positive control for the helper below: it finds real classes.
+    expect(fieldsFormErrorUtilities().sort()).toEqual(['dark:text-danger-400', 'text-danger-600'])
+  })
+
+  it('draws a field error in them, inside the Message that keeps its parts, class, role and id', async () => {
+    const wrapper = mountCard(singleDef)
+    ;(wrapper.vm as unknown as CardVm).setServerErrors({ f1: [{ code: 'invalid', message: FIELD_ERROR }] })
+    await flushPromises()
+
+    const text = textElement(wrapper.element, FIELD_ERROR)
+    for (const utility of fieldsFormErrorUtilities())
+      expect(text.classList.contains(utility)).toBe(true)
+    expect(text.getAttribute('style')).toBeNull()
+
+    const message = text.closest('[role="alert"]') as HTMLElement
+    expect(message).not.toBeNull()
+    expect(message.classList.contains('p-message-error')).toBe(true)
+    expect(message.classList.contains('w-form__error')).toBe(true)
+    expect(message.getAttribute('part')).toBe('error')
+    expect(message.id.endsWith('-err')).toBe(true)
+    // The colour lives on the text, not on the Message: no competing utility on the box.
+    expect(Array.from(message.classList).filter(c => /text-(?:danger|warn)-/.test(c))).toEqual([])
+  })
+
+  it('draws a non-retryable (error) banner\'s text in them', async () => {
+    const wrapper = mountCard(singleDef, { message: 'You are signed out. Sign in again, then retry.', retryable: false })
+    await flushPromises()
+
+    const text = textElement(wrapper.element, 'You are signed out. Sign in again, then retry.')
+    for (const utility of fieldsFormErrorUtilities())
+      expect(text.classList.contains(utility)).toBe(true)
+    expect(text.closest('[role="alert"]')?.classList.contains('p-message-error')).toBe(true)
+  })
+
+  it('draws a retryable (warn) banner\'s text in them too, and keeps its Retry button', async () => {
+    const wrapper = mountCard(singleDef, { message: BANNER_ERROR, retryable: true })
+    await flushPromises()
+
+    const text = textElement(wrapper.element, BANNER_ERROR)
+    for (const utility of fieldsFormErrorUtilities())
+      expect(text.classList.contains(utility)).toBe(true)
+    const message = text.closest('[role="alert"]') as HTMLElement
+    expect(message.classList.contains('p-message-warn')).toBe(true)
+    expect(Array.from(message.querySelectorAll('button')).some(b => b.textContent?.trim() === 'Retry')).toBe(true)
+  })
+
+  it('draws the form-level notice in them', async () => {
+    const wrapper = mountCard(singleDef)
+    ;(wrapper.vm as unknown as CardVm).setServerErrors(undefined, [{ code: 'stale', message: FORM_ERROR }])
+    await flushPromises()
+
+    const text = textElement(wrapper.element, FORM_ERROR)
+    for (const utility of fieldsFormErrorUtilities())
+      expect(text.classList.contains(utility)).toBe(true)
+    expect(text.closest('[role="alert"]')?.classList.contains('p-message-error')).toBe(true)
+  })
+
+  it('does not carry the utilities when there is no error (no stray error colour on other text)', () => {
+    const wrapper = mountCard(singleDef)
+    expect(wrapper.element.querySelector('[class*="text-danger"]')).toBeNull()
   })
 })
 

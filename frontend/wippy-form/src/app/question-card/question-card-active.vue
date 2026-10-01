@@ -7,6 +7,7 @@ import Message from 'primevue/message'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
 import { trimAnswerText } from '../../lib/answers'
+import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardQuestion from './question-card-question.vue'
@@ -376,7 +377,7 @@ function onKeydown(event: KeyboardEvent) {
       severity="error"
       :closable="false"
     >
-      {{ generalServerError }}
+      <span :class="ERROR_TEXT_CLASS">{{ generalServerError }}</span>
     </Message>
 
     <p
@@ -417,7 +418,7 @@ function onKeydown(event: KeyboardEvent) {
       :closable="false"
     >
       <div class="flex items-center gap-2">
-        <span>{{ banner.message }}</span>
+        <span :class="ERROR_TEXT_CLASS">{{ banner.message }}</span>
         <Button
           v-if="banner.retryable"
           type="button"
