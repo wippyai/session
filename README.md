@@ -180,6 +180,11 @@ return {
 `_control.artifacts` is a list; one tool call may produce several artifacts. A
 failing tool returns no `_control`.
 
+An entry with an `id` updates that artifact. The update sets `title` and
+`content` when they are given, and it sets only `content_type`, `description`,
+`icon` and `status` in `meta`. Every other `meta` key, such as `display_type`,
+`page_id` and `preview`, is kept.
+
 ### HTTP API
 
 `GET /artifact/{id}` returns metadata for one artifact.
@@ -193,7 +198,7 @@ failing tool returns no `_control`.
 | `title`, `created_at`, `updated_at` | columns |
 | `content_type`, `description`, `icon`, `status` | from `meta` |
 | `page_id`, `is_view_reference`, `params` | `view_ref` only |
-| `content_version` | constant `1`; see limitations |
+| `content_version` | revision of the content; starts at 1 and rises by one each time the content changes |
 
 `GET /artifact/{id}/content` returns raw bytes with `Content-Type` from
 `meta.content_type`, or `text/plain` when absent. A `view_ref` is rendered
@@ -221,13 +226,8 @@ Only `session:`-prefixed topics are relayed to clients.
 ### Limitations
 
 - `kind` is stored verbatim from `type` with no enum check.
-- Updating an artifact replaces `meta` wholesale. The update path supplies only
-  `content_type`, `description`, `icon` and `status`, so `display_type`,
-  `page_id` and `preview` do not survive an update.
 - Supplying both `title` and `content` matches the create path first, so an
   update shaped that way produces a second artifact with a new id.
-- `content_version` is constant, so a client caching on it will not refetch
-  updated content. Use `updated_at`.
 - A delegated tool call produces no artifact; the control payload is ignored.
 - SQLite does not cascade artifact deletion with its session. Orphaned rows
   remain listable, and fetching one returns HTTP 404.
@@ -255,9 +255,9 @@ injected into its prompt so it can find a form id without the trait.
 
 ### API
 
-`GET` / `POST /api/v1/artifact/{id}/state` reads a form's canonical state and
-accepts its answer. Both are served by `wippy.session.forms:state_service`
-behind the thin HTTP adapter in `src/api/artifact_state.lua`. A submission
+`GET` and `POST /artifact/{id}/state` read a form's canonical state and accept
+its answer. Both are served by `wippy.session.forms:state_service` behind the
+HTTP handling in `src/api/artifact_state_access.lua`. A submission
 commits the accepted answer and its user message in one transaction, then
 wakes the owning session process; a missed wake-up is recovered from the
 stored row on the next session start.
