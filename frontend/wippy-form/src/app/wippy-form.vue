@@ -13,9 +13,8 @@ import { useOnlineStatus } from '../composables/use-online-status'
 import { isChoiceFormState, isKnownFieldType, isSupportedFormVersion } from '../lib/definition'
 import { useArtifactId } from '../element-context'
 import ActiveForm from './active-form.vue'
+import FormNotice from './form-notice.vue'
 import IdleForm from './idle-form.vue'
-import NeedsNewerHostNotice from './needs-newer-host-notice.vue'
-import NoArtifactNotice from './no-artifact-notice.vue'
 import QuestionCardActive from './question-card/question-card-active.vue'
 import QuestionCardSummary from './question-card/question-card-summary.vue'
 
@@ -258,14 +257,16 @@ function handleRetry() {
       be submitted here" notice with no hint that a Web Host update was the
       actual fix (EE2-2461 / F-P4-1).
     -->
-    <NeedsNewerHostNotice
+    <FormNotice
       v-else-if="status === 'unsupported'"
+      reason="needs-newer-host"
       :definition="definition"
       :answered="answeredPerHostProp"
     />
 
-    <NoArtifactNotice
+    <FormNotice
       v-else-if="!artifactId"
+      reason="no-artifact"
       :definition="definition"
     />
 
@@ -343,7 +344,7 @@ function handleRetry() {
 
     <!--
       No `status === 'unsupported'` branch here: that case is now handled by
-      the NeedsNewerHostNotice branch above, before the `!artifactId` check
+      the `needs-newer-host` FormNotice branch above, before the `!artifactId` check
       and before `state` is even considered — reaching this far down the
       chain already implies `status !== 'unsupported'`.
     -->

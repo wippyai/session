@@ -4,6 +4,7 @@ import { computed, ref, useId } from 'vue'
 import { readOnlyAnswer } from '../../lib/answers'
 import { partClass } from '../../lib/part-class'
 import { textLines } from '../../lib/rich-text'
+import FieldLabel from './field-label.vue'
 
 /**
  * The one shell every field renders in, whatever its type: label (with the
@@ -76,8 +77,6 @@ const rootPart = computed(() => partClass(
   props.readonly && 'readonly',
   props.disabled && 'disabled',
 ))
-const labelPart = computed(() => partClass('field-label'))
-const markerPart = computed(() => partClass('field-marker'))
 const descriptionPart = computed(() => partClass('field-description'))
 const controlPart = computed(() => partClass('field-control'))
 const errorPart = computed(() => partClass('field-error'))
@@ -117,31 +116,20 @@ defineExpose({
           :invalid="hasErrors"
         />
       </div>
-      <label
-        :for="controlId"
-        :part="labelPart.part"
-        :class="labelPart.class"
-      >
-        {{ field.label }}<span
-          v-if="showMarker"
-          :part="markerPart.part"
-          :class="`${markerPart.class} text-danger-600 dark:text-danger-400`"
-        > (required)</span>
-      </label>
+      <FieldLabel
+        tag="label"
+        :control-id="controlId"
+        :label="field.label"
+        :required="showMarker"
+      />
     </div>
-    <component
-      :is="labelTag"
+    <FieldLabel
       v-else
-      :for="labelTag === 'label' ? controlId : undefined"
-      :part="labelPart.part"
-      :class="labelPart.class"
-    >
-      {{ field.label }}<span
-        v-if="showMarker"
-        :part="markerPart.part"
-        :class="`${markerPart.class} text-danger-600 dark:text-danger-400`"
-      > (required)</span>
-    </component>
+      :tag="labelTag"
+      :control-id="controlId"
+      :label="field.label"
+      :required="showMarker"
+    />
 
     <p
       v-if="field.description"

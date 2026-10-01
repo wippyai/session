@@ -3,6 +3,7 @@ import type { FormState } from '../lib/definition'
 import { computed, ref } from 'vue'
 import { partClass } from '../lib/part-class'
 import FormFieldControl from './fields/form-field.vue'
+import FormHeader from './form-header.vue'
 
 /**
  * The read-only, post-submit view of a fields form — the counterpart of
@@ -25,8 +26,6 @@ const statusEl = ref<HTMLElement | null>(null)
 
 const rootPart = computed(() => partClass('card', 'answered'))
 const fieldsPart = computed(() => partClass('fields'))
-const titlePart = computed(() => partClass('fields-title'))
-const formDescriptionPart = computed(() => partClass('form-description'))
 const statusPart = computed(() => partClass('status'))
 
 defineExpose({
@@ -42,21 +41,10 @@ defineExpose({
     :part="`${rootPart.part} ${fieldsPart.part}`"
     :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
   >
-    <div>
-      <h2
-        :part="titlePart.part"
-        :class="titlePart.class"
-      >
-        {{ state.definition.title }}
-      </h2>
-      <p
-        v-if="state.definition.description"
-        :part="formDescriptionPart.part"
-        :class="formDescriptionPart.class"
-      >
-        {{ state.definition.description }}
-      </p>
-    </div>
+    <FormHeader
+      :title="state.definition.title"
+      :description="state.definition.description"
+    />
 
     <FormFieldControl
       v-for="field in state.definition.fields"

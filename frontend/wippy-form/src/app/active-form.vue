@@ -6,6 +6,7 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
 import { partClass } from '../lib/part-class'
 import FormFieldControl from './fields/form-field.vue'
+import FormHeader from './form-header.vue'
 
 /**
  * The fields form: every field of the definition as its own control (choice
@@ -164,8 +165,6 @@ watch(() => props.banner, (banner) => {
 
 const rootPart = computed(() => partClass('card'))
 const fieldsPart = computed(() => partClass('fields'))
-const titlePart = computed(() => partClass('fields-title'))
-const formDescriptionPart = computed(() => partClass('form-description'))
 const noticePart = computed(() => partClass('notice'))
 const formErrorPart = computed(() => partClass('fields-error'))
 const sendPart = computed(() => partClass('send'))
@@ -204,20 +203,10 @@ defineExpose({
       {{ OFFLINE_MESSAGE }}
     </p>
 
-    <div>
-      <h2
-        :part="titlePart.part"
-        :class="titlePart.class"
-      >
-        {{ state.definition.title }}
-      </h2>
-      <p
-        v-if="state.definition.description"
-        :part="formDescriptionPart.part"
-        :class="formDescriptionPart.class"
-      >
-        {{ state.definition.description }}
-      </p>
+    <FormHeader
+      :title="state.definition.title"
+      :description="state.definition.description"
+    >
       <p
         v-if="state.stale"
         :part="noticePart.part"
@@ -226,7 +215,7 @@ defineExpose({
         Asked earlier — the conversation has moved on. You can still answer; the assistant will use it as
         context and confirm before acting on the earlier request.
       </p>
-    </div>
+    </FormHeader>
 
     <FormFieldControl
       v-for="field in state.definition.fields"
