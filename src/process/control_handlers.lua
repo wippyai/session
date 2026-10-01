@@ -360,8 +360,7 @@ end
 -- form behind and the input stays held. Success asks process_tools to end
 -- the turn instead of running another agent step.
 
--- Unanswered forms a session may hold; above it the agent must resolve or
--- supersede older forms (nothing is deleted silently).
+-- Cap on unanswered forms per session.
 control_handlers.MAX_UNRESOLVED_FORMS = 100
 
 local function count_unresolved_forms(session_id)
@@ -386,87 +385,83 @@ function control_handlers.control_forms(ctx, op)
         return reject("no_turn", "A form can only be created during an agent turn.")
     end
 
-    local created_artifacts = {}
-    for _, item in ipairs(op.forms) do
-        if type(item) ~= "table" then
-            return reject("invalid_request", "Invalid form operation.")
-        end
-        local def, def_errors = definition.normalize(item.definition)
-        if not def then
-            return reject("invalid_definition", "Invalid form definition:\n" .. definition.format_errors(def_errors))
-        end
-        if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, consts.UUID_PATTERN) then
-            return reject("invalid_request", "Form artifact id is missing or invalid.")
-        end
-        if ctx.form_turn_id == op.turn_id then
-            return reject("one_form_per_turn",
-                "This turn already asked the user with a form. No second form was created; "
-                    .. "wait for the answer to the first one.")
-        end
-        local unresolved, count_err = count_unresolved_forms(ctx.session_id)
-        if not unresolved then return nil, "Failed to count unanswered forms: " .. tostring(count_err) end
-        if unresolved >= control_handlers.MAX_UNRESOLVED_FORMS then
-            return reject("too_many_forms", "This session already has "
-                .. control_handlers.MAX_UNRESOLVED_FORMS
-                .. " unanswered forms. Ask the user to answer or dismiss older forms first.")
-        end
-
-        local content, content_err = form_artifact.build_content(def, consts.ARTIFACT_STATUS.ACTIVE)
-        if not content then return nil, content_err end
-
-        -- Internal messages the session held during this turn arrived before
-        -- the form existed: they go into the history first (session.lua,
-        -- write_held_before_form). Typed input is not held: a steered
-        -- message was stored when it arrived, so it already sits before the
-        -- form and does not make it stale.
-        local held_written = nil
-        local record, create_err = tx.run(function(dbtx)
-            if ctx.write_held_before_form then
-                local written, held_err = ctx.write_held_before_form({ tx = dbtx })
-                if not written then return nil, "Failed to store held input: " .. tostring(held_err) end
-                held_written = written
-            end
-            local stored, store_err = control_handlers.store_artifact(ctx, {
-                type = consts.ARTIFACT_TYPES.INLINE,
-                title = def.title,
-                content = content,
-                content_type = consts.CONTENT_TYPES.JSON,
-                display_type = consts.ARTIFACT_DISPLAY.INLINE,
-                status = consts.ARTIFACT_STATUS.ACTIVE,
-                instructions = false,
-            }, { tx = dbtx, artifact_id = item.artifact_id })
-            if not stored then return nil, store_err end
-            if not stored.message_date then
-                return nil, "Form artifact message date is unknown"
-            end
-
-            local _, meta_err = artifact_repo.update(stored.artifact_id, {
-                meta_patch = {
-                    [form_meta.KEY] = form_artifact.new_meta({
-                        call_id = op.call_id,
-                        tool_message_id = op.tool_message_id,
-                        created_cursor = stored.message_date,
-                    }),
-                },
-            }, { tx = dbtx })
-            if meta_err then return nil, "Failed to bind form origin: " .. tostring(meta_err) end
-            return stored
-        end)
-        if not record then
-            return nil, "Failed to create form: " .. tostring(create_err)
-        end
-        if held_written and ctx.commit_held_before_form then ctx.commit_held_before_form(held_written) end
-
-        ctx.form_turn_id = op.turn_id
-        control_handlers.announce_artifact(ctx, record)
-        table.insert(created_artifacts, {
-            artifact_id = record.artifact_id,
-            title = record.title,
-            kind = record.kind
-        })
+    local item = op.forms[1]
+    if type(item) ~= "table" then
+        return reject("invalid_request", "Invalid form operation.")
+    end
+    local def, def_errors = definition.normalize(item.definition)
+    if not def then
+        return reject("invalid_definition", "Invalid form definition:\n" .. definition.format_errors(def_errors))
+    end
+    if type(item.artifact_id) ~= "string" or not string.match(item.artifact_id, consts.UUID_PATTERN) then
+        return reject("invalid_request", "Form artifact id is missing or invalid.")
+    end
+    if ctx.form_turn_id == op.turn_id then
+        return reject("one_form_per_turn",
+            "This turn already asked the user with a form. No second form was created; "
+                .. "wait for the answer to the first one.")
+    end
+    local unresolved, count_err = count_unresolved_forms(ctx.session_id)
+    if not unresolved then return nil, "Failed to count unanswered forms: " .. tostring(count_err) end
+    if unresolved >= control_handlers.MAX_UNRESOLVED_FORMS then
+        return reject("too_many_forms", "This session already has "
+            .. control_handlers.MAX_UNRESOLVED_FORMS
+            .. " unanswered forms. Wait for the user to answer them before asking another.")
     end
 
-    return { completed = true, end_turn = true, created_artifacts = created_artifacts }
+    local content, content_err = form_artifact.build_content(def, consts.ARTIFACT_STATUS.ACTIVE)
+    if not content then return nil, content_err end
+
+    -- Internal messages the session held during this turn arrived before
+    -- the form existed: they go into the history first (session.lua,
+    -- write_held_before_form). Typed input is not held: a steered
+    -- message was stored when it arrived, so it already sits before the
+    -- form and does not make it stale.
+    local held_written = nil
+    local record, create_err = tx.run(function(dbtx)
+        if ctx.write_held_before_form then
+            local written, held_err = ctx.write_held_before_form({ tx = dbtx })
+            if not written then return nil, "Failed to store held input: " .. tostring(held_err) end
+            held_written = written
+        end
+        local stored, store_err = control_handlers.store_artifact(ctx, {
+            type = consts.ARTIFACT_TYPES.INLINE,
+            title = def.title,
+            content = content,
+            content_type = consts.CONTENT_TYPES.JSON,
+            display_type = consts.ARTIFACT_DISPLAY.INLINE,
+            status = consts.ARTIFACT_STATUS.ACTIVE,
+            instructions = false,
+        }, { tx = dbtx, artifact_id = item.artifact_id })
+        if not stored then return nil, store_err end
+        if not stored.message_date then
+            return nil, "Form artifact message date is unknown"
+        end
+
+        local _, meta_err = artifact_repo.update(stored.artifact_id, {
+            meta_patch = {
+                [form_meta.KEY] = form_artifact.new_meta({
+                    call_id = op.call_id,
+                    tool_message_id = op.tool_message_id,
+                    created_cursor = stored.message_date,
+                }),
+            },
+        }, { tx = dbtx })
+        if meta_err then return nil, "Failed to bind form origin: " .. tostring(meta_err) end
+        return stored
+    end)
+    if not record then
+        return nil, "Failed to create form: " .. tostring(create_err)
+    end
+    if held_written and ctx.commit_held_before_form then ctx.commit_held_before_form(held_written) end
+
+    ctx.form_turn_id = op.turn_id
+    control_handlers.announce_artifact(ctx, record)
+    return { completed = true, end_turn = true, created_artifacts = { {
+        artifact_id = record.artifact_id,
+        title = record.title,
+        kind = record.kind
+    } } }
 end
 
 function control_handlers.control_context(ctx, op)

@@ -69,7 +69,7 @@ function command_bus:queue_op(op)
     return true
 end
 
--- Held input (typed messages and form answer wake-ups received during a
+-- Held input (internal messages and form answer wake-ups received during a
 -- turn) that the bus has not settled yet.
 function command_bus:has_held()
     local held = self.context.held
@@ -237,8 +237,8 @@ function command_bus:fail(err, held_already_flushed)
     return nil, err
 end
 
--- Settles the input held during the turn (typed messages and accepted form
--- answers, in the order they arrived) and starts the next turn for the
+-- Settles the input held during the turn (internal messages and accepted
+-- form answers, in the order they arrived) and starts the next turn for the
 -- latest of them unless the turn was stopped or the session is finishing.
 -- Also runs from idle when held input is left over from a turn that never
 -- started (see run).
@@ -324,19 +324,12 @@ function command_bus:run()
                 local code = self.state == "closed" and "SESSION_FINISHING" or "SESSION_STOPPING"
                 reject_user_command(self, op, code, "Session no longer accepts this command")
             end
-        elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then
-            local completed, err
-            if self.context.turn_boundary_callback then
-                completed, err = self.context.turn_boundary_callback()
-            else
-                completed, err = self:end_turn()
-            end
-            if err then return self:fail(err, true) end
-        elseif self:has_held() then
-            -- Input was held for a turn that never ran (the operation that
-            -- was to start it wrote nothing or failed): settle it now as at
-            -- the end of a turn, through the session inbox when it owns
-            -- the turn boundary.
+        elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish"
+            or self:has_held() then
+            -- A turn ended, or input was held for a turn that never ran (the
+            -- operation that was to start it wrote nothing or failed):
+            -- settle it at the turn boundary, through the session inbox when
+            -- it owns the boundary.
             local _, err
             if self.context.turn_boundary_callback then
                 _, err = self.context.turn_boundary_callback()

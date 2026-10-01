@@ -988,7 +988,7 @@ local function define_tests()
                 local prompt = builder:get_messages()
                 test.contains(tostring(prompt[#prompt].content[1].text), "<wippy-form-answers record=")
 
-                local again = message_handlers.admit_answer(ctx, { message_id = accepted.answer_message_id })
+                local again = message_handlers.admit_answer(ctx)
                 test.is_nil(again.next_ops, "a repeated wake-up is a no-op")
             end)
 
@@ -1327,7 +1327,7 @@ local function define_tests()
                 -- An admission that finds the session finishing admits nothing.
                 local finishing_bus: any = with_bus(exiting)
                 finishing_bus.state = "draining_finish"
-                local result = message_handlers.admit_answer(exiting, {})
+                local result = message_handlers.admit_answer(exiting)
                 test.is_nil(result.next_ops)
                 test.eq(message_repo.get(kept.answer_message_id).metadata.session_form.pending, true)
             end)
