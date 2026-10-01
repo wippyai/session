@@ -61,21 +61,24 @@ entries:
       type: view.component
       title: Session Form
       description: >-
-        Renders one Session `ask_user` form artifact and submits the answer back to the owning session over
-        the Host's artifact-state API. When every field in `definition` has `type: "choice"` (the only field
-        type V1 emits), it renders a Claude-style question card: one question at a time for several-question
-        forms, with a `‹ n/total ›` counter, per-answer notes, an Other free-text row, a review step before
-        sending, and a read-only answered summary afterward. A mixed or non-choice definition falls back to a
-        plain radio/checkbox fields form (kept for V2 standard fields). Inputs: `definition` (the immutable
-        question/option data), `form-version` (schema version gate — an unsupported version disables
-        submission), and `state` (the package-tag lifecycle: "active" while answerable, "idle" once answered).
-        The component owns its own data loading (GET on mount, reload on visibility/session-message/artifact
-        events), submission (request-id reuse, one automatic retry on a no-response network failure, 422
-        field-error and 409 already-submitted handling), and offline detection — the host only needs to mount
-        the tag with these three attributes. Edge cases handled: a stale ("asked earlier") form, a race where
-        another client answers first, a reload that fails while a view is already showing, and an unsupported
-        form-version. Agents must never write the `<wippy-form>` tag themselves, because it is created only
-        through the Session `ask_user` tool and never from agent-generated content.
+        Renders one Session `ask_user` form artifact and submits the answer back to the owning session over the
+        Host's artifact-state API. When every field in `definition` has `type: "choice"` (form version 1), it
+        renders a Claude-style question card: one question at a time for several-question forms, with a `‹
+        n/total ›` counter, per-answer notes, an Other free-text row, a review step before sending, and a
+        read-only answered summary afterward. A form with at least one standard field (form version 2: `text`,
+        `textarea`, `number`, `email`, `date` or `checkbox`, alone or mixed with choices) renders as one fields
+        form instead: a labelled PrimeVue control for every field, each error linked to its control, client-side
+        checks that mirror the server's rules, one Submit button, and read-only values once answered. Inputs:
+        `definition` (the immutable question/option data), `form-version` (schema version gate — 1 and 2 render;
+        a higher version, or a field type this version does not know, shows a "needs a newer version" notice and
+        disables submission), and `state` (the package-tag lifecycle: "active" while answerable, "idle" once
+        answered). The component owns its own data loading (GET on mount, reload on
+        visibility/session-message/artifact events), submission (request-id reuse, one automatic retry on a
+        no-response network failure, 422 field-error and 409 already-submitted handling), and offline detection
+        — the host only needs to mount the tag with these three attributes. Edge cases handled: a stale ("asked
+        earlier") form, a race where another client answers first, a reload that fails while a view is already
+        showing, and an unsupported form-version. Agents must never write the `<wippy-form>` tag themselves,
+        because it is created only through the Session `ask_user` tool and never from agent-generated content.
       tag_name: wippy-form
       auto_register: true
       announced: true
@@ -88,18 +91,22 @@ entries:
             type: number
             default: 1
             description: >-
-              Form definition schema version (currently 1). A value other than 1, from this prop or from the
-              loaded state's own `form_version`, disables the interactive form and shows the notice "This form
-              needs a newer version of the app." instead.
+              Form definition schema version: 1 is a choice-only form, 2 is a form with at least one standard field
+              (`text`, `textarea`, `number`, `email`, `date`, `checkbox`). A higher value, from this prop or from the
+              loaded state's own `form_version`, disables the interactive form and shows the notice "This form needs a
+              newer version of the app." instead, and so does a field whose type this version does not know.
           definition:
             type: object
             default: null
             description: >-
               Immutable form definition: `title`, optional `description`, optional `submit_label`, optional
-              `answered_message` (not displayed), and `fields` (each `{ id, type: "choice", label,
-              description?, required, options: [{value, label, description?}], multiple, allow_other }`). When
-              every field is `type: "choice"` the question-card UI renders; otherwise the radio/checkbox
-              fields form renders.
+              `answered_message` (not displayed), and `fields`. Every field is `{ id, type, label, description?,
+              required }` plus the keys of its type: `choice` adds `options: [{value, label, description?}]`,
+              `multiple`, `allow_other`; `text` and `textarea` add `min_length`, `max_length`, `placeholder` and
+              `default` (`text` also `pattern`); `number` adds `min`, `max`, `step`, `integer`, `placeholder`,
+              `default`; `email` adds `placeholder`, `default`; `date` adds `min`, `max` (`YYYY-MM-DD`) and `default`;
+              `checkbox` adds `default` (only `false`). When every field is `type: "choice"` the question-card UI
+              renders; otherwise the fields form renders.
           state:
             type: string
             default: active
