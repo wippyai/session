@@ -92,7 +92,7 @@ describe('text', () => {
   // Spying on the RegExp constructor catches only `new RegExp(pattern)`: a
   // string handed to `match`, `search` or `split`, or built into a literal by
   // `eval`, compiles inside the engine and never calls the spied constructor.
-  // A pattern that no engine can compile is the probe for every route: any
+  // A pattern that no engine can compile is the probe for every route. Each
   // evaluation throws a SyntaxError, so a value that comes back accepted, with
   // no throw, proves the pattern was never compiled.
   it('accepts a value for a pattern no regular-expression engine can compile, so none is ever asked to', () => {
