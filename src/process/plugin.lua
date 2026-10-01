@@ -129,12 +129,8 @@ local function admit_stopped_answers(session_id: string, user_id: string, hub_pi
     if not stored then return {}, read_err or "Session was not found" end
     local session_writer, writer_err = writer.new(session_id)
     if not session_writer then return {}, writer_err end
-    return answer_admission.admit_in_order({
-        session_id = session_id,
-        writer = session_writer,
-        upstream = upstream.new(session_id, nil, hub_pid),
-        interaction = stored.meta and stored.meta.interaction,
-    }, nil)
+    return answer_admission.admit_stopped(session_id, session_writer, upstream.new(session_id, nil, hub_pid),
+        stored.meta and stored.meta.interaction)
 end
 
 -- Stores `target_status` with the interaction recovery gives it. Before

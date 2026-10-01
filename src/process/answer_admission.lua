@@ -7,14 +7,7 @@ local artifact_events = require("artifact_events")
 local answer_admission = {}
 
 local function all_messages(ctx)
-    local session_reader = ctx.reader
-    if session_reader and type(session_reader.list_all_messages) == "function" then
-        return session_reader:list_all_messages()
-    end
-    if session_reader and type(session_reader.messages) == "function" then
-        return session_reader:messages():all()
-    end
-    return message_repo.list_all_by_session(ctx.session_id)
+    return ctx.reader:list_all_messages()
 end
 
 -- STEERING AND FORM ANSWERS
@@ -300,6 +293,21 @@ function answer_admission.turn_start_after(ctx, admitted, steering_turn)
         if not scan.first_answer or entry.index < scan.first_answer then latest = entry.row.message_id end
     end
     return latest or answer_id, nil
+end
+
+-- Admits the pending answers of a session that has no process, with no turn
+-- (the plugin does this after a Stop it had to enforce). The rows are read
+-- from storage, steering is applied through `writer` against the stored
+-- `interaction`, and `upstream` tells the clients each answer was received.
+-- Returns the admitted rows and the first error, like admit_in_order.
+function answer_admission.admit_stopped(session_id: string, writer: any, upstream: any, interaction: any)
+    return answer_admission.admit_in_order({
+        session_id = session_id,
+        writer = writer,
+        upstream = upstream,
+        interaction = interaction,
+        reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
+    }, nil)
 end
 
 return answer_admission

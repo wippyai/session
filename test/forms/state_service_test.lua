@@ -84,6 +84,7 @@ local function define_tests()
             test.is_nil(writer_err)
             return {
                 session_id = session_id,
+                reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
                 writer = session_writer,
                 upstream = {
                     send_message_update = function() end,

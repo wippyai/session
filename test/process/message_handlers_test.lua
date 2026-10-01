@@ -73,6 +73,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         lifecycle_state = {},
         config = config,
         reader = {
+            list_all_messages = function(_self) return {}, nil end,
             messages = function(_self) return empty_query end,
             contexts = function(_self) return empty_query end,
             state = function(_self) return { title = "t", meta = {}, config = {} } end,
