@@ -162,28 +162,15 @@ local function settle_deferred_completion(ctx: any, next_turn_started: boolean):
     return message_handlers.complete_turn(ctx)
 end
 
--- Settles held input. phase:
---   "step"      between two steps of a turn: internal messages are written
---               for the next step to see, up to the first held form answer.
---               Answers are only admitted when the turn ends, and what came
---               after one waits with it so the order holds.
---   "turn_end"  the turn ended: messages are written and answers admitted in
---               arrival order, then any pending answer nobody woke the
---               session for. Answers are admitted in acceptance order, each
---               after the steering rows accepted before it
---               (answer_admission.admit_in_order). If an answer was
---               admitted, or the turn stopped at a form while steering is
---               still pending, the next turn starts at once at the latest of
---               that input (answer_admission.turn_start_after).
---   "stop"      the user stopped the turn: the same, but no turn follows.
---               The answers are delivered now so that they never start a
---               turn on their own later. Steering accepted after the last of
---               them stays pending, as it does after any Stop.
---   "exit"      the session is finishing or failed: messages are written;
---               answers stay pending for the next session start.
--- Returns (id the next turn starts at or nil, error, its request id). A write
--- failure keeps the unwritten input held and reports it; a failed answer
--- admission leaves the row pending (the plugin's scan asks again).
+-- Settles held input at a turn boundary. Phase "step" writes the internal
+-- messages up to the first held form answer. Phase "turn_end" writes the
+-- messages, admits the answers in acceptance order, and starts the next turn
+-- when an answer was admitted or steering is still pending after a form.
+-- Phase "stop" is "turn_end" without the next turn, and phase "exit" writes
+-- the messages only. Returns the id the next turn starts at (or nil), an
+-- error and the request id of that turn. Input that could not be written
+-- stays held, and a failed admission leaves the row pending for the plugin
+-- scan.
 local function flush_held(ctx: any, run_agent: boolean, phase: string?)
     phase = phase or (run_agent and "turn_end" or "exit")
     if phase ~= "step" and ctx.status == consts.STATUS.FAILED then phase = "exit" end

@@ -10,7 +10,7 @@ local tools = require("tools")
 local control_handlers = require("control_handlers")
 local answer_admission = require("answer_admission")
 local message_repo = require("message_repo")
-local logger = require("logger"):named("session.forms")
+local logger = require("logger"):named("session.messages")
 
 type SessionContext = {
     session_id: string,
@@ -1043,12 +1043,8 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        -- Also after Stop: Stop does not cancel a model call already in
-        -- flight, and a reply that arrives after it is stored above, so it is
-        -- sent now too. Otherwise the chat would gain it only on a reload.
-        -- It carries the stored row's date: the response began when the step
-        -- started, which after a Stop can be long before the reply was
-        -- stored, and the live reply must show the time the history keeps.
+        -- Sent after Stop too: a reply to a model call already in flight is
+        -- stored, so clients must see it. It carries the stored row's date.
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,

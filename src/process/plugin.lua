@@ -37,6 +37,15 @@ type ActiveSession = {
     answer_start: boolean?,
 }
 
+-- Bounds of the periodic scan for sessions that hold pending form answers
+-- (resume_pending_answer_sessions): sessions listed per scan, sessions started
+-- per scan, the longest wait in scans before a session whose start failed is
+-- tried again, and the page size of the stale running session scan.
+local RESUME_SCAN_LIMIT = 20
+local RESUME_STARTS_PER_SCAN = 3
+local MAX_RESUME_WAIT = 32
+local STALE_PAGE_SIZE = 50
+
 local function clear_stop_deadline(session_info)
     local deadline = session_info.stop_deadline
     if not deadline then return end
@@ -167,24 +176,14 @@ local function settle_session(session_id: string, user_id: string, target_status
     return target_status, success, status_err, recovery_err, interaction, admitted
 end
 
--- A session whose turn was stopped from outside: its calls are repaired and
--- it is stored idle, with an interaction that takes input. That is a session
--- the whole runtime stopped in the middle of a turn, or one whose process the
--- plugin cancelled or terminated to enforce the user's Stop (stop_enforced).
--- Not failed: in the interaction model a failed session does not take input
--- (input_policy.resolve), and no session process exists to move it on, so an
--- interaction-aware client would keep Send disabled while the only way to
--- continue is to send a message (the plugin reopens a session on its first
--- message, and a session process always starts idle). Nothing in the session
--- failed; its turn was interrupted from outside. An admitted form answer the
--- turn did not answer reads as interrupted ("send a message to continue",
--- state_service.delivery_of). Form answers still pending differ by cause:
--- after an enforced Stop they are admitted here with no turn
--- (`admit_stopped`), as a Stop the session honours would; after a runtime
--- stop they stay pending, and the next session start admits them with a
--- turn. Clients get the recovery notice only when the runtime stopped
--- (settle_stale_running); a Stop the user asked for is not reported as an
--- error.
+-- Settles a session whose turn was cut off from outside, either by a runtime
+-- stop or by the plugin enforcing the user's Stop (stop_enforced). It is
+-- stored idle with an interaction that takes input, because nothing in the
+-- session failed and a failed status would keep Send disabled. Pending calls
+-- are repaired first. After an enforced Stop the pending form answers are
+-- admitted with no turn (`admit_stopped`), and after a runtime stop they stay
+-- pending for the next session start. Clients get the recovery notice only
+-- when the runtime stopped (settle_stale_running).
 local function settle_interrupted(session_id: string, user_id: string, opts: any?)
     opts = opts or {}
     return settle_session(session_id, user_id, consts.STATUS.IDLE,
@@ -877,9 +876,6 @@ local function run(args)
     -- user may be using, and a session whose start failed waits a growing
     -- number of scans, so it neither restarts on every tick nor keeps the
     -- others from their turn.
-    local RESUME_SCAN_LIMIT = 20
-    local RESUME_STARTS_PER_SCAN = 3
-    local MAX_RESUME_WAIT = 32
     local function resume_pending_answer_sessions()
         if state.shutting_down then return end
         local waiting = {}
@@ -952,7 +948,6 @@ local function run(args)
     -- All of the user's running sessions are read, a page at a time; the
     -- pages follow session ids, so settling a session does not move the rows
     -- of later pages.
-    local STALE_PAGE_SIZE = 50
     local function settle_stale_running()
         local after = nil :: string?
         repeat
@@ -1008,7 +1003,7 @@ local function run(args)
     end
 
     -- First pending-answer scan as an ordinary inbox message, after start-up.
-    process.send(process.pid(), consts.PLUGIN_TOPICS.RESUME_ANSWERS, {})
+    process.send(process.pid(), consts.PLUGIN_TOPICS.SCAN_ANSWERS, {})
 
     while true do
         local result = channel.select({
@@ -1044,7 +1039,7 @@ local function run(args)
                 finish_sessions_for_shutdown(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.WAKE then
                 handle_wake(payload:data())
-            elseif topic == consts.PLUGIN_TOPICS.RESUME_ANSWERS then
+            elseif topic == consts.PLUGIN_TOPICS.SCAN_ANSWERS then
                 if not state.stale_checked then
                     state.stale_checked = true
                     settle_stale_running()

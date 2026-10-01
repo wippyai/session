@@ -3,9 +3,8 @@ namespace: wippy.session.forms
 
 # Session forms (V1: choice questions). The ask_user trait lets an agent ask
 # the user a structured question; the answer comes back as an ordinary user
-# message. Storage, turn handling and the state API live in the session
-# module: see src/process/control_handlers.lua (creation), src/api (state
-# endpoints) and src/process/message_handlers.lua (answer admission).
+# message. State logic is state_service, creation is
+# control_handlers.control_forms, and answer admission is answer_admission.
 entries:
   # wippy.session.forms:ordered_json
   - name: ordered_json
@@ -199,6 +198,7 @@ entries:
     meta:
       type: agent.trait
       title: Ask the user with a form
+      icon: tabler:message-question
       comment: Lets an agent ask the user structured choice questions through a form in the chat
       tags:
         - forms
