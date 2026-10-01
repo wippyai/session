@@ -1,13 +1,21 @@
 <script setup lang="ts">
-import type { FieldAnswer, FieldError, FormField, OtherAnswer } from '../../lib/definition'
+import type { ChoiceAnswer, ChoiceFormField, FieldAnswer, FieldError, OtherAnswer } from '../../lib/definition'
 import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import RadioButton from 'primevue/radiobutton'
 import { computed, ref, useId, watch } from 'vue'
 import { answerHasOther, answerOtherText } from '../../lib/definition'
+import { partClass } from '../../lib/part-class'
+import FieldShell from './field-shell.vue'
 
+/**
+ * A `choice` field as radios or checkboxes (with an optional Other box), on
+ * the shared `FieldShell`. This is how a choice renders inside a form that
+ * also holds standard fields; a form of choices only renders as the question
+ * card instead. No per-option notes here — the card has those.
+ */
 const props = defineProps<{
-  field: FormField
+  field: ChoiceFormField
   modelValue: FieldAnswer | undefined
   errors: FieldError[]
   disabled: boolean
@@ -20,8 +28,6 @@ const emit = defineEmits<{
 }>()
 
 const groupId = useId()
-const descriptionId = `${groupId}-desc`
-const errorId = `${groupId}-err`
 // Distinct prefixes ("opt-<index>" vs "other"/"other-text") so the Other
 // control's id can never collide with an option id, regardless of what the
 // option values are (they may contain spaces, or literally be "other").
@@ -34,25 +40,33 @@ function optionId(index: number): string {
   return `${groupId}-opt-${index}`
 }
 
-const fieldsetEl = ref<HTMLFieldSetElement | null>(null)
+const shell = ref<InstanceType<typeof FieldShell> | null>(null)
+const bodyEl = ref<HTMLElement | null>(null)
 
-const describedBy = computed(() => {
-  const ids: string[] = []
-  if (props.field.description)
-    ids.push(descriptionId)
-  if (!props.readonly && props.errors.length > 0)
-    ids.push(errorId)
-  return ids.length > 0 ? ids.join(' ') : undefined
-})
+const optionsPart = computed(() => partClass('field-options'))
+const optionPart = computed(() => partClass('field-option'))
+const otherOptionPart = computed(() => partClass('field-option', 'other'))
+const optionInputPart = computed(() => partClass('field-option-input'))
+const optionLabelPart = computed(() => partClass('field-option-label'))
+const optionDescriptionPart = computed(() => partClass('field-option-description'))
+const otherBodyPart = computed(() => partClass('field-other'))
+const otherInputPart = computed(() => partClass('field-other-input'))
+
+// The answer a choice field holds is always a choice answer.
+const answer = computed(() => props.modelValue as ChoiceAnswer | undefined)
 
 // ── Single choice ──────────────────────────────────────────────
 // Local sentinel value for the "Other" radio's v-model binding — never sent
 // anywhere; just distinguishes "Other is selected" from a real option value.
 const OTHER_TOKEN = 'choice-field-other-sentinel'
 
+function isOther(v: ChoiceAnswer | undefined): v is OtherAnswer {
+  return !!v && typeof v === 'object' && !Array.isArray(v) && typeof (v as OtherAnswer).other === 'string'
+}
+
 const singleSelected = computed<string>({
   get() {
-    const v = props.modelValue
+    const v = answer.value
     if (typeof v === 'string')
       return v
     if (isOther(v))
@@ -69,8 +83,8 @@ const singleSelected = computed<string>({
   },
 })
 
-const singleOtherText = ref(answerOtherText(props.modelValue))
-watch(() => props.modelValue, (v) => {
+const singleOtherText = ref(answerOtherText(answer.value))
+watch(answer, (v) => {
   if (!props.field.multiple)
     singleOtherText.value = answerOtherText(v)
 })
@@ -81,12 +95,12 @@ watch(singleOtherText, (text) => {
 
 // ── Multiple choice ─────────────────────────────────────────────
 const multiSelected = computed<string[]>(() => {
-  const v = props.modelValue
+  const v = answer.value
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
 })
-const multiOtherChecked = computed(() => props.field.multiple && answerHasOther(props.modelValue))
-const multiOtherText = ref(answerOtherText(props.modelValue))
-watch(() => props.modelValue, (v) => {
+const multiOtherChecked = computed(() => props.field.multiple && answerHasOther(answer.value))
+const multiOtherText = ref(answerOtherText(answer.value))
+watch(answer, (v) => {
   if (props.field.multiple)
     multiOtherText.value = answerOtherText(v)
 })
@@ -116,81 +130,37 @@ watch(multiOtherText, (text) => {
     emitMulti(multiSelected.value, true, text)
 })
 
-function isOther(v: FieldAnswer | undefined): v is OtherAnswer {
-  return !!v && typeof v === 'object' && !Array.isArray(v) && typeof (v as OtherAnswer).other === 'string'
-}
-
-// ── Read-only display ────────────────────────────────────────────
-const readOnlyText = computed<string>(() => {
-  const v = props.modelValue
-  if (v === undefined)
-    return '—'
-  const labelFor = (value: string) => props.field.options.find(o => o.value === value)?.label ?? value
-  const parts: string[] = []
-  if (Array.isArray(v)) {
-    for (const item of v) {
-      if (typeof item === 'string')
-        parts.push(labelFor(item))
-      else if (isOther(item))
-        parts.push(`Other: ${item.other}`)
-    }
-  }
-  else if (typeof v === 'string') {
-    parts.push(labelFor(v))
-  }
-  else if (isOther(v)) {
-    parts.push(`Other: ${v.other}`)
-  }
-  return parts.length > 0 ? parts.join(', ') : '—'
-})
-
 defineExpose({
   focusFirstControl() {
-    fieldsetEl.value?.querySelector<HTMLElement>('input, textarea')?.focus()
+    shell.value?.focusFirstControl()
   },
   // For a blank Other answer the text box is what needs fixing.
   focusOtherText() {
     // Ids come from Vue's useId plus a fixed suffix, so a quoted attribute
     // selector needs no escaping.
-    const text = fieldsetEl.value?.querySelector<HTMLElement>(`[id="${otherTextId}"]`)
+    const text = bodyEl.value?.querySelector<HTMLElement>(`[id="${otherTextId}"]`)
     if (text)
       text.focus()
     else
-      fieldsetEl.value?.querySelector<HTMLElement>('input, textarea')?.focus()
+      shell.value?.focusFirstControl()
   },
 })
 </script>
 
 <template>
-  <fieldset
-    ref="fieldsetEl"
-    class="flex flex-col gap-2 border-0 p-0 m-0 min-w-0"
-    :aria-describedby="describedBy"
+  <FieldShell
+    ref="shell"
+    :field="field"
+    :model-value="modelValue"
+    :errors="errors"
+    :disabled="disabled"
+    :readonly="readonly"
+    layout="group"
   >
-    <legend class="text-sm font-medium text-color p-0">
-      {{ field.label }}<span
-        v-if="!readonly && field.required"
-        class="text-danger-600 dark:text-danger-400"
-      > (required)</span>
-    </legend>
-    <p
-      v-if="field.description"
-      :id="descriptionId"
-      class="text-xs text-muted-color m-0"
-    >
-      {{ field.description }}
-    </p>
-
-    <p
-      v-if="readonly"
-      class="text-sm text-color break-words"
-    >
-      {{ readOnlyText }}
-    </p>
-
     <div
-      v-else
-      class="flex flex-col gap-1.5"
+      ref="bodyEl"
+      :part="optionsPart.part"
+      :class="optionsPart.class"
       :role="field.multiple ? 'group' : 'radiogroup'"
       :aria-required="field.required ? 'true' : undefined"
     >
@@ -198,7 +168,8 @@ defineExpose({
         <div
           v-for="(option, index) in field.options"
           :key="option.value"
-          class="flex items-start gap-2"
+          :part="optionPart.part"
+          :class="optionPart.class"
         >
           <RadioButton
             v-model="singleSelected"
@@ -206,21 +177,26 @@ defineExpose({
             :name="groupId"
             :value="option.value"
             :disabled="disabled"
+            :part="optionInputPart.part"
+            :class="optionInputPart.class"
           />
           <label
             :for="optionId(index)"
-            class="text-sm text-color break-words"
+            :part="optionLabelPart.part"
+            :class="optionLabelPart.class"
           >
             {{ option.label }}
             <span
               v-if="option.description"
-              class="block text-xs text-muted-color"
+              :part="optionDescriptionPart.part"
+              :class="optionDescriptionPart.class"
             >{{ option.description }}</span>
           </label>
         </div>
         <div
           v-if="field.allow_other"
-          class="flex items-start gap-2"
+          :part="otherOptionPart.part"
+          :class="otherOptionPart.class"
         >
           <RadioButton
             v-model="singleSelected"
@@ -228,24 +204,32 @@ defineExpose({
             :name="groupId"
             :value="OTHER_TOKEN"
             :disabled="disabled"
+            :part="optionInputPart.part"
+            :class="optionInputPart.class"
           />
-          <div class="flex flex-col gap-1 min-w-0 grow">
+          <div
+            :part="otherBodyPart.part"
+            :class="otherBodyPart.class"
+          >
             <label
               :id="otherLabelId"
               :for="otherControlId"
-              class="text-sm text-color"
+              :part="optionLabelPart.part"
+              :class="optionLabelPart.class"
             >Other</label>
             <label
               :id="otherTextLabelId"
               :for="otherTextId"
-              class="sr-only"
+              class="w-form__sr"
             >Other answer</label>
             <InputText
               :id="otherTextId"
               v-model="singleOtherText"
               :disabled="disabled || singleSelected !== OTHER_TOKEN"
+              :part="otherInputPart.part"
+              :class="otherInputPart.class"
               size="small"
-              class="w-full"
+              fluid
             />
           </div>
         </div>
@@ -255,71 +239,72 @@ defineExpose({
         <div
           v-for="(option, index) in field.options"
           :key="option.value"
-          class="flex items-start gap-2"
+          :part="optionPart.part"
+          :class="optionPart.class"
         >
           <Checkbox
             :model-value="multiSelected.includes(option.value)"
             binary
             :input-id="optionId(index)"
             :disabled="disabled"
+            :part="optionInputPart.part"
+            :class="optionInputPart.class"
             @update:model-value="(checked) => toggleOption(option.value, !!checked)"
           />
           <label
             :for="optionId(index)"
-            class="text-sm text-color break-words"
+            :part="optionLabelPart.part"
+            :class="optionLabelPart.class"
           >
             {{ option.label }}
             <span
               v-if="option.description"
-              class="block text-xs text-muted-color"
+              :part="optionDescriptionPart.part"
+              :class="optionDescriptionPart.class"
             >{{ option.description }}</span>
           </label>
         </div>
         <div
           v-if="field.allow_other"
-          class="flex items-start gap-2"
+          :part="otherOptionPart.part"
+          :class="otherOptionPart.class"
         >
           <Checkbox
             :model-value="multiOtherChecked"
             binary
             :input-id="otherControlId"
             :disabled="disabled"
+            :part="optionInputPart.part"
+            :class="optionInputPart.class"
             @update:model-value="(checked) => toggleOther(!!checked)"
           />
-          <div class="flex flex-col gap-1 min-w-0 grow">
+          <div
+            :part="otherBodyPart.part"
+            :class="otherBodyPart.class"
+          >
             <label
               :id="otherLabelId"
               :for="otherControlId"
-              class="text-sm text-color"
+              :part="optionLabelPart.part"
+              :class="optionLabelPart.class"
             >Other</label>
             <label
               :id="otherTextLabelId"
               :for="otherTextId"
-              class="sr-only"
+              class="w-form__sr"
             >Other answer</label>
             <InputText
               :id="otherTextId"
               v-model="multiOtherText"
               :disabled="disabled || !multiOtherChecked"
+              :part="otherInputPart.part"
+              :class="otherInputPart.class"
               size="small"
-              class="w-full"
+              fluid
             />
           </div>
         </div>
       </template>
     </div>
-
-    <ul
-      v-if="!readonly && errors.length > 0"
-      :id="errorId"
-      class="text-xs text-danger-600 dark:text-danger-400 list-none p-0 m-0 flex flex-col gap-0.5"
-    >
-      <li
-        v-for="(err, i) in errors"
-        :key="i"
-      >
-        {{ err.message }}
-      </li>
-    </ul>
-  </fieldset>
+  </FieldShell>
 </template>

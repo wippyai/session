@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { FormDefinition } from '../lib/definition'
 import Message from 'primevue/message'
-import ChoiceField from './fields/choice-field.vue'
+import { computed } from 'vue'
+import { partClass } from '../lib/part-class'
+import FormFieldControl from './fields/form-field.vue'
 
 defineProps<{
   definition: FormDefinition
@@ -13,36 +15,49 @@ defineProps<{
    */
   answered?: boolean
 }>()
+
+const rootPart = computed(() => partClass('card', 'unsupported'))
+const fieldsPart = computed(() => partClass('fields'))
+const titlePart = computed(() => partClass('fields-title'))
+const formDescriptionPart = computed(() => partClass('form-description'))
 </script>
 
 <template>
-  <div class="flex flex-col gap-4 min-w-0">
-    <div class="flex flex-col gap-1">
-      <h2 class="text-base font-semibold text-color break-words">
+  <div
+    :part="`${rootPart.part} ${fieldsPart.part}`"
+    :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
+  >
+    <div>
+      <h2
+        :part="titlePart.part"
+        :class="titlePart.class"
+      >
         {{ definition.title }}
       </h2>
       <p
         v-if="definition.description"
-        class="text-sm text-muted-color break-words"
+        :part="formDescriptionPart.part"
+        :class="formDescriptionPart.class"
       >
         {{ definition.description }}
       </p>
     </div>
 
     <!--
-      `:readonly="false"` (unlike NoArtifactNotice, which has no state to
-      show at all): the Host still handed this component its `definition`
-      prop directly — it just predates the artifact-state API, so there is
-      no GET to fetch an answer from. Rendering the real options disabled
-      gives the reader something to look at instead of "—" placeholder rows,
-      without inventing an answer that was never loaded.
+      `:readonly="false"` (unlike a read-only answer): the Host still handed
+      this component its `definition` prop directly — it just predates the
+      artifact-state API, so there is no GET to fetch an answer from.
+      Rendering the real controls disabled, each of its own kind (a V2 text
+      box is a text box, never an empty radio group), gives the reader
+      something to look at instead of "—" placeholder rows, without inventing
+      an answer that was never loaded.
 
       For the same reason the notice below points at the chat for an answer
       that was already sent (the user's "Answered …" message and the agent's
-      reply are readable there): every option here is unselected, so the card
+      reply are readable there): every control here is empty, so the card
       alone would look like an open, unanswered form (EE2-2461 / F-P4F-6).
     -->
-    <ChoiceField
+    <FormFieldControl
       v-for="field in definition.fields"
       :key="field.id"
       :field="field"

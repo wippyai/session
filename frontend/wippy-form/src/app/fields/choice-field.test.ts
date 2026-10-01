@@ -1,10 +1,10 @@
-import type { FormField } from '../../lib/definition'
+import type { ChoiceFormField } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import ChoiceField from './choice-field.vue'
 
-const trickyField: FormField = {
+const trickyField: ChoiceFormField = {
   id: 'f1',
   type: 'choice',
   label: 'Pick one',
@@ -84,7 +84,7 @@ describe('ChoiceField — Other control accessible name', () => {
 
 describe('ChoiceField — fieldset aria-describedby', () => {
   it('describes the fieldset with the description and error ids, not an inner div', () => {
-    const described: FormField = { ...trickyField, description: 'Pick carefully' }
+    const described: ChoiceFormField = { ...trickyField, description: 'Pick carefully' }
     const wrapper = mountField({
       field: described,
       errors: [{ code: 'required', message: 'This question is required.' }],

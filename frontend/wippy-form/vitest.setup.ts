@@ -76,4 +76,20 @@ if (typeof window !== 'undefined') {
       disconnect() {}
     }
   }
+  // jsdom does not implement matchMedia either. PrimeVue's DatePicker binds a
+  // media-query listener on mount (it switches to a full-width panel on
+  // small screens) — without this stub, mounting a date field throws
+  // `matchMedia is not a function`.
+  if (!w.matchMedia) {
+    w.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent: () => false,
+    })
+  }
 }

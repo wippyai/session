@@ -94,7 +94,7 @@ describe('ActiveForm — server-side validation errors', () => {
 
     const status = wrapper.find('[role="status"]')
     expect(status.exists()).toBe(true)
-    expect(status.text()).toBe('1 question needs an answer.')
+    expect(status.text()).toBe('1 question needs attention.')
   })
 
   it('mirrors a submit-failure banner into the polite status region', async () => {
@@ -150,7 +150,7 @@ describe('ActiveForm — blank Other answer', () => {
 
     expect(wrapper.emitted('submit')).toBeUndefined()
     expect(wrapper.text()).toContain('Enter the other answer.')
-    expect(wrapper.find('[role="status"]').text()).toContain('1 question needs an answer.')
+    expect(wrapper.find('[role="status"]').text()).toContain('1 question needs attention.')
     wrapper.unmount()
   })
 })

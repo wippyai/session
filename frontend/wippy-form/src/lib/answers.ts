@@ -1,34 +1,51 @@
-import type { FieldAnswer, FormAnswers, FormDefinition, FormField, NotedAnswer, OtherAnswer, SingleFieldAnswer } from './definition'
-import { isNotedAnswer } from './definition'
+import type {
+  ChoiceAnswer,
+  ChoiceFormField,
+  FieldAnswer,
+  FieldError,
+  FormAnswers,
+  FormDefinition,
+  FormField,
+  FormFieldType,
+  NotedAnswer,
+  OtherAnswer,
+  SingleFieldAnswer,
+} from './definition'
+import type { FieldHandler, FieldOutcome } from './scalar-answers'
+import { isChoiceField, isNotedAnswer } from './definition'
+import { REQUIRED_MESSAGE, SCALAR_HANDLERS } from './scalar-answers'
+import { codePointLength, trimAnswerText } from './text'
 
 /**
- * Client-side answer serialization + a required-field guard, mirroring the
- * answer shapes the Session state API accepts per field. This is a
- * convenience mirror for the UI (canonical ordering, omission of empty
- * optional answers, trimming). It is NOT the authority on validity — the
- * Session state API validates every submission server-side and its errors
- * are what the component ultimately surfaces (422 field and form errors).
+ * Client-side answer rules and serialization, one handler per field type,
+ * mirroring the answer shapes and rules the Session state API applies. This
+ * is a convenience mirror for the UI (canonical ordering, omission of empty
+ * optional answers, trimming, an early error before a round trip). It is NOT
+ * the authority on validity — the Session state API validates every
+ * submission server-side and its errors are what the component ultimately
+ * surfaces (422 field and form errors).
+ *
+ * The choice rules live here; the six V2 standard fields live in
+ * `scalar-answers.ts` and are added to the same table (`HANDLERS`).
  */
 
 const OTHER_TEXT_MAX = 2000
 /** Server limit for a per-answer note (question-card notes, V1). */
 export const NOTE_TEXT_MAX = 1000
 
+const BLANK_OTHER_MESSAGE = 'Enter the other answer.'
+const TOO_LONG_MESSAGE = 'Use at most 2,000 characters.'
+
 function isOtherDraft(value: unknown): value is OtherAnswer {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as OtherAnswer).other === 'string'
 }
 
-/** Draft shape held in the form's local edit state, keyed by field id. */
-export type AnswerDraft = Record<string, FieldAnswer | undefined>
-
 /**
- * Counts Unicode code points, not UTF-16 code units — a `raw.length` check
- * over-counts astral characters (e.g. many emoji) that are stored as
- * surrogate pairs. The server counts code points too, so this must match.
+ * Draft shape held in the form's local edit state, keyed by field id: the
+ * raw value of each control (a choice answer, the typed text of a text-like
+ * or number field, a checkbox's boolean).
  */
-function codePointLength(raw: string): number {
-  return Array.from(raw).length
-}
+export type AnswerDraft = Record<string, FieldAnswer | undefined>
 
 /** True once the trimmed "Other" text exceeds the server's 2,000-code-point limit. */
 export function isOtherTextTooLong(raw: string): boolean {
@@ -43,21 +60,6 @@ export function noteTextLength(raw: string): number {
 /** True once the trimmed note exceeds the server's 1,000-code-point limit. */
 export function isNoteTextTooLong(raw: string): boolean {
   return codePointLength(trimAnswerText(raw)) > NOTE_TEXT_MAX
-}
-
-/**
- * The one client-side trim rule for every blank/length check on free-text
- * answer content — an "Other" answer or a note — used here and by every
- * question-card call site that needs to know whether such text is blank.
- * Plain `String.prototype.trim()`, matching the server's own trim rule, so
- * a string that trims blank here also trims blank there and vice versa.
- * `trim()` strips ECMAScript `WhiteSpace` (e.g. U+3000 IDEOGRAPHIC SPACE, a
- * real space character) but leaves Unicode's own zero-width characters
- * alone (e.g. U+200B ZERO WIDTH SPACE is not whitespace and still counts
- * as content) — see `answers.test.ts`.
- */
-export function trimAnswerText(raw: string): string {
-  return raw.trim()
 }
 
 /**
@@ -85,12 +87,14 @@ export function buildNotedValue(value: string, note: string): SingleFieldAnswer 
   return trimmed ? { value, note: trimmed } : value
 }
 
+// ── choice ───────────────────────────────────────────────────────
+
 /**
- * Serializes one field's draft value into the wire `FieldAnswer`, or
- * `undefined` when it should be omitted (unanswered optional field, or a
- * multi-select that normalizes to empty).
+ * Serializes one choice field's draft into the wire answer, or `undefined`
+ * when it should be omitted (unanswered optional field, or a multi-select
+ * that normalizes to empty).
  */
-export function serializeFieldAnswer(field: FormField, draft: FieldAnswer | undefined): FieldAnswer | undefined {
+function serializeChoiceAnswer(field: ChoiceFormField, draft: FieldAnswer | undefined): ChoiceAnswer | undefined {
   if (field.multiple) {
     const items = Array.isArray(draft) ? draft : []
     const optionOrder = field.options.map(o => o.value)
@@ -123,7 +127,7 @@ export function serializeFieldAnswer(field: FormField, draft: FieldAnswer | unde
     return ordered.length > 0 ? ordered : undefined
   }
 
-  if (draft === undefined)
+  if (draft === undefined || typeof draft === 'number' || typeof draft === 'boolean' || Array.isArray(draft))
     return undefined
   if (isOtherDraft(draft)) {
     const text = normalizeOtherText(draft.other)
@@ -134,6 +138,75 @@ export function serializeFieldAnswer(field: FormField, draft: FieldAnswer | unde
   if (typeof draft === 'string' && field.options.some(o => o.value === draft))
     return draft
   return undefined
+}
+
+/** The "Other" draft of a field (single or multiple choice), if Other is selected. */
+function otherDraftOf(field: ChoiceFormField, value: FieldAnswer | undefined): OtherAnswer | undefined {
+  if (field.multiple)
+    return Array.isArray(value) ? value.find(isOtherDraft) : undefined
+  return isOtherDraft(value) ? value : undefined
+}
+
+/**
+ * A choice's `answer` is always the plain serialization (an over-long Other
+ * is never truncated, a blank one is dropped); `errors` say whether it may
+ * be sent. A standard field is stricter: it has no answer while it has a finding.
+ */
+function evaluateChoice(field: ChoiceFormField, draft: FieldAnswer | undefined): FieldOutcome {
+  const answer = serializeChoiceAnswer(field, draft)
+  const other = otherDraftOf(field, draft)
+  // Serializing a blank Other would silently drop it, so the form asks for
+  // the text instead, as the server would. It is also the more precise
+  // message for a required field.
+  if (other && normalizeOtherText(other.other).length === 0)
+    return { answer, errors: [{ code: 'blank', message: BLANK_OTHER_MESSAGE }] }
+  if (other && isOtherTextTooLong(other.other))
+    return { answer, errors: [{ code: 'too_long', message: TOO_LONG_MESSAGE }] }
+  if (answer === undefined && field.required)
+    return { answer, errors: [{ code: 'required', message: REQUIRED_MESSAGE }] }
+  return { answer, errors: [] }
+}
+
+/** Builds an edit draft from a previously accepted/loaded answer for a choice field. */
+function choiceInitialDraft(field: ChoiceFormField, wire: FieldAnswer | undefined): FieldAnswer | undefined {
+  if (wire === undefined)
+    return undefined
+  return field.multiple
+    ? (Array.isArray(wire) ? [...wire] : [wire as SingleFieldAnswer])
+    : wire
+}
+
+// ── the per-type table ───────────────────────────────────────────
+
+type DraftHandler<F extends FormField> = Pick<FieldHandler<F>, 'evaluate' | 'initialDraft'>
+
+/** Every field type's rules: the V1 choice handler plus the six standard fields. */
+const HANDLERS: { [T in FormFieldType]: DraftHandler<Extract<FormField, { type: T }>> } = {
+  choice: { evaluate: evaluateChoice, initialDraft: choiceInitialDraft },
+  ...SCALAR_HANDLERS,
+}
+
+/** The handler for a field's type, or `undefined` for a type this component does not know. */
+function handlerFor(field: FormField): DraftHandler<FormField> | undefined {
+  return (HANDLERS as Record<string, DraftHandler<FormField> | undefined>)[field.type]
+}
+
+/**
+ * Judges one field's draft: the wire answer (`undefined` = omit it) and any
+ * client-side findings. A field of a type this component does not know is
+ * omitted without findings (the host shows the "newer version" notice for
+ * such a form before any field renders).
+ */
+export function evaluateField(field: FormField, draft: FieldAnswer | undefined): FieldOutcome {
+  return handlerFor(field)?.evaluate(field, draft) ?? { answer: undefined, errors: [] }
+}
+
+/**
+ * Serializes one field's draft into the wire answer, or `undefined` when it
+ * should be omitted. Any field type.
+ */
+export function serializeFieldAnswer(field: FormField, draft: FieldAnswer | undefined): FieldAnswer | undefined {
+  return evaluateField(field, draft).answer
 }
 
 /** Serializes the full draft into a submit-ready `FormAnswers` object. */
@@ -148,26 +221,42 @@ export function serializeAnswers(definition: FormDefinition, draft: AnswerDraft)
 }
 
 /**
- * Field ids whose `required` rule the current draft plainly fails — used
- * to guard the Submit button and pick which field gets focus, ahead of the
- * server's own (authoritative) 422 response.
+ * Client-side findings for every field the current draft plainly fails,
+ * keyed by field id (fields with no finding are absent) — a pre-check ahead
+ * of the server's own (authoritative) 422 response.
  */
-export function missingRequiredFields(definition: FormDefinition, draft: AnswerDraft): string[] {
-  const missing: string[] = []
+export function validateAnswers(definition: FormDefinition, draft: AnswerDraft): Record<string, FieldError[]> {
+  const out: Record<string, FieldError[]> = {}
   for (const field of definition.fields) {
-    if (!field.required)
-      continue
-    if (serializeFieldAnswer(field, draft[field.id]) === undefined)
-      missing.push(field.id)
+    const { errors } = evaluateField(field, draft[field.id])
+    if (errors.length > 0)
+      out[field.id] = errors
   }
-  return missing
+  return out
 }
 
-/** The "Other" draft of a field (single or multiple choice), if Other is selected. */
-function otherDraftOf(field: FormField, value: FieldAnswer | undefined): OtherAnswer | undefined {
-  if (field.multiple)
-    return Array.isArray(value) ? value.find(isOtherDraft) : undefined
-  return isOtherDraft(value) ? value : undefined
+/**
+ * A stable text for a draft, to tell whether the user changed anything since
+ * the form opened: field order follows the definition, and an empty value
+ * (nothing typed, nothing ticked) counts as no value at all.
+ */
+export function draftSignature(definition: FormDefinition, draft: AnswerDraft): string {
+  return JSON.stringify(definition.fields.map((field) => {
+    const value = draft[field.id]
+    const empty = value === undefined || value === '' || (Array.isArray(value) && value.length === 0)
+    return [field.id, empty ? null : value]
+  }))
+}
+
+/**
+ * Field ids whose `required` rule the current draft plainly fails. For a
+ * standard field "required" means its own rule: non-whitespace text, a
+ * parsed number, a true checkbox.
+ */
+export function missingRequiredFields(definition: FormDefinition, draft: AnswerDraft): string[] {
+  return definition.fields
+    .filter(field => evaluateField(field, draft[field.id]).errors.some(e => e.code === 'required'))
+    .map(field => field.id)
 }
 
 /**
@@ -178,6 +267,8 @@ function otherDraftOf(field: FormField, value: FieldAnswer | undefined): OtherAn
 export function fieldsWithBlankOther(definition: FormDefinition, draft: AnswerDraft): string[] {
   const invalid: string[] = []
   for (const field of definition.fields) {
+    if (!isChoiceField(field))
+      continue
     const other = otherDraftOf(field, draft[field.id])
     if (other && normalizeOtherText(other.other).length === 0)
       invalid.push(field.id)
@@ -193,23 +284,16 @@ export function fieldsWithBlankOther(definition: FormDefinition, draft: AnswerDr
 export function fieldsWithOverlongOtherText(definition: FormDefinition, draft: AnswerDraft): string[] {
   const invalid: string[] = []
   for (const field of definition.fields) {
-    const value = draft[field.id]
-    let otherText: string | undefined
-    if (field.multiple) {
-      if (Array.isArray(value)) {
-        const found = value.find(isOtherDraft)
-        if (found)
-          otherText = found.other
-      }
-    }
-    else if (isOtherDraft(value)) {
-      otherText = value.other
-    }
-    if (otherText !== undefined && isOtherTextTooLong(otherText))
+    if (!isChoiceField(field))
+      continue
+    const other = otherDraftOf(field, draft[field.id])
+    if (other && isOtherTextTooLong(other.other))
       invalid.push(field.id)
   }
   return invalid
 }
+
+// ── display ──────────────────────────────────────────────────────
 
 /** One answer shown back to the user — the review step, the post-submit summary, or a read-only field. */
 export interface AnswerDisplayItem {
@@ -221,14 +305,14 @@ export interface AnswerDisplayItem {
 }
 
 /**
- * Display items for one field's answer — options in definition order, Other
- * last — or `null` when the field has no answer at all. Reads all three
- * wire shapes (`answerNoteFor`/`isNotedAnswer` in `definition.ts` back
- * this), so it works for a live in-progress answer and for `state.data`
- * read back from the server alike.
+ * Display items for one choice field's answer — options in definition order,
+ * Other last — or `null` when the field has no answer at all (or is not a
+ * choice field). Reads all three wire shapes (`answerNoteFor`/`isNotedAnswer`
+ * in `definition.ts` back this), so it works for a live in-progress answer
+ * and for `state.data` read back from the server alike.
  */
 export function answerDisplayItems(field: FormField, answer: FieldAnswer | undefined): AnswerDisplayItem[] | null {
-  if (answer === undefined)
+  if (answer === undefined || !isChoiceField(field) || typeof answer === 'number' || typeof answer === 'boolean')
     return null
   const values = Array.isArray(answer) ? answer : [answer]
   const items: AnswerDisplayItem[] = []
@@ -243,18 +327,36 @@ export function answerDisplayItems(field: FormField, answer: FieldAnswer | undef
   return items.length > 0 ? items : null
 }
 
-/** Builds an edit draft from a previously accepted/loaded `FormAnswers`. */
+/** What a read-only field shows for its stored answer. */
+export type ReadOnlyAnswer
+  = | { kind: 'empty' }
+    | { kind: 'text', text: string }
+    | { kind: 'choice', items: AnswerDisplayItem[] }
+
+/**
+ * The read-only form of a stored answer: text (line breaks kept) for a
+ * standard field, display items for a choice, `empty` for no answer — the
+ * caller words that "Skipped".
+ */
+export function readOnlyAnswer(field: FormField, answer: FieldAnswer | undefined): ReadOnlyAnswer {
+  if (isChoiceField(field)) {
+    const items = answerDisplayItems(field, answer)
+    return items ? { kind: 'choice', items } : { kind: 'empty' }
+  }
+  const text = (SCALAR_HANDLERS[field.type] as FieldHandler<FormField>).display(field, answer)
+  return text === null ? { kind: 'empty' } : { kind: 'text', text }
+}
+
+/**
+ * Builds an edit draft from a previously accepted/loaded `FormAnswers`:
+ * each field starts from its stored answer, else its definition default.
+ */
 export function draftFromAnswers(definition: FormDefinition, answers: FormAnswers | null): AnswerDraft {
   const draft: AnswerDraft = {}
-  if (!answers)
-    return draft
   for (const field of definition.fields) {
-    const value = answers[field.id]
-    if (value === undefined)
-      continue
-    draft[field.id] = field.multiple
-      ? (Array.isArray(value) ? [...value] : [value])
-      : value
+    const value = handlerFor(field)?.initialDraft(field, answers?.[field.id])
+    if (value !== undefined)
+      draft[field.id] = value
   }
   return draft
 }

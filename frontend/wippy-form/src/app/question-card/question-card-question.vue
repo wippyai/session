@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
-import type { FormField } from '../../lib/definition'
+import type { ChoiceFormField } from '../../lib/definition'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { Icon } from '@iconify/vue'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
-import { isNoteTextTooLong, isOtherTextTooLong, trimAnswerText } from '../../lib/answers'
+import { isNoteTextTooLong, isOtherTextTooLong } from '../../lib/answers'
+import { trimAnswerText } from '../../lib/text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardComposer from './question-card-composer.vue'
 import QuestionCardOption from './question-card-option.vue'
@@ -14,7 +15,7 @@ import QuestionCardRichText from './question-card-rich-text.vue'
 
 /** One question's body: notice, hint, the options list (+ Other), footer send (multi without Other), error, keyboard hint. */
 const props = defineProps<{
-  question: FormField
+  question: ChoiceFormField
   controller: QuestionCardController
   qid: string
   stale: boolean

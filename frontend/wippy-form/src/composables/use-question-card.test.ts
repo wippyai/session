@@ -1,8 +1,8 @@
-import type { FormDefinition } from '../lib/definition'
+import type { ChoiceFormDefinition } from '../lib/definition'
 import { describe, expect, it, vi } from 'vitest'
 import { useQuestionCard } from './use-question-card'
 
-const singleDef: FormDefinition = {
+const singleDef: ChoiceFormDefinition = {
   title: 'T',
   fields: [{
     id: 'f1',
@@ -15,7 +15,7 @@ const singleDef: FormDefinition = {
   }],
 }
 
-const multiDef: FormDefinition = {
+const multiDef: ChoiceFormDefinition = {
   title: 'T',
   fields: [{
     id: 'f1',
@@ -28,7 +28,7 @@ const multiDef: FormDefinition = {
   }],
 }
 
-const twoQDef: FormDefinition = {
+const twoQDef: ChoiceFormDefinition = {
   title: 'T',
   fields: [
     { id: 'f1', type: 'choice', label: 'Q1', required: true, options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }], multiple: false, allow_other: false },
@@ -251,7 +251,7 @@ describe('useQuestionCard — review focus on a missing required answer', () => 
 
 describe('useQuestionCard — hydrating from a previously loaded answer', () => {
   it('reads back a plain value, a {value, note}, and an {other} shape', () => {
-    const def: FormDefinition = {
+    const def: ChoiceFormDefinition = {
       title: 'T',
       fields: [
         { id: 'plain', type: 'choice', label: 'Plain', required: false, options: [{ value: 'a', label: 'A' }], multiple: false, allow_other: false },

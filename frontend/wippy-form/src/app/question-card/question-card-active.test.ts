@@ -1,10 +1,10 @@
-import type { FormDefinition, FormState } from '../../lib/definition'
+import type { ChoiceFormDefinition, ChoiceFormState } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import QuestionCardActive from './question-card-active.vue'
 
-const singleQuestionDef: FormDefinition = {
+const singleQuestionDef: ChoiceFormDefinition = {
   title: 'Deploy',
   fields: [{
     id: 'f1',
@@ -17,7 +17,7 @@ const singleQuestionDef: FormDefinition = {
   }],
 }
 
-const twoQuestionDef: FormDefinition = {
+const twoQuestionDef: ChoiceFormDefinition = {
   title: 'Release',
   fields: [
     { id: 'f1', type: 'choice', label: 'Widen the peer range?', required: true, options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }], multiple: false, allow_other: false },
@@ -25,7 +25,7 @@ const twoQuestionDef: FormDefinition = {
   ],
 }
 
-function makeState(definition: FormDefinition, overrides: Partial<FormState> = {}): FormState {
+function makeState(definition: ChoiceFormDefinition, overrides: Partial<ChoiceFormState> = {}): ChoiceFormState {
   return {
     form_version: 1,
     artifact_id: 'artifact-1',
@@ -43,7 +43,7 @@ function makeState(definition: FormDefinition, overrides: Partial<FormState> = {
   }
 }
 
-function mountCard(definition: FormDefinition, overrides: Partial<FormState> = {}) {
+function mountCard(definition: ChoiceFormDefinition, overrides: Partial<ChoiceFormState> = {}) {
   return mount(QuestionCardActive, {
     props: {
       state: makeState(definition, overrides),
@@ -235,7 +235,7 @@ describe('QuestionCardActive — form title and description (the one-question ca
   })
 
   it('shows the form-level description, in the muted style, with backticks rendered as inline code', () => {
-    const withFormDescription: FormDefinition = {
+    const withFormDescription: ChoiceFormDefinition = {
       ...singleQuestionDef,
       description: 'Uses the `staging` cluster only.',
     }
@@ -254,7 +254,7 @@ describe('QuestionCardActive — form title and description (the one-question ca
 })
 
 describe('QuestionCardActive — field description', () => {
-  const withDescription: FormDefinition = {
+  const withDescription: ChoiceFormDefinition = {
     title: 'Deploy',
     fields: [{
       id: 'f1',

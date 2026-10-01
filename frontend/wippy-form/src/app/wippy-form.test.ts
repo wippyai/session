@@ -404,14 +404,14 @@ describe('WippyForm — card-state during the initial load does not briefly flas
 })
 
 describe('WippyForm — unsupported form-version contract', () => {
-  it('never renders the submittable form when the form-version prop is not 1', async () => {
+  it('never renders the submittable form when the form-version prop is not a supported version (1 or 2)', async () => {
     const getFn = vi.fn().mockResolvedValue(activeState())
     const submitFn = vi.fn()
     mockArtifactState().mockReturnValue({ get: getFn, submit: submitFn })
 
     const element = elementWithArtifactId('artifact-1')
     const wrapper = mountWippyForm(
-      { formVersion: 2, definition: choiceDefinition, state: 'active' },
+      { formVersion: 3, definition: choiceDefinition, state: 'active' },
       element,
     )
     await flushPromises()
@@ -425,8 +425,8 @@ describe('WippyForm — unsupported form-version contract', () => {
     expect(element.getAttribute('card-state')).toBe('unsupported')
   })
 
-  it('never renders the submittable form when the loaded state\'s form_version is not 1', async () => {
-    const getFn = vi.fn().mockResolvedValue(activeState({ form_version: 2 }))
+  it('never renders the submittable form when the loaded state\'s form_version is not a supported version (1 or 2)', async () => {
+    const getFn = vi.fn().mockResolvedValue(activeState({ form_version: 3 }))
     const submitFn = vi.fn()
     mockArtifactState().mockReturnValue({ get: getFn, submit: submitFn })
 
@@ -792,5 +792,120 @@ describe('WippyForm — unmount during a pending load', () => {
 
     consoleErrorSpy.mockRestore()
     consoleWarnSpy.mockRestore()
+  })
+})
+
+// ── V2: standard fields ────────────────────────────────────────────
+
+const v2Definition = {
+  title: 'Delivery details',
+  fields: [
+    { id: 'name', type: 'text' as const, label: 'Full name', required: true },
+    { id: 'mail', type: 'email' as const, label: 'Email', required: false },
+    { id: 'qty', type: 'number' as const, label: 'Parcels', required: false, integer: true },
+    { id: 'consent', type: 'checkbox' as const, label: 'I agree', required: true },
+  ],
+}
+
+function v2State(overrides: Partial<FormState> = {}): FormState {
+  return { ...activeState({ form_version: 2 }), definition: v2Definition, ...overrides }
+}
+
+describe('WippyForm — form version 2', () => {
+  it('accepts version 1 and 2 from the prop and from the loaded state', async () => {
+    for (const [propVersion, stateVersion] of [[1, 1], [2, 2], [undefined, 2], [2, undefined]] as const) {
+      const getFn = vi.fn().mockResolvedValue(v2State({ form_version: stateVersion ?? 2 }))
+      mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+      const element = elementWithArtifactId('artifact-1')
+      const wrapper = mountWippyForm({ formVersion: propVersion, definition: v2Definition, state: 'active' }, element)
+      await flushPromises()
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.text()).not.toContain('needs a newer version')
+      expect(wrapper.find('button[type="submit"]').exists()).toBe(true)
+      expect(element.getAttribute('card-state')).toBe('active')
+    }
+  })
+
+  it('keeps the "needs a newer version" notice for a version above 2, from either source', async () => {
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State({ form_version: 3 })), submit: vi.fn() })
+    const fromProp = mountWippyForm({ formVersion: 3, definition: v2Definition, state: 'active' }, elementWithArtifactId('artifact-1'))
+    await flushPromises()
+    expect(fromProp.text()).toContain('This form needs a newer version of the app.')
+    expect(fromProp.find('input').exists()).toBe(false)
+
+    const fromState = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, elementWithArtifactId('artifact-1'))
+    await flushPromises()
+    expect(fromState.text()).toContain('This form needs a newer version of the app.')
+    expect(fromState.find('button[type="submit"]').exists()).toBe(false)
+  })
+
+  it('shows the "needs a newer version" notice for a field type it does not know, rather than dropping the question', async () => {
+    const future = { ...v2Definition, fields: [...v2Definition.fields, { id: 'rate', type: 'slider', label: 'Rate us', required: false }] }
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State({ definition: future as unknown as FormState['definition'] })), submit: vi.fn() })
+    const element = elementWithArtifactId('artifact-1')
+    const wrapper = mountWippyForm({ formVersion: 2, definition: future as unknown as ComponentProps['definition'], state: 'active' }, element)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('This form needs a newer version of the app.')
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(element.getAttribute('card-state')).toBe('unsupported')
+  })
+
+  it('renders a form with standard fields as the fields form, not the question card', async () => {
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State()), submit: vi.fn() })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, elementWithArtifactId('artifact-1'))
+    await flushPromises()
+
+    expect(wrapper.find('.w-form__fields').exists()).toBe(true)
+    expect(wrapper.find('.w-form__option').exists()).toBe(false)
+    expect(wrapper.find('input[type="email"]').exists()).toBe(true)
+  })
+
+  it('renders a form that mixes choices with standard fields as the fields form with radio rows', async () => {
+    const mixed = { title: 'Mixed', fields: [...choiceDefinition.fields, ...v2Definition.fields] }
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State({ definition: mixed })), submit: vi.fn() })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: mixed, state: 'active' }, elementWithArtifactId('artifact-1'))
+    await flushPromises()
+
+    expect(wrapper.find('.w-form__fields').exists()).toBe(true)
+    expect(wrapper.findAll('input[type="radio"]')).toHaveLength(2)
+  })
+
+  it('submits version 2 answers, with a number as a JSON number and a checkbox as a boolean', async () => {
+    const submitFn = vi.fn().mockResolvedValue({ success: true, artifact_id: 'artifact-1', request_id: 'r1', answer_message_id: 'm1', content_version: 2, status: 'idle', late: false, delivery: 'pending', replayed: false })
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State()), submit: submitFn })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, elementWithArtifactId('artifact-1'), { attachToBody: true })
+    await flushPromises()
+
+    const byLabel = (label: string) => {
+      const l = wrapper.findAll('label').find(el => el.text().startsWith(label))
+      return wrapper.find(`[id="${l?.attributes('for')}"]`)
+    }
+    await byLabel('Full name').setValue('Ada')
+    await byLabel('Parcels').setValue('4')
+    await byLabel('I agree').setValue(true)
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(submitFn).toHaveBeenCalledTimes(1)
+    const envelope = submitFn.mock.calls[0][0]
+    expect(envelope.form_version).toBe(2)
+    expect(envelope.answers).toEqual({ name: 'Ada', qty: 4, consent: true })
+  })
+
+  it('shows a stored version 2 answer read-only once answered', async () => {
+    const idle = v2State({ status: 'idle', data: { name: 'Ada', qty: 4, consent: true }, submitted_at: '2026-10-01T10:00:00.000Z', delivery: 'complete' })
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(idle), submit: vi.fn() })
+    const element = elementWithArtifactId('artifact-1')
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'idle' }, element)
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('input').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Ada')
+    expect(wrapper.text()).toContain('Yes')
+    expect(wrapper.text()).toContain('Skipped')
+    expect(element.getAttribute('card-state')).toBe('answered')
   })
 })

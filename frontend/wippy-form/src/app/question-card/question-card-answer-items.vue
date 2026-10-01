@@ -2,7 +2,7 @@
 import type { AnswerDisplayItem } from '../../lib/answers'
 import { Icon } from '@iconify/vue'
 import { computed } from 'vue'
-import { trimAnswerText } from '../../lib/answers'
+import { trimAnswerText } from '../../lib/text'
 import { partClass } from '../../lib/part-class'
 import { textLines } from '../../lib/rich-text'
 import QuestionCardRichText from './question-card-rich-text.vue'

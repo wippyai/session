@@ -1,7 +1,8 @@
 import type { AnswerDraft } from './answers'
 import type { FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
-import { answerDisplayItems, buildNotedValue, fieldsWithBlankOther, fieldsWithOverlongOtherText, isNoteTextTooLong, isOtherTextTooLong, missingRequiredFields, noteTextLength, serializeAnswers, serializeFieldAnswer, trimAnswerText } from './answers'
+import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, fieldsWithBlankOther, fieldsWithOverlongOtherText, isNoteTextTooLong, isOtherTextTooLong, missingRequiredFields, noteTextLength, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
+import { trimAnswerText } from './text'
 
 const definition: FormDefinition = {
   title: 'Form',
@@ -271,3 +272,177 @@ describe('answerDisplayItems (review/summary rendering)', () => {
     expect(answerDisplayItems(single, 'a')).toEqual([{ label: 'Alpha', note: undefined }])
   })
 })
+
+// ── V2 standard fields: the per-type table ───────────────────────────
+
+const v2Definition: FormDefinition = {
+  title: 'Delivery',
+  fields: [
+    { id: 'name', type: 'text', label: 'Name', required: true },
+    { id: 'notes', type: 'textarea', label: 'Notes', required: false },
+    { id: 'mail', type: 'email', label: 'Email', required: true },
+    { id: 'count', type: 'number', label: 'Parcels', required: false, integer: true, min: 1, max: 9 },
+    { id: 'day', type: 'date', label: 'Day', required: false },
+    { id: 'consent', type: 'checkbox', label: 'Consent', required: true },
+    { id: 'pick', type: 'choice', label: 'Speed', required: false, options: [{ value: 'a', label: 'A' }], multiple: false, allow_other: false },
+  ],
+}
+
+describe('evaluateField — dispatches on the field type', () => {
+  it('judges a choice field with the V1 rules', () => {
+    const pick = v2Definition.fields[6]
+    expect(evaluateField(pick, 'a')).toEqual({ answer: 'a', errors: [] })
+    expect(evaluateField(pick, undefined)).toEqual({ answer: undefined, errors: [] })
+  })
+
+  it('reports a required choice with no answer as required, and a blank Other as blank', () => {
+    const required: FormField = { id: 'c', type: 'choice', label: 'C', required: true, options: [{ value: 'a', label: 'A' }], multiple: false, allow_other: true }
+    expect(evaluateField(required, undefined).errors.map(e => e.code)).toEqual(['required'])
+    expect(evaluateField(required, { other: '  ' }).errors.map(e => e.code)).toEqual(['blank'])
+    expect(evaluateField(required, { other: 'x'.repeat(2001) }).errors.map(e => e.code)).toEqual(['too_long'])
+  })
+
+  it('judges the six standard fields', () => {
+    expect(evaluateField(v2Definition.fields[0], ' Ada ')).toEqual({ answer: ' Ada ', errors: [] })
+    expect(evaluateField(v2Definition.fields[3], '4')).toEqual({ answer: 4, errors: [] })
+    expect(evaluateField(v2Definition.fields[5], true)).toEqual({ answer: true, errors: [] })
+  })
+
+  it('omits a field of a type this component does not know, with no findings', () => {
+    const future = { id: 'z', type: 'slider', label: 'Z', required: true } as unknown as FormField
+    expect(evaluateField(future, '5')).toEqual({ answer: undefined, errors: [] })
+  })
+})
+
+describe('serializeAnswers — V2 fields', () => {
+  it('sends text as typed, numbers as numbers and checkboxes as explicit booleans, in definition order', () => {
+    const answers = serializeAnswers(v2Definition, {
+      consent: true,
+      count: '3',
+      mail: ' ada@example.com ',
+      name: '  Ada  ',
+      day: '2026-10-01',
+      notes: 'line one\nline two',
+    })
+    expect(Object.keys(answers)).toEqual(['name', 'notes', 'mail', 'count', 'day', 'consent'])
+    expect(answers).toEqual({
+      name: '  Ada  ',
+      notes: 'line one\nline two',
+      mail: 'ada@example.com',
+      count: 3,
+      day: '2026-10-01',
+      consent: true,
+    })
+  })
+
+  it('omits blank optional fields but still sends an unchecked optional checkbox as false', () => {
+    const optionalConsent: FormDefinition = { title: 'T', fields: [
+      { id: 'a', type: 'text', label: 'A', required: false },
+      { id: 'b', type: 'checkbox', label: 'B', required: false },
+    ] }
+    expect(serializeAnswers(optionalConsent, { a: '   ' })).toEqual({ b: false })
+  })
+
+  it('serializes one field through serializeFieldAnswer for any type', () => {
+    expect(serializeFieldAnswer(v2Definition.fields[3], '7')).toBe(7)
+    expect(serializeFieldAnswer(v2Definition.fields[3], 'seven')).toBeUndefined()
+  })
+})
+
+describe('validateAnswers — client findings by field id', () => {
+  it('returns nothing for a valid form', () => {
+    expect(validateAnswers(v2Definition, { name: 'Ada', mail: 'a@b.co', consent: true })).toEqual({})
+  })
+
+  it('reports every failing field with its own code and a message that does not echo the value', () => {
+    const typed = { name: '', mail: 'not-an-email', count: '12', day: 'tomorrow', consent: false }
+    const errors = validateAnswers(v2Definition, typed)
+    expect(Object.keys(errors)).toEqual(['name', 'mail', 'count', 'day', 'consent'])
+    expect(errors.name[0].code).toBe('required')
+    expect(errors.mail[0].code).toBe('invalid_email')
+    expect(errors.count[0].code).toBe('above_max')
+    expect(errors.day[0].code).toBe('invalid_date')
+    expect(errors.consent[0].code).toBe('required')
+    for (const list of Object.values(errors)) {
+      for (const error of list) {
+        expect(error.message).not.toContain('not-an-email')
+        expect(error.message).not.toContain('tomorrow')
+      }
+    }
+  })
+})
+
+describe('missingRequiredFields — V2 fields', () => {
+  it('counts a whitespace-only required text and an unchecked required checkbox as missing', () => {
+    expect(missingRequiredFields(v2Definition, { name: '  ', mail: 'a@b.co', consent: false })).toEqual(['name', 'consent'])
+  })
+
+  it('does not count an invalid but filled field as missing', () => {
+    expect(missingRequiredFields(v2Definition, { name: 'Ada', mail: 'broken', consent: true })).toEqual([])
+  })
+})
+
+describe('draftFromAnswers — defaults and stored answers', () => {
+  const withDefaults: FormDefinition = { title: 'T', fields: [
+    { id: 'city', type: 'text', label: 'City', required: false, default: 'Berlin' },
+    { id: 'qty', type: 'number', label: 'Qty', required: false, default: 3 },
+    { id: 'ok', type: 'checkbox', label: 'OK', required: false, default: false },
+    { id: 'plain', type: 'text', label: 'Plain', required: false },
+    { id: 'pick', type: 'choice', label: 'Pick', required: false, options: [{ value: 'a', label: 'A' }], multiple: true, allow_other: false },
+  ] }
+
+  it('prefills defaults and starts a checkbox unchecked', () => {
+    expect(draftFromAnswers(withDefaults, null)).toEqual({ city: 'Berlin', qty: '3', ok: false })
+  })
+
+  it('lets stored answers win over defaults and keeps the V1 choice draft shape', () => {
+    expect(draftFromAnswers(withDefaults, { city: 'Paris', qty: 8, ok: true, pick: 'a' })).toEqual({ city: 'Paris', qty: '8', ok: true, pick: ['a'] })
+  })
+
+  it('submits a prefilled default unless the user clears it', () => {
+    const draft = draftFromAnswers(withDefaults, null)
+    expect(serializeAnswers(withDefaults, draft)).toEqual({ city: 'Berlin', qty: 3, ok: false })
+    expect(serializeAnswers(withDefaults, { ...draft, city: '' })).toEqual({ qty: 3, ok: false })
+  })
+})
+
+describe('draftSignature — has the user changed anything?', () => {
+  const signature = (draft: AnswerDraft) => draftSignature(v2Definition, draft)
+
+  it('is the same for drafts that differ only in key order or in empty values', () => {
+    expect(signature({ name: 'Ada', mail: 'a@b.co' })).toBe(signature({ mail: 'a@b.co', name: 'Ada' }))
+    expect(signature({ name: '' })).toBe(signature({}))
+    expect(signature({ pick: [] })).toBe(signature({ pick: undefined }))
+  })
+
+  it('differs once any value, including an invalid or false one, is set', () => {
+    expect(signature({ name: 'Ada' })).not.toBe(signature({}))
+    expect(signature({ mail: 'half-typed' })).not.toBe(signature({}))
+    expect(signature({ consent: false })).not.toBe(signature({}))
+    expect(signature({ consent: true })).not.toBe(signature({ consent: false }))
+  })
+})
+
+describe('readOnlyAnswer — what a read-only field shows', () => {
+  it('shows text with its line breaks, a number as stored, a date as ISO text and a checkbox as Yes or No', () => {
+    expect(readOnlyAnswer(v2Definition.fields[1], 'a\nb')).toEqual({ kind: 'text', text: 'a\nb' })
+    expect(readOnlyAnswer(v2Definition.fields[3], 4)).toEqual({ kind: 'text', text: '4' })
+    expect(readOnlyAnswer(v2Definition.fields[4], '2026-10-01')).toEqual({ kind: 'text', text: '2026-10-01' })
+    expect(readOnlyAnswer(v2Definition.fields[5], true)).toEqual({ kind: 'text', text: 'Yes' })
+    expect(readOnlyAnswer(v2Definition.fields[5], false)).toEqual({ kind: 'text', text: 'No' })
+  })
+
+  it('shows an unanswered field as empty', () => {
+    for (const field of v2Definition.fields)
+      expect(readOnlyAnswer(field, undefined), field.id).toEqual({ kind: 'empty' })
+  })
+
+  it('shows a choice answer as display items, keeping a note and an Other entry', () => {
+    const pick: FormField = { id: 'p', type: 'choice', label: 'P', required: false, options: [{ value: 'a', label: 'Alpha' }], multiple: true, allow_other: true }
+    expect(readOnlyAnswer(pick, [{ value: 'a', note: 'because' }, { other: 'mine' }])).toEqual({
+      kind: 'choice',
+      items: [{ label: 'Alpha', note: 'because' }, { label: 'mine', own: true }],
+    })
+  })
+})
+

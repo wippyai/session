@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { FormState } from '../../lib/definition'
+import type { ChoiceFormState } from '../../lib/definition'
 import { Icon } from '@iconify/vue'
 import { computed, ref } from 'vue'
 import { answerDisplayItems } from '../../lib/answers'
@@ -15,7 +15,7 @@ import QuestionCardRichText from './question-card-rich-text.vue'
  * notice, "Answered at …") `IdleForm.vue` shows.
  */
 const props = defineProps<{
-  state: FormState
+  state: ChoiceFormState
 }>()
 
 function formatTime(iso: string | null): string | null {

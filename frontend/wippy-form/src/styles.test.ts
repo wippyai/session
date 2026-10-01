@@ -61,3 +61,34 @@ describe('styles.css — the form-level description has space below it and the t
     expect(body).toMatch(/color:\s*var\(--_muted\)/)
   })
 })
+
+// The fields form reads the same tokens as the card; only the space between
+// fields and the label weight are new tokens. Each is a public
+// `--wippy-form-*` token read through a private `--_x`, like the rest.
+describe('styles.css — fields form tokens and parts', () => {
+  it('reads the field gap and the label weight through public tokens', () => {
+    const body = ruleBody(':host')
+    expect(body).toMatch(/--_field-gap:\s*var\(--wippy-form-field-gap,\s*var\(--_d-field-gap\)\)/)
+    expect(body).toMatch(/--_label-weight:\s*var\(--wippy-form-label-weight,\s*500\)/)
+  })
+
+  it('has a wider field gap at comfortable density', () => {
+    const body = ruleBody(':host\\(\\[density=\'comfortable\'\\]\\)')
+    expect(body).toMatch(/--_d-field-gap:\s*20px/)
+  })
+
+  it('spaces fields with the token, and sets the label weight from it', () => {
+    expect(ruleBody('\\.w-form__fields')).toMatch(/gap:\s*var\(--_field-gap\)/)
+    expect(ruleBody('\\.w-form__field-label')).toMatch(/font-weight:\s*var\(--_label-weight\)/)
+  })
+
+  it('draws the description and read-only note muted, through --_muted', () => {
+    expect(ruleBody('\\.w-form__field-description')).toMatch(/color:\s*var\(--_muted\)/)
+    expect(ruleBody('\\.w-form__field-note')).toMatch(/color:\s*var\(--_muted\)/)
+  })
+
+  it('has no raw .p-* rule for the PrimeVue inputs (comments aside)', () => {
+    const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(withoutComments).not.toMatch(/\.p-(inputtext|textarea|checkbox|datepicker|radiobutton)/)
+  })
+})

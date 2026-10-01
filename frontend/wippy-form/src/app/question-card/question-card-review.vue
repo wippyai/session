@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
-import type { FormDefinition } from '../../lib/definition'
+import type { ChoiceFormDefinition } from '../../lib/definition'
 import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import { computed } from 'vue'
@@ -10,7 +10,7 @@ import QuestionCardRichText from './question-card-rich-text.vue'
 
 /** The review step for a several-question card: every question's answer, editable, then "Send answers". */
 const props = defineProps<{
-  definition: FormDefinition
+  definition: ChoiceFormDefinition
   controller: QuestionCardController
   /** True while offline or a submit is already in flight — disables "Send answers". */
   disabled?: boolean

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import type { FocusTarget } from '../../composables/use-question-card'
-import type { FieldError, FormAnswers, FormState } from '../../lib/definition'
+import type { ChoiceFormState, FieldError, FormAnswers } from '../../lib/definition'
 import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
-import { trimAnswerText } from '../../lib/answers'
+import { trimAnswerText } from '../../lib/text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardQuestion from './question-card-question.vue'
@@ -22,7 +22,7 @@ import QuestionCardRichText from './question-card-rich-text.vue'
  * and 422/409 handling in `wippy-form.vue` all keep working unchanged.
  */
 const props = defineProps<{
-  state: FormState
+  state: ChoiceFormState
   submitting: boolean
   banner: { message: string, retryable?: boolean } | null
   offline?: boolean

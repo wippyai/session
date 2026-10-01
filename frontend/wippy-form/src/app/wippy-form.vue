@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { HostState } from '../composables/use-host-reflection'
-import type { FormAnswers } from '../lib/definition'
+import type { FormAnswers, FormDefinition } from '../lib/definition'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -10,6 +10,7 @@ import { useFormState } from '../composables/use-form-state'
 import { useFormSubmit } from '../composables/use-form-submit'
 import { useHostReflection } from '../composables/use-host-reflection'
 import { useOnlineStatus } from '../composables/use-online-status'
+import { isChoiceFormState, isKnownFieldType, isSupportedFormVersion } from '../lib/definition'
 import { useArtifactId } from '../element-context'
 import ActiveForm from './active-form.vue'
 import IdleForm from './idle-form.vue'
@@ -27,8 +28,6 @@ const RELOAD_FAILED_NOTICE = 'Could not refresh this form. Showing what you last
 // attempt and an untouched local pick are both still just a draft once
 // another answer has already been saved.
 const ANSWERED_ELSEWHERE_NOTICE = 'This form was already answered elsewhere, so your draft was not saved. The saved answer is shown below.'
-/** The only `form_version` this component knows how to render interactively (see `unsupportedVersion` below). */
-const SUPPORTED_FORM_VERSION = 1
 
 const props = useComponentProps()
 const propErrors = useComponentPropsErrors()
@@ -91,29 +90,38 @@ watch(() => state.value?.status, (status, previousStatus) => {
     answeredElsewhere.value = true
 })
 
+/** True when any field of `def` has a type this component cannot render (a type from a newer version). */
+function hasUnknownFieldType(def: FormDefinition | undefined): boolean {
+  return !!def?.fields?.some(field => !isKnownFieldType(field.type))
+}
+
 // The contract check ("form-version") applies before anything else: the
 // package-tag prop is known immediately (no need to wait for GET), and once
 // state is loaded its own `form_version` is checked too. Either source
-// being anything other than 1 means an interactive ActiveForm must never be
-// rendered — a v-else-if branch below, not a submit-time guard, since the
-// Host's `Submit` button must simply not exist.
+// naming a version this component does not render (1 and 2 are supported)
+// means an interactive form must never be rendered — a v-else-if branch
+// below, not a submit-time guard, since the Host's `Submit` button must
+// simply not exist. A field of a type this component does not know gets the
+// same notice, so a question is never silently dropped from the form.
 const unsupportedVersion = computed(() => {
   const propVersion = props.value.formVersion
-  if (propVersion !== undefined && propVersion !== SUPPORTED_FORM_VERSION)
+  if (propVersion !== undefined && !isSupportedFormVersion(propVersion))
     return true
   const stateVersion = state.value?.form_version
-  if (stateVersion !== undefined && stateVersion !== SUPPORTED_FORM_VERSION)
+  if (stateVersion !== undefined && !isSupportedFormVersion(stateVersion))
     return true
-  return false
+  return hasUnknownFieldType(definition.value) || hasUnknownFieldType(state.value?.definition)
 })
 
-// Routing: a definition where every field is `type: 'choice'` (the only
-// field type V1 emits) renders the question card; anything else (a future
-// mixed/non-choice V2 definition) falls back to the plain radio/checkbox
-// fields form, which stays fully supported for that case.
-const allChoice = computed(() => {
-  const fields = definition.value?.fields
-  return !!fields && fields.length > 0 && fields.every(f => f.type === 'choice')
+// Routing: a definition where every field is `type: 'choice'` (a version 1
+// form) renders the question card; anything else — a V2 form with any
+// standard field, or a mix of choices and standard fields — renders the
+// fields form (choices there are plain radios/checkboxes, with no per-option
+// notes and no click-to-answer).
+// The loaded state narrowed to its choice-only form, for the question card.
+const choiceState = computed(() => {
+  const current = state.value
+  return current && isChoiceFormState(current) ? current : null
 })
 
 // Host attribute reflection (`card-state`, `collapsed`) only makes sense for
@@ -145,9 +153,9 @@ const hostState = computed<HostState>(() => {
     return 'loading'
   if (state.value.status === 'idle')
     return 'answered'
-  return allChoice.value ? questionCardState.value : 'active'
+  return choiceState.value ? questionCardState.value : 'active'
 })
-const hostCollapsed = computed(() => !unsupportedVersion.value && allChoice.value && state.value?.status === 'active' && questionCardCollapsed.value)
+const hostCollapsed = computed(() => !unsupportedVersion.value && choiceState.value !== null && state.value?.status === 'active' && questionCardCollapsed.value)
 useHostReflection(hostState, hostCollapsed)
 
 async function handleSubmit(answers: FormAnswers) {
@@ -280,10 +288,10 @@ function handleRetry() {
         artifacts.
       -->
       <QuestionCardActive
-        v-if="state.status === 'active' && allChoice"
+        v-if="state.status === 'active' && choiceState"
         :key="artifactId"
         ref="activeFormRef"
-        :state="state"
+        :state="choiceState"
         :submitting="submitting"
         :banner="banner"
         :offline="!isOnline"
@@ -313,10 +321,10 @@ function handleRetry() {
           {{ ANSWERED_ELSEWHERE_NOTICE }}
         </p>
         <QuestionCardSummary
-          v-if="allChoice"
+          v-if="choiceState"
           :key="artifactId"
           ref="idleFormRef"
-          :state="state"
+          :state="choiceState"
         />
         <IdleForm
           v-else

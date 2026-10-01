@@ -1,11 +1,23 @@
 <script setup lang="ts">
-import type { FieldError, FormAnswers, FormState } from '../lib/definition'
+import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/definition'
 import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { draftFromAnswers, fieldsWithBlankOther, fieldsWithOverlongOtherText, missingRequiredFields, serializeAnswers } from '../lib/answers'
-import ChoiceField from './fields/choice-field.vue'
+import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
+import { partClass } from '../lib/part-class'
+import FormFieldControl from './fields/form-field.vue'
 
+/**
+ * The fields form: every field of the definition as its own control (choice
+ * radios/checkboxes and the V2 standard fields), one Submit button, and one
+ * polite status region. A form of choices only renders as the question card
+ * instead; this is the renderer for any form with a standard field.
+ *
+ * The `<form>` is `novalidate`: a native `type="email"` or `required` would
+ * otherwise stop the submit event with the browser's own bubble and bypass
+ * the accessible error flow below (per-field errors linked by
+ * `aria-describedby`, focus on the first invalid control, a status summary).
+ */
 const props = defineProps<{
   state: FormState
   submitting: boolean
@@ -19,14 +31,15 @@ const emit = defineEmits<{
   retry: []
 }>()
 
-const TOO_LONG_MESSAGE = 'Use at most 2,000 characters.'
-const BLANK_OTHER_MESSAGE = 'Enter the other answer.'
 const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
 
-// Keyed by field id; typed values only — matches AnswerDraft.
-const draft = reactive<Record<string, ReturnType<typeof draftFromAnswers>[string]>>(
+// Keyed by field id: the raw value of each control — matches AnswerDraft.
+const draft = reactive<Record<string, FieldAnswer | undefined>>(
   draftFromAnswers(props.state.definition, props.state.data),
 )
+// What the form started with, so "unsent input" means the user changed something.
+const initialSignature = draftSignature(props.state.definition, draft)
+
 const fieldErrors = ref<Record<string, FieldError[]>>({})
 const formErrors = ref<FieldError[]>([])
 type FieldHandle = { focusFirstControl: () => void, focusOtherText: () => void }
@@ -57,7 +70,7 @@ function focusFirstInvalid(ids: string[], blankOther: string[] = []) {
 }
 
 function announceErrorSummary(count: number) {
-  statusMessage.value = count === 1 ? '1 question needs an answer.' : `${count} questions need an answer.`
+  statusMessage.value = count === 1 ? '1 question needs attention.' : `${count} questions need attention.`
 }
 
 function setServerErrors(errors: Record<string, FieldError[]> | undefined, formLevel: FieldError[] | undefined) {
@@ -71,7 +84,7 @@ function setServerErrors(errors: Record<string, FieldError[]> | undefined, formL
 }
 
 // A changed answer drops that question's errors; the next submit re-checks it.
-function updateField(id: string, value: ReturnType<typeof draftFromAnswers>[string]) {
+function updateField(id: string, value: FieldAnswer | undefined) {
   draft[id] = value
   if (fieldErrors.value[id]) {
     const { [id]: _cleared, ...rest } = fieldErrors.value
@@ -84,23 +97,15 @@ function currentAnswers(): FormAnswers {
 }
 
 function handleSubmit() {
-  const blankOther = fieldsWithBlankOther(props.state.definition, draft)
-  // A blank Other is the more precise message for a required field too.
-  const missing = missingRequiredFields(props.state.definition, draft).filter(id => !blankOther.includes(id))
-  const tooLong = fieldsWithOverlongOtherText(props.state.definition, draft)
-  if (missing.length > 0 || tooLong.length > 0 || blankOther.length > 0) {
-    const errors: Record<string, FieldError[]> = {}
-    for (const id of missing)
-      errors[id] = [...(errors[id] ?? []), { code: 'required', message: 'This question is required.' }]
-    for (const id of blankOther)
-      errors[id] = [...(errors[id] ?? []), { code: 'blank', message: BLANK_OTHER_MESSAGE }]
-    for (const id of tooLong)
-      errors[id] = [...(errors[id] ?? []), { code: 'too_long', message: TOO_LONG_MESSAGE }]
+  const errors = validateAnswers(props.state.definition, draft)
+  const invalidIds = Object.keys(errors)
+  if (invalidIds.length > 0) {
     fieldErrors.value = errors
     formErrors.value = []
-    const invalidIds = [...missing, ...blankOther, ...tooLong]
+    // A blank Other is the one failure where the text box, not the group, needs focus.
+    const blankOther = invalidIds.filter(id => errors[id].some(e => e.code === 'blank'))
     focusFirstInvalid(invalidIds, blankOther)
-    announceErrorSummary(new Set(invalidIds).size)
+    announceErrorSummary(invalidIds.length)
     return
   }
   fieldErrors.value = {}
@@ -115,25 +120,35 @@ watch(() => props.banner, (banner) => {
     statusMessage.value = banner.message
 })
 
+const rootPart = computed(() => partClass('card'))
+const fieldsPart = computed(() => partClass('fields'))
+const titlePart = computed(() => partClass('fields-title'))
+const formDescriptionPart = computed(() => partClass('form-description'))
+const noticePart = computed(() => partClass('notice'))
+const formErrorPart = computed(() => partClass('fields-error'))
+const sendPart = computed(() => partClass('send'))
+
 defineExpose({
   setServerErrors,
   retry: () => emit('submit', currentAnswers()),
-  // See QuestionCardActive's own `hasUnsentInput` — a field whose current
-  // draft would actually serialize to something counts as unsent input a
-  // background "answered elsewhere" swap would otherwise silently discard
-  // without explanation.
-  hasUnsentInput: () => Object.keys(currentAnswers()).length > 0,
+  // See QuestionCardActive's own `hasUnsentInput` — a form the user changed
+  // counts as unsent input a background "answered elsewhere" swap would
+  // otherwise silently discard without explanation. An untouched form does
+  // not, even one whose controls start filled from defaults or a checkbox.
+  hasUnsentInput: () => draftSignature(props.state.definition, draft) !== initialSignature,
 })
 </script>
 
 <template>
   <form
-    class="flex flex-col gap-4 min-w-0"
+    :part="`${rootPart.part} ${fieldsPart.part}`"
+    :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
+    novalidate
     @submit.prevent="handleSubmit"
   >
     <div
       role="status"
-      class="sr-only"
+      class="w-form__sr"
     >
       {{ statusMessage }}
     </div>
@@ -141,31 +156,37 @@ defineExpose({
     <p
       v-if="offline"
       role="status"
-      class="text-xs text-muted-color"
+      :part="noticePart.part"
+      :class="noticePart.class"
     >
       {{ OFFLINE_MESSAGE }}
     </p>
 
-    <div class="flex flex-col gap-1">
-      <h2 class="text-base font-semibold text-color break-words">
+    <div>
+      <h2
+        :part="titlePart.part"
+        :class="titlePart.class"
+      >
         {{ state.definition.title }}
       </h2>
       <p
         v-if="state.definition.description"
-        class="text-sm text-muted-color break-words"
+        :part="formDescriptionPart.part"
+        :class="formDescriptionPart.class"
       >
         {{ state.definition.description }}
       </p>
       <p
         v-if="state.stale"
-        class="text-xs italic text-muted-color"
+        :part="noticePart.part"
+        :class="noticePart.class"
       >
         Asked earlier — the conversation has moved on. You can still answer; the assistant will use it as
         context and confirm before acting on the earlier request.
       </p>
     </div>
 
-    <ChoiceField
+    <FormFieldControl
       v-for="field in state.definition.fields"
       :key="field.id"
       :ref="(el) => setFieldRef(field.id, el)"
@@ -179,7 +200,8 @@ defineExpose({
 
     <ul
       v-if="formErrors.length > 0"
-      class="text-xs text-danger-600 dark:text-danger-400 list-none p-0 m-0"
+      :part="formErrorPart.part"
+      :class="`${formErrorPart.class} text-danger-600 dark:text-danger-400`"
     >
       <li
         v-for="(err, i) in formErrors"
@@ -214,6 +236,8 @@ defineExpose({
         :label="state.definition.submit_label || 'Submit'"
         :loading="submitting"
         :disabled="!canSubmit"
+        :part="sendPart.part"
+        :class="sendPart.class"
       />
     </div>
   </form>

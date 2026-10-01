@@ -1,10 +1,10 @@
-import type { FormState } from '../../lib/definition'
+import type { ChoiceFormState } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import QuestionCardSummary from './question-card-summary.vue'
 
-const baseState: FormState = {
+const baseState: ChoiceFormState = {
   form_version: 1,
   artifact_id: 'artifact-1',
   session_id: 'session-1',
@@ -40,7 +40,7 @@ describe('QuestionCardSummary — required indicator hidden on the read-only ans
   })
 
   it('does not show "(required)" even for a question the user left unanswered (skipped)', () => {
-    const skipped: FormState = { ...baseState, data: {} }
+    const skipped: ChoiceFormState = { ...baseState, data: {} }
     const wrapper = mount(QuestionCardSummary, { props: { state: skipped }, global: { plugins: [PrimeVuePlugin] } })
     expect(wrapper.text()).not.toContain('(required)')
     expect(wrapper.text()).toContain('Skipped')
@@ -49,7 +49,7 @@ describe('QuestionCardSummary — required indicator hidden on the read-only ans
 
 describe('QuestionCardSummary — form-level description (same gap as the active card)', () => {
   it('shows the form-level description, muted, with backticks as inline code', () => {
-    const withFormDescription: FormState = {
+    const withFormDescription: ChoiceFormState = {
       ...baseState,
       definition: { ...baseState.definition, description: 'Answers go straight to `ops`.' },
     }

@@ -1,8 +1,9 @@
 import type { ComputedRef, Ref } from 'vue'
 import type { AnswerDisplayItem } from '../lib/answers'
-import type { FieldAnswer, FormAnswers, FormDefinition, FormField, SingleFieldAnswer } from '../lib/definition'
+import type { ChoiceAnswer, ChoiceFormDefinition, ChoiceFormField, FormAnswers, SingleFieldAnswer } from '../lib/definition'
 import { computed, reactive, ref } from 'vue'
-import { answerDisplayItems, buildNotedValue, trimAnswerText } from '../lib/answers'
+import { answerDisplayItems, buildNotedValue } from '../lib/answers'
+import { trimAnswerText } from '../lib/text'
 import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText } from '../lib/definition'
 
 /** One question's in-progress answer while the card is active (not yet submitted). */
@@ -31,19 +32,19 @@ export interface QuestionCardController {
   focusSeq: Ref<number>
   answers: Record<string, QuestionAnswerState>
   inReview: ComputedRef<boolean>
-  currentQuestion: ComputedRef<FormField | null>
-  missingRequired: ComputedRef<Array<{ field: FormField, index: number }>>
-  ans: (q: FormField) => QuestionAnswerState
-  hasContent: (q: FormField) => boolean
-  answered: (q: FormField) => boolean
-  answerItemsFor: (q: FormField) => AnswerDisplayItem[] | null
-  keysText: (q: FormField) => string
-  activate: (q: FormField, i: number) => void
-  toggleNote: (q: FormField, value: string, openOnly?: boolean) => void
-  setNote: (q: FormField, value: string, text: string) => void
-  sendNote: (q: FormField, value: string) => void
-  sendOther: (q: FormField) => void
-  commit: (q: FormField) => void
+  currentQuestion: ComputedRef<ChoiceFormField | null>
+  missingRequired: ComputedRef<Array<{ field: ChoiceFormField, index: number }>>
+  ans: (q: ChoiceFormField) => QuestionAnswerState
+  hasContent: (q: ChoiceFormField) => boolean
+  answered: (q: ChoiceFormField) => boolean
+  answerItemsFor: (q: ChoiceFormField) => AnswerDisplayItem[] | null
+  keysText: (q: ChoiceFormField) => string
+  activate: (q: ChoiceFormField, i: number) => void
+  toggleNote: (q: ChoiceFormField, value: string, openOnly?: boolean) => void
+  setNote: (q: ChoiceFormField, value: string, text: string) => void
+  sendNote: (q: ChoiceFormField, value: string) => void
+  sendOther: (q: ChoiceFormField) => void
+  commit: (q: ChoiceFormField) => void
   go: (i: number, focus?: FocusTarget) => void
   submitAll: () => void
   requestFocus: (target: FocusTarget) => void
@@ -70,7 +71,7 @@ export const MAX_KEYED_ROWS = 9
  * an in-progress answer survives a background reload of `state`.
  */
 export function useQuestionCard(
-  definition: FormDefinition,
+  definition: ChoiceFormDefinition,
   initialData: FormAnswers | null,
   onSubmit: (answers: FormAnswers) => void,
 ): QuestionCardController {
@@ -91,7 +92,8 @@ export function useQuestionCard(
 
   const answers = reactive<Record<string, QuestionAnswerState>>(
     Object.fromEntries(definition.fields.map((field) => {
-      const existing = initialData?.[field.id]
+      // A choice field's stored answer is always a choice answer.
+      const existing = initialData?.[field.id] as ChoiceAnswer | undefined
       const chosen = field.options.filter(o => answerHasOption(existing, o.value)).map(o => o.value)
       const notes: Record<string, string> = {}
       for (const value of chosen) {
@@ -107,23 +109,23 @@ export function useQuestionCard(
     })),
   )
 
-  function ans(q: FormField): QuestionAnswerState {
+  function ans(q: ChoiceFormField): QuestionAnswerState {
     return answers[q.id]
   }
 
-  function hasContent(q: FormField): boolean {
+  function hasContent(q: ChoiceFormField): boolean {
     const a = ans(q)
     return q.multiple
       ? (a.chosen.length > 0 || trimAnswerText(a.other) !== '')
       : (a.chosen.length > 0 || (a.useOther && trimAnswerText(a.other) !== ''))
   }
 
-  function answered(q: FormField): boolean {
+  function answered(q: ChoiceFormField): boolean {
     return ans(q).done && hasContent(q)
   }
 
   const inReview = computed(() => multi && index.value === n)
-  const currentQuestion = computed<FormField | null>(() => inReview.value ? null : (definition.fields[index.value] ?? null))
+  const currentQuestion = computed<ChoiceFormField | null>(() => inReview.value ? null : (definition.fields[index.value] ?? null))
   const missingRequired = computed(() =>
     definition.fields
       .map((field, i) => ({ field, index: i }))
@@ -141,11 +143,11 @@ export function useQuestionCard(
   }
 
   /** Number of rows (options + Other, if any) that get a number-key badge. */
-  function keyableCount(q: FormField): number {
+  function keyableCount(q: ChoiceFormField): number {
     return Math.min(q.options.length + (q.allow_other ? 1 : 0), MAX_KEYED_ROWS)
   }
 
-  function keysText(q: FormField): string {
+  function keysText(q: ChoiceFormField): string {
     const keyable = keyableCount(q)
     const range = keyable > 1 ? `1–${keyable}` : '1'
     const noteKeyable = Math.min(q.options.length, MAX_KEYED_ROWS)
@@ -156,7 +158,7 @@ export function useQuestionCard(
       : `${range} answers, ${noteRange} adds a note first.${move}`
   }
 
-  function fieldAnswer(q: FormField): FieldAnswer | undefined {
+  function fieldAnswer(q: ChoiceFormField): ChoiceAnswer | undefined {
     const a = ans(q)
     if (q.multiple) {
       const list: SingleFieldAnswer[] = q.options
@@ -174,7 +176,7 @@ export function useQuestionCard(
     return undefined
   }
 
-  function answerItemsFor(q: FormField): AnswerDisplayItem[] | null {
+  function answerItemsFor(q: ChoiceFormField): AnswerDisplayItem[] | null {
     if (!answered(q))
       return null
     return answerDisplayItems(q, fieldAnswer(q))
@@ -226,7 +228,7 @@ export function useQuestionCard(
     onSubmit(buildAnswers())
   }
 
-  function commit(q: FormField) {
+  function commit(q: ChoiceFormField) {
     ans(q).done = true
     error.value = ''
     if (!multi) {
@@ -239,7 +241,7 @@ export function useQuestionCard(
     go(next === -1 ? n : next)
   }
 
-  function activate(q: FormField, i: number) {
+  function activate(q: ChoiceFormField, i: number) {
     const a = ans(q)
     if (i >= q.options.length) {
       requestFocus('other')
@@ -273,7 +275,7 @@ export function useQuestionCard(
     commit(q)
   }
 
-  function toggleNote(q: FormField, value: string, openOnly = false) {
+  function toggleNote(q: ChoiceFormField, value: string, openOnly = false) {
     const a = ans(q)
     const i = q.options.findIndex(o => o.value === value)
     if (a.noteOpen === value && !openOnly) {
@@ -287,11 +289,11 @@ export function useQuestionCard(
   }
 
   /** Live-updates a note's draft text as the user types — tracked per option value regardless of `chosen`. */
-  function setNote(q: FormField, value: string, text: string) {
+  function setNote(q: ChoiceFormField, value: string, text: string) {
     ans(q).notes[value] = text
   }
 
-  function sendNote(q: FormField, value: string) {
+  function sendNote(q: ChoiceFormField, value: string) {
     const a = ans(q)
     a.noteOpen = null
     if (q.multiple) {
@@ -306,7 +308,7 @@ export function useQuestionCard(
     commit(q)
   }
 
-  function sendOther(q: FormField) {
+  function sendOther(q: ChoiceFormField) {
     const a = ans(q)
     const text = trimAnswerText(a.other)
     if (q.multiple) {

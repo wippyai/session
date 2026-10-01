@@ -1,8 +1,15 @@
 <script setup lang="ts">
 import type { FormState } from '../lib/definition'
-import { ref } from 'vue'
-import ChoiceField from './fields/choice-field.vue'
+import { computed, ref } from 'vue'
+import { partClass } from '../lib/part-class'
+import FormFieldControl from './fields/form-field.vue'
 
+/**
+ * The read-only, post-submit view of a fields form — the counterpart of
+ * `ActiveForm`. Every field shows its stored answer as text (an unanswered
+ * one says "Skipped"), then the delivery status, late notice and answered
+ * time. A form of choices only shows `QuestionCardSummary` instead.
+ */
 defineProps<{
   state: FormState
 }>()
@@ -16,6 +23,12 @@ function formatTime(iso: string | null): string | null {
 
 const statusEl = ref<HTMLElement | null>(null)
 
+const rootPart = computed(() => partClass('card', 'answered'))
+const fieldsPart = computed(() => partClass('fields'))
+const titlePart = computed(() => partClass('fields-title'))
+const formDescriptionPart = computed(() => partClass('form-description'))
+const statusPart = computed(() => partClass('status'))
+
 defineExpose({
   /** Moves focus to the status text after a successful submit, so focus isn't lost when the form swaps to this read-only view. */
   focusStatus() {
@@ -25,20 +38,27 @@ defineExpose({
 </script>
 
 <template>
-  <div class="flex flex-col gap-4 min-w-0">
-    <div class="flex flex-col gap-1">
-      <h2 class="text-base font-semibold text-color break-words">
+  <div
+    :part="`${rootPart.part} ${fieldsPart.part}`"
+    :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
+  >
+    <div>
+      <h2
+        :part="titlePart.part"
+        :class="titlePart.class"
+      >
         {{ state.definition.title }}
       </h2>
       <p
         v-if="state.definition.description"
-        class="text-sm text-muted-color break-words"
+        :part="formDescriptionPart.part"
+        :class="formDescriptionPart.class"
       >
         {{ state.definition.description }}
       </p>
     </div>
 
-    <ChoiceField
+    <FormFieldControl
       v-for="field in state.definition.fields"
       :key="field.id"
       :field="field"
@@ -51,7 +71,8 @@ defineExpose({
     <div
       ref="statusEl"
       tabindex="-1"
-      class="text-xs text-muted-color flex flex-col gap-0.5 outline-none"
+      :part="statusPart.part"
+      :class="statusPart.class"
     >
       <p v-if="state.late">
         Late answer — this was answered after the conversation moved on. The assistant will confirm before
