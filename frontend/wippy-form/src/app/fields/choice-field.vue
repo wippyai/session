@@ -5,7 +5,7 @@ import InputText from 'primevue/inputtext'
 import RadioButton from 'primevue/radiobutton'
 import { computed, ref, useId, watch } from 'vue'
 import { answerHasOther, answerOtherText, isOtherAnswer } from '../../lib/definition'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 import FieldShell from './field-shell.vue'
 
 /**
@@ -61,14 +61,14 @@ function inputPt(describedBy: string | undefined) {
   return { input: { 'aria-describedby': describedBy } }
 }
 
-const optionsPart = computed(() => partClass('field-options'))
-const optionPart = computed(() => partClass('field-option'))
-const otherOptionPart = computed(() => partClass('field-option', 'other'))
-const optionInputPart = computed(() => partClass('field-option-input'))
-const optionLabelPart = computed(() => partClass('field-option-label'))
-const optionDescriptionPart = computed(() => partClass('field-option-description'))
-const otherBodyPart = computed(() => partClass('field-other'))
-const otherInputPart = computed(() => partClass('field-other-input'))
+const optionsPart = computed(() => partAttrs('field-options'))
+const optionPart = computed(() => partAttrs('field-option'))
+const otherOptionPart = computed(() => partAttrs('field-option', 'other'))
+const optionInputPart = computed(() => partAttrs('field-option-input'))
+const optionLabelPart = computed(() => partAttrs('field-option-label'))
+const optionDescriptionPart = computed(() => partAttrs('field-option-description'))
+const otherBodyPart = computed(() => partAttrs('field-other'))
+const otherInputPart = computed(() => partAttrs('field-other-input'))
 
 // The answer a choice field holds is always a choice answer.
 const answer = computed(() => props.modelValue as ChoiceAnswer | undefined)

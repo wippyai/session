@@ -9,7 +9,7 @@ local definition = require("definition")
 local form_pattern = require("form_pattern")
 local state_service = require("state_service")
 local control_handlers = require("control_handlers")
-local message_handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local artifact_repo = require("artifact_repo")
 local message_repo = require("message_repo")
 local context_repo = require("context_repo")
@@ -86,6 +86,7 @@ local function define_tests()
             test.is_nil(writer_err)
             return {
                 session_id = session_id,
+                reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
                 writer = session_writer,
                 upstream = {
                     send_message_update = function() end,
@@ -190,7 +191,6 @@ local function define_tests()
             test.eq(submission.request_id, request_id)
             test.eq(submission.message_id, body.answer_message_id)
             test.eq(submission.answers.extras[1], "Gift wrap")
-            test.eq(artifact.meta.session_form.origin.turn_id ~= nil, true)
 
             local row: any = message_repo.get(body.answer_message_id)
             test.eq(row.type, consts.MSG_TYPE.USER)
@@ -281,7 +281,7 @@ local function define_tests()
             test.not_nil(body.submitted_at)
             test.eq(body.delivery, "pending")
 
-            local admitted: any = message_handlers.admit_in_order(ctx, nil)
+            local admitted: any = answer_admission.admit_in_order(ctx, nil)
             test.eq(admitted[#admitted].message_id, accepted.answer_message_id)
             local _, stopped = get(artifact_id)
             test.eq(stopped.delivery, "interrupted", "admitted, no reply, session not running")
@@ -310,7 +310,7 @@ local function define_tests()
             local second = new_form(ctx)
             -- The first answer, accepted before the second form existed, is
             -- admitted now and lands after the second form in the history.
-            test.eq(#message_handlers.admit_in_order(ctx, nil), 1)
+            test.eq(#answer_admission.admit_in_order(ctx, nil), 1)
             local _, before = get(second)
             test.eq(before.stale, false, "an answer accepted earlier does not make a later form stale")
             ctx.writer:add_message(consts.MSG_TYPE.USER, "Something else")
@@ -624,7 +624,7 @@ local function define_tests()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             local _, accepted = post(artifact_id, answer())
-            message_handlers.admit_in_order(ctx, nil)
+            answer_admission.admit_in_order(ctx, nil)
             state_service._lookup_session = function() return nil end
 
             -- A tool call alone is not a reply: the turn stopped or crashed after it.
@@ -651,7 +651,7 @@ local function define_tests()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
             post(artifact_id, answer())
-            message_handlers.admit_in_order(ctx, nil)
+            answer_admission.admit_in_order(ctx, nil)
             local original_get = session_repo.get
             session_repo.get = function(session_id, owner)
                 -- The ownership check passes; the delivery lookup fails.

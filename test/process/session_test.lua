@@ -12,6 +12,7 @@ local function fixture(): (any, any, {any}, {any}, {any}, {any})
     local successes = {} :: {any}
     local ctx: any = {
         session_id = "session-1", held = {}, status = consts.STATUS.IDLE,
+        reader = { list_all_messages = function() return {}, nil end },
         config = { input_policy = { while_running = "steer" } },
         writer = {
             add_message = function(_self, msg_type, content, metadata)

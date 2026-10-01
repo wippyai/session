@@ -25,6 +25,16 @@ type MessageList = {
 local message_repo = {}
 local get_db
 
+-- Replaces the JSON text in row.metadata with the table it decodes to. A
+-- missing, empty or malformed value stays as it is.
+local function decode_json_metadata(row: any): any
+    if type(row.metadata) == "string" and row.metadata ~= "" then
+        local decoded, err = json.decode(row.metadata :: string)
+        if not err then row.metadata = decoded end
+    end
+    return row
+end
+
 -- Inserts rows (each { message_id, type, data, metadata }) in one
 -- transaction, dated in array order. Returns true and, as the third value,
 -- each row's stored date keyed by message_id, so callers can announce the
@@ -285,7 +295,6 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
     end)
 end
 
--- Get a message by ID
 -- The message `message_id` with its metadata decoded, or nil without an
 -- error when there is none.
 function message_repo.find(message_id)
@@ -318,17 +327,7 @@ function message_repo.find(message_id)
         return nil, nil
     end
 
-    local message = messages[1]
-
-    -- Parse metadata JSON if it exists
-    if message.metadata and message.metadata ~= "" then
-        local decoded, err = json.decode(message.metadata :: string)
-        if not err then
-            message.metadata = decoded
-        end
-    end
-
-    return message
+    return decode_json_metadata(messages[1])
 end
 
 function message_repo.get(message_id)
@@ -636,15 +635,7 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         table.remove(messages)
     end
 
-    -- Parse metadata JSON if it exists
-    for i, message in ipairs(messages) do
-        if message.metadata and message.metadata ~= "" then
-            local decoded, err = json.decode(message.metadata :: string)
-            if not err then
-                message.metadata = decoded
-            end
-        end
-    end
+    for _, message in ipairs(messages) do decode_json_metadata(message) end
 
     -- Reverse to chronological ASC order when query used DESC
     if not (cursor and direction == "after") then
@@ -716,15 +707,7 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
         return nil, "Failed to list messages after message ID: " .. err
     end
 
-    -- Parse metadata JSON if it exists
-    for i, message in ipairs(messages) do
-        if message.metadata and message.metadata ~= "" then
-            local decoded, err = json.decode(message.metadata :: string)
-            if not err then
-                message.metadata = decoded
-            end
-        end
-    end
+    for _, message in ipairs(messages) do decode_json_metadata(message) end
 
     if bounded then
         local chronological = {}
@@ -780,15 +763,7 @@ function message_repo.list_by_type(session_id, msg_type, limit, offset)
         return nil, "Failed to list messages by type: " .. err
     end
 
-    -- Parse metadata JSON if it exists
-    for i, message in ipairs(messages) do
-        if message.metadata and message.metadata ~= "" then
-            local decoded, err = json.decode(message.metadata :: string)
-            if not err then
-                message.metadata = decoded
-            end
-        end
-    end
+    for _, message in ipairs(messages) do decode_json_metadata(message) end
 
     -- Reverse the order to maintain chronological order in the result
     local reversed = {}
@@ -831,17 +806,7 @@ function message_repo.get_latest(session_id)
         return nil, "No messages found for this session"
     end
 
-    local message = messages[1]
-
-    -- Parse metadata JSON if it exists
-    if message.metadata and message.metadata ~= "" then
-        local decoded, err = json.decode(message.metadata :: string)
-        if not err then
-            message.metadata = decoded
-        end
-    end
-
-    return message
+    return decode_json_metadata(messages[1])
 end
 
 -- Delete a message
@@ -903,28 +868,27 @@ end
 -- patterns below only narrow the rows that are decoded and checked. They
 -- match whatever the key order, because "pending":true sits inside the
 -- session_form object.
-local PENDING_CANDIDATE_PATTERN = '%"session_form":{%"pending":true%'
+local PENDING_CANDIDATE_PATTERN = '%"' .. form_meta.ANSWER_KEY .. '":{%"pending":true%'
 local SUBMITTED_PATTERN = '%"submitted_at":%'
 
 -- Rows fetched per page by the scans below.
 local SCAN_PAGE = 100
 
-local function decode_metadata(row)
-    if type(row.metadata) == "string" and row.metadata ~= "" then
-        local decoded, decode_err = json.decode(row.metadata :: string)
-        if not decode_err then row.metadata = decoded end
-    end
+-- A row's metadata as a table: the decoded JSON, or an empty table when it
+-- has none or cannot be decoded.
+local function decode_metadata(row: any): any
+    decode_json_metadata(row)
     if type(row.metadata) ~= "table" then row.metadata = {} end
     return row
 end
 
 local function is_form_answer(row)
     return row.type == consts.MSG_TYPE.USER and type(row.metadata) == "table"
-        and type(row.metadata.session_form) == "table"
+        and type(row.metadata[form_meta.ANSWER_KEY]) == "table"
 end
 
 local function is_pending_answer(row)
-    return is_form_answer(row) and row.metadata.session_form.pending == true
+    return is_form_answer(row) and row.metadata[form_meta.ANSWER_KEY].pending == true
 end
 
 -- Whether a history row (metadata decoded) is a form answer that the
@@ -939,7 +903,7 @@ message_repo.is_form_answer = is_form_answer
 -- The id of the form a form answer row answers, or nil for any other row.
 function message_repo.answer_form_id(row)
     if not is_form_answer(row) then return nil end
-    local form_id = row.metadata.session_form.artifact_id
+    local form_id = row.metadata[form_meta.ANSWER_KEY].artifact_id
     return type(form_id) == "string" and form_id or nil
 end
 
@@ -997,10 +961,13 @@ function message_repo.list_pending_answers(session_id, limit)
 end
 
 -- Ids of the user's sessions that hold pending answer rows, at most `limit`,
--- ordered by their oldest pending answer. opts.exclude: session ids to skip
--- (for example sessions already running, or ones that failed to start), so
--- they cannot fill the result and starve the others. Lets the session plugin
--- start sessions whose wake-up was lost, for example after a runtime restart.
+-- ordered by their oldest pending answer. opts.exclude: session ids to skip,
+-- such as sessions that failed to start and wait before the next try, so they
+-- cannot fill the result and starve the others. Lets the session plugin start
+-- sessions whose wake-up was lost, for example after a runtime restart, and
+-- ask running sessions to look again. The rows are found by a LIKE on the
+-- metadata with no index, so the cost grows with the number of user messages
+-- in the whole table (about 80 ms at 200,000 messages on SQLite).
 function message_repo.list_sessions_with_pending_answers(user_id, limit, opts)
     if not user_id or user_id == "" then return nil, "User ID is required" end
     limit = limit or 5
@@ -1064,7 +1031,7 @@ function message_repo.admit_pending_answer(session_id, message_id)
 
         local date, date_err = message_date.next(dbtx, session_id)
         if date_err then return nil, date_err end
-        row.metadata.session_form.pending = nil
+        row.metadata[form_meta.ANSWER_KEY].pending = nil
         local metadata_json, encode_err = json.encode(row.metadata)
         if encode_err then return nil, "Failed to encode metadata: " .. encode_err end
 

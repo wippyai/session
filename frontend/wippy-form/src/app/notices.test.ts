@@ -1,9 +1,13 @@
 import type { FormDefinition } from '../lib/definition'
-import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
+import type { MessageSeverity } from '../lib/error-text'
 import { mount } from '@vue/test-utils'
+import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { describe, expect, it } from 'vitest'
 import FormNotice from './form-notice.vue'
 
+// Which message the notice shows, and when, is decided by `wippy-form.vue` and
+// tested in `wippy-form.test.ts`. These tests cover how the notice shows a form
+// with standard fields.
 const definition: FormDefinition = {
   title: 'Delivery details',
   description: 'Where should it go?',
@@ -18,17 +22,17 @@ const definition: FormDefinition = {
   ],
 }
 
-function mountNotice(reason: 'needs-newer-host' | 'no-artifact', answered?: boolean) {
-  return mount(FormNotice, { props: { definition, reason, answered }, global: { plugins: [PrimeVuePlugin] } })
+function mountNotice(severity: MessageSeverity) {
+  return mount(FormNotice, { props: { definition, severity, message: 'Not here.' }, global: { plugins: [PrimeVuePlugin] } })
 }
 
 function plain(wrapper: ReturnType<typeof mountNotice>) {
   return wrapper.findAll('input, textarea').filter(el => (el.element as HTMLInputElement).type !== 'radio')
 }
 
-describe.each(['needs-newer-host', 'no-artifact'] as const)('FormNotice (%s) — V2 fields', (reason) => {
+describe.each(['warn', 'secondary'] as const)('FormNotice (%s): standard fields', (severity) => {
   it('renders every field as a real, disabled control of its own kind, never an empty radio group', () => {
-    const wrapper = mountNotice(reason)
+    const wrapper = mountNotice(severity)
 
     const controls = plain(wrapper)
     expect(controls.length).toBeGreaterThanOrEqual(6)
@@ -40,7 +44,7 @@ describe.each(['needs-newer-host', 'no-artifact'] as const)('FormNotice (%s) —
   })
 
   it('keeps the title, description and every question readable, and shows no answer', () => {
-    const wrapper = mountNotice(reason)
+    const wrapper = mountNotice(severity)
     for (const text of ['Delivery details', 'Where should it go?', 'Full name', 'Notes', 'Email', 'Parcels', 'Delivery date', 'I agree', 'Speed'])
       expect(wrapper.text()).toContain(text)
     expect(wrapper.text()).not.toContain('Skipped')
@@ -49,32 +53,17 @@ describe.each(['needs-newer-host', 'no-artifact'] as const)('FormNotice (%s) —
   })
 
   it('names the card, its unsupported state and the form as parts and classes, with the shared header', () => {
-    const root = mountNotice(reason).element as HTMLElement
+    const root = mountNotice(severity).element as HTMLElement
     expect(root.getAttribute('part')?.split(' ')).toEqual(expect.arrayContaining(['card', 'card-unsupported', 'fields']))
     for (const name of ['w-form', 'w-form__card', 'w-form__card--unsupported', 'w-form__fields'])
       expect(root.classList.contains(name), name).toBe(true)
     expect(root.querySelector('[part~="fields-title"]')?.textContent?.trim()).toBe('Delivery details')
     expect(root.querySelector('[part~="form-description"]')?.textContent?.trim()).toBe('Where should it go?')
   })
-})
 
-describe('FormNotice — needs-newer-host', () => {
-  it('says what to do, depending on whether the form was already answered', () => {
-    const open = mountNotice('needs-newer-host')
-    expect(open.text()).toContain('This form needs a newer Web Host. If you already answered it, your answer is in the chat.')
-    expect(open.find('.p-message-warn').exists()).toBe(true)
-    const done = mountNotice('needs-newer-host', true)
-    expect(done.text()).toContain('This form was answered. Your answer is in the chat.')
-    expect(done.text()).not.toContain('needs a newer Web Host')
-    expect(done.find('.p-message-secondary').exists()).toBe(true)
-  })
-})
-
-describe('FormNotice — no-artifact', () => {
-  it('says the form cannot be submitted here, whatever the Host says it is answered', () => {
-    const wrapper = mountNotice('no-artifact')
-    expect(wrapper.text()).toContain('This form cannot be submitted here.')
-    expect(wrapper.find('.p-message-secondary').exists()).toBe(true)
-    expect(mountNotice('no-artifact', true).text()).toContain('This form cannot be submitted here.')
+  it('shows the message in a Message of its severity', () => {
+    const wrapper = mountNotice(severity)
+    expect(wrapper.text()).toContain('Not here.')
+    expect(wrapper.find(`.p-message-${severity}`).exists()).toBe(true)
   })
 })

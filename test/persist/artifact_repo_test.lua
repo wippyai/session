@@ -448,7 +448,7 @@ local function define_tests()
             end)
         end)
 
-        describe("update: meta_patch, meta_remove, expected_version, content_version", function()
+        describe("update: meta_patch, expected_version, content_version", function()
             local function fresh_artifact(kind: string?, meta: {[string]: any}?)
                 local id = uuid.v7()
                 local db_resource, _ = consts.get_db_resource()
@@ -485,27 +485,7 @@ local function define_tests()
                 test.eq(artifact.meta.preview, "a preview")
             end)
 
-            it("meta_remove deletes only the named keys", function()
-                local id = fresh_artifact("static", {
-                    display_type = "standalone",
-                    status = "active",
-                    icon = "star",
-                })
-
-                local result, err = artifact_repo.update(id, {
-                    meta_remove = { "status", "icon" }
-                })
-                test.is_nil(err)
-                test.not_nil(result)
-
-                local artifact, get_err = artifact_repo.get(id)
-                test.is_nil(get_err)
-                test.is_nil(artifact.meta.status)
-                test.is_nil(artifact.meta.icon)
-                test.eq(artifact.meta.display_type, "standalone")
-            end)
-
-            it("rejects meta combined with meta_patch or meta_remove", function()
+            it("rejects meta combined with meta_patch", function()
                 local id = fresh_artifact("static", {})
 
                 local result, err = artifact_repo.update(id, {
@@ -665,14 +645,9 @@ local function define_tests()
                 test.is_nil(result)
                 test.contains(tostring(err), "meta")
                 test.eq(raw_meta(id), "{broken")
-
-                local removed, remove_err = artifact_repo.update(id, { meta_remove = { "status" } })
-                test.is_nil(removed)
-                test.not_nil(remove_err)
-                test.eq(raw_meta(id), "{broken")
             end)
 
-            it("keeps empty objects in untouched keys and stores an emptied meta as an object", function()
+            it("keeps empty objects in untouched keys and stores an empty patch of a missing meta as an object", function()
                 local id = fresh_artifact("static", nil)
                 set_raw_meta(id, '{"keep":{},"list":[],"session_form":{"submission":{"answers":{}}}}')
                 local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
@@ -682,13 +657,8 @@ local function define_tests()
                 test.contains(stored, '"list":[]')
                 test.contains(stored, '"answers":{}')
 
-                local emptied = fresh_artifact("static", { only = "key" })
-                local _, remove_err = artifact_repo.update(emptied, { meta_remove = { "only" } })
-                test.is_nil(remove_err)
-                test.eq(raw_meta(emptied), "{}")
-
                 local was_null = fresh_artifact("static", nil)
-                local _, null_err = artifact_repo.update(was_null, { meta_remove = { "absent" } })
+                local _, null_err = artifact_repo.update(was_null, { meta_patch = {} })
                 test.is_nil(null_err)
                 test.eq(raw_meta(was_null), "{}")
             end)
@@ -715,14 +685,15 @@ local function define_tests()
                 test.eq(artifact.meta.owner.nested.deep.items[2], 2)
                 test.eq(#artifact.meta.owner.list, 0)
 
-                -- A later removal of another key leaves them as they are.
-                local _, remove_err = artifact_repo.update(id, { meta_remove = { "note" } })
-                test.is_nil(remove_err)
+                -- A later patch of another key leaves them as they are.
+                local _, patch_err = artifact_repo.update(id, { meta_patch = { icon = "star" } })
+                test.is_nil(patch_err)
                 local after = tostring(raw_meta(id))
                 test.contains(after, '"list":[]')
                 test.contains(after, '"empty":{}')
-                test.is_false(string.find(after, '"note"', 1, true) ~= nil)
+                test.contains(after, '"icon":"star"')
                 local reread: any = artifact_repo.get(id)
+                test.eq(reread.meta.note, "kept")
                 test.eq(reread.meta.owner.nested.deep.items[1], 1)
                 test.eq(reread.meta.owner.nested.deep.flag, true)
 

@@ -2,7 +2,8 @@
 import type { FieldAnswer, FieldError, FormField } from '../../lib/definition'
 import { computed, ref, useId } from 'vue'
 import { readOnlyAnswer } from '../../lib/answers'
-import { partClass } from '../../lib/part-class'
+import { ERROR_TEXT_CLASS } from '../../lib/error-text'
+import { partAttrs } from '../../lib/part-attrs'
 import { textLines } from '../../lib/rich-text'
 import FieldLabel from './field-label.vue'
 
@@ -69,7 +70,7 @@ const labelTag = computed(() => {
 })
 const inlineEditable = computed(() => props.layout === 'inline' && !props.readonly)
 
-const rootPart = computed(() => partClass(
+const rootPart = computed(() => partAttrs(
   'field',
   props.layout !== 'stacked' && props.layout,
   !!props.field.required && 'required',
@@ -77,14 +78,14 @@ const rootPart = computed(() => partClass(
   props.readonly && 'readonly',
   props.disabled && 'disabled',
 ))
-const descriptionPart = computed(() => partClass('field-description'))
-const controlPart = computed(() => partClass('field-control'))
-const errorPart = computed(() => partClass('field-error'))
+const descriptionPart = computed(() => partAttrs('field-description'))
+const controlPart = computed(() => partAttrs('field-control'))
+const errorPart = computed(() => partAttrs('field-error'))
 const showMarker = computed(() => !!props.field.required && !props.readonly)
 
 const value = computed(() => readOnlyAnswer(props.field, props.modelValue))
-const valuePart = computed(() => partClass('field-value', value.value.kind === 'empty' && 'empty'))
-const notePart = computed(() => partClass('field-note'))
+const valuePart = computed(() => partAttrs('field-value', value.value.kind === 'empty' && 'empty'))
+const notePart = computed(() => partAttrs('field-note'))
 
 defineExpose({
   /** Focuses the first focusable control, e.g. the first invalid field after a failed submit. */
@@ -202,7 +203,7 @@ defineExpose({
       v-if="hasErrors"
       :id="errorId"
       :part="errorPart.part"
-      :class="`${errorPart.class} text-danger-600 dark:text-danger-400`"
+      :class="`${errorPart.class} ${ERROR_TEXT_CLASS}`"
     >
       <li
         v-for="(err, i) in errors"

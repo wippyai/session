@@ -1,10 +1,10 @@
 # @wippy-session/wippy-form-answers
 
-A Wippy `view.component` web component (`<wippy-form-answers>`) that makes a form's raw JSON answer record invisible in chat while keeping it reachable to an agent reading the raw message text.
+The `<wippy-form-answers>` web component carries the JSON answer record of a Session form in a chat message, invisibly, so the agent can read it later in the raw message text.
 
-## Why this exists
+## Why it exists
 
-When a user answers a Session form (see the sibling `@wippy-session/wippy-form` package), the Session server writes the user's chat message as a human sentence followed by a machine-readable record carried in this tag's `record` attribute:
+When a user answers a form (see `@wippy-session/wippy-form`), the Session server writes the user's chat message as a sentence followed by this tag:
 
 ```
 Answered questions about the delivery of your order.
@@ -13,67 +13,45 @@ Answered questions about the delivery of your order.
 </wippy-form-answers>
 ```
 
-The JSON is always a single line. The Session server escapes `'`, `<`, `>`, and `&` inside it (as the equivalent HTML entities) so the attribute value is exactly valid JSON once the HTML parser decodes it back — `element.getAttribute('record')` returns the decoded string directly; no extra unescaping is needed in this package's code.
+The JSON is one line. The server escapes `'`, `<`, `>` and `&` inside it, so `element.getAttribute('record')` returns valid JSON and needs no further unescaping.
 
-The chat renders user messages as Markdown (`markdown-it`, `html: true`) then `sanitize-html`. The Wippy Web Host auto-loads every `view.component` registry entry with `auto_register: true` at boot and allows its tag (plus its declared prop attribute names) through the chat sanitizer — so `<wippy-form-answers>` and its `record` attribute survive sanitization instead of being stripped.
+The chat renders user messages as Markdown (`markdown-it` with `html: true`) and then sanitizes them with `sanitize-html`. The Host registers every `view.component` entry with `auto_register: true` and allows its tag and its declared prop attributes through the sanitizer, so the tag and its `record` attribute survive. The user reads the answered-form card above the message. This element only keeps the JSON out of sight and in the raw message text, where the agent reads it on a later turn.
 
-The answered-form card already shown above the message is the human-readable summary. This element's only job is to keep the JSON out of the user's sight while leaving it reachable in the raw message text, so an agent reading the conversation history on a later turn can still see exactly what was answered.
+## Why an attribute
 
-## Why an attribute, not text content
+The record is in the `record` attribute and never in text content, because two cases leave the tag on the page with no children:
 
-The record is carried in the `record` attribute — never in the element's text content or children. Two observed failure modes both leave the tag on the page with no children:
+- The sanitizer removes the tag, for example right after a deploy, before the Host has fetched its components list. An element with no children shows nothing, while text content would show the raw JSON.
+- The component script has not loaded yet, or fails to load. The browser then treats the tag as a plain element and shows its children, so text content would be visible.
 
-- **The chat sanitizer strips the tag.** If the Host's components list (which the sanitizer's allow-list is built from) hasn't picked up `wippy-form-answers` yet — for example right after a fresh deploy, before the Host has re-fetched it — the whole tag gets removed from the sanitized HTML. An unrecognized tag with no children renders nothing either way; one with visible text content would have shown the raw JSON to the user for that entire window.
-- **The component's script hasn't loaded yet, or fails to load.** Until `customElements.define('wippy-form-answers', …)` runs, the browser treats `<wippy-form-answers>` as an anonymous, unstyled `HTMLElement` — which still renders its children by default. Text content would render as plain visible text; an element with no children (because the record lives in an attribute) renders nothing.
-
-`record` is declared as a `wippy.props` entry specifically so the Host adds `record` to the sanitizer's allowed attribute list for this tag — without that declaration, the attribute itself would still be stripped even once the tag is allowed through.
-
-The no-`<slot>` shadow root and `:host { display: none; }` (below) are defense in depth for the case where the element mounts normally — they are not what prevents the leak in the two failure modes above; the attribute-vs-text-content choice is.
+`record` is declared in `wippy.props` so the Host adds the attribute to the sanitizer's allowed list. Without that, the attribute is stripped even when the tag is allowed. The shadow root has no `<slot>`, and `:host { display: none; }` hides the element when it mounts normally. Those two do not prevent the leak in the cases above. The attribute does.
 
 ## What it renders
 
-Nothing. There is no framework, no template, and no `<slot>` anywhere in this component's own implementation, so even stray light-DOM content would never project into its shadow root. `:host { display: none; }` hides the element outright as a second, independent guarantee. This component's own code (`src/`) makes no host API calls and opens no network requests — it never calls `api`, `ws`, or `instance` itself. Its base class, `WippyElement` (`@wippy-fe/webcomponent-core`), does subscribe to the Host's `@theme` broadcast on connect (via the proxy's `on()`) so every component gets consistent light/dark handling; that subscription has no visible effect here since the element renders nothing, but it is a real host API call made on this element's behalf, not "none at all".
+Nothing. The element has no framework, template or slot. Its own code makes no host API calls and no network requests. Its base class, `WippyElement` from `@wippy-fe/webcomponent-core`, subscribes to the Host's `@theme` broadcast when the element connects, which has no visible effect here.
 
-**A note on the `vue` dependency in package.json:** this component's own code (`src/`) contains no Vue import, no `WippyVueElement`, and no `vueConfig` — it extends the framework-agnostic `WippyElement` from `@wippy-fe/webcomponent-core`, not `WippyVueElement`. `vue` still appears in `peerDependencies` and as a `vite.config.ts` build external, though, because `@wippy-fe/webcomponent-core` itself imports `@iconify/vue`, which imports `vue` — bundling that transitive import into this component's output would ship Vue's unreplaced `process.env.NODE_ENV` checks and fail at load time in the browser (`process is not defined`) instead of being resolved from the Host's shared import map, as it is for every other component. `@iconify/vue` itself is only a `devDependency` here (a build-time external, not a `peerDependencies` entry — this component never imports it directly, so it declares no runtime expectation on it). So: no Vue *usage* in this package, but a real, necessary Vue *dependency declaration* for correct module resolution.
+`vue` is a peer dependency and a build external because `@wippy-fe/webcomponent-core` imports `@iconify/vue`.
 
 ## Props
 
 | Prop (HTML attribute) | Type | Default | Description |
 | --- | --- | --- | --- |
-| `record` | `string` | `""` | The self-contained JSON answer record (`form_id`, `form_version`, `title`, `late`, `answers`) as a single-line string, written by the Session server. Agents never write this attribute themselves. |
+| `record` | `string` | `""` | The JSON answer record (`form_id`, `form_version`, `title`, `late`, `answers`) as a single-line string, written by the Session server. Agents never write this attribute. |
 
 ## Public API
 
 | Member | Type | Behavior |
 | --- | --- | --- |
-| `answerRecord` | `Record<string, unknown> \| null` (read-only getter) | Parses the `record` attribute as JSON and returns the parsed object. Returns `null` when the attribute is missing, empty, or invalid JSON, or JSON that isn't a plain object (array, string, number, boolean, `null`). Text content is never read. Never throws. |
+| `answerRecord` | `Record<string, unknown> \| null` (read-only getter) | Parses the `record` attribute as JSON and returns the object. Returns `null` when the attribute is missing, empty, invalid JSON, or JSON that is not a plain object. Text content is never read. It never throws. |
 
-The getter is deliberately not called `record`. The Host's chat compiles message HTML as a Vue template, and Vue assigns a prop on a custom element as a DOM property whenever the element has a property of that name. A read-only `record` getter swallowed the value, so the attribute was never set. The element must never own a `record` property; a unit test guards this.
+The getter is not named `record`. The Host's chat compiles message HTML as a Vue template, and Vue sets a prop on a custom element as a DOM property when the element has a property of that name. A `record` getter swallowed the value, so the attribute was never set. A unit test guards this.
 
-The parsing logic lives in `src/lib/parse-record.ts` (`parseFormAnswersRecord`) so it is unit-testable independent of the custom element; the getter itself (`src/index.ts`) is a one-line call to `parseFormAnswersRecord(this.getAttribute('record'))`.
+The parsing is in `src/lib/parse-record.ts` (`parseFormAnswersRecord`), so it can be tested without the custom element.
 
 ## For agents
 
-**Agents must never emit this tag themselves.** It is written exclusively by the Session server's message-composition code as part of the fixed "Answered questions about …" reply format. An agent that includes `<wippy-form-answers>` in its own generated message content is misusing it — the tag carries no meaning outside that exact server-written wire format, and the Session server is the only writer that keeps the JSON payload consistent with the answered-form card rendered alongside it.
+Agents must never write this tag. The Session server writes it in the fixed "Answered questions about …" reply, and only the server keeps the JSON consistent with the answered-form card shown beside it.
 
----
+## Styling
 
-## Styling API
-
-This control has no visible surface, so it has none of the four public styling surfaces the Session Forms styling contract defines for the sibling `wippy-form` question card:
-
-**Tokens used:** none. **New tokens:** none — there is nothing to color, size, or space.
-
-| Part | States | What it is |
-| --- | --- | --- |
-| _(none)_ | | The element has no shadow-DOM content to expose a `part` on. |
-
-| Host attribute | Values | Notes |
-| --- | --- | --- |
-| _(none)_ | | No state is reflected — there is nothing for a stylesheet to react to. (`record` is a data-carrying prop, not a styling hook.) |
-
-| Keys | Where | What happens |
-| --- | --- | --- |
-| _(none)_ | | The element is never visible, so it never receives focus or keyboard input. |
-
-**Why:** the element renders nothing by design — hiding the answer-record JSON from the user is its entire purpose, not an incomplete styling pass. Exposing parts, tokens, classes, or host attributes would invite restyling an element that must stay invisible under every theme, so none exist. If a future requirement needs this data to be visible in some context, that belongs in a new, separate presentational component — not in a styling override of this one.
+No tokens, parts, or host attributes: the element renders nothing. A requirement to show this data belongs in a separate presentational component.

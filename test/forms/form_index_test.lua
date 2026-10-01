@@ -26,6 +26,12 @@ end
 
 local function define_tests()
     describe("form index", function()
+        -- A test that replaces the pending answer lookup gets the real one
+        -- back even when one of its assertions fails.
+        local original_list_pending_answers = nil
+        before_each(function() original_list_pending_answers = message_repo.list_pending_answers end)
+        after_each(function() message_repo.list_pending_answers = original_list_pending_answers end)
+
         it("is absent when the session has no forms", function()
             test.is_nil(form_index.build({ { artifact_id = "x", title = "Notes", meta = {} } }))
             test.is_nil(form_index.build(nil))
@@ -55,7 +61,6 @@ local function define_tests()
         end)
 
         it("reads pending answer rows only when a form holds an answer", function()
-            local original = message_repo.list_pending_answers
             local scans = 0
             message_repo.list_pending_answers = function(session_id, limit)
                 scans = scans + 1
@@ -69,7 +74,6 @@ local function define_tests()
 
             local none, none_err = form_index.pending_answers("s-1", { unanswered(1) })
             local some, some_err = form_index.pending_answers("s-1", { unanswered(1), answered(2) })
-            message_repo.list_pending_answers = original
 
             test.is_nil(none_err)
             test.is_nil(next(none or { x = true }), "no answered form: an empty set")

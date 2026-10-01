@@ -1,9 +1,8 @@
-import { useEvents, usePropsErrors, useProps } from '@wippy-fe/webcomponent-vue'
 import type { ComponentProps } from './types'
+import { useProps, usePropsErrors } from '@wippy-fe/webcomponent-vue'
 
+/** The events the base element dispatches. This component adds none. */
 export interface Events {
-  /** Fired after a submission is durably accepted (including an exact replay). */
-  'answer-submitted': { requestId: string, answerMessageId: string, late: boolean }
   load: undefined
   unload: undefined
   error: { message: string, error: unknown }
@@ -11,5 +10,4 @@ export interface Events {
 }
 
 export const useComponentProps = () => useProps<ComponentProps>()
-export const useComponentEvents = () => useEvents<Events>()
 export const useComponentPropsErrors = usePropsErrors

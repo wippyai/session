@@ -1,11 +1,9 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 
 /**
- * Tracks `window` online/offline state. Submitting while offline can only
- * fail, so the form disables Submit and shows a notice instead of letting
- * the user hit the no-response retry path. `onBackOnline` is called once
- * per online transition so the caller can refresh state (coalesced with any
- * other pending reload — see `use-form-state.ts`), not poll.
+ * Tracks the `online` and `offline` state of the window. A submit while offline
+ * can only fail, so the card blocks it and shows a notice. `onBackOnline` runs
+ * once per return to online, so the caller can refresh its state.
  */
 export function useOnlineStatus(onBackOnline: () => void) {
   const isOnline = ref(typeof navigator === 'undefined' ? true : navigator.onLine)

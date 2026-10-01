@@ -1,5 +1,4 @@
 local json = require("json")
-local message_repo = require("message_repo")
 local answer_text = require("answer_text")
 local session = require("session")
 local llm = require("llm")
@@ -181,21 +180,19 @@ local function handle(args)
     local tool_results = {}
 
     for _, msg in ipairs(range_messages) do
-        if message_repo.is_pending_answer(msg) then
-            -- A form answer accepted during the running turn. Summarizing it
-            -- would put it into the session context the active turn reads.
-        elseif msg.type == "user" then
-            local text = msg.data or ""
-            if not message_repo.is_form_answer(msg) then
-                -- A <wippy-form-answers> tag the user typed is not a record.
-                text = answer_text.neutralize(text)
-            end
-            table.insert(conversation_parts, "[USER]: " .. text)
+        if msg.type == "user" then
+            -- nil for a form answer accepted during the running turn:
+            -- summarizing it would put it into the session context the
+            -- active turn reads.
+            local text = answer_text.model_text(msg)
+            if text ~= nil then
+                table.insert(conversation_parts, "[USER]: " .. text)
 
-            local metadata = msg.metadata or {}
-            if metadata.file_uuids and #metadata.file_uuids > 0 then
-                for _, file_uuid in ipairs(metadata.file_uuids) do
-                    table.insert(file_references, "file_uuid:" .. file_uuid)
+                local metadata = msg.metadata or {}
+                if metadata.file_uuids and #metadata.file_uuids > 0 then
+                    for _, file_uuid in ipairs(metadata.file_uuids) do
+                        table.insert(file_references, "file_uuid:" .. file_uuid)
+                    end
                 end
             end
         elseif msg.type == "assistant" and msg.data ~= "" then

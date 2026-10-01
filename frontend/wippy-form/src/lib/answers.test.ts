@@ -1,8 +1,7 @@
 import type { AnswerDraft } from './answers'
 import type { FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
-import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, isNoteTextTooLong, isOtherTextTooLong, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
-import { trimAnswerText } from './text'
+import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, exceedsLength, lengthLimitMessage, NOTE_TEXT_MAX, OTHER_TEXT_MAX, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
 
 const definition: FormDefinition = {
   title: 'Form',
@@ -28,9 +27,34 @@ const definition: FormDefinition = {
   ],
 }
 
+describe('exceedsLength', () => {
+  it('trims outer whitespace before comparing', () => {
+    expect(exceedsLength(` ${'a'.repeat(OTHER_TEXT_MAX)} `, OTHER_TEXT_MAX)).toBe(false)
+    expect(exceedsLength(` ${'a'.repeat(NOTE_TEXT_MAX)} `, NOTE_TEXT_MAX)).toBe(false)
+  })
+
+  it('counts an emoji as one code point, although it is two UTF-16 code units', () => {
+    expect('😀'.length).toBe(2)
+    expect(exceedsLength('😀'.repeat(OTHER_TEXT_MAX), OTHER_TEXT_MAX)).toBe(false)
+    expect(exceedsLength(`${'😀'.repeat(OTHER_TEXT_MAX)}x`, OTHER_TEXT_MAX)).toBe(true)
+  })
+
+  it('is false at the limit and true one code point over it', () => {
+    expect(exceedsLength('a'.repeat(NOTE_TEXT_MAX), NOTE_TEXT_MAX)).toBe(false)
+    expect(exceedsLength('a'.repeat(NOTE_TEXT_MAX + 1), NOTE_TEXT_MAX)).toBe(true)
+  })
+})
+
+describe('lengthLimitMessage', () => {
+  it('names the limit with a thousands separator', () => {
+    expect(lengthLimitMessage(OTHER_TEXT_MAX)).toBe('Use at most 2,000 characters.')
+    expect(lengthLimitMessage(NOTE_TEXT_MAX)).toBe('Use at most 1,000 characters.')
+  })
+})
+
 describe('serializeAnswers', () => {
   it('orders keys by definition order, regardless of draft insertion order', () => {
-    // f2 is inserted before f1 here — the output must still follow the
+    // f2 is inserted before f1 here, and the output still follows the
     // definition's field order (f1, then f2).
     const draft: AnswerDraft = { f2: ['x'], f1: 'a' }
     const answers = serializeAnswers(definition, draft)
@@ -94,40 +118,15 @@ describe('serializeFieldAnswer — multiple choice', () => {
   })
 })
 
-describe('trimAnswerText — matches the server\'s trim set exactly', () => {
-  // Built from code points rather than literal characters in source, since
-  // an ideographic space and a zero-width space are both visually silent
-  // and easy to lose or mis-paste in a diff.
-  const ideographicSpace = String.fromCharCode(0x3000) // Unicode Zs (Space_Separator) — real whitespace
-  const zeroWidthSpace = String.fromCharCode(0x200B) // Unicode Cf (Format) — not whitespace
+describe('validateAnswers — the trim set of an Other text', () => {
+  // Built from code points because both characters are invisible and easy to
+  // lose in a diff.
+  const ideographicSpace = String.fromCharCode(0x3000) // Unicode Zs, real whitespace
+  const zeroWidthSpace = String.fromCharCode(0x200B) // Unicode Cf, not whitespace
 
-  it('strips U+3000 IDEOGRAPHIC SPACE: it is real Unicode whitespace', () => {
-    expect(trimAnswerText(ideographicSpace + ideographicSpace)).toBe('')
-    expect(trimAnswerText(`${ideographicSpace}hi${ideographicSpace}`)).toBe('hi')
-  })
-
-  it('does NOT strip U+200B ZERO WIDTH SPACE: Unicode format characters are not whitespace', () => {
-    expect(trimAnswerText(zeroWidthSpace)).toBe(zeroWidthSpace)
-    expect(trimAnswerText(`${zeroWidthSpace}hi${zeroWidthSpace}`)).toBe(`${zeroWidthSpace}hi${zeroWidthSpace}`)
-  })
-
-  it('so a field whose only content is U+3000 counts as blank Other text, but U+200B does not', () => {
+  it('counts an Other text of only U+3000 as blank, and one of only U+200B as text', () => {
     expect(validateAnswers(definition, { f1: { other: ideographicSpace } }).f1?.map(e => e.code)).toEqual(['blank'])
     expect(validateAnswers(definition, { f1: { other: zeroWidthSpace } })).toEqual({})
-  })
-})
-
-describe('isOtherTextTooLong', () => {
-  it('trims outer whitespace before checking the limit', () => {
-    const padded = ` ${'a'.repeat(2000)} `
-    expect(isOtherTextTooLong(padded)).toBe(false)
-  })
-
-  it('flags text over 2,000 code points, counted with emoji as single code points', () => {
-    const justOver = `${'😀'.repeat(2000)}x` // 2001 code points
-    expect(isOtherTextTooLong(justOver)).toBe(true)
-    const exactly = '😀'.repeat(2000) // 2000 code points
-    expect(isOtherTextTooLong(exactly)).toBe(false)
   })
 })
 
@@ -185,7 +184,7 @@ describe('validateAnswers — Other selected with blank text', () => {
   })
 })
 
-describe('buildNotedValue (question-card notes)', () => {
+describe('buildNotedValue', () => {
   it('returns the plain value when the note trims to blank', () => {
     expect(buildNotedValue('a', '   ')).toBe('a')
     expect(buildNotedValue('a', '')).toBe('a')
@@ -193,23 +192,6 @@ describe('buildNotedValue (question-card notes)', () => {
 
   it('returns { value, note } with the note trimmed', () => {
     expect(buildNotedValue('a', '  extra context  ')).toEqual({ value: 'a', note: 'extra context' })
-  })
-})
-
-describe('isNoteTextTooLong (note limit, server 1,000-code-point cap)', () => {
-  it('counts code points the same way for notes as for Other text, with emoji as one code point', () => {
-    expect(isNoteTextTooLong('😀'.repeat(1000))).toBe(false)
-    expect(isNoteTextTooLong('😀'.repeat(1001))).toBe(true)
-  })
-
-  it('trims outer whitespace before checking the 1,000-code-point limit', () => {
-    const padded = ` ${'a'.repeat(1000)} `
-    expect(isNoteTextTooLong(padded)).toBe(false)
-  })
-
-  it('flags a note over 1,000 code points, matches at exactly 1,000', () => {
-    expect(isNoteTextTooLong('a'.repeat(1001))).toBe(true)
-    expect(isNoteTextTooLong('a'.repeat(1000))).toBe(false)
   })
 })
 
@@ -236,7 +218,7 @@ describe('serializeFieldAnswer — noted answers (question-card {value, note} ro
   })
 })
 
-describe('answerDisplayItems (review/summary rendering)', () => {
+describe('answerDisplayItems', () => {
   const field: FormField = {
     id: 'f',
     type: 'choice',
@@ -251,23 +233,20 @@ describe('answerDisplayItems (review/summary rendering)', () => {
     expect(answerDisplayItems(field, undefined)).toBeNull()
   })
 
-  it('orders items by definition (option) order, not selection order, with Other last', () => {
-    const items = answerDisplayItems(field, [{ other: 'mine' }, 'b', 'a'])
-    expect(items).toEqual([
+  it('orders items by option order, not selection order, with Other last', () => {
+    expect(answerDisplayItems(field, [{ other: 'mine' }, 'b', 'a'])).toEqual([
       { label: 'Alpha', note: undefined },
       { label: 'Beta', note: undefined },
       { label: 'mine', own: true },
     ])
   })
 
-  it('carries a note through for a {value, note} item', () => {
-    const items = answerDisplayItems(field, [{ value: 'a', note: 'context' }])
-    expect(items).toEqual([{ label: 'Alpha', note: 'context' }])
+  it('carries the note of a { value, note } item', () => {
+    expect(answerDisplayItems(field, [{ value: 'a', note: 'context' }])).toEqual([{ label: 'Alpha', note: 'context' }])
   })
 
-  it('single-choice field: a plain string answer', () => {
-    const single: FormField = { ...field, multiple: false }
-    expect(answerDisplayItems(single, 'a')).toEqual([{ label: 'Alpha', note: undefined }])
+  it('reads a plain string answer for a single-choice field', () => {
+    expect(answerDisplayItems({ ...field, multiple: false }, 'a')).toEqual([{ label: 'Alpha', note: undefined }])
   })
 })
 

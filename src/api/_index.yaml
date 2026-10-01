@@ -49,6 +49,18 @@ entries:
       comment: JSON request bodies of the API endpoints (Content-Type gate, capped body read)
     source: file://request_body.lua
 
+  # wippy.session.api:artifact_state_access
+  - name: artifact_state_access
+    kind: library.lua
+    meta:
+      comment: Request handling of the form state endpoints (GET and POST /artifact/{id}/state) once the caller is authenticated
+    source: file://artifact_state_access.lua
+    modules:
+      - http
+    imports:
+      request_body: wippy.session.api:request_body
+      state_service: wippy.session.forms:state_service
+
   # wippy.session.api:get_artifact
   - name: get_artifact
     kind: function.lua
@@ -112,8 +124,7 @@ entries:
       - http
       - security
     imports:
-      request_body: wippy.session.api:request_body
-      state_service: wippy.session.forms:state_service
+      artifact_state_access: wippy.session.api:artifact_state_access
     method: get
     pool:
       size: 4
@@ -139,8 +150,7 @@ entries:
       - http
       - security
     imports:
-      request_body: wippy.session.api:request_body
-      state_service: wippy.session.forms:state_service
+      artifact_state_access: wippy.session.api:artifact_state_access
     method: post
     pool:
       size: 4

@@ -30,7 +30,7 @@ describe('plainText', () => {
 })
 
 // A multi-line "Own answer" (Other textarea, Shift+Enter) must keep its
-// line breaks when displayed back — see textLines' callers in
+// line breaks when displayed back, see textLines' callers in
 // question-card-answer-items.vue.
 describe('textLines', () => {
   it('splits on \\n', () => {

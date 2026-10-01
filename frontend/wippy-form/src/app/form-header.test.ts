@@ -51,7 +51,7 @@ describe('FormHeader', () => {
     for (const wrapper of [
       mount(ActiveForm, { props: { state, submitting: false, banner: null }, global }),
       mount(IdleForm, { props: { state: { ...state, status: 'idle' } }, global }),
-      mount(FormNotice, { props: { definition: state.definition, reason: 'no-artifact' }, global }),
+      mount(FormNotice, { props: { definition: state.definition, severity: 'secondary', message: 'Not here.' }, global }),
     ]) {
       const header = wrapper.findComponent(FormHeader)
       expect(header.exists()).toBe(true)

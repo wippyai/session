@@ -86,6 +86,7 @@ entries:
       control_handlers: wippy.session.process:control_handlers
       test: wippy.test:test
     method: run_tests
+
   - name: control_handlers_test
     kind: function.lua
     meta:
@@ -128,6 +129,7 @@ entries:
       consts: wippy.session:consts
       command_bus: wippy.session.process:command_bus
       message_handlers: wippy.session.process:message_handlers
+      answer_admission: wippy.session.process:answer_admission
       control_handlers: wippy.session.process:control_handlers
       session_handlers: wippy.session.process:session_handlers
       session: wippy.session.process:session
@@ -164,6 +166,7 @@ entries:
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
       message_handlers: wippy.session.process:message_handlers
+      answer_admission: wippy.session.process:answer_admission
       plugin: wippy.session.process:plugin
       session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo
@@ -278,6 +281,7 @@ entries:
       consts: wippy.session:consts
       input_policy: wippy.session.process:input_policy
       message_handlers: wippy.session.process:message_handlers
+      answer_admission: wippy.session.process:answer_admission
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
     method: run_tests

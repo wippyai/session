@@ -1,53 +1,39 @@
 import type { Ref } from 'vue'
 import type { FormState } from '../lib/definition'
 import { on } from '@wippy-fe/proxy'
-import * as WippyProxy from '@wippy-fe/proxy'
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { hostExport } from '../lib/host-proxy'
+import { LOAD_FAILED_MESSAGE } from '../lib/messages'
 
 export const RELOAD_RETRY_MS = 5000
 
-export type LoadStatus ='idle' | 'loading' | 'loaded' | 'error' | 'unsupported'
+export type LoadStatus = 'idle' | 'loading' | 'loaded' | 'error' | 'unsupported'
 
 export interface UseFormStateResult {
   status: Ref<LoadStatus>
   state: Ref<FormState | null>
   errorMessage: Ref<string | null>
-  /**
-   * Set only when a load fails while a view is already showing (a
-   * background reload, not the artifact's first load). The caller keeps
-   * rendering `state` as-is and can surface this as a small, non-blocking
-   * notice instead of replacing the view with an error screen.
-   */
+  /** Set when a reload fails while a view is already showing. The caller keeps rendering `state` and can show a small notice. */
   reloadError: Ref<string | null>
   reload: () => void
-  /** Loads now (coalesced with any load in flight) and resolves with the resulting state. */
+  /** Loads now, coalesced with any load in flight, and resolves with the resulting state. */
   refresh: () => Promise<FormState | null>
 }
 
 /**
- * Loads and keeps `FormState` current for one artifact id: on mount, when
- * the id changes, when the Host's `state` prop changes (props.state="idle"
- * once the answer is accepted), on the `artifact:<id>` relay event, and on
- * the proxy's `@visibility` restore event (tab/document becoming visible
- * again), and on new messages or a status change in the form's session
- * while the form can still become "asked earlier" or its answer is not yet
- * complete — the session-level `session:<id>` topic fires even when a Stop
- * settles the turn with no reply message to trigger the message listener.
- * Superseded/late responses (unmount, id change, or a newer load
- * already in flight) are dropped via a generation counter rather than an
- * abort signal, since the Host client has no cancellation contract.
+ * Loads the `FormState` of one artifact and keeps it current. It loads on
+ * mount and when the id or the Host's `state` prop changes. It reloads on the
+ * `artifact:<id>` event, when the page becomes visible, and after a WebSocket
+ * reconnect. While the form can still become "asked earlier" or its answer is
+ * not yet delivered, it also reloads on messages and status changes of the
+ * session.
  *
- * Only the artifact's first load sets `status` to `'loading'` / `'error'`
- * (there is nothing to show yet, so a full loading/error screen is
- * appropriate). A background reload — the artifact already has a `state`
- * value — never touches `status`; a failure there only sets `reloadError`,
- * so the caller keeps the current view mounted (no remount, no lost focus
- * or draft) instead of replacing it.
- *
- * Concurrent reload requests (e.g. a visibility restore firing while an
- * `artifact:<id>` reload is still in flight) are coalesced into a single
- * follow-up load rather than piling up requests — no polling, no request
- * pile-up.
+ * A response for a previous id, or for a load that a newer one superseded, is
+ * dropped by a generation counter, because the Host client cannot cancel a
+ * request. Only the first load sets `status` to `loading` or `error`. A failed
+ * background reload sets `reloadError` and keeps the view, so no remount loses
+ * focus or a draft. Reloads requested while one is in flight are coalesced into
+ * one follow-up load.
  */
 export function useFormState(artifactId: Ref<string | null>, statePropTrigger: Ref<unknown>): UseFormStateResult {
   const status = ref<LoadStatus>('idle')
@@ -56,32 +42,16 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
   const reloadError = ref<string | null>(null)
 
   let generation = 0
-  // The load currently in flight, and — when a reload is requested while one
-  // is already running — the promise of the coalesced follow-up load that
-  // will run right after it. `runLoad()` always resolves once the freshest
-  // requested load has actually finished, so `refresh()` (used by the
-  // delivery nudge) never returns stale `state.value` from a load that was
-  // still in flight when it was called.
+  // The load in flight, and the follow-up load that a reload requested during
+  // it waits for. `runLoad()` resolves once the freshest requested load has
+  // finished, so `refresh()` never returns the state of an older load.
   let currentLoad: Promise<void> | null = null
   let pendingLoad: Promise<void> | null = null
   let unsubscribeArtifactEvent: (() => void) | null = null
   let subscribedId: string | null = null
 
-  function getArtifactStateFn() {
-    // Property access on the module namespace object, NOT a named import.
-    // `import { artifactState } from '@wippy-fe/proxy'` resolves statically
-    // against whatever proxy.js the Host's import map actually serves — on
-    // an older Host that doesn't export it yet, that's a hard SyntaxError
-    // at module link time, before any of our code runs. A namespace-object
-    // property read just yields `undefined` there, which the "unsupported"
-    // branch below turns into the actionable message the contract asks for.
-    return (WippyProxy as unknown as Record<string, unknown>).artifactState as
-      | ((id: string) => { get: () => Promise<FormState> })
-      | undefined
-  }
-
-  // One delayed retry after a failed background refresh, so a transient
-  // failure does not leave the view stale until the next event.
+  // One delayed retry after a failed background reload, so a transient failure
+  // does not leave the view stale until the next event.
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let retried = false
   function scheduleRetry(): void {
@@ -95,18 +65,10 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
   }
 
   async function performLoad(): Promise<void> {
-    // Checked BEFORE the artifact-id branch below: a Host that predates the
-    // artifact-state API never sets `data-wippy-artifact-id` either (every
-    // published Host older than the one that added `artifactState` sets
-    // neither), so checking `!id` first left this branch unreachable in
-    // practice — `status` fell through to 'idle' forever instead of ever
-    // reporting 'unsupported', and the caller (wippy-form.vue) had no signal
-    // to show anything other than the generic "no artifact id" notice
-    // (EE2-2461 / F-P4-1).
-    const artifactStateFn = getArtifactStateFn()
-    if (typeof artifactStateFn !== 'function') {
+    // Checked first: a Host without artifactState never sets an artifact id either.
+    const artifactState = hostExport('artifactState')
+    if (typeof artifactState !== 'function') {
       status.value = 'unsupported'
-      errorMessage.value = 'This form needs a newer Web Host.'
       return
     }
 
@@ -124,7 +86,7 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       status.value = 'loading'
 
     try {
-      const next = await artifactStateFn(id).get()
+      const next = await artifactState(id).get()
       if (myGeneration !== generation)
         return
       state.value = next
@@ -136,27 +98,19 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
     catch (err) {
       if (myGeneration !== generation)
         return
-      const message = err instanceof Error ? err.message : 'Could not load this form.'
+      const message = err instanceof Error ? err.message : LOAD_FAILED_MESSAGE
       if (isFirstLoad) {
         status.value = 'error'
         errorMessage.value = message
       }
       else {
-        // Keep the current view mounted; just flag the failed refresh.
         reloadError.value = message
         scheduleRetry()
       }
     }
   }
 
-  /**
-   * Runs `performLoad`, coalescing any reload requested while one is
-   * already in flight into a single follow-up run. Returns a promise that
-   * resolves once the freshest requested load has finished — when a load is
-   * already running, that is the coalesced follow-up's own completion, not
-   * the already-running load's, so a caller that awaits this always
-   * observes state at least as fresh as the moment it called `runLoad()`.
-   */
+  /** Runs `performLoad`, or queues one follow-up run behind the load in flight. Resolves when the freshest requested load is done. */
   function runLoad(): Promise<void> {
     if (currentLoad) {
       if (!pendingLoad) {
@@ -183,30 +137,11 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       unsubscribeArtifactEvent = on(`artifact:${id}`, () => { void runLoad() })
   }
 
-  watch(artifactId, (id) => {
-    // A rebind to a different artifact is a new form — nothing to keep
-    // showing, so let its own first load show the full loading state
-    // rather than lingering on the previous artifact's content. Bumping
-    // `generation` here (not only inside `performLoad`) is what actually
-    // makes the rebind safe: without it, a GET already in flight for the
-    // PREVIOUS id can still land after this point (it may even be the
-    // load a coalesced `runLoad()` call is currently queued behind) and
-    // would otherwise pass the `myGeneration !== generation` check and
-    // overwrite `state.value` with the old artifact's data after the id
-    // has already moved on.
-    generation++
-    state.value = null
-    reloadError.value = null
-    subscribe(id)
-    void runLoad()
-  }, { immediate: true })
-
   watch(statePropTrigger, () => { void runLoad() })
 
-  // A newer message in the session changes derived state the artifact event
-  // never announces: an open form becomes "asked earlier", and a pending
-  // answer moves to running/complete. Listen only while one of those can
-  // still change, and skip streaming chunks.
+  // A newer message in the session makes an open form "asked earlier", and a
+  // pending answer moves on to running and complete. The session is listened
+  // to only while one of those can still happen.
   const watchedSessionId = computed(() => {
     const current = state.value
     if (!current?.session_id)
@@ -219,45 +154,46 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
   })
   let unsubscribeSessionMessages: (() => void) | null = null
   let unsubscribeSessionStatus: (() => void) | null = null
-  watch(watchedSessionId, (sessionId) => {
-    unsubscribeSessionMessages?.()
-    unsubscribeSessionMessages = null
-    unsubscribeSessionStatus?.()
-    unsubscribeSessionStatus = null
-    if (sessionId) {
-      unsubscribeSessionMessages = on(`session:${sessionId}:message:*`, (message) => {
-        if ((message.data as { type?: string } | undefined)?.type !== 'chunk')
-          void runLoad()
-      })
-      // A user Stop that settles the turn without a pending answer to admit
-      // stores no reply message at all — only the session's own status
-      // flips. The message:* listener above never fires for that, so a card
-      // whose delivery the Stop interrupted (`delivery: 'interrupted'`)
-      // stays on "The assistant is reading your answer." until something
-      // else happens to reload it. `session:<id>` (no further segments) is
-      // the session-level metadata/status topic (see websocket-topics.md —
-      // distinct from `session:<id>:message:*` by segment count, per
-      // topic-matcher's exact part-count check), so it fires on that status
-      // change even when no message does. Same gate as the listener above:
-      // only while this card's own delivery could still change.
-      unsubscribeSessionStatus = on(`session:${sessionId}`, () => { void runLoad() })
-    }
-  }, { immediate: true })
+  let unsubscribeVisibility: (() => void) | null = null
+  let unsubscribeReconnect: (() => void) | null = null
 
-  // Host-mediated tab/document visibility restore — a bounded, coalesced
-  // state check, not polling.
-  const unsubscribeVisibility = on('@visibility', (visible: boolean) => {
-    if (visible)
+  onMounted(() => {
+    watch(artifactId, (id) => {
+      // A rebind starts a new form, so its first load shows the loading state.
+      // Bumping `generation` here stops a GET still in flight for the previous
+      // id, possibly the load a queued follow-up waits behind, from
+      // overwriting `state` after the id has moved on.
+      generation++
+      state.value = null
+      reloadError.value = null
+      subscribe(id)
       void runLoad()
-  })
+    }, { immediate: true })
 
-  // Fires after the Host's WebSocket reconnects following a disconnect (no
-  // payload) — without this, the card stayed stale through a server
-  // restart: a reload only otherwise happens on an artifact/session event
-  // delivered over that same (just-dropped) socket, or on the next
-  // visibility restore, neither of which fires on its own once the socket
-  // comes back up on an already-visible tab.
-  const unsubscribeReconnect = on('@reconnect', () => { void runLoad() })
+    watch(watchedSessionId, (sessionId) => {
+      unsubscribeSessionMessages?.()
+      unsubscribeSessionMessages = null
+      unsubscribeSessionStatus?.()
+      unsubscribeSessionStatus = null
+      if (sessionId) {
+        unsubscribeSessionMessages = on(`session:${sessionId}:message:*`, (message) => {
+          if ((message.data as { type?: string } | undefined)?.type !== 'chunk')
+            void runLoad()
+        })
+        // A Stop that settles the turn without a reply sends no message, but it
+        // changes the status of the session, which `session:<id>` announces.
+        unsubscribeSessionStatus = on(`session:${sessionId}`, () => { void runLoad() })
+      }
+    }, { immediate: true })
+
+    unsubscribeVisibility = on('@visibility', (visible: boolean) => {
+      if (visible)
+        void runLoad()
+    })
+    // After a WebSocket reconnect (no payload) the card is stale, because the
+    // events that would have reloaded it travelled over the dropped socket.
+    unsubscribeReconnect = on('@reconnect', () => { void runLoad() })
+  })
 
   onUnmounted(() => {
     generation++
@@ -265,13 +201,10 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       clearTimeout(retryTimer)
     retryTimer = null
     unsubscribeArtifactEvent?.()
-    unsubscribeArtifactEvent = null
     unsubscribeSessionMessages?.()
-    unsubscribeSessionMessages = null
     unsubscribeSessionStatus?.()
-    unsubscribeSessionStatus = null
-    unsubscribeVisibility()
-    unsubscribeReconnect()
+    unsubscribeVisibility?.()
+    unsubscribeReconnect?.()
   })
 
   async function refresh(): Promise<FormState | null> {

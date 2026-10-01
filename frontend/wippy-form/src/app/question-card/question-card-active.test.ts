@@ -1,7 +1,8 @@
-import type { ChoiceFormDefinition, ChoiceFormState } from '../../lib/definition'
-import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
+import type { ChoiceFormDefinition } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
+import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { describe, expect, it } from 'vitest'
+import { formState } from '../../test-support/fixtures'
 import QuestionCardActive from './question-card-active.vue'
 
 const singleQuestionDef: ChoiceFormDefinition = {
@@ -25,37 +26,16 @@ const twoQuestionDef: ChoiceFormDefinition = {
   ],
 }
 
-function makeState(definition: ChoiceFormDefinition, overrides: Partial<ChoiceFormState> = {}): ChoiceFormState {
-  return {
-    form_version: 1,
-    artifact_id: 'artifact-1',
-    session_id: 'session-1',
-    status: 'active',
-    stale: false,
-    late: false,
-    content_version: 1,
-    definition,
-    data: null,
-    submitted_at: null,
-    answer_message_id: null,
-    delivery: null,
-    ...overrides,
-  }
-}
-
-function mountCard(definition: ChoiceFormDefinition, overrides: Partial<ChoiceFormState> = {}) {
+/** Mounts the card with the form's props, which `props` can override. `global` adds mounting options. */
+function mountCard(definition: ChoiceFormDefinition, props: { offline?: boolean, submitting?: boolean } = {}, global: Record<string, unknown> = {}) {
   return mount(QuestionCardActive, {
-    props: {
-      state: makeState(definition, overrides),
-      submitting: false,
-      banner: null,
-    },
+    props: { state: formState({ definition }), submitting: false, banner: null, ...props },
     attachTo: document.body,
-    global: { plugins: [PrimeVuePlugin] },
+    global: { plugins: [PrimeVuePlugin], ...global },
   })
 }
 
-describe('QuestionCardActive — styling API surface', () => {
+describe('QuestionCardActive: styling API surface', () => {
   it('the root carries the w-form class and the card part', () => {
     const wrapper = mountCard(singleQuestionDef)
     const root = wrapper.find('.w-form')
@@ -85,7 +65,7 @@ describe('QuestionCardActive — styling API surface', () => {
   })
 })
 
-describe('QuestionCardActive — single question, single answer', () => {
+describe('QuestionCardActive: single question, single answer', () => {
   it('clicking a row answers and submits the whole form', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.findAll('.w-form__option')[0].trigger('click')
@@ -94,13 +74,13 @@ describe('QuestionCardActive — single question, single answer', () => {
 
   it('pressing a row\'s number key answers it', async () => {
     const wrapper = mountCard(singleQuestionDef)
-    // A real digit keypress carries both — `.key` is what the handler
+    // A real digit keypress carries both, `.key` is what the handler
     // actually reads for a plain (non-Shift) digit.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit2', key: '2' })
     expect(wrapper.emitted('submit')?.[0]).toEqual([{ f1: 'no' }])
   })
 
-  it('Other stays focus-only while empty — Enter does not send', async () => {
+  it('Other stays focus-only while empty: Enter does not send', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('.w-form__other-input')
     await other.trigger('keydown', { key: 'Enter' })
@@ -116,25 +96,15 @@ describe('QuestionCardActive — single question, single answer', () => {
   })
 })
 
-describe('QuestionCardActive — offline indicator and blocked answering (P2 tracker line 107c)', () => {
+describe('QuestionCardActive: offline indicator and blocked answering', () => {
   it('shows a visible offline notice and blocks a row click and a number key from answering', async () => {
-    const wrapper = mount(QuestionCardActive, {
-      props: {
-        state: makeState(singleQuestionDef),
-        submitting: false,
-        banner: null,
-        offline: true,
-      },
-      attachTo: document.body,
-      global: { plugins: [PrimeVuePlugin] },
-    })
+    const wrapper = mountCard(singleQuestionDef, { offline: true })
 
     const notice = wrapper.find('[role="status"]')
     expect(notice.exists()).toBe(true)
     expect(notice.text()).toContain('You are offline. Your choices are kept.')
 
-    // Rows silently ignoring clicks (via JS) is not enough — assistive tech
-    // needs the disabled state marked on the control itself.
+    // Assistive technology needs the blocked state on the control itself.
     const row = wrapper.find('[role="radio"]')
     expect(row.attributes('aria-disabled')).toBe('true')
 
@@ -152,7 +122,7 @@ describe('QuestionCardActive — offline indicator and blocked answering (P2 tra
   })
 })
 
-describe('QuestionCardActive — blocked while a submit is already in flight', () => {
+describe('QuestionCardActive: blocked while a submit is already in flight', () => {
   it('marks the card aria-busy and blocks a row click and a number key from submitting again', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.setProps({ submitting: true })
@@ -169,7 +139,7 @@ describe('QuestionCardActive — blocked while a submit is already in flight', (
   })
 })
 
-describe('QuestionCardActive — keyboard boundaries', () => {
+describe('QuestionCardActive: keyboard boundaries', () => {
   it('a digit typed into Other does not answer the question', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('textarea.w-form__other-input')
@@ -179,9 +149,8 @@ describe('QuestionCardActive — keyboard boundaries', () => {
 
   it('a numpad digit reported with NumLock off (its `.key` is an arrow, not a digit) does not answer', async () => {
     const wrapper = mountCard(singleQuestionDef)
-    // With NumLock off, the physical Numpad2 key's `.code` is still
-    // `Numpad2`, but the browser reports `.key` as `ArrowDown` — matching
-    // on `.code` (the old behavior) misread this as "answer option 2".
+    // With NumLock off the key's `.code` is still `Numpad2` and its `.key` is
+    // `ArrowDown`. The handler reads `.key`, so this is navigation, not answer 2.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Numpad2', key: 'ArrowDown' })
     expect(wrapper.emitted('submit')).toBeUndefined()
   })
@@ -201,7 +170,7 @@ describe('QuestionCardActive — keyboard boundaries', () => {
   })
 })
 
-describe('QuestionCardActive — Escape in a note closes it without losing the draft', () => {
+describe('QuestionCardActive: Escape in a note closes it without losing the draft', () => {
   it('closes the note editor but keeps the typed draft, shown back under the row', async () => {
     const wrapper = mountCard(singleQuestionDef)
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
@@ -214,7 +183,7 @@ describe('QuestionCardActive — Escape in a note closes it without losing the d
 
     // The editor closed...
     expect(wrapper.find('.w-form__option--editing').exists()).toBe(false)
-    // ...but the draft was not cleared — it shows back under the row, and
+    // ...but the draft was not cleared, it shows back under the row, and
     // nothing was submitted (Escape leaves the box, it does not answer).
     expect(wrapper.find('.w-form__option-note').text()).toContain('leave at the door')
     expect(wrapper.emitted('submit')).toBeUndefined()
@@ -226,7 +195,7 @@ describe('QuestionCardActive — Escape in a note closes it without losing the d
   })
 })
 
-describe('QuestionCardActive — form title and description (the one-question card was missing both)', () => {
+describe('QuestionCardActive: form title and description', () => {
   it('shows the form title on a single-question card, not only a several-question one', () => {
     const wrapper = mountCard(singleQuestionDef)
     const title = wrapper.find('.w-form__title')
@@ -253,7 +222,7 @@ describe('QuestionCardActive — form title and description (the one-question ca
   })
 })
 
-describe('QuestionCardActive — field description', () => {
+describe('QuestionCardActive: field description', () => {
   const withDescription: ChoiceFormDefinition = {
     title: 'Deploy',
     fields: [{
@@ -282,7 +251,7 @@ describe('QuestionCardActive — field description', () => {
   })
 })
 
-describe('QuestionCardActive — 422 field errors', () => {
+describe('QuestionCardActive: 422 field errors', () => {
   it('setServerErrors shows the message on the question that owns the field', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void }
@@ -292,7 +261,7 @@ describe('QuestionCardActive — 422 field errors', () => {
   })
 })
 
-describe('QuestionCardActive — length-error and server-error alerts are linked to the textarea', () => {
+describe('QuestionCardActive: length-error and server-error alerts are linked to the textarea', () => {
   it('links the Other textarea to its own too-long alert via aria-describedby/aria-invalid', async () => {
     const wrapper = mountCard(singleQuestionDef)
     const other = wrapper.find('textarea.w-form__other-input')
@@ -336,9 +305,7 @@ describe('QuestionCardActive — length-error and server-error alerts are linked
     vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
     await wrapper.vm.$nextTick()
 
-    // The options group already points its own aria-describedby at the
-    // question's error Message — the Other textarea must reference that
-    // same id too, not just the group as a whole.
+    // The Other textarea names the same error as the options group.
     const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
     expect(groupErrorId).toBeTruthy()
 
@@ -348,63 +315,39 @@ describe('QuestionCardActive — length-error and server-error alerts are linked
     expect(describedBy).toContain(groupErrorId)
   })
 
-  // PrimeVue's `Message` sets `inheritAttrs: false`. vue-test-utils mounts
-  // with its OWN <transition> stub by default, which renders as a real DOM
-  // element (<transition-stub>) that captures $attrs regardless of the
-  // wrapped component's own inheritAttrs setting — so the test above proves
-  // the STRING ids match, but not that the id actually lands on anything in
-  // a real (non-test-stub) render. This one mounts with the real
-  // <transition> (global.stubs.transition: false, matching an actual
-  // browser) and resolves the id through `document.getElementById` to prove
-  // it names a real element, not a dangling reference the browser would
-  // silently fail to link.
-  it('the error id an Other/radiogroup aria-describedby points at resolves to a real element in an UNSTUBBED render (not just a matching string)', async () => {
-    const wrapper = mount(QuestionCardActive, {
-      props: {
-        state: makeState(singleQuestionDef),
-        submitting: false,
-        banner: null,
-      },
-      attachTo: document.body,
-      global: { plugins: [PrimeVuePlugin], stubs: { transition: false } },
-    })
-    try {
-      const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
-      vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
-      await wrapper.vm.$nextTick()
+  // The test-utils <transition> stub is a real element that captures $attrs, so
+  // the tests above prove the id strings match, not that the id lands on an
+  // element. This one mounts with the real <transition> a browser has and
+  // looks the id up in the tree.
+  it('the error id that aria-describedby points at names a real element when mounted without the transition stub', async () => {
+    const wrapper = mountCard(singleQuestionDef, {}, { stubs: { transition: false } })
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
+    vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
+    await wrapper.vm.$nextTick()
 
-      const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
-      expect(groupErrorId).toBeTruthy()
+    const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
+    expect(groupErrorId).toBeTruthy()
 
-      // Scoped to THIS wrapper's own rendered tree, not the global
-      // `document` — this file's other tests mount with `attachTo:
-      // document.body` too and none of them unmount afterward, so stale
-      // elements from earlier tests (whose Vue `useId()` counter can
-      // collide with this one's, since each `mount()` starts a fresh app
-      // instance) can otherwise still be sitting in `document.body` and
-      // `document.getElementById` would find the WRONG, stale one.
-      const target = wrapper.element.querySelector(`#${groupErrorId}`)
-      expect(target).not.toBeNull()
-      expect(target?.getAttribute('role')).toBe('alert')
-      expect(target?.textContent).toContain('That choice is no longer available.')
-    }
-    finally {
-      wrapper.unmount()
-    }
+    // Looked up in this wrapper's own tree, because `useId()` values can repeat
+    // across separately mounted apps.
+    const target = wrapper.element.querySelector(`#${groupErrorId}`)
+    expect(target).not.toBeNull()
+    expect(target?.getAttribute('role')).toBe('alert')
+    expect(target?.textContent).toContain('That choice is no longer available.')
   })
 })
 
-describe('QuestionCardActive — several questions', () => {
+describe('QuestionCardActive: several questions', () => {
   it('answering advances to the next question, shows the counter, then review, then sends', async () => {
     const wrapper = mountCard(twoQuestionDef)
     expect(wrapper.text()).toContain('1/2')
 
-    // Q1: single-choice — click answers and advances.
+    // Q1: single-choice, click answers and advances.
     await wrapper.findAll('.w-form__option')[0].trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('2/2')
 
-    // Q2: multi-choice — tick one, then send via the footer button (no Other on this field).
+    // Q2: multi-choice, tick one, then send via the footer button (no Other on this field).
     await wrapper.find('.w-form__option').trigger('click')
     await wrapper.vm.$nextTick()
     const sendBtn = wrapper.find('[data-focus="send"]')
@@ -449,7 +392,7 @@ describe('QuestionCardActive — several questions', () => {
     expect(wrapper.text()).toContain('Tick at least one answer, or type your own.')
   })
 
-  it('reaching the review step emits update:state("review"); the collapse chevron emits update:collapsed', async () => {
+  it('reaching the review step emits step-change("review"); the collapse chevron emits collapsed-change', async () => {
     const wrapper = mountCard(twoQuestionDef)
     await wrapper.findAll('.w-form__option')[0].trigger('click')
     await wrapper.vm.$nextTick()
@@ -458,12 +401,12 @@ describe('QuestionCardActive — several questions', () => {
     await wrapper.find('[data-focus="send"]').trigger('click')
     await wrapper.vm.$nextTick()
 
-    const stateEvents = wrapper.emitted('update:state') ?? []
+    const stateEvents = wrapper.emitted('step-change') ?? []
     expect(stateEvents.at(-1)).toEqual(['review'])
 
     await wrapper.find('.w-form__collapse').trigger('click')
     await wrapper.vm.$nextTick()
-    const collapsedEvents = wrapper.emitted('update:collapsed') ?? []
+    const collapsedEvents = wrapper.emitted('collapsed-change') ?? []
     expect(collapsedEvents.at(-1)).toEqual([true])
   })
 
@@ -480,7 +423,7 @@ describe('QuestionCardActive — several questions', () => {
     expect(wrapper.text()).toContain('Review')
     expect(wrapper.text()).toContain('still needs an answer')
 
-    // A disabled "Send answers" cannot take focus — it must have landed on
+    // A disabled "Send answers" cannot take focus, it must have landed on
     // Q2's own review row instead of silently falling through to <body>.
     const missingRow = wrapper.find('[data-focus="review-item-1"]')
     expect(missingRow.exists()).toBe(true)
@@ -489,31 +432,18 @@ describe('QuestionCardActive — several questions', () => {
   })
 })
 
-describe('QuestionCardActive — checkbox visual state follows the model', () => {
-  // Ticking a row's checkbox with the mouse while that row's
-  // own note is open leaves aria-checked="true" (driven by our own
-  // `selected` prop) but the nested PrimeVue Checkbox's own visual mark
-  // empty (data-p-checked="false") — the row and its Checkbox disagree.
-  // The row already marks the Checkbox purely decorative (tabindex="-1"
-  // aria-hidden="true") and drives every answer through its own click
-  // handler (`onRowClick` -> `activate()`), but the Checkbox is still fully
-  // interactive underneath: PrimeVue wires its native <input>'s own
-  // `change` event to its own internal `d_value`/`writeValue` machinery,
-  // which can update the visual mark independently of the `selected` prop
-  // we pass it. A real mouse click fires both that native `change` AND the
-  // row's bubbled `click` in close succession — browser-timing-dependent
-  // and not reproducible through jsdom's simplified event dispatch — but
-  // firing the native `change` alone (bypassing the row's click handler
-  // entirely) isolates the exact mechanism: PrimeVue's own internal toggle
-  // running independent of the model we own. That is the divergence this
-  // item asks to close.
+describe('QuestionCardActive: checkbox visual state follows the model', () => {
+  // PrimeVue's Checkbox listens to its own native `change` event and can update
+  // its mark independently of the `selected` prop. A real click fires that event
+  // and the row's `click` together, which jsdom cannot reproduce, so the test
+  // fires `change` alone to show that the mark follows the model.
   it('does not let the checkbox\'s own native change event move its visual mark independently of the selected prop', async () => {
     const wrapper = mountCard(twoQuestionDef)
     // Reach f2 (multi-choice, two options, no Other).
     await wrapper.findAll('.w-form__option')[0].trigger('click')
     await wrapper.vm.$nextTick()
 
-    // Open the first option's note (the repro's starting state).
+    // Open the first option's note.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
     await wrapper.vm.$nextTick()
     const row = wrapper.find('.w-form__option--editing')
@@ -523,26 +453,22 @@ describe('QuestionCardActive — checkbox visual state follows the model', () =>
     expect(wrapper.find('[role="checkbox"]').attributes('aria-checked')).toBe('false')
     expect(wrapper.find('.w-form__option-mark').attributes('data-p-checked')).toBe('false')
 
-    // Fire only the checkbox's native `change` event — the DOM event
-    // PrimeVue's own Checkbox listens to internally — without going
-    // through the row's `click` handler (which owns ticking via
-    // `activate()`). `selected` (and so `chosen`) is untouched.
+    // Fire only the native `change` event, without the row's `click` handler that ticks through `activate()`.
     const checkboxInput = row.find('input[type="checkbox"]')
     const checkboxEl = checkboxInput.element as HTMLInputElement
     checkboxEl.checked = true
     await checkboxInput.trigger('change')
     await wrapper.vm.$nextTick()
 
-    // The row's own aria-checked (still driven directly by `selected`,
-    // which nothing here changed) must agree with the nested Checkbox's own
-    // visual state — it must stay unselected, not flip on its own.
+    // The row's aria-checked follows `selected`, which nothing changed, and the
+    // Checkbox's own mark must agree with it instead of flipping on its own.
     expect(row.attributes('part')).not.toContain('option-selected')
     expect(wrapper.find('[role="checkbox"]').attributes('aria-checked')).toBe('false')
     expect(wrapper.find('.w-form__option-mark').attributes('data-p-checked')).toBe('false')
   })
 })
 
-describe('QuestionCardActive — single-choice is one Tab stop with a roving tabindex', () => {
+describe('QuestionCardActive: single-choice is one Tab stop with a roving tabindex', () => {
   it('starts with tabindex=0 on the first row and -1 on the rest, for a single-choice (radio) question', () => {
     const wrapper = mountCard(singleQuestionDef)
     const rows = wrapper.findAll('[role="radio"]')
@@ -580,10 +506,10 @@ describe('QuestionCardActive — single-choice is one Tab stop with a roving tab
 
     const rows = wrapper.findAll('[role="radio"]')
     expect(rows[0].attributes('tabindex')).toBe('-1')
-    expect(rows[1].attributes('tabindex')).toBe('0') // "No" — the stored answer.
+    expect(rows[1].attributes('tabindex')).toBe('0') // "No", the stored answer.
   })
 
-  it('leaves every row its own Tab stop (tabindex=0) for a multi-choice (checkbox) question — no roving', async () => {
+  it('leaves every row its own Tab stop (tabindex=0) for a multi-choice (checkbox) question: no roving', async () => {
     const wrapper = mountCard(twoQuestionDef)
     // Reach f2 (multi-choice).
     await wrapper.findAll('.w-form__option')[0].trigger('click')

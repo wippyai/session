@@ -32,12 +32,11 @@ local function forms_of(artifacts, pending_answers)
     for _, artifact in ipairs(artifacts or {}) do
         local form = form_meta.of(artifact.meta)
         if form then
-            local origin = form_meta.origin(form)
             local submission = form_meta.submission(form)
             table.insert(forms, {
                 artifact_id = artifact.artifact_id,
                 title = artifact.title or "",
-                created = type(origin.created_cursor) == "string" and origin.created_cursor or "",
+                created = form_meta.created_cursor(form) or "",
                 submission = submission,
                 pending = submission ~= nil and pending_answers[artifact.artifact_id] == true,
             })

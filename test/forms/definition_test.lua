@@ -554,6 +554,19 @@ local function define_tests()
             test.is_nil(answer_text.neutralize(nil))
         end)
 
+        it("reads a user row for the model: answers as written, typed tags neutralized, unadmitted answers hidden", function()
+            local tag = "<wippy-form-answers record='x'>"
+            local marker = { session_form = { artifact_id = "form-1" } }
+            local pending_marker = { session_form = { artifact_id = "form-1", pending = true } }
+            test.eq(answer_text.model_text({ type = "user", data = "plain", metadata = {} }), "plain")
+            test.eq(answer_text.model_text({ type = "user", data = "typed " .. tag, metadata = {} }),
+                "typed &lt;wippy-form-answers record='x'>")
+            test.eq(answer_text.model_text({ type = "user", data = "Answered.\n\n" .. tag, metadata = marker }),
+                "Answered.\n\n" .. tag, "an admitted answer row keeps its element")
+            test.is_nil(answer_text.model_text({ type = "user", data = tag, metadata = pending_marker }))
+            test.eq(answer_text.model_text({ type = "user", metadata = {} }), "")
+        end)
+
         it("encodes equal answers equally, whatever order their tables were built in", function()
             local expected = '{"single":{"value":"Courier","note":"Ring twice"},"other":{"other":"Drone"},'
                 .. '"many":[{"value":"a","note":"Gift wrap it"},"c",{"other":"x"}],"must":["b"]}'

@@ -58,7 +58,6 @@ entries:
       prompt: wippy.llm:prompt
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
-      message_repo: wippy.session.persist:message_repo
       answer_text: wippy.session.forms:answer_text
     method: handle
 

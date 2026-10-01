@@ -16,7 +16,7 @@ describe('isNotedAnswer', () => {
   })
 })
 
-describe('answerHasOption — reads all three answer shapes', () => {
+describe('answerHasOption: reads all three answer shapes', () => {
   it('matches a plain string answer', () => {
     expect(answerHasOption('a', 'a')).toBe(true)
     expect(answerHasOption('a', 'b')).toBe(false)
@@ -52,7 +52,7 @@ describe('answerNoteFor', () => {
   })
 })
 
-describe('answerOtherText / answerHasOther — unaffected by NotedAnswer', () => {
+describe('answerOtherText / answerHasOther: unaffected by NotedAnswer', () => {
   it('still finds Other text and presence alongside noted items', () => {
     const answer = [{ value: 'a', note: 'hi' }, { other: 'mine' }]
     expect(answerHasOther(answer)).toBe(true)

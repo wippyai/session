@@ -293,18 +293,8 @@ local function generate_title_now(ctx)
     }
 end
 
--- The title is a model call that only names the session, so it runs beside
--- the turn, not in it. As an ordinary bus operation it held up whatever the
--- turn queued behind it for the whole call: check_background_triggers runs
--- ahead of the tool round (a checkpoint must land before the next step), so
--- on every new session the first tool round, and the form an ask_user call
--- stores, waited several seconds for the title, and a turn without tools
--- stayed running that long after its reply. ctx.run_in_background (set by
--- the session process) runs the work in its own coroutine; the title reaches
--- the session row, the reader and the clients when the call returns. The
--- session writer serializes the row write with the turn's own writes. A
--- failed title is logged and a later step asks again. Without a background
--- runner the title is generated in place, as before.
+-- Runs the title call in ctx.run_in_background so it does not hold up the
+-- operations queued behind it; without a background runner it runs in place.
 function session_handlers.generate_title(ctx, op)
     if not ctx.config.title_function_id then
         return nil, "No title function ID configured"

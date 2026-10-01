@@ -14,7 +14,7 @@ local wait_for_boot = require("wait_for_boot")
 -- artifact_access (their request handling after authentication) with a fake
 -- request and response on the real database. Both answer another user's
 -- artifact exactly like a missing one (404, same body), so neither tells a
--- caller that a foreign id exists. The owner gets the artifact as before.
+-- caller that a foreign id exists. The owner still gets the artifact.
 
 local function fake_exchange(artifact_id: string)
     local req = {

@@ -17,64 +17,39 @@ import { REQUIRED_MESSAGE, SCALAR_HANDLERS } from './scalar-answers'
 import { codePointLength, trimAnswerText } from './text'
 
 /**
- * Client-side answer rules and serialization, one handler per field type,
- * mirroring the answer shapes and rules the Session state API applies. This
- * is a convenience mirror for the UI (canonical ordering, omission of empty
- * optional answers, trimming, an early error before a round trip). It is NOT
- * the authority on validity — the Session state API validates every
- * submission server-side and its errors are what the component ultimately
- * surfaces (422 field and form errors).
- *
- * The choice rules live here; the six V2 standard fields live in
- * `scalar-answers.ts` and are added to the same table (`HANDLERS`).
+ * The answer rules the component checks before sending, one handler per field
+ * type, and the answer shapes it sends. They repeat the Session state API's
+ * rules so the user sees an error before a round trip; the server still
+ * checks every answer, and its 422 field and form errors are what the
+ * component finally shows. The choice rules live here; the six standard
+ * fields live in `scalar-answers.ts` and join the same table (`HANDLERS`).
  */
 
-const OTHER_TEXT_MAX = 2000
-/** Server limit for a per-answer note (question-card notes, V1). */
+/** The server rejects Other text and notes longer than these, counted in Unicode code points. */
+export const OTHER_TEXT_MAX = 2000
 export const NOTE_TEXT_MAX = 1000
 
 const BLANK_OTHER_MESSAGE = 'Enter the other answer.'
-const TOO_LONG_MESSAGE = 'Use at most 2,000 characters.'
 
 /**
- * Draft shape held in the form's local edit state, keyed by field id: the
- * raw value of each control (a choice answer, the typed text of a text-like
- * or number field, a checkbox's boolean).
+ * The form's local draft, keyed by field id: the raw value of each control (a
+ * choice answer, the typed text of a text-like or number field, a checkbox's
+ * boolean).
  */
 export type AnswerDraft = Record<string, FieldAnswer | undefined>
 
-/** True once the trimmed "Other" text exceeds the server's 2,000-code-point limit. */
-export function isOtherTextTooLong(raw: string): boolean {
-  return codePointLength(trimAnswerText(raw)) > OTHER_TEXT_MAX
+/** True when the trimmed text is longer than `max` code points. An emoji counts as one, as on the server. */
+export function exceedsLength(raw: string, max: number): boolean {
+  return codePointLength(trimAnswerText(raw)) > max
 }
 
-/** True once the trimmed note exceeds the server's 1,000-code-point limit. */
-export function isNoteTextTooLong(raw: string): boolean {
-  return codePointLength(trimAnswerText(raw)) > NOTE_TEXT_MAX
+export function lengthLimitMessage(max: number): string {
+  return `Use at most ${max.toLocaleString('en-US')} characters.`
 }
 
-/**
- * Trims outer whitespace only — never truncates. Truncating silently would
- * submit different text than what the user sees; an over-length "Other"
- * answer must instead be blocked from submission (see `evaluateChoice`) so the
- * UI can ask the user to shorten it.
- */
-function normalizeOtherText(raw: string): string {
-  return trimAnswerText(raw)
-}
-
-/** Same trimming rule as `normalizeOtherText`, named for notes at call sites. */
-export function normalizeNote(raw: string): string {
-  return trimAnswerText(raw)
-}
-
-/**
- * Builds the wire shape for one chosen option: the plain value when it has
- * no note, or `{ value, note }` once a trimmed, non-blank note is attached.
- * Mirrors the server contract (blank notes come back as the plain string).
- */
+/** The wire shape of a chosen option: the plain value, or `{ value, note }` once the trimmed note is not blank. */
 export function buildNotedValue(value: string, note: string): SingleFieldAnswer {
-  const trimmed = normalizeNote(note)
+  const trimmed = trimAnswerText(note)
   return trimmed ? { value, note: trimmed } : value
 }
 
@@ -111,7 +86,7 @@ function serializeChoiceAnswer(field: ChoiceFormField, draft: FieldAnswer | unde
       })
     const otherEntry = items.find(isOtherAnswer)
     if (otherEntry) {
-      const text = normalizeOtherText(otherEntry.other)
+      const text = trimAnswerText(otherEntry.other)
       if (text.length > 0)
         ordered.push({ other: text })
     }
@@ -121,7 +96,7 @@ function serializeChoiceAnswer(field: ChoiceFormField, draft: FieldAnswer | unde
   if (draft === undefined || typeof draft === 'number' || typeof draft === 'boolean' || Array.isArray(draft))
     return undefined
   if (isOtherAnswer(draft)) {
-    const text = normalizeOtherText(draft.other)
+    const text = trimAnswerText(draft.other)
     return text.length > 0 ? { other: text } : undefined
   }
   if (isNotedAnswer(draft) && field.options.some(o => o.value === draft.value))
@@ -149,10 +124,10 @@ function evaluateChoice(field: ChoiceFormField, draft: FieldAnswer | undefined):
   // Serializing a blank Other would silently drop it, so the form asks for
   // the text instead, as the server would. It is also the more precise
   // message for a required field.
-  if (other && normalizeOtherText(other.other).length === 0)
+  if (other && trimAnswerText(other.other).length === 0)
     return { answer, errors: [{ code: 'blank', message: BLANK_OTHER_MESSAGE }] }
-  if (other && isOtherTextTooLong(other.other))
-    return { answer, errors: [{ code: 'too_long', message: TOO_LONG_MESSAGE }] }
+  if (other && exceedsLength(other.other, OTHER_TEXT_MAX))
+    return { answer, errors: [{ code: 'too_long', message: lengthLimitMessage(OTHER_TEXT_MAX) }] }
   if (answer === undefined && field.required)
     return { answer, errors: [{ code: 'required', message: REQUIRED_MESSAGE }] }
   return { answer, errors: [] }
@@ -241,21 +216,20 @@ export function draftSignature(definition: FormDefinition, draft: AnswerDraft): 
 
 // ── display ──────────────────────────────────────────────────────
 
-/** One answer shown back to the user — the review step, the post-submit summary, or a read-only field. */
+/** One answer shown back to the user in the review step, the answered summary or a read-only field. */
 export interface AnswerDisplayItem {
   label: string
-  /** A note attached to this chosen option, if any (never set for `own`). */
+  /** The note attached to a chosen option. Never set for `own`. */
   note?: string
-  /** True for the free-text "Other" entry, shown as "Own answer: …". */
+  /** True for the free-text Other entry. */
   own?: boolean
 }
 
 /**
- * Display items for one choice field's answer — options in definition order,
- * Other last — or `null` when the field has no answer at all (or is not a
- * choice field). Reads all three wire shapes (`answerNoteFor`/`isNotedAnswer`
- * in `definition.ts` back this), so it works for a live in-progress answer
- * and for `state.data` read back from the server alike.
+ * The items of one choice field's answer, options in definition order and
+ * Other last, or `null` when the field has no answer or is not a choice.
+ * Reads all three wire shapes, so it works for an answer in progress and for
+ * `state.data` read back from the server.
  */
 export function answerDisplayItems(field: FormField, answer: FieldAnswer | undefined): AnswerDisplayItem[] | null {
   if (answer === undefined || !isChoiceField(field) || typeof answer === 'number' || typeof answer === 'boolean')

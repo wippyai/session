@@ -2,23 +2,21 @@
 import { richSegments } from '../../lib/rich-text'
 
 /**
- * Renders `text` with backtick-delimited spans as inline `<code>` — plain
- * text nodes only (Vue interpolation), never `v-html`. A fragment (no
- * wrapping element), so it can sit directly inside a `question`/
- * `option-label`/`review-question` part without adding an extra node to
- * that part's content.
+ * Renders `text` with backtick spans as inline `<code>`, as text nodes only
+ * and never as `v-html`. It has no wrapping element, so it can sit directly
+ * in a part without adding a node to it.
  */
-const props = defineProps<{
+defineProps<{
   text: string
 }>()
 </script>
 
 <template>
   <template
-    v-for="(seg, i) in richSegments(props.text)"
+    v-for="(seg, i) in richSegments(text)"
     :key="i"
   >
-    <!-- Adjacent text/code segments must not gain a whitespace text node between them. -->
+    <!-- Adjacent text and code segments must not gain a whitespace text node between them. -->
     <!-- eslint-disable vue/singleline-html-element-content-newline -->
     <code
       v-if="seg.code"

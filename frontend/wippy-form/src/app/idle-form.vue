@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { FormState } from '../lib/definition'
 import { computed, ref } from 'vue'
-import { partClass } from '../lib/part-class'
+import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
 import FormHeader from './form-header.vue'
 
@@ -24,9 +24,9 @@ function formatTime(iso: string | null): string | null {
 
 const statusEl = ref<HTMLElement | null>(null)
 
-const rootPart = computed(() => partClass('card', 'answered'))
-const fieldsPart = computed(() => partClass('fields'))
-const statusPart = computed(() => partClass('status'))
+const rootPart = computed(() => partAttrs('card', 'answered'))
+const fieldsPart = computed(() => partAttrs('fields'))
+const statusPart = computed(() => partAttrs('status'))
 
 defineExpose({
   /** Moves focus to the status text after a successful submit, so focus isn't lost when the form swaps to this read-only view. */

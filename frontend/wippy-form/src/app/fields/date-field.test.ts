@@ -641,8 +641,10 @@ describe('date field: focus when the calendar closes', () => {
    * focus to the page. These tests run in a shadow root with fake timers, as the
    * web component does, and drive the keyboard path the calendar offers.
    */
+  // The calendar's keyboard focus starts on today's cell, so today is pinned to
+  // 1 October 2026 (local time) and the picked day does not depend on the clock.
   beforeEach(() => {
-    vi.useFakeTimers()
+    vi.useFakeTimers({ now: new Date(2026, 9, 1, 12) })
   })
 
   const hosts: HTMLElement[] = []

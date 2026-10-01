@@ -1,11 +1,10 @@
 /**
- * Form contract types: the definition the Session module stores
- * (`src/forms/definition.lua`) and the answers its state API accepts
- * (`src/forms/state_service.lua`). V1 forms hold `choice` fields only; V2
- * adds six standard fields (`text`, `textarea`, `number`, `email`, `date`,
- * `checkbox`). The server is the authority for validation — these types
- * exist so the component can render and serialize without guessing shapes;
- * `answers.ts` mirrors the server's rules for the client-side pre-check.
+ * Shapes of the form the Session module stores (`src/forms/definition.lua`)
+ * and of the answers its state API accepts (`src/forms/state_service.lua`).
+ * A version 1 form holds `choice` fields only; version 2 adds six standard
+ * fields (`text`, `textarea`, `number`, `email`, `date`, `checkbox`). The
+ * server validates; these types only describe the data. `answers.ts` repeats
+ * the server's rules for the check before sending.
  */
 
 /**
@@ -114,48 +113,44 @@ export interface FormDefinition<F extends FormField = FormField> {
   description?: string
   submit_label?: string
   fields: F[]
-  /**
-   * Server-only: the chat message text the assistant sees once this form is
-   * answered. Purely informational for the backend/prompt side — the
-   * component never reads or displays it.
-   */
+  /** The chat message text the assistant sees once the form is answered. The component never reads it. */
   answered_message?: string
 }
 
 /** A definition whose every field is a `choice`: the question card renders it. */
 export type ChoiceFormDefinition = FormDefinition<ChoiceFormField>
 
-/** True for a non-empty definition made only of `choice` fields (a V1 form). */
+/** True for a non-empty definition made only of `choice` fields (a version 1 form). */
 export function isChoiceDefinition(definition: FormDefinition): definition is ChoiceFormDefinition {
   return definition.fields.length > 0 && definition.fields.every(isChoiceField)
 }
 
-/** One "Other" answer entry — the free-text, not-one-of-the-options shape. */
+/** The free-text answer that is not one of the options. */
 export interface OtherAnswer {
   other: string
 }
 
-/** A chosen option value with a note attached (question-card notes, V1). */
+/** A chosen option with a note attached. */
 export interface NotedAnswer {
   value: string
   note: string
 }
 
-/** One item within a single field's answer: a plain option value, a noted option, or Other. */
+/** One item of a field's answer: a plain option value, a noted option, or Other. */
 export type SingleFieldAnswer = string | NotedAnswer | OtherAnswer
 
-/** A choice field's answer: one item (single choice), or an array of items (multiple choice). */
+/** A choice field's answer: one item for single choice, an array of items for multiple choice. */
 export type ChoiceAnswer = SingleFieldAnswer | Array<SingleFieldAnswer>
 
 /**
- * Any field's answer. On the wire a text-like field answers with a string, a
+ * Any field's answer. When sent, a text-like field answers with a string, a
  * number field with a JSON number and a checkbox with a boolean. A form's
- * local draft holds the raw control value instead (a number field's draft is
- * the typed text, so a strict parser can judge exactly what was typed).
+ * local draft holds the raw control value instead: a number field's draft is
+ * the typed text, so a strict parser can judge exactly what was typed.
  */
 export type FieldAnswer = ChoiceAnswer | number | boolean
 
-/** Answers keyed by field id. Optional unanswered fields are simply omitted. */
+/** Answers keyed by field id. Unanswered optional fields are omitted. */
 export type FormAnswers = Record<string, FieldAnswer>
 
 export interface FieldError {
@@ -195,7 +190,7 @@ export interface SubmitEnvelope {
   answers: FormAnswers
 }
 
-/** 200 response body (accepted, including an exact replay). */
+/** 200 response body, including an exact replay. */
 export interface SubmitAccepted {
   success: true
   artifact_id: string
@@ -209,19 +204,10 @@ export interface SubmitAccepted {
   replayed: boolean
 }
 
-/**
- * What `artifactState(id).submit()` resolves with. Every failure, including a
- * 422 with field errors, rejects with the Host's `ArtifactStateError`.
- */
+/** What `artifactState(id).submit()` resolves with. Every failure, including a 422 with field errors, rejects with the Host's `ArtifactStateError`. */
 export type SubmitResult = SubmitAccepted
 
-/** Shape of a 409 conflict body, when the transport surfaces it. */
-export interface SubmitConflict {
-  code: 'request_conflict' | 'already_submitted' | 'version_conflict'
-  message?: string
-}
-
-/** True for the `{ other: text }` shape of an own answer (the one guard for it; also read from a loaded or drafted answer). */
+/** True for the `{ other: text }` shape of an own answer, in a loaded or a drafted answer. */
 export function isOtherAnswer(value: unknown): value is OtherAnswer {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as OtherAnswer).other === 'string'
 }
@@ -232,11 +218,7 @@ export function isNotedAnswer(value: unknown): value is NotedAnswer {
     && typeof (value as NotedAnswer).value === 'string' && typeof (value as NotedAnswer).note === 'string'
 }
 
-export function isFieldError(value: unknown): value is FieldError {
-  return !!value && typeof value === 'object' && typeof (value as FieldError).code === 'string'
-}
-
-/** The option value a single answer item selects — a plain string, or a `{value, note}`'s `value`. */
+/** The option value an answer item selects, or null for Other. */
 function itemOptionValue(item: SingleFieldAnswer): string | null {
   if (typeof item === 'string')
     return item
@@ -245,7 +227,7 @@ function itemOptionValue(item: SingleFieldAnswer): string | null {
   return null
 }
 
-/** True when `answer` selects `optionValue` for a single- or multi-choice field (noted or not). */
+/** True when `answer` selects `optionValue`, with or without a note. */
 export function answerHasOption(answer: ChoiceAnswer | undefined, optionValue: string): boolean {
   if (answer === undefined)
     return false
@@ -254,7 +236,7 @@ export function answerHasOption(answer: ChoiceAnswer | undefined, optionValue: s
   return itemOptionValue(answer) === optionValue
 }
 
-/** Extracts the "Other" free-text value from an answer, if present. */
+/** The Other text of an answer, or an empty string. */
 export function answerOtherText(answer: ChoiceAnswer | undefined): string {
   if (answer === undefined)
     return ''
@@ -265,7 +247,7 @@ export function answerOtherText(answer: ChoiceAnswer | undefined): string {
   return isOtherAnswer(answer) ? answer.other : ''
 }
 
-/** True when `answer` includes an "Other" entry. */
+/** True when `answer` includes an Other entry. */
 export function answerHasOther(answer: ChoiceAnswer | undefined): boolean {
   if (answer === undefined)
     return false
@@ -274,7 +256,7 @@ export function answerHasOther(answer: ChoiceAnswer | undefined): boolean {
   return isOtherAnswer(answer)
 }
 
-/** The note attached to `optionValue` within `answer`, if any (empty string when none). */
+/** The note attached to `optionValue` within `answer`, or an empty string. */
 export function answerNoteFor(answer: ChoiceAnswer | undefined, optionValue: string): string {
   if (answer === undefined)
     return ''

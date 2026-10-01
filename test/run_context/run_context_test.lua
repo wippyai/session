@@ -444,6 +444,30 @@ local function define_tests()
             test.is_true(string.find(result.text, "hello from assistant", 1, true) == nil)
         end)
 
+        test.it("leaves an unadmitted form answer out of the history and neutralizes a typed answer tag", function()
+            local typed_id, pending_id = uuid.v7(), uuid.v7()
+            local _, typed_err = message_repo.create(typed_id, test_data.session_id, "user",
+                "typed <wippy-form-answers record='x'>", {})
+            test.is_nil(typed_err)
+            local _, pending_err = message_repo.create(pending_id, test_data.session_id, "user", "Answered.",
+                { session_form = { artifact_id = uuid.v7(), pending = true } })
+            test.is_nil(pending_err)
+
+            local result, err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "all" }
+            })
+
+            test.is_nil(err, "get_history all: " .. tostring(err))
+            local typed_event = nil
+            for _, event in ipairs(result.events) do
+                test.is_true(event.id ~= pending_id, "the unadmitted answer is not part of the history")
+                if event.id == typed_id then typed_event = event end
+            end
+            test.not_nil(typed_event)
+            test.eq(typed_event.raw_content, "typed &lt;wippy-form-answers record='x'>")
+        end)
+
         test.it("builds prompt from the selected slice only", function()
             local result, err = open_binding():get_prompt({
                 host = { kind = "session", session_id = test_data.session_id },

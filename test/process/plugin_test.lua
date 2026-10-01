@@ -2,6 +2,7 @@ local test = require("test")
 local plugin = require("plugin")
 local session = require("session")
 local message_handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local writer = require("writer")
 local uuid = require("uuid")
 local json = require("json")
@@ -457,7 +458,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
         if mid_turn then
             -- A real step builds its prompt first: steering that arrives
             -- while the model works is applied by the next step.
-            local _, apply_err = message_handlers.apply_pending_inputs(ctx, op.from_user and op.message_id or nil)
+            local _, apply_err = answer_admission.apply_pending_inputs(ctx, op.from_user and op.message_id or nil)
             if apply_err then error(apply_err) end
             if agent_steps == 1 then
                 step_parked = true
@@ -1439,7 +1440,7 @@ local function define_tests()
             add_pending_answer(session_id)
             local started = {}
             local run = run_plugin_lifecycle(actor, session_id, "resume-hub", {
-                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} }
+                { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} }
             }, nil, { open = false, cancel_plugin = true, on_spawn = function(init)
                 table.insert(started, init.session_id)
             end })
@@ -1459,7 +1460,7 @@ local function define_tests()
             add_pending_answer(session_id)
             local run = run_plugin_lifecycle(actor, session_id, "nudge-hub", {}, nil, {
                 cancel_plugin = true,
-                after_open = { { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} } },
+                after_open = { { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} } },
             })
             cleanup_session_fixture(session_id, context_id)
             test.is_nil(run.error)
@@ -1478,7 +1479,7 @@ local function define_tests()
             local keeper_id, keeper_context = create_session_fixture(actor, "Keeps the plugin", consts.STATUS.IDLE)
             local failing_id, failing_context = create_session_fixture(actor, "Fails to start", consts.STATUS.IDLE)
             add_pending_answer(failing_id)
-            local resume = { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} }
+            local resume = { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} }
             local run = run_plugin_script(actor, "backoff-hub", {
                 { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = keeper_id } },
                 resume,
@@ -1539,8 +1540,8 @@ local function define_tests()
                 end,
             })
             local run = run_plugin_lifecycle(actor, stale_ids[1], "stale-hub", {
-                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} },
-                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} },
+                { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} },
+                { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} },
             }, nil, { open = false, cancel_plugin = true })
             restore_mock("process.registry")
             session_repo.list_by_user_status = original_list
@@ -1771,7 +1772,7 @@ local function define_tests()
             session_repo.list_by_user_status = function() return { sessions = {} } end
             local started = {} :: {string}
             local later = run_plugin_lifecycle(actor, session_id, "answer-stop-hub", {
-                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} }
+                { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} }
             }, nil, { open = false, cancel_plugin = true, on_spawn = function(init)
                 table.insert(started, init.session_id)
             end })

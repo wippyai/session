@@ -1,44 +1,21 @@
 local definition = require("definition")
 local field_values = require("field_values")
 local ordered_json = require("ordered_json")
+local message_repo = require("message_repo")
 
--- Builds the text of the user message that carries an accepted form answer
--- (spec section 13). The server writes it from the immutable definition and
--- the validated answers; the browser never supplies it.
+-- Text of the user message that carries an accepted form answer. The server
+-- builds it from the immutable definition and the validated answers, and the
+-- browser never supplies it. It has this shape:
 --
---   <answered_message, or: Answered “<title>”.>
+--   <answered_message, or Answered “<title>”.>
 --
---   <wippy-form-answers record='{"form_id":"<id>","form_version":1,"title":"<title>","late":false,"answers":{"<field id>":{"question":"<label>","answer":<answer>},...}}'>
+--   <wippy-form-answers record='{...}'>
 --   </wippy-form-answers>
 --
--- The user sees only the sentence: the answered form card above the message
--- already shows the answers, and the element has no content, so nothing else
--- shows whether or not the wippy-form-answers component has loaded (text
--- between the tags would show while it loads, or for good if the sanitizer
--- drops an unknown tag). The agent reads the whole text. The sentence is the
--- definition's answered_message, written by the agent when it asked, so no
--- model call is needed at answer time.
---
--- The JSON is self-contained, so the agent needs nothing else to act on it:
--- <answer> is {"value","label"} for a chosen option (plus "note" when the
--- user added one), {"other"} for the user's own answer, a list of those for a
--- several-answer question, the text, number or true/false the user gave for a
--- standard field (text, textarea, email, date, number, checkbox), or null for
--- a question left unanswered. A late answer adds "late_notice" telling the
--- agent to ask for fresh confirmation. "form_version" is 1 for a form of
--- choices only and 2 for a form with a standard field.
--- The stored submission keeps only values (definition.encode_answers); this
--- record is derived from it and the immutable definition. read_form returns
--- the same record.
---
--- The opening tag fills a line of its own and the closing tag the next, a
--- CommonMark HTML block (type 7, which needs the open tag to end its line),
--- so Markdown leaves it alone and wraps no paragraph around it; JSON never
--- contains a raw line break. User text cannot end the attribute, close the
--- tag or add markup: "'", "<", ">" and "&" inside the record are written as
--- \u0027, \u003c, \u003e and \u0026, which JSON reads back as the original
--- characters, so the attribute value needs no HTML entities and is exactly
--- the JSON.
+-- The user sees only the sentence. The element is empty, so nothing shows if
+-- its component has not loaded or the sanitizer drops it. The tag sits on its
+-- own lines so Markdown leaves it alone, and "'", "<", ">" and "&" inside the
+-- record are written as \u escapes so user text cannot end the attribute.
 
 local answer_text = {}
 
@@ -46,14 +23,8 @@ answer_text.TAG = "wippy-form-answers"
 answer_text.LATE_NOTICE = "The conversation moved on before this answer. Use it as context "
     .. "and ask for fresh confirmation before acting on the earlier request."
 
--- Chat renders user messages as Markdown, so an answered_message or title
--- such as "<img ...>", "**x**" or "[link](url)" would become markup in the
--- user's own message, and one starting with "#", "- ", "1. ", ">", or a bare
--- "---"/"===" line would become a heading, list, blockquote or rule instead
--- of the first line of a plain paragraph. Line breaks are folded to spaces
--- so the sentence stays one paragraph and only its very start needs the
--- block-syntax check; backslash escapes (CommonMark) make each character
--- literal.
+-- Escapes Markdown so agent-written text shows as one plain paragraph: line
+-- breaks fold to spaces and block syntax at the line start is escaped.
 local function plain(text: any): string
     local folded = string.gsub(tostring(text), "[%c]+", " ")
     -- Collapse a leading run of spaces to one, so the line cannot pass for
@@ -93,7 +64,19 @@ function answer_text.neutralize(text: any): any
     return (string.gsub(text, TAG_PATTERN, "&lt;%1%2"))
 end
 
-local ATTRIBUTE_SAFE ={ ["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }
+-- The text of a stored user row as the model and the checkpoint summary read
+-- it, or nil for a form answer the session has not admitted yet, which
+-- neither may show. A server-written answer row keeps its answer element,
+-- and the same tag in typed text is neutralized.
+function answer_text.model_text(row: any): string?
+    if message_repo.is_pending_answer(row) then return nil end
+    local text = row.data
+    if type(text) ~= "string" then return "" end
+    if message_repo.is_form_answer(row) then return text end
+    return answer_text.neutralize(text) :: string
+end
+
+local ATTRIBUTE_SAFE = {["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }
 
 -- Only valid on encoded JSON: these characters occur there only inside
 -- strings, where the \u escapes decode to the same text.
@@ -121,8 +104,17 @@ local function record_item(labels: {[string]: string}, item: any): string
     return ordered_json.object({ { "other", item.other } })
 end
 
--- Self-contained answer record: every question with its text and the
--- answer (value, label, note), in definition order, on one line.
+-- Self-contained answer record, on one line: every question in definition
+-- order with its text and its answer, so the agent needs nothing else to act
+-- on it. An answer is {"value","label"} for a chosen option (plus "note"
+-- when the user added one), {"other"} for the user's own answer, a list of
+-- those for a several-answer question, the text, number or true/false the
+-- user gave for a standard field (text, textarea, email, date, number,
+-- checkbox), or null for a question left unanswered. A late answer adds
+-- "late_notice". "form_version" is 1 for a form of choices only and 2 for a
+-- form with a standard field. The stored submission keeps only values
+-- (definition.encode_answers), so the record is derived from it and the
+-- immutable definition. read_form returns the same record.
 -- params: { artifact_id, definition (normalized), answers (normalized, or
 -- nil), late }
 function answer_text.record_json(params: any): string

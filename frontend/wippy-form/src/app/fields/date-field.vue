@@ -4,7 +4,7 @@ import type { DateFormField, FieldAnswer, FieldError } from '../../lib/definitio
 import DatePicker from 'primevue/datepicker'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useThemeModeClass } from '../../composables/use-theme-mode-class'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 import { isValidIsoDate } from '../../lib/scalar-answers'
 import FieldShell from './field-shell.vue'
 
@@ -197,8 +197,8 @@ function onBlur(event: { originalEvent: Event, value: string }) {
 }
 
 // The `date` state is what the stylesheet bounds the control's width by.
-const inputPart = computed(() => partClass('field-input', 'date'))
-const calendarPart = computed(() => partClass('field-calendar'))
+const inputPart = computed(() => partAttrs('field-input', 'date'))
+const calendarPart = computed(() => partAttrs('field-calendar'))
 
 const picker = ref<ComponentPublicInstance | null>(null)
 

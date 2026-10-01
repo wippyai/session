@@ -2,7 +2,7 @@
 import type { EmailFormField, FieldAnswer, FieldError, NumberFormField, TextFormField } from '../../lib/definition'
 import InputText from 'primevue/inputtext'
 import { computed, ref } from 'vue'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 import FieldShell from './field-shell.vue'
 
 /**
@@ -69,7 +69,7 @@ const attrs = computed(() => {
 })
 const placeholder = computed(() => props.field.type === 'text' ? props.field.placeholder : undefined)
 const text = computed(() => typeof props.modelValue === 'string' ? props.modelValue : '')
-const inputPart = computed(() => partClass('field-input'))
+const inputPart = computed(() => partAttrs('field-input'))
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })

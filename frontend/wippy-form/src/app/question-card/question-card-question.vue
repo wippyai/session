@@ -1,37 +1,32 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
 import type { ChoiceFormField } from '../../lib/definition'
-import Button from 'primevue/button'
-import Message from 'primevue/message'
-import { Icon } from '@iconify/vue'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
-import { isNoteTextTooLong, isOtherTextTooLong } from '../../lib/answers'
+import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX } from '../../lib/answers'
+import { joinIds } from '../../lib/aria'
+import { optionIndexOf } from '../../lib/focus-key'
+import { partAttrs, partSelector } from '../../lib/part-attrs'
 import { trimAnswerText } from '../../lib/text'
-import { partClass } from '../../lib/part-class'
+import FormMessage from '../form-message.vue'
 import QuestionCardComposer from './question-card-composer.vue'
+import QuestionCardLengthAlert from './question-card-length-alert.vue'
 import QuestionCardOption from './question-card-option.vue'
 import QuestionCardRichText from './question-card-rich-text.vue'
+import QuestionCardSendButton from './question-card-send-button.vue'
 
-/** One question's body: notice, hint, the options list (+ Other), footer send (multi without Other), error, keyboard hint. */
+/** One question: the notice, description and hint, the answer rows with Other, the send button, the error and the keyboard hint. */
 const props = defineProps<{
   question: ChoiceFormField
   controller: QuestionCardController
   qid: string
   stale: boolean
   serverError: string
-  /** True while offline or a submit is already in flight — disables the explicit send actions. */
+  /** The ids of the card-wide error messages on screen. Each answer control names them in `aria-describedby`, so the control that has focus reads them. */
+  cardErrorIds?: string
+  /** True while offline or a send is in flight. "Send" stays focusable but ignores activation. */
   disabled?: boolean
 }>()
-
-const noticePart = computed(() => partClass('notice'))
-const descriptionPart = computed(() => partClass('description'))
-const hintPart = computed(() => partClass('hint'))
-const optionsPart = computed(() => partClass('options'))
-const footerPart = computed(() => partClass('footer'))
-const sendPart = computed(() => partClass('send'))
-const errorPart = computed(() => partClass('error'))
-const keysPart = computed(() => partClass('keys'))
 
 const hint = computed(() => {
   const parts: string[] = []
@@ -42,116 +37,88 @@ const hint = computed(() => {
   return parts.join(' ')
 })
 
+const answer = computed(() => props.controller.ans(props.question))
 const displayError = computed(() => props.controller.error.value || props.serverError || '')
 
 function keyLabelFor(index: number): string | null {
   return index < MAX_KEYED_ROWS ? String(index + 1) : null
 }
-const otherKeyLabel = computed(() => {
-  const n = props.question.options.length + 1
-  return n <= MAX_KEYED_ROWS ? String(n) : null
-})
+const otherKeyLabel = computed(() => keyLabelFor(props.question.options.length))
 
-function answerState() {
-  return props.controller.ans(props.question)
-}
-
-const otherRowPart = computed(() => {
-  const a = answerState()
-  const selected = props.question.multiple ? trimAnswerText(a.other) !== '' : (a.useOther && a.done)
-  return partClass('option', 'other', selected && 'selected')
-})
-const otherEnabled = computed(() => {
-  const a = answerState()
-  return trimAnswerText(a.other) !== '' || (props.question.multiple && a.chosen.length > 0)
-})
-// Client-side mirror of the server's 2,000-code-point Other limit — the
-// same pre-check the note composer already applies (isNoteTextTooLong,
-// 1,000), so a too-long Other answer is caught before a round trip
-// instead of only surfacing as a 422.
-const otherTooLong = computed(() => isOtherTextTooLong(answerState().other))
+const otherSelected = computed(() => props.question.multiple ? trimAnswerText(answer.value.other) !== '' : (answer.value.useOther && answer.value.done))
+const otherEnabled = computed(() => trimAnswerText(answer.value.other) !== '' || (props.question.multiple && answer.value.chosen.length > 0))
+const otherTooLong = computed(() => exceedsLength(answer.value.other, OTHER_TEXT_MAX))
 const otherErrorId = `${props.qid}-other-err`
-// Links the Other textarea's aria-invalid/aria-describedby to whichever
-// role="alert" text actually applies to it right now — the too-long notice
-// and/or the question's server/validation error (`displayError`, already
-// shown in the Message with id `${qid}-err`) — instead of leaving both
-// alerts unlinked to any control.
-const otherDescribedBy = computed(() => {
-  const ids: string[] = []
-  if (otherTooLong.value)
-    ids.push(otherErrorId)
-  if (displayError.value)
-    ids.push(`${props.qid}-err`)
-  return ids.join(' ') || undefined
-})
+const errorId = `${props.qid}-err`
+
+// The errors that apply to every answer control of this question: its own
+// error and the card-wide ones. The control that has focus names them in
+// `aria-describedby`, so the error is read with the control and not only when
+// it appears.
+const errorIds = computed(() => joinIds(displayError.value && errorId, props.cardErrorIds))
+// The Other box names its own length alert as well.
+const otherDescribedBy = computed(() => joinIds(otherTooLong.value && otherErrorId, errorIds.value))
+// `aria-invalid` marks a problem with what was entered. A failed send or a
+// form-level error describes the control but does not make it invalid.
 const otherInvalid = computed(() => otherTooLong.value || !!displayError.value)
 
 function onOtherWrapperClick(event: MouseEvent) {
-  const target = event.target as HTMLElement
-  if (!target.closest('.w-form__composer'))
+  if (!(event.target as HTMLElement).closest(partSelector('composer')))
     props.controller.requestFocus('other')
 }
 
 /**
- * Roving tabindex for a single-choice (`role="radio"`) question — the
- * WAI-ARIA radio group pattern: the group is ONE Tab stop, and arrow keys
- * (already handled in question-card-active.vue's keydown handler, which
- * moves DOM focus between rows) move within it. `question-card-option.vue`
- * stays the one place that decides `tabindex` (0 for multi-choice rows
- * always; for a radio row, 0 only for the index this ref names). Reset
- * whenever the QUESTION changes (this component persists across question-to
- * -question navigation, only its `question` prop changes) to the already-
- * chosen option, or the first row if none is chosen yet.
+ * The roving tab stop of a single-answer question: the group is one Tab stop and
+ * the arrow keys, handled by the card, move focus within it. A row that
+ * receives focus by any means takes the stop. It starts on the chosen row, or
+ * the first, and resets when the question changes, because this component stays
+ * mounted while only its `question` prop changes.
  */
 const rovingIndex = ref(0)
 watch(() => props.question.id, () => {
   if (props.question.multiple)
     return
-  const a = answerState()
+  const a = answer.value
   const chosenIndex = a.useOther ? -1 : props.question.options.findIndex(o => o.value === a.chosen[0])
   rovingIndex.value = chosenIndex >= 0 ? chosenIndex : 0
 }, { immediate: true })
 
-/** Any option row actually receiving DOM focus (click, arrow-key `.focus()`, or Tab) moves the roving stop with it. */
 function onOptionsFocusIn(event: FocusEvent) {
   if (props.question.multiple)
     return
-  const focusAttr = (event.target as HTMLElement)?.dataset?.focus ?? ''
-  if (focusAttr.startsWith('opt-'))
-    rovingIndex.value = Number(focusAttr.slice(4))
+  const index = optionIndexOf((event.target as HTMLElement)?.dataset?.focus)
+  if (index >= 0)
+    rovingIndex.value = index
 }
 </script>
 
 <template>
   <p
     v-if="stale"
-    :part="noticePart.part"
-    :class="noticePart.class"
+    v-bind="partAttrs('notice')"
   >
     Asked earlier. You can still answer; the assistant uses it as context and asks again before acting on the
     earlier request.
   </p>
   <p
     v-if="question.description"
-    :part="descriptionPart.part"
-    :class="descriptionPart.class"
+    v-bind="partAttrs('description')"
   >
     <QuestionCardRichText :text="question.description" />
   </p>
   <p
     v-if="hint"
-    :part="hintPart.part"
-    :class="hintPart.class"
+    v-bind="partAttrs('hint')"
   >
     {{ hint }}
   </p>
 
   <div
-    :part="optionsPart.part"
-    :class="optionsPart.class"
+    v-bind="partAttrs('options')"
     :role="question.multiple ? 'group' : 'radiogroup'"
     :aria-labelledby="qid"
-    :aria-describedby="`${qid}-err`"
+    :aria-describedby="displayError ? errorId : undefined"
+    :aria-invalid="!question.multiple && displayError ? 'true' : undefined"
     @focusin="onOptionsFocusIn"
   >
     <QuestionCardOption
@@ -160,13 +127,15 @@ function onOptionsFocusIn(event: FocusEvent) {
       :option="option"
       :index="i"
       :multiple="question.multiple"
-      :selected="question.multiple ? controller.ans(question).chosen.includes(option.value) : (!controller.ans(question).useOther && controller.ans(question).chosen[0] === option.value)"
-      :note="trimAnswerText(controller.ans(question).notes[option.value] || '')"
-      :editing="controller.ans(question).noteOpen === option.value"
-      :note-draft="controller.ans(question).notes[option.value] || ''"
+      :selected="question.multiple ? answer.chosen.includes(option.value) : (!answer.useOther && answer.chosen[0] === option.value)"
+      :note="trimAnswerText(answer.notes[option.value] || '')"
+      :editing="answer.noteOpen === option.value"
+      :note-draft="answer.notes[option.value] || ''"
       :key-label="keyLabelFor(i)"
-      :note-too-long="isNoteTextTooLong(controller.ans(question).notes[option.value] || '')"
+      :note-too-long="exceedsLength(answer.notes[option.value] || '', NOTE_TEXT_MAX)"
       :disabled="!!disabled"
+      :described-by="errorIds"
+      :invalid="!!displayError"
       :roving-tabbable="i === rovingIndex"
       @activate="controller.activate(question, i)"
       @toggle-note="controller.toggleNote(question, option.value)"
@@ -177,13 +146,12 @@ function onOptionsFocusIn(event: FocusEvent) {
 
     <div
       v-if="question.allow_other"
-      :part="otherRowPart.part"
-      :class="otherRowPart.class"
+      v-bind="partAttrs('option', 'other', otherSelected && 'selected')"
       @click="onOtherWrapperClick"
     >
       <QuestionCardComposer
         kind="other"
-        :model-value="answerState().other"
+        :model-value="answer.other"
         :placeholder="question.multiple ? 'Add your own answer (optional). Enter sends.' : 'Type your own answer'"
         label="Your own answer"
         :send-label="question.multiple ? 'Send the ticked answers' : 'Send this answer'"
@@ -191,72 +159,51 @@ function onOptionsFocusIn(event: FocusEvent) {
         :invalid="otherInvalid"
         :described-by="otherDescribedBy"
         data-focus="other"
-        @update:model-value="(v) => { answerState().other = v }"
+        @update:model-value="(v) => { answer.other = v }"
         @send="controller.sendOther(question)"
         @escape="controller.requestFocus('card')"
       />
       <kbd
         v-if="otherKeyLabel"
-        part="option-key"
-        class="w-form__option-key"
+        v-bind="partAttrs('option-key')"
         aria-hidden="true"
       >{{ otherKeyLabel }}</kbd>
       <span v-else />
-      <p
+      <QuestionCardLengthAlert
         v-if="otherTooLong"
         :id="otherErrorId"
-        :part="errorPart.part"
-        :class="errorPart.class"
-        role="alert"
-      >
-        Use at most 2,000 characters.
-      </p>
+        :max="OTHER_TEXT_MAX"
+      />
     </div>
   </div>
 
   <div
     v-if="question.multiple && !question.allow_other"
-    :part="footerPart.part"
-    :class="footerPart.class"
+    v-bind="partAttrs('footer')"
   >
-    <Button
-      type="button"
-      :part="sendPart.part"
-      :class="sendPart.class"
-      data-focus="send"
-      :disabled="controller.ans(question).chosen.length === 0 || disabled"
-      @click="controller.commit(question)"
-    >
-      Send
-      <Icon
-        icon="tabler:send-2"
-        aria-hidden="true"
-      />
-    </Button>
+    <QuestionCardSendButton
+      name="send"
+      label="Send"
+      :blocked="disabled"
+      :nothing-to-send="answer.chosen.length === 0"
+      :described-by="errorIds"
+      @send="controller.commit(question)"
+    />
   </div>
 
-  <Message
+  <FormMessage
     v-if="displayError"
-    :id="`${qid}-err`"
+    :id="errorId"
+    v-bind="partAttrs('error')"
     severity="error"
     variant="simple"
     size="small"
-    :part="errorPart.part"
-    :class="errorPart.class"
     role="alert"
   >
     {{ displayError }}
-  </Message>
-  <p
-    v-else
-    :id="`${qid}-err`"
-    class="hidden"
-  />
+  </FormMessage>
 
-  <p
-    :part="keysPart.part"
-    :class="keysPart.class"
-  >
+  <p v-bind="partAttrs('keys')">
     {{ controller.keysText(question) }}
   </p>
 </template>

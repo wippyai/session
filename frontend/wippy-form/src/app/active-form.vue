@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/definition'
+import type { SubmitBanner } from '../lib/submit-error'
 import Button from 'primevue/button'
-import Message from 'primevue/message'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
-import { partClass } from '../lib/part-class'
+import { ERROR_TEXT_CLASS } from '../lib/error-text'
+import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
 import FormHeader from './form-header.vue'
+import FormMessage from './form-message.vue'
 
 /**
  * The fields form: every field of the definition as its own control (choice
@@ -22,8 +24,8 @@ import FormHeader from './form-header.vue'
 const props = defineProps<{
   state: FormState
   submitting: boolean
-  banner: { message: string, retryable?: boolean } | null
-  /** True while the browser is offline — blocks Submit; a submission can only fail with no network. */
+  banner: SubmitBanner | null
+  /** True while the browser is offline. It blocks Submit, because a submission can only fail with no network. */
   offline?: boolean
 }>()
 
@@ -127,6 +129,16 @@ function setServerErrors(errors: Record<string, FieldError[]> | undefined, formL
     announceErrorSummary()
 }
 
+// Starting a send clears the previous server errors, as it does the banner, so
+// a resent answer, such as one sent again with Retry, never shows an old 422
+// next to the new outcome.
+watch(() => props.submitting, (sending) => {
+  if (!sending)
+    return
+  fieldErrors.value = {}
+  formErrors.value = []
+})
+
 // A changed answer drops that question's errors; the next submit re-checks it.
 function updateField(id: string, value: FieldAnswer | undefined) {
   draft[id] = value
@@ -166,11 +178,11 @@ watch(() => props.banner, (banner) => {
   statusMessage.value = banner.message
 })
 
-const rootPart = computed(() => partClass('card'))
-const fieldsPart = computed(() => partClass('fields'))
-const noticePart = computed(() => partClass('notice'))
-const formErrorPart = computed(() => partClass('fields-error'))
-const sendPart = computed(() => partClass('send'))
+const rootPart = computed(() => partAttrs('card'))
+const fieldsPart = computed(() => partAttrs('fields'))
+const noticePart = computed(() => partAttrs('notice'))
+const formErrorPart = computed(() => partAttrs('fields-error'))
+const sendPart = computed(() => partAttrs('send'))
 
 defineExpose({
   setServerErrors,
@@ -235,7 +247,7 @@ defineExpose({
     <ul
       v-if="formErrors.length > 0"
       :part="formErrorPart.part"
-      :class="`${formErrorPart.class} text-danger-600 dark:text-danger-400`"
+      :class="`${formErrorPart.class} ${ERROR_TEXT_CLASS}`"
     >
       <li
         v-for="(err, i) in formErrors"
@@ -245,25 +257,15 @@ defineExpose({
       </li>
     </ul>
 
-    <Message
+    <FormMessage
       v-if="banner"
       :severity="banner.retryable ? 'warn' : 'error'"
-      :closable="false"
+      :retry="banner.retryable"
       :pt="QUIET_MESSAGE_PT"
+      @retry="emit('retry')"
     >
-      <div class="flex items-center gap-2">
-        <span>{{ banner.message }}</span>
-        <Button
-          v-if="banner.retryable"
-          type="button"
-          link
-          size="small"
-          @click="emit('retry')"
-        >
-          Retry
-        </Button>
-      </div>
-    </Message>
+      {{ banner.message }}
+    </FormMessage>
 
     <div>
       <Button

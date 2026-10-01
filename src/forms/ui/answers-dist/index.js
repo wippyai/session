@@ -450,27 +450,15 @@ class J extends K {
   static get wippyConfig() {
     return {
       propsSchema: B.wippy.props,
-      // Nothing is ever visible, so no platform CSS is needed at all.
       hostCssKeys: [],
       inlineCss: M,
-      // This element must never receive host/app customCSS either — it has
-      // nothing to style, and skipping the injection keeps it that way
-      // even if a facade or page customCSS rule happened to target the tag.
       customCss: !1
     };
   }
   /**
-   * Parses this element's `record` attribute (the raw JSON payload
-   * written by the Session server) and returns the parsed record, or
-   * `null` when the attribute is missing, empty, or not valid JSON. Text
-   * content is never read — see the class doc for why the record lives
-   * in an attribute instead. Never throws.
-   *
-   * Deliberately NOT named `record`: the Host's chat compiles message HTML
-   * as a Vue template, and Vue assigns a prop on a custom element as a DOM
-   * property whenever the element has one by that name (`key in el`). A
-   * `record` getter swallows the value, so the attribute is never set. The
-   * element must not own a `record` property.
+   * The parsed `record` attribute, or `null` when it is missing, empty or not a
+   * JSON object. It is not named `record`, because an element with a `record`
+   * property would swallow the attribute the Host's chat sets.
    */
   get answerRecord() {
     return D(this.getAttribute("record"));

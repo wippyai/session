@@ -3,33 +3,28 @@ import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import InputGroup from 'primevue/inputgroup'
 import Textarea from 'primevue/textarea'
-import { computed } from 'vue'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 
 /**
- * The joined text input + send button used for both a per-answer note and
- * the Other free-text row: PrimeVue `InputGroup` (the joined-border/radius
- * treatment) wrapping an auto-resizing `Textarea` and an icon-only `Button`
- * — the "joined input" from the compliance brief, all P0 PrimeVue. Enter
- * sends (when `enabled`); Shift+Enter is a newline (native textarea
- * behavior); Escape asks the parent to leave the box via `escape` — this
- * component does not decide what "leave" means (close a note vs. defocus
- * Other), since that differs by `kind` and the parent owns focus.
+ * The text box with a send button, joined in a PrimeVue `InputGroup`, used for
+ * a note and for the Other answer. Enter sends when `enabled`, Shift+Enter
+ * starts a new line, and Escape emits `escape` for the parent to decide what
+ * leaving the box means, since that differs by `kind`.
  */
 const props = defineProps<{
   kind: 'note' | 'other'
   modelValue: string
   placeholder: string
-  /** Accessible name for the textarea — named `label`, not `ariaLabel`, only to keep Vue's template prop resolution unambiguous. */
+  /** The accessible name of the textarea. Named `label` because `ariaLabel` is ambiguous in a Vue template prop. */
   label: string
   sendLabel: string
-  /** Whether the send button may fire right now (e.g. non-blank text, or something already ticked). */
+  /** Whether the send button may fire, for example with non-blank text. */
   enabled: boolean
-  /** Value for the textarea's `data-focus` attribute — how the keyboard/focus layer finds this control. */
+  /** The `data-focus` value of the textarea, which the card's focus handling looks up. */
   dataFocus: string
-  /** True while a `role="alert"` error (too-long, or a server field error) applies to this textarea. */
+  /** True while an alert, such as a length error, applies to the textarea. */
   invalid?: boolean
-  /** Id(s) of the `role="alert"` element(s) that explain `invalid` — set on the textarea's `aria-describedby`. */
+  /** The ids of the alerts that explain `invalid`. */
   describedBy?: string
 }>()
 
@@ -39,19 +34,13 @@ const emit = defineEmits<{
   'escape': []
 }>()
 
-const wrapper = computed(() => partClass('composer', props.kind))
-const inputPart = computed(() => partClass(`${props.kind}-input`))
-const sendPart = computed(() => partClass(`${props.kind}-send`))
-
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault()
     if (props.enabled)
       emit('send')
   }
-  // `!event.isComposing`: an IME uses Escape to cancel the composition
-  // in progress, not to leave the box — intercepting it here would eat
-  // that cancel and defocus/close the note instead.
+  // An input method uses Escape to cancel its composition, which must not leave the box.
   else if (event.key === 'Escape' && !event.isComposing) {
     event.preventDefault()
     emit('escape')
@@ -60,14 +49,10 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <InputGroup
-    :part="wrapper.part"
-    :class="wrapper.class"
-  >
+  <InputGroup v-bind="partAttrs('composer', kind)">
     <Textarea
+      v-bind="partAttrs(`${kind}-input`)"
       :model-value="modelValue"
-      :part="inputPart.part"
-      :class="inputPart.class"
       rows="1"
       auto-resize
       :placeholder="placeholder"
@@ -80,11 +65,10 @@ function onKeydown(event: KeyboardEvent) {
       @keydown="onKeydown"
     />
     <Button
+      v-bind="partAttrs(`${kind}-send`)"
       type="button"
       text
       rounded
-      :part="sendPart.part"
-      :class="sendPart.class"
       :disabled="!enabled"
       :aria-label="sendLabel"
       :title="sendLabel"

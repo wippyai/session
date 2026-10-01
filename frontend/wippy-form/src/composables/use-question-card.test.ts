@@ -36,7 +36,7 @@ const twoQDef: ChoiceFormDefinition = {
   ],
 }
 
-describe('useQuestionCard — single question, single answer', () => {
+describe('useQuestionCard: single question, single answer', () => {
   it('activate() on an option immediately submits', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(singleDef, null, onSubmit)
@@ -44,7 +44,7 @@ describe('useQuestionCard — single question, single answer', () => {
     expect(onSubmit).toHaveBeenCalledWith({ f1: 'a' })
   })
 
-  it('activate() with that row\'s note editor open does not commit — it focuses the note', () => {
+  it('activate() with that row\'s note editor open does not commit: it focuses the note', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(singleDef, null, onSubmit)
     const q = singleDef.fields[0]
@@ -70,6 +70,21 @@ describe('useQuestionCard — single question, single answer', () => {
     c.setNote(q, 'a', '   ')
     c.sendNote(q, 'a')
     expect(onSubmit).toHaveBeenCalledWith({ f1: 'a' })
+  })
+
+  it('sendNote() hands focus to the row that owns the note: the editor closes and would take focus with it, and a one-question card moves focus nowhere else', () => {
+    const onSubmit = vi.fn()
+    const c = useQuestionCard(singleDef, null, onSubmit)
+    const q = singleDef.fields[0]
+    c.toggleNote(q, 'b', true)
+    expect(c.focusTarget.value).toBe('note-b')
+    const seq = c.focusSeq.value
+    c.setNote(q, 'b', 'extra context')
+    c.sendNote(q, 'b')
+    expect(onSubmit).toHaveBeenCalledWith({ f1: { value: 'b', note: 'extra context' } })
+    expect(c.ans(q).noteOpen).toBeNull()
+    expect(c.focusTarget.value).toBe('opt-1')
+    expect(c.focusSeq.value).toBeGreaterThan(seq)
   })
 
   it('activate() past the last row (Other\'s slot) only focuses Other', () => {
@@ -98,7 +113,7 @@ describe('useQuestionCard — single question, single answer', () => {
   })
 })
 
-describe('useQuestionCard — single question, several answers', () => {
+describe('useQuestionCard: single question, several answers', () => {
   it('activate() ticks and unticks without submitting', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(multiDef, null, onSubmit)
@@ -141,7 +156,7 @@ describe('useQuestionCard — single question, several answers', () => {
     expect(c.ans(q).chosen).toEqual(['b'])
   })
 
-  it('activate() on a row whose OWN note is open still ticks it (M16: was silently dropped)', () => {
+  it('activate() on a row whose OWN note is open still ticks it', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(multiDef, null, onSubmit)
     const q = multiDef.fields[0]
@@ -156,7 +171,7 @@ describe('useQuestionCard — single question, several answers', () => {
   })
 })
 
-describe('useQuestionCard — several questions', () => {
+describe('useQuestionCard: several questions', () => {
   it('advances to the next unseen question on commit, then to review once every question is seen', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(twoQDef, null, onSubmit)
@@ -205,18 +220,17 @@ describe('useQuestionCard — several questions', () => {
   })
 })
 
-describe('useQuestionCard — commits an unsent multi-choice tick on navigating away', () => {
+describe('useQuestionCard: commits an unsent multi-choice tick on navigating away', () => {
   it('counts a ticked-but-never-sent answer as answered once the user leaves the question', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     c.activate(twoQDef.fields[0], 0) // Q1 (single) answers and advances to Q2
     expect(c.index.value).toBe(1)
 
-    c.activate(twoQDef.fields[1], 0) // tick Q2's first option — no footer Send, no Enter
+    c.activate(twoQDef.fields[1], 0) // tick Q2's first option, no footer Send, no Enter
     expect(c.ans(twoQDef.fields[1]).chosen).toEqual(['x'])
-    expect(c.answered(twoQDef.fields[1])).toBe(false) // not yet committed
+    expect(c.answerItemsFor(twoQDef.fields[1])).toBeNull() // not yet committed
 
     c.go(2) // navigate to review without an explicit send
-    expect(c.answered(twoQDef.fields[1])).toBe(true)
     expect(c.answerItemsFor(twoQDef.fields[1])).toEqual([{ label: 'X', note: undefined }])
   })
 
@@ -226,12 +240,23 @@ describe('useQuestionCard — commits an unsent multi-choice tick on navigating 
     expect(c.index.value).toBe(1)
 
     c.go(2)
-    expect(c.answered(twoQDef.fields[1])).toBe(false)
     expect(c.answerItemsFor(twoQDef.fields[1])).toBeNull()
   })
 })
 
-describe('useQuestionCard — review focus on a missing required answer', () => {
+describe('useQuestionCard: a single-answer note send on a several-question card', () => {
+  it('leaves focus to the move to the next question, not the row the note was on', () => {
+    const c = useQuestionCard(twoQDef, null, vi.fn())
+    const q1 = twoQDef.fields[0]
+    c.toggleNote(q1, 'a', true)
+    c.setNote(q1, 'a', 'context')
+    c.sendNote(q1, 'a')
+    expect(c.index.value).toBe(1)
+    expect(c.focusTarget.value).toBe('first')
+  })
+})
+
+describe('useQuestionCard: review focus on a missing required answer', () => {
   it('targets the first missing question\'s review row, not the disabled "send-all"', () => {
     const c = useQuestionCard(twoQDef, null, vi.fn())
     c.go(2) // straight to review without answering the required Q1
@@ -249,7 +274,57 @@ describe('useQuestionCard — review focus on a missing required answer', () => 
   })
 })
 
-describe('useQuestionCard — hydrating from a previously loaded answer', () => {
+describe('useQuestionCard: the polite live region', () => {
+  it('speaks the step a moment after it changes, and quiet() empties it so it stops describing a step that was sent from', () => {
+    vi.useFakeTimers()
+    try {
+      const c = useQuestionCard(twoQDef, { f1: 'a' }, vi.fn())
+      c.go(2)
+      expect(c.liveMessage.value).toBe('')
+      vi.advanceTimersByTime(30)
+      // Positive control: it really said something to be emptied.
+      expect(c.liveMessage.value).toBe('Review your answers')
+
+      c.quiet()
+      expect(c.liveMessage.value).toBe('')
+      vi.advanceTimersByTime(100)
+      expect(c.liveMessage.value).toBe('')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('quiet() also drops a message that is still waiting to be spoken', () => {
+    vi.useFakeTimers()
+    try {
+      const c = useQuestionCard(twoQDef, { f1: 'a' }, vi.fn())
+      c.go(2)
+      c.quiet()
+      vi.advanceTimersByTime(100)
+      expect(c.liveMessage.value).toBe('')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a newer message replaces one still waiting, so only the last is spoken', () => {
+    vi.useFakeTimers()
+    try {
+      const c = useQuestionCard(twoQDef, null, vi.fn())
+      c.go(1)
+      c.go(2)
+      vi.advanceTimersByTime(100)
+      expect(c.liveMessage.value).toBe('Review your answers')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('useQuestionCard: hydrating from a previously loaded answer', () => {
   it('reads back a plain value, a {value, note}, and an {other} shape', () => {
     const def: ChoiceFormDefinition = {
       title: 'T',

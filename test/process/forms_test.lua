@@ -8,6 +8,7 @@ local time = require("time")
 local consts = require("consts")
 local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
 local session = require("session")
@@ -25,7 +26,7 @@ local wait_for_boot = require("wait_for_boot")
 -- Session forms inside the session process, on the real database: creation
 -- through the ask_user tool and the `_control.forms` effect in
 -- process_tools, the one-form-per-turn guard, ending the turn, the failure
--- row rewrite (F05), and admission of accepted answers (idle, during a turn
+-- row rewrite, and admission of accepted answers (idle, during a turn
 -- in acceptance order with steered typed input, after a stop, on finish,
 -- and by the startup/end-of-turn scans), plus what the prompt and read_form
 -- show of an answer that is not admitted yet.
@@ -258,24 +259,27 @@ local function define_tests()
         describe("title generation beside the first form", function()
             -- A new session's first agent step queues the title check ahead
             -- of its tool round (message_handlers.agent_step: a checkpoint
-            -- must land before the next step). The title is a model call of
-            -- several seconds; the tool round that stores the form must not
-            -- wait for it (live: every first form appeared 6-10 s late).
-            local TITLE_DELAY_MS = 1500
+            -- must land before the next step). The title is a model call, and
+            -- the tool round that stores the form must not wait for it.
             local original_funcs = nil
 
             before_each(function() original_funcs = session_handlers._funcs end)
             after_each(function() session_handlers._funcs = original_funcs end)
 
-            -- A title function that takes TITLE_DELAY_MS, like the model call
-            -- the real one makes.
-            local function slow_title(calls: {any})
+            -- A title function that returns only after the test sends on
+            -- `release`, so the order of the two ends comes from the test and
+            -- not from the clock. The timer keeps a title run in place from
+            -- hanging the suite: it would return before the tool round ends.
+            local function gated_title(calls: {any}, release: any, order: {string})
                 session_handlers._funcs = { new = function()
                     return {
                         with_context = function(self) return self end,
                         call = function(_self, _function_id, args)
                             table.insert(calls, args)
-                            time.sleep(tostring(TITLE_DELAY_MS) .. "ms")
+                            local timer = time.timer("5s")
+                            channel.select({ release:case_receive(), timer:channel():case_receive() })
+                            timer:stop()
+                            table.insert(order, "title returned")
                             return { title = "Parcel delivery" }
                         end,
                     }
@@ -284,10 +288,10 @@ local function define_tests()
 
             -- The operations of a first agent step that called ask_user, in
             -- the order agent_step queues them, run the way the command bus
-            -- loop runs them. Returns the milliseconds from the start until
-            -- the tool round (which stores the form) has finished.
-            local function first_step_with_form(ctx): number
-                ctx.config.title_function_id = "app:slow_title"
+            -- loop runs them. Records "tool round done" in `order` once the
+            -- tool round (which stores the form) has finished.
+            local function first_step_with_form(ctx, order: {string})
+                ctx.config.title_function_id = "app:gated_title"
                 ctx.writer:add_message(consts.MSG_TYPE.USER, "Deliver my parcel")
                 local call_id = "call-" .. uuid.v7()
                 local _, ids: any, store_err = ctx.writer:add_response("", {}, {
@@ -306,8 +310,6 @@ local function define_tests()
                 bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, session_handlers.check_background_triggers)
                 bus:mount_op_handler(consts.OP_TYPE.GENERATE_TITLE, session_handlers.generate_title)
                 bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
-                local started = time.now()
-                local tools_done_at = nil :: any
                 bus:enqueue_result({ next_ops = {
                     { type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, tokens = { prompt_tokens = 10 },
                         message_id = "user-message" },
@@ -323,11 +325,9 @@ local function define_tests()
                     bus.pending_ops = bus.pending_ops - 1
                     local result: any, err = bus:process_operation(op)
                     test.is_nil(err)
-                    if op.type == consts.OP_TYPE.PROCESS_TOOLS then tools_done_at = time.now() end
+                    if op.type == consts.OP_TYPE.PROCESS_TOOLS then table.insert(order, "tool round done") end
                     bus:enqueue_result(result)
                 end
-                test.not_nil(tools_done_at)
-                return tonumber(tools_done_at:sub(started):milliseconds()) or 0
             end
 
             -- Waits for a background title to reach the session row.
@@ -340,24 +340,36 @@ local function define_tests()
                 return ""
             end
 
+            -- Waits for the clients to be told the title: the session row is
+            -- written first, and the update reaches the clients after it.
+            local function announced_title(events: any): any
+                for _ = 1, 100 do
+                    for _, update in ipairs(events.updates) do
+                        if update.title then return update.title end
+                    end
+                    time.sleep("50ms")
+                end
+                return nil
+            end
+
             it("stores the first form without waiting for the session title", function()
                 local ctx, events = new_ctx("")
                 ctx.run_in_background = session.run_in_background
                 local calls = {}
-                slow_title(calls)
+                local order = {} :: {string}
+                local release = channel.new(1)
+                gated_title(calls, release, order)
 
-                local elapsed = first_step_with_form(ctx)
+                first_step_with_form(ctx, order)
 
                 test.eq(#artifact_repo.list_by_session(ctx.session_id), 1)
-                test.lt(elapsed, TITLE_DELAY_MS / 2, "the form was stored " .. tostring(elapsed)
-                    .. " ms after the step; the title takes " .. tostring(TITLE_DELAY_MS) .. " ms")
+                test.eq(table.concat(order, ", "), "tool round done",
+                    "the form was stored while the title call was still waiting")
+                release:send(true)
                 test.eq(stored_title(ctx), "Parcel delivery", "the title is still generated, beside the turn")
+                test.eq(table.concat(order, ", "), "tool round done, title returned")
                 test.eq(#calls, 1)
-                local announced = nil
-                for _, update in ipairs(events.updates) do
-                    if update.title then announced = update.title end
-                end
-                test.eq(announced, "Parcel delivery")
+                test.eq(announced_title(events), "Parcel delivery")
             end)
         end)
 
@@ -386,7 +398,7 @@ local function define_tests()
                 local origin = artifact.meta.session_form.origin
                 test.eq(artifact.meta.session_form.version, 1)
                 test.is_nil(artifact.meta.session_form.submission)
-                test.eq(origin.turn_id, ctx.turn_state.id)
+                test.is_nil(origin.turn_id, "the origin binds the form to its call, not to the turn")
                 test.eq(origin.call_id, call_id)
                 test.eq(origin.tool_message_id, (ids :: any)[call_id])
 
@@ -741,7 +753,7 @@ local function define_tests()
 
                 -- The step applies it after the form's turn; applying does not
                 -- make the form stale.
-                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, typed_id)
+                local applied, apply_err = answer_admission.apply_pending_inputs(ctx, typed_id)
                 test.is_nil(apply_err)
                 test.eq(applied, 1)
                 local _, later = state_service.get_state(user_id, form_id)
@@ -833,7 +845,7 @@ local function define_tests()
                 test.is_false(string.find(pending.user, "<wippy-form-answers record=", 1, true) ~= nil,
                     "the pending answer is not in the prompt yet")
 
-                message_handlers.admit_in_order(ctx, nil)
+                answer_admission.admit_in_order(ctx, nil)
                 local admitted = prompt_parts()
                 test.contains(admitted.index, "answered: \"Delivery preference\" form_id=" .. answered_id)
                 test.contains(admitted.index, "answer_message_id=" .. accepted.answer_message_id)
@@ -859,7 +871,7 @@ local function define_tests()
                 ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Noted.")
                 ask(ctx, DEFINITION)
                 submit(form_id_of(ctx))
-                message_handlers.admit_in_order(ctx, nil)
+                answer_admission.admit_in_order(ctx, nil)
                 local builder = prompt_builder.build(ctx.reader:messages():all(), {}, {},
                     { include_contexts = false, include_files = false, cache_markers = false })
                 local user_text = ""
@@ -892,7 +904,7 @@ local function define_tests()
                 test.contains(hidden.message, "\"status\":\"answer_pending\"")
                 test.is_false(string.find(hidden.message, "\"value\":\"Locker\"", 1, true) ~= nil)
 
-                message_handlers.admit_in_order(ctx, nil)
+                answer_admission.admit_in_order(ctx, nil)
                 local result, err = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(err)
                 test.contains(result.message, "\"status\":\"answered\"")
@@ -923,7 +935,7 @@ local function define_tests()
                 test.contains(hidden.message, '"status":"answer_pending"')
                 test.is_false(string.find(hidden.message, "Ann Lee", 1, true) ~= nil)
 
-                message_handlers.admit_in_order(ctx, nil)
+                answer_admission.admit_in_order(ctx, nil)
                 local answered = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.contains(answered.message, '"status":"answered"')
                 test.contains(answered.message, '"form_version":2')
@@ -972,7 +984,7 @@ local function define_tests()
                 test.contains(pending, "\"status\":\"answer_pending\"")
                 test.is_false(string.find(pending, "Locker", 1, true) ~= nil, "no answer values")
 
-                message_handlers.admit_in_order(ctx, nil)
+                answer_admission.admit_in_order(ctx, nil)
                 local admitted = read_in_turn()
                 test.contains(admitted, "\"status\":\"answered\"")
                 test.contains(admitted, "\"label\":\"Locker\"")
@@ -1019,7 +1031,7 @@ local function define_tests()
                 test.contains(during, "\"status\":\"answer_pending\"")
                 test.is_false(string.find(during, "Locker", 1, true) ~= nil, "no answer values")
 
-                message_handlers.admit_in_order(ctx, nil)
+                answer_admission.admit_in_order(ctx, nil)
                 local admitted = read_in_turn(nil)
                 test.contains(admitted, "\"status\":\"answered\"")
                 test.contains(admitted, "\"answer\":{\"value\":\"Locker\",\"label\":\"Locker\"}")
@@ -1058,7 +1070,7 @@ local function define_tests()
                 local prompt = builder:get_messages()
                 test.contains(tostring(prompt[#prompt].content[1].text), "<wippy-form-answers record=")
 
-                local again = message_handlers.admit_answer(ctx, { message_id = accepted.answer_message_id })
+                local again = message_handlers.admit_answer(ctx)
                 test.is_nil(again.next_ops, "a repeated wake-up is a no-op")
             end)
 
@@ -1085,7 +1097,7 @@ local function define_tests()
                 test.is_nil(bus.ops[1].request_id, "its request was answered when it was stored")
 
                 -- The step places the message after the answer.
-                local _, apply_err = message_handlers.apply_pending_inputs(ctx, typed_id)
+                local _, apply_err = answer_admission.apply_pending_inputs(ctx, typed_id)
                 test.is_nil(apply_err)
                 local texts = prompt_user_texts(ctx)
                 local answer_at = index_containing(texts, "<wippy-form-answers record=")
@@ -1135,7 +1147,7 @@ local function define_tests()
                 local steer_id = type_during_turn(ctx, bus, "Make it tomorrow", "second")
 
                 -- The first step applies the pending input the way agent_step does.
-                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, first_id)
+                local applied, apply_err = answer_admission.apply_pending_inputs(ctx, first_id)
                 test.is_nil(apply_err)
                 test.eq(applied, 1)
                 test.eq(message_repo.get(steer_id).metadata.input.after_message_id, first_id)
@@ -1192,7 +1204,7 @@ local function define_tests()
                 test.is_false(continued.completed)
                 test.eq(continued.next_ops[1].type, consts.OP_TYPE.AGENT_STEP)
                 test.is_false(continued.next_ops[1].from_user)
-                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, nil)
+                local applied, apply_err = answer_admission.apply_pending_inputs(ctx, nil)
                 test.is_nil(apply_err)
                 test.eq(applied, 1)
                 test.is_nil(index_containing(prompt_user_texts(ctx), "<wippy-form-answers record="),
@@ -1224,7 +1236,7 @@ local function define_tests()
                 local _, step_err = session.flush_held(ctx, true, "step")
                 test.is_nil(step_err)
                 test.eq(#ctx.held, 1, "the answer waits for the end of the turn")
-                local applied, apply_err = message_handlers.apply_pending_inputs(ctx, nil)
+                local applied, apply_err = answer_admission.apply_pending_inputs(ctx, nil)
                 test.is_nil(apply_err)
                 test.eq(applied, 1, "only the message sent before the answer")
                 test.eq(message_repo.get(first_id).metadata.input.state, "applied")
@@ -1234,7 +1246,7 @@ local function define_tests()
                 local finished = reach_boundary(ctx, bus)
                 test.is_true(finished.completed, "nothing else is due before the answer")
                 test.eq(bus.ops[1].message_id, later_id)
-                local _, later_err = message_handlers.apply_pending_inputs(ctx, later_id)
+                local _, later_err = answer_admission.apply_pending_inputs(ctx, later_id)
                 test.is_nil(later_err)
                 local texts = prompt_user_texts(ctx)
                 local first_at = index_containing(texts, "Before the answer") :: number
@@ -1250,7 +1262,7 @@ local function define_tests()
                 local form_id = form_id_of(ctx)
                 local bus: any = running_turn(ctx)
                 type_during_turn(ctx, bus, "Pick the locker", "steer")
-                local _, apply_err = message_handlers.apply_pending_inputs(ctx, nil)
+                local _, apply_err = answer_admission.apply_pending_inputs(ctx, nil)
                 test.is_nil(apply_err)
 
                 local accepted = submit(form_id, { delivery = "Locker" })
@@ -1303,7 +1315,7 @@ local function define_tests()
                     { data = { text = "Carry on" }, request_id = "next" }, { finishing = false })
                 test.not_nil(next_id)
                 test.eq(bus.ops[#bus.ops].message_id, next_id)
-                local _, apply_err = message_handlers.apply_pending_inputs(ctx, next_id)
+                local _, apply_err = answer_admission.apply_pending_inputs(ctx, next_id)
                 test.is_nil(apply_err)
                 local texts = prompt_user_texts(ctx)
                 local before_at = index_containing(texts, "Sent before the answer") :: number
@@ -1397,7 +1409,7 @@ local function define_tests()
                 -- An admission that finds the session finishing admits nothing.
                 local finishing_bus: any = with_bus(exiting)
                 finishing_bus.state = "draining_finish"
-                local result = message_handlers.admit_answer(exiting, {})
+                local result = message_handlers.admit_answer(exiting)
                 test.is_nil(result.next_ops)
                 test.eq(message_repo.get(kept.answer_message_id).metadata.session_form.pending, true)
             end)
@@ -1428,27 +1440,26 @@ local function define_tests()
                 test.eq(message_repo.get(steps[1].message_id).data, "Typed meanwhile")
             end)
 
-            it("stores only a list of UUID strings as a message's attachments", function()
+            it("stores a message's attachments as the client sent them, and a client value that looks like an answer marker stays attachment data", function()
                 local attachment = uuid.v7()
+                local lookalike = { session_form = { artifact_id = uuid.v7(), pending = true } }
                 local cases = {
-                    { value = { session_form = { pending = true } }, expected = nil },
-                    { value = { "not-a-uuid" }, expected = nil },
-                    { value = { attachment, 7 }, expected = nil },
-                    { value = { attachment }, expected = attachment },
+                    { label = "a list of ids", value = { attachment },
+                        check = function(stored) test.eq(stored[1], attachment) end },
+                    { label = "a lookalike marker", value = lookalike,
+                        check = function(stored) test.eq(stored.session_form.artifact_id, lookalike.session_form.artifact_id) end },
                 }
                 for _, case in ipairs(cases) do
                     -- Each on an idle session: the message id is the server's.
                     local ctx = new_ctx()
                     local result: any, err = message_handlers.handle_message(ctx,
                         { data = { text = "with files", file_uuids = case.value } })
-                    test.is_nil(err)
+                    test.is_nil(err, case.label)
                     local row: any = message_repo.get(result.message_id)
-                    local stored = row.metadata and row.metadata.file_uuids
-                    if case.expected then
-                        test.eq(stored[1], case.expected)
-                    else
-                        test.is_nil(stored)
-                    end
+                    case.check(row.metadata.file_uuids)
+                    test.is_false(message_repo.is_form_answer(row), case.label .. ": not an answer row")
+                    test.eq(#message_repo.list_pending_answers(ctx.session_id, 50), 0,
+                        case.label .. ": not a pending answer")
                 end
             end)
 
@@ -1469,7 +1480,7 @@ local function define_tests()
                 local pending: any = message_repo.list_pending_answers(ctx.session_id, 1)
                 test.eq(pending[1].message_id, first.answer_message_id)
 
-                local admitted: any, err = message_handlers.admit_in_order(ctx, nil)
+                local admitted: any, err = answer_admission.admit_in_order(ctx, nil)
                 test.is_nil(err)
                 test.eq(#admitted, 2)
                 test.eq(admitted[2].message_id, second.answer_message_id)
@@ -1478,7 +1489,7 @@ local function define_tests()
                 test.eq(rows[#rows].message_id, second.answer_message_id)
                 local admitted_date = rows[#rows].date
 
-                local again, again_err = message_handlers.admit_in_order(ctx, nil)
+                local again, again_err = answer_admission.admit_in_order(ctx, nil)
                 test.is_nil(again_err)
                 test.eq(#again, 0)
                 test.eq(message_repo.get(second.answer_message_id).date, admitted_date)

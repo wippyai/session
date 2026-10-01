@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { partClass } from '../lib/part-class'
+import { partAttrs } from '../lib/part-attrs'
 
 /**
  * The top of a fields form: its title and, when it has one, its description,
@@ -14,8 +14,8 @@ defineProps<{
   description?: string
 }>()
 
-const titlePart = computed(() => partClass('fields-title'))
-const descriptionPart = computed(() => partClass('form-description'))
+const titlePart = computed(() => partAttrs('fields-title'))
+const descriptionPart = computed(() => partAttrs('form-description'))
 </script>
 
 <template>

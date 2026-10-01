@@ -1,26 +1,20 @@
 import { enableAutoUnmount } from '@vue/test-utils'
-import { afterEach } from 'vitest'
+import { afterEach, vi } from 'vitest'
 
 // Unmount every mounted wrapper after each test. Many suites mount with
-// `attachTo: document.body`; without this their DOM stays in the body for
-// the rest of the file, and a global `document` query can find another
-// test's element (separately mounted apps can reuse the same `useId()` ids).
+// `attachTo: document.body`, and a leftover element can be found by a later
+// test's document query, because separately mounted apps can reuse `useId()` ids.
 enableAutoUnmount(afterEach)
 
+// Every test file gets the mocked proxy module, so none has to mock it itself.
+vi.mock('@wippy-fe/proxy', async () => (await import('./src/test-support/proxy-mock')).proxyMock())
+
 /**
- * Vitest global setup. Runs before any test module is loaded.
- *
- * `@wippy-fe/webcomponent-core` (pulled in transitively by
- * `@wippy-fe/webcomponent-vue`, which `src/constants.ts` imports) reads
- * several `@wippy-fe/proxy` getters (`api`, `host`, `config`, ...) at
- * module-evaluation time to re-export them as named bindings. Those
- * getters throw immediately unless `window.__WIPPY_APP_API__` /
- * `window.__WIPPY_APP_CONFIG__` are already present — normally injected
- * by the Host before proxy.js loads. Mirrors the stub in the sibling
- * Host repo's own `vitest.setup.ts`, trimmed to what this package needs.
- * Individual tests mock `@wippy-fe/proxy` themselves for the behavior
- * they actually exercise (`artifactState`, `on`); this stub only keeps
- * the unrelated import graph from crashing on load.
+ * `@wippy-fe/webcomponent-core`, which `@wippy-fe/webcomponent-vue` pulls in,
+ * reads several getters of `@wippy-fe/proxy` (`api`, `host`, `config`) when it
+ * is evaluated. The getters throw unless `window.__WIPPY_APP_API__` and
+ * `window.__WIPPY_APP_CONFIG__` exist, and the Host normally injects them before
+ * proxy.js loads. This stub only keeps that import graph from failing.
  */
 if (typeof window !== 'undefined') {
   const w = window as unknown as Record<string, unknown>
@@ -65,10 +59,8 @@ if (typeof window !== 'undefined') {
       context: { resourceId: '', resourceType: 'page' },
     }
   }
-  // jsdom does not implement ResizeObserver. PrimeVue's Textarea uses it
-  // for `auto-resize` (question-card-composer.vue) — without this stub,
-  // mounting any component with an auto-resizing Textarea throws
-  // `ResizeObserver is not defined` during onMounted.
+  // jsdom has no ResizeObserver, which PrimeVue's auto-resizing Textarea
+  // (question-card-composer.vue) creates when it mounts.
   if (!w.ResizeObserver) {
     w.ResizeObserver = class ResizeObserver {
       observe() {}

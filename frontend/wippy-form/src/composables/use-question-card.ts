@@ -1,25 +1,24 @@
 import type { ComputedRef, Ref } from 'vue'
 import type { AnswerDisplayItem } from '../lib/answers'
 import type { ChoiceAnswer, ChoiceFormDefinition, ChoiceFormField, FormAnswers, SingleFieldAnswer } from '../lib/definition'
+import type { FocusTarget } from '../lib/focus-key'
 import { computed, reactive, ref } from 'vue'
 import { answerDisplayItems, buildNotedValue } from '../lib/answers'
 import { trimAnswerText } from '../lib/text'
 import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText } from '../lib/definition'
+import { noteKey, optionKey, reviewItemKey } from '../lib/focus-key'
 
-/** One question's in-progress answer while the card is active (not yet submitted). */
+/** One question's answer in progress, before it is submitted. */
 export interface QuestionAnswerState {
   chosen: string[]
   other: string
   useOther: boolean
-  /** Option value -> note text, only for options currently chosen. */
+  /** Option value to note text, for options currently chosen. */
   notes: Record<string, string>
-  /** Option value whose note editor is open, or `null`. */
+  /** The option value whose note editor is open, or `null`. */
   noteOpen: string | null
   done: boolean
 }
-
-/** Where focus should move next — read by the view via `focusTarget`/`focusSeq`. */
-export type FocusTarget = 'first' | 'card' | 'send-all' | 'other' | `opt-${number}` | `note-${string}` | `review-item-${number}`
 
 export interface QuestionCardController {
   readonly n: number
@@ -35,8 +34,6 @@ export interface QuestionCardController {
   currentQuestion: ComputedRef<ChoiceFormField | null>
   missingRequired: ComputedRef<Array<{ field: ChoiceFormField, index: number }>>
   ans: (q: ChoiceFormField) => QuestionAnswerState
-  hasContent: (q: ChoiceFormField) => boolean
-  answered: (q: ChoiceFormField) => boolean
   answerItemsFor: (q: ChoiceFormField) => AnswerDisplayItem[] | null
   keysText: (q: ChoiceFormField) => string
   activate: (q: ChoiceFormField, i: number) => void
@@ -48,27 +45,24 @@ export interface QuestionCardController {
   go: (i: number, focus?: FocusTarget) => void
   submitAll: () => void
   requestFocus: (target: FocusTarget) => void
+  /** Empties the polite live region, so it does not keep announcing the step a send started from. */
+  quiet: () => void
   buildAnswers: () => FormAnswers
 }
 
-/** At most this many rows (options, then Other) get a number-key badge — see the design decision "Nine keys". */
+/** The first this many rows (options, then Other) get a number key. */
 export const MAX_KEYED_ROWS = 9
 
 /**
- * Interactive state machine for the question card, mirroring the approved
- * prototype's `WippyForm` class but as a Vue composable: reactive
- * per-question answer state, question navigation (single question ->
- * immediate submit; several questions -> advance to the next unseen
- * question, then a review step), notes, and Other. DOM focus movement is
- * NOT done here — `focusTarget`/`focusSeq` name the intent (`focusSeq`
- * increments on every request, even a repeat, so the view's watcher always
- * fires) and the view (which owns the actual elements) performs the
- * `.focus()` call.
+ * Interaction state of the question card: the answer in progress for each
+ * question, navigation (a single question submits at once, several advance to
+ * the next unseen question and then to a review step), notes and Other. Focus
+ * is not moved here. `focusTarget` names where it should go next and
+ * `focusSeq` increments on every request, even a repeat, so the view's
+ * watcher always fires and makes the `.focus()` call.
  *
- * `definition` and `initialData` are read once, at creation — the same
- * "hydrate on mount, don't re-sync on background prop changes" contract
- * `ActiveForm.vue`'s own `reactive(draftFromAnswers(...))` already uses, so
- * an in-progress answer survives a background reload of `state`.
+ * `definition` and `initialData` are read once, when the card is created, so
+ * an answer in progress survives a background reload of `state`.
  */
 export function useQuestionCard(
   definition: ChoiceFormDefinition,
@@ -77,10 +71,8 @@ export function useQuestionCard(
 ): QuestionCardController {
   const n = definition.fields.length
   const multi = n > 1
-  // Questions already shown (answered or skipped) — once every question has
-  // been seen, the next answer returns to the review step instead of
-  // forwarding to a question already visited. Plain Set: nothing in the
-  // template reads it, so it does not need to be reactive.
+  // Questions already shown, answered or skipped. Once all have been seen, an
+  // answer returns to the review step. Nothing in a template reads it.
   const seen = new Set<number>([0])
 
   const index = ref(0)
@@ -132,9 +124,20 @@ export function useQuestionCard(
       .filter(({ field }) => field.required && !answered(field)),
   )
 
+  // The polite region speaks by changing its text, so it is cleared first and
+  // set a moment later. At most one message waits, and a newer one or `quiet`
+  // replaces it.
+  let sayTimer: ReturnType<typeof setTimeout> | undefined
+
   function say(text: string) {
+    clearTimeout(sayTimer)
     liveMessage.value = ''
-    setTimeout(() => { liveMessage.value = text }, 30)
+    sayTimer = setTimeout(() => { liveMessage.value = text }, 30)
+  }
+
+  function quiet() {
+    clearTimeout(sayTimer)
+    liveMessage.value = ''
   }
 
   function requestFocus(target: FocusTarget) {
@@ -142,13 +145,8 @@ export function useQuestionCard(
     focusSeq.value++
   }
 
-  /** Number of rows (options + Other, if any) that get a number-key badge. */
-  function keyableCount(q: ChoiceFormField): number {
-    return Math.min(q.options.length + (q.allow_other ? 1 : 0), MAX_KEYED_ROWS)
-  }
-
   function keysText(q: ChoiceFormField): string {
-    const keyable = keyableCount(q)
+    const keyable = Math.min(q.options.length + (q.allow_other ? 1 : 0), MAX_KEYED_ROWS)
     const range = keyable > 1 ? `1–${keyable}` : '1'
     const noteKeyable = Math.min(q.options.length, MAX_KEYED_ROWS)
     const noteRange = noteKeyable > 1 ? `Shift+1–${noteKeyable}` : 'Shift+1'
@@ -195,10 +193,9 @@ export function useQuestionCard(
   }
 
   function go(i: number, focus: FocusTarget = 'first') {
-    // A multi-choice question the user ticked (or typed an Other answer
-    // into) but never explicitly sent still counts as answered once they
-    // leave it — otherwise those ticks are silently dropped as "Skipped"
-    // in the review step and the final submission alike.
+    // A several-answer question that was ticked or typed into but never sent
+    // still counts as answered once the user leaves it, instead of showing as
+    // skipped in the review and the submission.
     const leaving = currentQuestion.value
     if (leaving && leaving.multiple && !ans(leaving).done && hasContent(leaving))
       ans(leaving).done = true
@@ -209,12 +206,11 @@ export function useQuestionCard(
     if (!inReview.value)
       seen.add(index.value)
     if (inReview.value) {
-      // "Send answers" is disabled while a required question is still
-      // unanswered — focusing it then is a no-op (a disabled button can't
-      // take focus), which silently dropped focus to <body>. Focus the
-      // first missing item's row instead so it's reachable immediately.
+      // "Send answers" is disabled while a required answer is missing and a
+      // disabled button cannot take focus, so focus goes to the first missing
+      // row instead of falling to <body>.
       const firstMissing = missingRequired.value[0]
-      requestFocus(firstMissing ? `review-item-${firstMissing.index}` : 'send-all')
+      requestFocus(firstMissing ? reviewItemKey(firstMissing.index) : 'send-all')
     }
     else {
       requestFocus(focus)
@@ -235,8 +231,7 @@ export function useQuestionCard(
       onSubmit(buildAnswers())
       return
     }
-    // Forward to the next question not yet seen; once every question has
-    // been seen (answered or skipped), an answer returns to the review.
+    // Forward to the next question not yet seen. Once all have been seen, the review follows.
     const next = definition.fields.findIndex((_field, i) => i > index.value && !seen.has(i))
     go(next === -1 ? n : next)
   }
@@ -248,17 +243,11 @@ export function useQuestionCard(
       return
     }
     const value = q.options[i].value
-    // A note editor already open on THIS row, for a single-choice question,
-    // would otherwise commit-and-advance immediately via the plain-`chosen`
-    // branch below — eat the click/number and move focus into the note
-    // instead, so the note-in-progress isn't abandoned mid-edit. Multi-choice
-    // never auto-commits from `activate()` (only `commit()`/Enter do), so a
-    // tick is always safe to apply even while that same row's note is open —
-    // gating it here too silently dropped the tick (clicking the row, or its
-    // checkbox, while its own note was open did nothing) until the next
-    // question/Other commit fired and read a `chosen` that was never updated.
+    // With this row's note editor open on a single-answer question, a click or
+    // number key moves focus into the note instead of answering, so the note is
+    // not abandoned mid-edit. A tick on a several-answer question always applies.
     if (a.noteOpen === value && !q.multiple) {
-      requestFocus(`note-${value}`)
+      requestFocus(noteKey(value))
       return
     }
     if (q.multiple) {
@@ -266,7 +255,7 @@ export function useQuestionCard(
       if (!hasContent(q))
         a.done = false
       error.value = ''
-      requestFocus(`opt-${i}`)
+      requestFocus(optionKey(i))
       say(a.chosen.includes(value) ? 'Ticked' : 'Unticked')
       return
     }
@@ -277,18 +266,17 @@ export function useQuestionCard(
 
   function toggleNote(q: ChoiceFormField, value: string, openOnly = false) {
     const a = ans(q)
-    const i = q.options.findIndex(o => o.value === value)
     if (a.noteOpen === value && !openOnly) {
       a.noteOpen = null
-      requestFocus(`opt-${i}`)
+      requestFocus(optionKey(q.options.findIndex(o => o.value === value)))
     }
     else {
       a.noteOpen = value
-      requestFocus(`note-${value}`)
+      requestFocus(noteKey(value))
     }
   }
 
-  /** Live-updates a note's draft text as the user types — tracked per option value regardless of `chosen`. */
+  /** Keeps the note text as the user types, for any option, chosen or not. */
   function setNote(q: ChoiceFormField, value: string, text: string) {
     ans(q).notes[value] = text
   }
@@ -296,15 +284,21 @@ export function useQuestionCard(
   function sendNote(q: ChoiceFormField, value: string) {
     const a = ans(q)
     a.noteOpen = null
+    const rowKey = optionKey(q.options.findIndex(o => o.value === value))
     if (q.multiple) {
       if (!a.chosen.includes(value))
         a.chosen = [...a.chosen, value]
-      requestFocus(`opt-${q.options.findIndex(o => o.value === value)}`)
+      requestFocus(rowKey)
       say('Note saved')
       return
     }
     a.chosen = [value]
     a.useOther = false
+    // A single-answer note sends the form, and its editor closes and takes focus
+    // with it. Focus first returns to the row that owns the note, where a
+    // rejected send or a 422 field error also lands. A card with several
+    // questions makes its own focus request after this one, which wins.
+    requestFocus(rowKey)
     commit(q)
   }
 
@@ -338,8 +332,6 @@ export function useQuestionCard(
     currentQuestion,
     missingRequired,
     ans,
-    hasContent,
-    answered,
     answerItemsFor,
     keysText,
     activate,
@@ -351,6 +343,7 @@ export function useQuestionCard(
     go,
     submitAll,
     requestFocus,
+    quiet,
     buildAnswers,
   }
 }

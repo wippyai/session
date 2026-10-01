@@ -5,24 +5,18 @@
  */
 
 /**
- * The one client-side trim rule for free-text answer content — an "Other"
- * answer, a note or an email — used here and by every question-card call site
- * that needs to know whether such text is blank. Plain
- * `String.prototype.trim()`, matching the server's own trim rule, so a string
- * that trims blank here also trims blank there and vice versa. `trim()`
- * strips ECMAScript `WhiteSpace` (e.g. U+3000 IDEOGRAPHIC SPACE, a real space
- * character) but leaves Unicode's own zero-width characters alone (e.g.
- * U+200B ZERO WIDTH SPACE is not whitespace and still counts as content) —
- * see `answers.test.ts`.
+ * The trim rule for free text (an Other answer, a note, an email address),
+ * the same plain `trim()` the server applies, so text that trims blank here
+ * trims blank there. It strips U+3000 (ideographic space) and keeps U+200B
+ * (zero width space).
  */
 export function trimAnswerText(raw: string): string {
   return raw.trim()
 }
 
 /**
- * Counts Unicode code points, not UTF-16 code units — a `raw.length` check
- * over-counts astral characters (e.g. many emoji) that are stored as
- * surrogate pairs. The server counts code points too, so this must match.
+ * Counts Unicode code points, as the server does. `raw.length` counts UTF-16
+ * code units, so it would count an emoji stored as a surrogate pair as two.
  */
 export function codePointLength(raw: string): number {
   return Array.from(raw).length

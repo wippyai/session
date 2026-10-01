@@ -2,25 +2,20 @@ import type { InjectionKey, Ref } from 'vue'
 import { inject, onMounted, onUnmounted, ref } from 'vue'
 
 /**
- * Injection key for the raw custom-element host — the only reliable way to
- * read `data-wippy-artifact-id`. `@wippy-fe/webcomponent-vue`'s provider set
- * doesn't expose the host element itself (only props/events/content refs),
- * so `wippyConfig.vueConfig.providers` (in `src/index.ts`) supplies it here.
+ * Injection key for the raw custom element. It is the only way to read
+ * `data-wippy-artifact-id`, because the provider set of
+ * `@wippy-fe/webcomponent-vue` does not expose the host element. `src/index.ts`
+ * provides it.
  */
 export const ELEMENT_PROVIDER = Symbol('wippy-form:element') as InjectionKey<HTMLElement>
 
 const ARTIFACT_ID_ATTR = 'data-wippy-artifact-id'
 
 /**
- * Reactive `data-wippy-artifact-id` read off the host element.
- *
- * The form's identity is the Host-set `data-wippy-artifact-id` attribute
- * (see the Web Host's "Reserved Host Attributes"). That attribute
- * is not part of the component's props schema (it's an identity marker the
- * Host writes directly, not a package-tag prop), so `parseProps` /
- * `onPropsChanged` never see it. A `MutationObserver` on this one attribute
- * is what actually stays current if the Host (re)binds the element to a
- * different artifact without a full remount.
+ * The `data-wippy-artifact-id` attribute of the host element, kept current. The
+ * Host writes it directly and it is not a prop, so prop changes never report
+ * it, and a MutationObserver on that one attribute notices a rebind to another
+ * artifact.
  */
 export function useArtifactId(): Ref<string | null> {
   const element = inject(ELEMENT_PROVIDER)

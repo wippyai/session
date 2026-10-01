@@ -5,6 +5,7 @@ local writer = require("writer")
 local upstream = require("upstream")
 local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
 local agent_context = require("agent_context")
@@ -150,28 +151,26 @@ local function hold_answer(ctx: any, message_id: string)
     table.insert(ctx.held, { answer_id = message_id })
 end
 
--- Settles held input. phase:
---   "step"      between two steps of a turn: internal messages are written
---               for the next step to see, up to the first held form answer.
---               Answers are only admitted when the turn ends, and what came
---               after one waits with it so the order holds.
---   "turn_end"  the turn ended: messages are written and answers admitted in
---               arrival order, then any pending answer nobody woke the
---               session for. Answers are admitted in acceptance order, each
---               after the steering rows accepted before it
---               (message_handlers.admit_in_order). If an answer was
---               admitted, or the turn stopped at a form while steering is
---               still pending, the next turn starts at once at the latest of
---               that input (message_handlers.turn_start_after).
---   "stop"      the user stopped the turn: the same, but no turn follows.
---               The answers are delivered now so that they never start a
---               turn on their own later. Steering accepted after the last of
---               them stays pending, as it does after any Stop.
---   "exit"      the session is finishing or failed: messages are written;
---               answers stay pending for the next session start.
--- Returns (id the next turn starts at or nil, error, its request id). A write
--- failure keeps the unwritten input held and reports it; a failed answer
--- admission leaves the row pending (the plugin's scan asks again).
+-- A turn that ended normally is left running (finish_turn,
+-- defer_completion). The next turn replaces it, or it completes here, so the
+-- clients see one status change either way. Returns true, or nil and an
+-- error.
+local function settle_deferred_completion(ctx: any, next_turn_started: boolean): (boolean?, string?)
+    if not ctx.completion_deferred then return true end
+    ctx.completion_deferred = nil
+    if next_turn_started then return true end
+    return message_handlers.complete_turn(ctx)
+end
+
+-- Settles held input at a turn boundary. Phase "step" writes the internal
+-- messages up to the first held form answer. Phase "turn_end" writes the
+-- messages, admits the answers in acceptance order, and starts the next turn
+-- when an answer was admitted or steering is still pending after a form.
+-- Phase "stop" is "turn_end" without the next turn, and phase "exit" writes
+-- the messages only. Returns the id the next turn starts at (or nil), an
+-- error and the request id of that turn. Input that could not be written
+-- stays held, and a failed admission leaves the row pending for the plugin
+-- scan.
 local function flush_held(ctx: any, run_agent: boolean, phase: string?)
     phase = phase or (run_agent and "turn_end" or "exit")
     if phase ~= "step" and ctx.status == consts.STATUS.FAILED then phase = "exit" end
@@ -180,11 +179,11 @@ local function flush_held(ctx: any, run_agent: boolean, phase: string?)
 
     local admitted = {}
     local function admit(through_id)
-        local rows, admit_err = message_handlers.admit_in_order(ctx, through_id)
+        local rows, admit_err = answer_admission.admit_in_order(ctx, through_id)
         for _, row in ipairs(rows) do table.insert(admitted, row) end
         if admit_err then
             logger:warn("form answer admission failed", { session_id = ctx.session_id, error = tostring(admit_err) })
-            if phase == "stop" and through_id then message_handlers.note_stopped_answer(ctx, through_id) end
+            if phase == "stop" and through_id then answer_admission.note_stopped_answer(ctx, through_id) end
         end
     end
 
@@ -207,7 +206,7 @@ local function flush_held(ctx: any, run_agent: boolean, phase: string?)
                         end
                     end
                 end
-                message_handlers.defer_publish(ctx, admitted)
+                answer_admission.defer_publish(ctx, admitted)
                 return nil, write_err
             end
             table.remove(ctx.held :: {any}, 1)
@@ -220,38 +219,30 @@ local function flush_held(ctx: any, run_agent: boolean, phase: string?)
     local next_turn = nil
     if phase == "turn_end" and run_agent then
         local start_err
-        next_turn, start_err = message_handlers.turn_start_after(ctx, admitted, steering_turn)
+        next_turn, start_err = answer_admission.turn_start_after(ctx, admitted, steering_turn)
         if start_err then
-            message_handlers.defer_publish(ctx, admitted)
+            answer_admission.defer_publish(ctx, admitted)
             return nil, start_err
         end
         if next_turn then
             local started, turn_err = message_handlers.start_turn(ctx, next_turn)
             if not started then
-                message_handlers.defer_publish(ctx, admitted)
+                answer_admission.defer_publish(ctx, admitted)
                 return nil, turn_err
             end
         end
     end
-    -- The ended turn was left running (finish_turn, defer_completion): the
-    -- next turn replaced it above, or it completes now. Either way the
-    -- clients see one status change.
-    if ctx.completion_deferred then
-        ctx.completion_deferred = nil
-        if not next_turn then
-            local completed, complete_err = message_handlers.complete_turn(ctx)
-            if not completed then
-                message_handlers.defer_publish(ctx, admitted)
-                return nil, complete_err
-            end
-        end
+    local settled, settle_err = settle_deferred_completion(ctx, next_turn ~= nil)
+    if not settled then
+        answer_admission.defer_publish(ctx, admitted)
+        return nil, settle_err
     end
     if #admitted > 0 then
         if next_turn then
             -- The session status already says running for the next turn.
-            message_handlers.publish_admitted(admitted)
+            answer_admission.publish_admitted(admitted)
         else
-            message_handlers.defer_publish(ctx, admitted)
+            answer_admission.defer_publish(ctx, admitted)
         end
     end
     return next_turn, nil, nil
@@ -313,11 +304,8 @@ local function turn_boundary(ctx: any, bus: any): (boolean?, string?)
         if end_err then return nil, end_err end
         -- flush_held completes the deferred turn; this covers a context
         -- without the held-input hooks, where end_turn settles nothing.
-        if ctx.completion_deferred then
-            ctx.completion_deferred = nil
-            local completed, complete_err = message_handlers.complete_turn(ctx)
-            if not completed then return nil, complete_err end
-        end
+        local settled, settle_err = settle_deferred_completion(ctx, false)
+        if not settled then return nil, settle_err end
         return true
     end
     for _, next_op in ipairs(finished.next_ops or {}) do
@@ -420,7 +408,7 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         if (ctx.turn_state and ctx.turn_state.active) or bus:is_turn_active() then
             if type(message_id) == "string" and message_id ~= "" then hold_answer(ctx, message_id) end
         else
-            local result = message_handlers.admit_answer(ctx, { message_id = message_id })
+            local result = message_handlers.admit_answer(ctx)
             for _, next_op in ipairs(result.next_ops or {}) do
                 local queued, queue_err = bus:queue_op(next_op)
                 if not queued then return nil, queue_err end
@@ -493,10 +481,16 @@ local function run(args: SessionArgs)
         error("Failed to create session writer: " .. writer_err)
     end
 
+    -- Settles the calls an interrupted turn left pending; a call whose form
+    -- was committed counts as created (form_recovery).
+    local function recover_calls()
+        return message_repo.recover_pending(args.session_id,
+            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
+    end
+
     local recovered_calls = 0
     if not args.create then
-        local count, recovery_err = message_repo.recover_pending(args.session_id,
-            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
+        local count, recovery_err = recover_calls()
         if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
         recovered_calls = count
     end
@@ -563,7 +557,7 @@ local function run(args: SessionArgs)
     -- finish_turn). An empty queue only publishes answers admitted without a
     -- turn (after a stop), which read as delivered now that it is idle.
     context.queue_empty_callback = function()
-        message_handlers.publish_deferred(context)
+        answer_admission.publish_deferred(context)
         return true
     end
 
@@ -614,10 +608,7 @@ local function run(args: SessionArgs)
     context.flush_held = function(run_agent, phase) return flush_held(context, run_agent, phase) end
     context.write_held_before_form = function(write_opts) return write_held_before_form(context, write_opts) end
     context.commit_held_before_form = function(written) return commit_held_before_form(context, written) end
-    context.settle_intents = function()
-        return message_repo.recover_pending(args.session_id,
-            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
-    end
+    context.settle_intents = recover_calls
 
     local bus = command_bus.new(context)
     context.on_turn_end = function(turn_id, stop_requested, stop_request_id)
@@ -730,7 +721,7 @@ local function run(args: SessionArgs)
     -- turn. After the idle announcement above, so the running status that
     -- follows is the last one the clients see.
     if not args.create then
-        local admitted = message_handlers.admit_answer(context, {})
+        local admitted = message_handlers.admit_answer(context)
         for _, next_op in ipairs(admitted.next_ops or {}) do
             local queued, queue_err = bus:queue_op(next_op)
             if not queued then error("Failed to start the pending answer turn: " .. tostring(queue_err)) end

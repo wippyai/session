@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { partClass } from '../../lib/part-class'
+import { ERROR_TEXT_CLASS } from '../../lib/error-text'
+import { partAttrs } from '../../lib/part-attrs'
 
 /**
  * A field's label and, on an editable required field, its "(required)" marker
@@ -17,8 +18,8 @@ defineProps<{
   required: boolean
 }>()
 
-const labelPart = computed(() => partClass('field-label'))
-const markerPart = computed(() => partClass('field-marker'))
+const labelPart = computed(() => partAttrs('field-label'))
+const markerPart = computed(() => partAttrs('field-marker'))
 </script>
 
 <template>
@@ -31,7 +32,7 @@ const markerPart = computed(() => partClass('field-marker'))
     {{ label }}<span
       v-if="required"
       :part="markerPart.part"
-      :class="`${markerPart.class} text-danger-600 dark:text-danger-400`"
+      :class="`${markerPart.class} ${ERROR_TEXT_CLASS}`"
     > (required)</span>
   </component>
 </template>
