@@ -3,6 +3,7 @@ import type { FormDefinition, FormState } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
+import { WARN_TEXT_CLASS } from '../../lib/error-text'
 import ChoiceField from '../fields/choice-field.vue'
 import QuestionCardActive from './question-card-active.vue'
 
@@ -469,16 +470,33 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
     expect(text.closest('[role="alert"]')?.classList.contains('p-message-error')).toBe(true)
   })
 
-  it('draws a retryable (warn) banner\'s text in them too, and keeps its Retry button', async () => {
+  it('draws a retryable (warn) banner\'s text on the warning scale, not the danger one, and keeps its Retry button', async () => {
     const wrapper = mountCard(singleDef, { message: BANNER_ERROR, retryable: true })
     await flushPromises()
 
     const text = textElement(wrapper.element, BANNER_ERROR)
-    for (const utility of fieldsFormErrorUtilities())
+    // The warning's own severity pair (one step per theme, see lib/error-text.ts)...
+    expect(WARN_TEXT_CLASS).toMatch(/^text-warn-\d+ dark:text-warn-\d+$/)
+    for (const utility of WARN_TEXT_CLASS.split(' '))
       expect(text.classList.contains(utility)).toBe(true)
+    // ...and none of the danger pair.
+    for (const utility of fieldsFormErrorUtilities())
+      expect(text.classList.contains(utility)).toBe(false)
     const message = text.closest('[role="alert"]') as HTMLElement
     expect(message.classList.contains('p-message-warn')).toBe(true)
     expect(Array.from(message.querySelectorAll('button')).some(b => b.textContent?.trim() === 'Retry')).toBe(true)
+  })
+
+  it('follows the banner\'s severity when it changes: a retryable failure is a warning, the next non-retryable one an error', async () => {
+    const wrapper = mountCard(singleDef, { message: BANNER_ERROR, retryable: true })
+    await flushPromises()
+    expect(textElement(wrapper.element, BANNER_ERROR).classList.contains('text-warn-700')).toBe(true)
+
+    await wrapper.setProps({ banner: { message: 'You are signed out. Sign in again, then retry.', retryable: false } })
+    await flushPromises()
+    const text = textElement(wrapper.element, 'You are signed out. Sign in again, then retry.')
+    expect(text.classList.contains('text-danger-600')).toBe(true)
+    expect(text.classList.contains('text-warn-700')).toBe(false)
   })
 
   it('draws the form-level notice in them', async () => {

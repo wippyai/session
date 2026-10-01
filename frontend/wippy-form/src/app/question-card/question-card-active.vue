@@ -7,7 +7,7 @@ import Message from 'primevue/message'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
 import { trimAnswerText } from '../../lib/answers'
-import { ERROR_TEXT_CLASS } from '../../lib/error-text'
+import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardQuestion from './question-card-question.vue'
@@ -107,6 +107,11 @@ const cardErrorIds = computed(() => [
   generalServerError.value ? generalErrorId : '',
   props.banner ? bannerId : '',
 ].filter(Boolean).join(' ') || undefined)
+
+// The banner's text follows its severity, the same as its box: a retryable
+// failure is a warning (`warn`), anything else an error. Colour on the text,
+// not the `Message` (see lib/error-text.ts).
+const bannerTextClass = computed(() => props.banner?.retryable ? WARN_TEXT_CLASS : ERROR_TEXT_CLASS)
 
 // A changed answer clears that question's own server error — the same
 // "the next submit re-checks it" contract ActiveForm.vue's updateField()
@@ -418,7 +423,7 @@ function onKeydown(event: KeyboardEvent) {
       :closable="false"
     >
       <div class="flex items-center gap-2">
-        <span :class="ERROR_TEXT_CLASS">{{ banner.message }}</span>
+        <span :class="bannerTextClass">{{ banner.message }}</span>
         <Button
           v-if="banner.retryable"
           type="button"
