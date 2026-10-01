@@ -33,6 +33,9 @@ const emit = defineEmits<{
 }>()
 
 const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
+// One shared empty list: a fresh `[]` per render would hand every field a new
+// prop on each parent render and re-render all of them.
+const NO_ERRORS: FieldError[] = []
 
 // A PrimeVue `Message` is a live region (`role="alert"`, `aria-live="assertive"`).
 // The submit-failure banner is announced by the form's polite status region
@@ -223,7 +226,7 @@ defineExpose({
       :ref="(el) => setFieldRef(field.id, el)"
       :field="field"
       :model-value="draft[field.id]"
-      :errors="fieldErrors[field.id] ?? []"
+      :errors="fieldErrors[field.id] ?? NO_ERRORS"
       :disabled="submitting"
       :readonly="false"
       @update:model-value="(v) => updateField(field.id, v)"
