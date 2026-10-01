@@ -1105,6 +1105,7 @@ function message_handlers.process_tools(ctx, op)
             or tool_call.registry_id ~= ctx.config.delegation_func_id)
             and not (tool_call.meta and tool_call.meta.private) then
             ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
+                message_id = op.call_message_ids[call_id],
                 function_name = tool_call.name
             })
             end
@@ -1253,6 +1254,7 @@ function message_handlers.process_tools(ctx, op)
 
                 if not is_delegation and not is_private then
                     ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
+                        message_id = message_id,
                         call_id = call_id,
                         function_name = result_data.tool_call.name
                     })
