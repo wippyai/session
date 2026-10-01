@@ -691,6 +691,17 @@ span.w-form__option-mark {
   flex: 1 1 auto;
   min-width: 0;
 }
+/*
+ * The date picker's calendar. PrimeVue opens it at least as wide as the whole
+ * date control and writes that as an inline `min-width`, which for a
+ * full-width box is the whole form (1,796px at 1920). The calendar's own
+ * width is enough, so the inline minimum is lifted here; only `!important`
+ * can beat an inline style. The class is our own, on the panel through the
+ * picker's pass-through (the `field-calendar` part).
+ */
+.w-form__field-calendar {
+  min-width: 0 !important;
+}
 
 @container (max-width: 520px) {
   .w-form__header:not(.w-form__header--single) {

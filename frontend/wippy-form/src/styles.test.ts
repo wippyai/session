@@ -87,6 +87,11 @@ describe('styles.css — fields form tokens and parts', () => {
     expect(ruleBody('\\.w-form__field-note')).toMatch(/color:\s*var\(--_muted\)/)
   })
 
+  it('lifts the calendar\'s inline minimum width through its own class, so it is not as wide as the whole form', () => {
+    // PrimeVue writes `min-width` inline on the panel; only an important rule beats that.
+    expect(ruleBody('\\.w-form__field-calendar')).toMatch(/min-width:\s*0\s*!important/)
+  })
+
   it('has no raw .p-* rule for the PrimeVue inputs (comments aside)', () => {
     const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
     expect(withoutComments).not.toMatch(/\.p-(inputtext|textarea|checkbox|datepicker|radiobutton)/)
