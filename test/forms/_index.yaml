@@ -120,6 +120,7 @@ entries:
       - sql
       - uuid
       - security
+      - funcs
     imports:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition

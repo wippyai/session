@@ -3,6 +3,7 @@ local json = require("json")
 local sql = require("sql")
 local uuid = require("uuid")
 local security = require("security")
+local funcs = require("funcs")
 local consts = require("consts")
 local definition = require("definition")
 local form_pattern = require("form_pattern")
@@ -965,6 +966,145 @@ local function define_tests()
                 end)
                 form_pattern._compile_source = original_compile
                 if not ok then error(failure, 0) end
+            end)
+
+            it("answers 422 pattern_mismatch for an answer that does not match the pattern, and accepts one that does", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = {
+                    { id = "code", type = "text", label = "Code", required = true, pattern = "[A-Z]{2}[0-9]{4}" },
+                } }
+                local artifact_id = new_v2_form(ctx, def)
+                for _, wrong in ipairs({ "ab1234", "AB123", "AB12345", " AB1234", "AB1234 " }) do
+                    local status, body = post(artifact_id, v2_request({ code = wrong }))
+                    test.eq(status, 422, wrong)
+                    test.eq(body.code, "validation_failed", wrong)
+                    test.eq(body.errors.code[1].code, "pattern_mismatch", wrong)
+                    test.is_nil(string.find(tostring(body.errors.code[1].message), wrong, 1, true),
+                        "no value is echoed: " .. wrong)
+                end
+                test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                test.eq(#user_rows(ctx.session_id), 0)
+                test.eq(#wakes, 0)
+
+                local request = v2_request({ code = "AB1234" })
+                local status, accepted = post(artifact_id, request)
+                test.eq(status, 200)
+                test.eq(accepted.success, true)
+                test.eq(accepted.replayed, false)
+                test.eq(#wakes, 1)
+                local _, state = get(artifact_id)
+                test.eq(state.data.code, "AB1234")
+                local replay_status, replay = post(artifact_id, request)
+                test.eq(replay_status, 200)
+                test.eq(replay.replayed, true)
+            end)
+
+            -- A default only prefills a field: it is never an answer. The
+            -- server never submits it, so a form whose fields all have
+            -- defaults is unanswered until the user sends something.
+            describe("a form whose fields all have defaults", function()
+                local REQUIRED_DEFAULTS = {
+                    title = "Delivery defaults",
+                    fields = {
+                        { id = "name", type = "text", label = "Your name", required = true, default = "Ann Lee" },
+                        { id = "parcels", type = "number", label = "Parcels", required = true, default = 3 },
+                        { id = "terms", type = "checkbox", label = "I agree", required = true, default = false },
+                        { id = "email", type = "email", label = "Email", default = "ann@example.org" },
+                        { id = "ready", type = "date", label = "Ready on", default = "2026-05-06" },
+                        { id = "notes", type = "textarea", label = "Notes", default = "Leave at the door" },
+                    },
+                }
+                local OPTIONAL_DEFAULTS = {
+                    title = "Optional defaults",
+                    fields = {
+                        { id = "email", type = "email", label = "Email", default = "ann@example.org" },
+                        { id = "ready", type = "date", label = "Ready on", default = "2026-05-06" },
+                        { id = "count", type = "number", label = "Count", default = 2 },
+                        { id = "news", type = "checkbox", label = "News", default = false },
+                    },
+                }
+                local EMPTY = '{"form_version":2,"request_id":"r-nothing","expected_content_version":1,"answers":{}}'
+
+                local function reader_of(ctx)
+                    return funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
+                end
+
+                it("is unanswered before anything is sent: no answer, no message, no wake-up", function()
+                    local ctx = new_session()
+                    local artifact_id = new_v2_form(ctx, REQUIRED_DEFAULTS)
+                    local status, state, raw = get(artifact_id)
+                    test.eq(status, 200)
+                    test.eq(state.status, "active")
+                    test.is_nil(state.data)
+                    test.contains(raw, '"data":null')
+                    test.contains(raw, '"submitted_at":null')
+                    test.contains(raw, '"answer_message_id":null')
+                    test.contains(raw, '"delivery":null')
+                    -- The form still carries what to prefill.
+                    test.eq(state.definition.fields[1].default, "Ann Lee")
+                    test.eq(state.definition.fields[2].default, 3)
+                    test.eq(state.definition.fields[3].default, false)
+                    test.eq(#user_rows(ctx.session_id), 0, "no answer message")
+                    test.eq(#wakes, 0, "no wake-up")
+                    test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
+
+                    local open, open_err = reader_of(ctx):call("wippy.session.forms:read_form_tool",
+                        { form_id = artifact_id })
+                    test.is_nil(open_err)
+                    test.contains(open.message, '"status":"unanswered"')
+                    test.contains(open.message, '"default":"Ann Lee"')
+                    test.is_nil(string.find(open.message, "answered_at", 1, true))
+                end)
+
+                it("refuses an answer that leaves the required fields out, and stays unanswered", function()
+                    local ctx = new_session()
+                    local artifact_id = new_v2_form(ctx, REQUIRED_DEFAULTS)
+                    local status, body = post(artifact_id, EMPTY)
+                    test.eq(status, 422)
+                    test.eq(body.errors.name[1].code, "required", "the default is not the answer")
+                    test.eq(body.errors.parcels[1].code, "required")
+                    test.eq(body.errors.terms[1].code, "required")
+                    test.is_nil(body.errors.email, "an optional field left out is just unanswered")
+                    test.is_nil(body.errors.ready)
+                    test.is_nil(body.errors.notes)
+                    test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                    test.eq(#user_rows(ctx.session_id), 0)
+                    test.eq(#wakes, 0)
+
+                    local _, state = get(artifact_id)
+                    test.eq(state.status, "active")
+                    test.is_nil(state.data)
+                    local open = reader_of(ctx):call("wippy.session.forms:read_form_tool", { form_id = artifact_id })
+                    test.contains(open.message, '"status":"unanswered"')
+                end)
+
+                it("takes an empty answer to optional fields as no answer, and records no default", function()
+                    local ctx = new_session()
+                    local artifact_id = new_v2_form(ctx, OPTIONAL_DEFAULTS)
+                    test.eq(select(2, get(artifact_id)).status, "active")
+                    local status, body = post(artifact_id, EMPTY)
+                    test.eq(status, 200)
+                    test.eq(body.success, true)
+                    test.eq(#wakes, 1, "an accepted answer wakes the session; before it, nothing did")
+
+                    local answers = artifact_repo.get(artifact_id).meta.session_form.submission.answers
+                    test.is_nil(next(answers), "no default was stored as an answer")
+                    local _, state, raw = get(artifact_id)
+                    test.eq(state.status, "idle")
+                    test.contains(raw, '"data":{}')
+
+                    local row: any = message_repo.get(body.answer_message_id)
+                    test.contains(row.data, '"email":{"question":"Email","answer":null}')
+                    test.contains(row.data, '"ready":{"question":"Ready on","answer":null}')
+                    test.contains(row.data, '"count":{"question":"Count","answer":null}')
+                    test.contains(row.data, '"news":{"question":"News","answer":null}')
+                    test.is_nil(string.find(tostring(row.data), "ann@example.org", 1, true), "the default is not in the record")
+                    test.is_nil(string.find(tostring(row.data), "2026-05-06", 1, true))
+
+                    local pending = reader_of(ctx):call("wippy.session.forms:read_form_tool", { form_id = artifact_id })
+                    test.contains(pending.message, '"status":"answer_pending"')
+                    test.is_nil(string.find(pending.message, "ann@example.org", 1, true))
+                end)
             end)
 
             -- P6: the largest answers a valid form can take, with the
