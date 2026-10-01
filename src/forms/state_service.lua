@@ -14,6 +14,7 @@ local message_repo = require("message_repo")
 local message_date = require("message_date")
 local session_repo = require("session_repo")
 local session_status = require("session_status")
+local logger = require("logger"):named("session.forms")
 
 -- Form state behind GET/POST /artifact/{id}/state (the HTTP handlers in
 -- src/api/artifact_state.lua are thin adapters). Every function returns an
@@ -38,7 +39,7 @@ function state_service._new_message_id()
 end
 
 function state_service._lookup_session(session_id)
-    return process.registry.lookup(consts.REGISTRY.SESSION .. session_id)
+    return session_status._lookup(session_id)
 end
 
 -- The same session permissions the session reader and writer check: reading
@@ -78,6 +79,24 @@ local function failure(status, code, message, extra)
     return status, error_body(code, message, extra)
 end
 
+-- An error response for the HTTP adapter's own refusals, in the same shape
+-- as every other body of this API.
+function state_service.error_response(status, code, message)
+    return failure(status, code, message)
+end
+
+-- The 413 for a body over MAX_BODY_BYTES.
+function state_service.payload_too_large()
+    return failure(413, "payload_too_large",
+        string.format("The submission is larger than %d KiB.", math.floor(state_service.MAX_BODY_BYTES / 1024)))
+end
+
+-- A 500: the client gets `message`, and the cause goes to the log.
+local function internal_failure(message, cause)
+    logger:warn(message, { error = tostring(cause) })
+    return failure(500, "internal", message)
+end
+
 ---------------------------------------------------------------------------
 -- Loading and authorization
 ---------------------------------------------------------------------------
@@ -96,7 +115,7 @@ local function load_form(user_id, artifact_id)
         if artifact_repo.is_not_found(err) then
             return nil, nil, failure(404, "not_found", "Form not found")
         end
-        return nil, nil, failure(500, "internal", "Failed to read the form")
+        return nil, nil, internal_failure("Failed to read the form", err)
     end
     if type(artifact.session_id) ~= "string" or artifact.session_id == "" then
         return nil, nil, failure(404, "not_found", "Form not found")
@@ -108,17 +127,7 @@ local function load_form(user_id, artifact_id)
     return artifact, form
 end
 
--- Delivery of an accepted answer, derived from the rows (no stored state):
---   pending      the answer row waits for admission
---   complete     admitted, and the agent has replied after it
---   running      admitted, no reply yet, and a live session process is
---                running a turn
---   interrupted  admitted, no reply, and no turn is running: the user
---                stopped the turn (the answer is delivered; a new message
---                continues), or it crashed before answering (the stored
---                status can still say running until the session process
---                starts again). Also when the answer row is gone from the
---                history: nothing will answer it.
+-- How many rows after an answer are read to look for the agent's reply.
 local REPLY_SCAN_LIMIT = 50
 
 -- A reply is assistant text, or a turn that ended by asking a new form. Tool
@@ -137,6 +146,29 @@ local function is_reply(row)
     return false
 end
 
+-- Whether other user input was accepted after the form was created: the
+-- "conversation moved on" test. `opts.tx` reads on a caller's transaction. A
+-- form without a creation cursor never counts as moved on. Returns the flag,
+-- or nil and an error.
+local function moved_on(artifact, record, opts)
+    local cursor = form_meta.created_cursor(record)
+    if not cursor then return false, nil end
+    local moved, err = message_repo.has_user_input_after(artifact.session_id, cursor, artifact.artifact_id, opts)
+    if err then return nil, err end
+    return moved == true, nil
+end
+
+-- Delivery of an accepted answer, derived from the rows (no stored state):
+--   pending      the answer row waits for admission
+--   complete     admitted, and the agent has replied after it
+--   running      admitted, no reply yet, and a live session process is
+--                running a turn
+--   interrupted  admitted, no reply, and no turn is running: the user
+--                stopped the turn (the answer is delivered; a new message
+--                continues), or it crashed before answering (the stored
+--                status can still say running until the session process
+--                starts again). Also when the answer row is gone from the
+--                history: nothing will answer it.
 local function delivery_of(submission, session_id)
     if type(submission) ~= "table" then return nil, nil end
     local row, err = message_repo.find(submission.message_id)
@@ -174,27 +206,23 @@ function state_service.get_state(user_id, artifact_id)
     end
 
     local submission = form_meta.submission(form.meta)
-    local origin = form_meta.origin(form.meta)
     local stale = false
     local delivery = nil
     if not submission then
-        if type(origin.created_cursor) == "string" and origin.created_cursor ~= "" then
-            local moved_on, stale_err = message_repo.has_user_input_after(
-                artifact.session_id, origin.created_cursor, artifact.artifact_id)
-            if stale_err then return failure(500, "internal", "Failed to read the form state") end
-            stale = moved_on == true
-        end
+        local stale_err
+        stale, stale_err = moved_on(artifact, form.meta)
+        if stale_err then return internal_failure("Failed to read the form state", stale_err) end
     else
         local delivery_err
         delivery, delivery_err = delivery_of(submission, artifact.session_id)
-        if delivery_err then return failure(500, "internal", "Failed to read the delivery state") end
+        if delivery_err then return internal_failure("Failed to read the delivery state", delivery_err) end
     end
 
     return 200, ordered_json.object({
         { "form_version", definition.FORM_VERSION },
         { "artifact_id", artifact.artifact_id },
         { "session_id", artifact.session_id },
-        { "status", submission and form_artifact.STATE.IDLE or form_artifact.STATE.ACTIVE },
+        { "status", submission and consts.ARTIFACT_STATUS.IDLE or consts.ARTIFACT_STATUS.ACTIVE },
         { "stale", stale },
         { "late", submission and submission.late == true or false },
         { "content_version", artifact.content_version or 1 },
@@ -249,7 +277,7 @@ local function success_body(r)
         { "request_id", r.request_id },
         { "answer_message_id", r.message_id },
         { "content_version", r.content_version },
-        { "status", form_artifact.STATE.IDLE },
+        { "status", consts.ARTIFACT_STATUS.IDLE },
         { "late", r.late },
         { "delivery", r.delivery },
         { "replayed", r.replayed },
@@ -282,7 +310,7 @@ local function against_existing(artifact, form, submission, request_id, answers)
         local canonical = canonical_of(form, answers)
         if canonical and canonical == accepted then
             local delivery, delivery_err = delivery_of(submission, artifact.session_id)
-            if delivery_err then return failure(500, "internal", "Failed to read the delivery state") end
+            if delivery_err then return internal_failure("Failed to read the delivery state", delivery_err) end
             return 200, success_body({
                 artifact_id = artifact.artifact_id, request_id = request_id,
                 message_id = submission.message_id, content_version = artifact.content_version or 1,
@@ -293,12 +321,6 @@ local function against_existing(artifact, form, submission, request_id, answers)
             "This request id was already used with different answers.", conflict_extra(artifact))
     end
     return failure(409, "already_submitted", "This form was already answered.", conflict_extra(artifact))
-end
-
-local function copy_table(value)
-    local out = {}
-    for key, item in pairs(value or {}) do out[key] = item end
-    return out
 end
 
 -- Validation response: 422 with errors keyed by field id and form errors.
@@ -353,7 +375,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
     end
 
     local message_id, id_err = state_service._new_message_id()
-    if not message_id then return failure(500, "internal", "Failed to create the answer id: " .. tostring(id_err)) end
+    if not message_id then return internal_failure("Failed to create the answer id", id_err) end
     local session_id = artifact.session_id
 
     local accepted, accept_err = tx.run(function(dbtx)
@@ -380,14 +402,8 @@ function state_service.submit(user_id, artifact_id, raw_body)
             return nil, { version_conflict = current }
         end
 
-        local origin = form_meta.origin(current_form.meta)
-        local late = false
-        if type(origin.created_cursor) == "string" and origin.created_cursor ~= "" then
-            local moved_on, stale_err = message_repo.has_user_input_after(
-                session_id, origin.created_cursor, current.artifact_id, { tx = dbtx })
-            if stale_err then return nil, tostring(stale_err) end
-            late = moved_on == true
-        end
+        local late, stale_err = moved_on(current, current_form.meta, { tx = dbtx })
+        if stale_err then return nil, tostring(stale_err) end
 
         local text = answer_text.build({
             artifact_id = current.artifact_id,
@@ -398,36 +414,34 @@ function state_service.submit(user_id, artifact_id, raw_body)
         -- The row's marker: which form it answers, and that the session has
         -- not admitted it yet.
         local stored: any, message_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER, text, {
-            session_form = {
+            [form_meta.ANSWER_KEY] = {
                 artifact_id = current.artifact_id,
                 pending = true,
             },
         }, { tx = dbtx })
         if message_err then return nil, tostring(message_err) end
 
-        local content, content_err = form_artifact.content_with_state(current_form, form_artifact.STATE.IDLE)
+        local content, content_err = form_artifact.content_with_state(current_form, consts.ARTIFACT_STATUS.IDLE)
         if not content then return nil, content_err end
-        local meta = copy_table(current_form.meta)
-        meta.submission = {
+        local record = form_meta.with_submission(current_form.meta, {
             request_id = request_id,
             answers = normalized,
             -- The answer row's own date: its place in the input order.
             submitted_at = stored.date,
             message_id = message_id,
             late = late,
-        }
+        })
         local updated, update_err = artifact_repo.update(current.artifact_id, {
             content = content,
             meta_patch = {
-                [form_artifact.META_KEY] = meta,
-                status = form_artifact.STATE.IDLE,
+                [form_meta.KEY] = record,
+                status = consts.ARTIFACT_STATUS.IDLE,
             },
         -- The conditional update is the winner check even without a client
         -- revision: it pins the revision read above in this transaction.
         }, { tx = dbtx, expected_version = expected_version or current.content_version or 1 })
         if not updated then
-            local kind_ok, kind = pcall(function() return (update_err :: any):kind() end)
-            if kind_ok and kind == errors.CONFLICT then return nil, { version_conflict = current } end
+            if artifact_repo.is_conflict(update_err) then return nil, { version_conflict = current } end
             return nil, tostring(update_err)
         end
 
@@ -456,15 +470,19 @@ function state_service.submit(user_id, artifact_id, raw_body)
             return failure(409, "version_conflict", "The form changed since it was loaded.",
                 conflict_extra(accept_err.version_conflict))
         end
-        return failure(500, "internal", "The answer could not be saved. Try again.")
+        return internal_failure("The answer could not be saved. Try again.", accept_err)
     end
 
     -- Committed. Tell the owner's open tabs, then wake the session process;
     -- neither is needed for correctness (state refetch, pending-row scans),
-    -- so a failed wake-up does not fail the request.
+    -- so a failed wake-up is logged and does not fail the request.
     local updated_artifact = artifact_repo.get(artifact.artifact_id)
     if updated_artifact then artifact_events.publish_updated(updated_artifact) end
-    state_service.wake_session(session_id, message_id, artifact.user_id)
+    local woken, wake_err = state_service.wake_session(session_id, message_id, artifact.user_id)
+    if not woken then
+        logger:warn("form answer wake-up not delivered",
+            { session_id = session_id, message_id = message_id, error = tostring(wake_err) })
+    end
 
     return 200, success_body({
         artifact_id = artifact.artifact_id, request_id = request_id, message_id = message_id,

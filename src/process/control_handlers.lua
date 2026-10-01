@@ -411,7 +411,7 @@ function control_handlers.control_forms(ctx, op)
                 .. " unanswered forms. Ask the user to answer or dismiss older forms first.")
         end
 
-        local content, content_err = form_artifact.build_content(def, form_artifact.STATE.ACTIVE)
+        local content, content_err = form_artifact.build_content(def, consts.ARTIFACT_STATUS.ACTIVE)
         if not content then return nil, content_err end
 
         -- Internal messages the session held during this turn arrived before
@@ -442,7 +442,7 @@ function control_handlers.control_forms(ctx, op)
 
             local _, meta_err = artifact_repo.update(stored.artifact_id, {
                 meta_patch = {
-                    [form_artifact.META_KEY] = form_artifact.new_meta({
+                    [form_meta.KEY] = form_artifact.new_meta({
                         turn_id = op.turn_id,
                         call_id = op.call_id,
                         tool_message_id = op.tool_message_id,

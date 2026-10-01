@@ -903,7 +903,7 @@ end
 -- patterns below only narrow the rows that are decoded and checked. They
 -- match whatever the key order, because "pending":true sits inside the
 -- session_form object.
-local PENDING_CANDIDATE_PATTERN = '%"session_form":{%"pending":true%'
+local PENDING_CANDIDATE_PATTERN = '%"' .. form_meta.ANSWER_KEY .. '":{%"pending":true%'
 local SUBMITTED_PATTERN = '%"submitted_at":%'
 
 -- Rows fetched per page by the scans below.
@@ -920,11 +920,11 @@ end
 
 local function is_form_answer(row)
     return row.type == consts.MSG_TYPE.USER and type(row.metadata) == "table"
-        and type(row.metadata.session_form) == "table"
+        and type(row.metadata[form_meta.ANSWER_KEY]) == "table"
 end
 
 local function is_pending_answer(row)
-    return is_form_answer(row) and row.metadata.session_form.pending == true
+    return is_form_answer(row) and row.metadata[form_meta.ANSWER_KEY].pending == true
 end
 
 -- Whether a history row (metadata decoded) is a form answer that the
@@ -939,7 +939,7 @@ message_repo.is_form_answer = is_form_answer
 -- The id of the form a form answer row answers, or nil for any other row.
 function message_repo.answer_form_id(row)
     if not is_form_answer(row) then return nil end
-    local form_id = row.metadata.session_form.artifact_id
+    local form_id = row.metadata[form_meta.ANSWER_KEY].artifact_id
     return type(form_id) == "string" and form_id or nil
 end
 
@@ -1064,7 +1064,7 @@ function message_repo.admit_pending_answer(session_id, message_id)
 
         local date, date_err = message_date.next(dbtx, session_id)
         if date_err then return nil, date_err end
-        row.metadata.session_form.pending = nil
+        row.metadata[form_meta.ANSWER_KEY].pending = nil
         local metadata_json, encode_err = json.encode(row.metadata)
         if encode_err then return nil, "Failed to encode metadata: " .. encode_err end
 

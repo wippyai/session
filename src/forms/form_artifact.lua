@@ -11,15 +11,15 @@ local form_artifact = {}
 
 form_artifact.SPECIFICATION = "wippy-component-tag-1.0"
 form_artifact.TAG_NAME = "wippy-form"
-form_artifact.META_KEY = form_meta.KEY
-form_artifact.META_VERSION = form_meta.VERSION
 
-form_artifact.STATE = {
-    ACTIVE = "active",
-    IDLE = "idle",
-}
+local function shallow_copy(value: any): any
+    local copy = {}
+    for key, item in pairs(value) do copy[key] = item end
+    return copy
+end
 
--- Content JSON for a form in the given state ("active" or "idle").
+-- Content JSON for a form in the given state (an artifact status, "active"
+-- or "idle").
 function form_artifact.build_content(def: any, state: string): (string?, string?)
     local encoded, err = json.encode({
         specification = form_artifact.SPECIFICATION,
@@ -38,7 +38,7 @@ end
 -- null) until an answer is accepted: Lua has no null sentinel.
 function form_artifact.new_meta(origin: any): any
     return {
-        version = form_artifact.META_VERSION,
+        version = form_meta.VERSION,
         origin = origin,
     }
 end
@@ -48,7 +48,7 @@ end
 -- a supported form.
 function form_artifact.parse(artifact: any): (any, string?)
     local meta = type(artifact) == "table" and form_meta.of(artifact.meta) or nil
-    if not meta or meta.version ~= form_artifact.META_VERSION then
+    if not meta or meta.version ~= form_meta.VERSION then
         return nil, "Artifact is not a form"
     end
     if type(artifact.content) ~= "string" or artifact.content == "" then
@@ -97,10 +97,8 @@ function form_artifact.content_with_state(form: any, state: string): (string?, s
     if type(stored) ~= "table" or type(stored.props) ~= "table" then
         return nil, "Form content is missing"
     end
-    local content = {}
-    for key, value in pairs(stored) do content[key] = value end
-    local props = {}
-    for key, value in pairs(stored.props) do props[key] = value end
+    local content = shallow_copy(stored)
+    local props = shallow_copy(stored.props)
     props.state = state
     content.props = props
     local encoded, err = json.encode(content)

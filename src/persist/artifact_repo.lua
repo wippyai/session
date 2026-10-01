@@ -230,11 +230,21 @@ function artifact_repo.get_owned(user_id, artifact_id, opts)
     end)
 end
 
+local function has_kind(err: any, kind: string): boolean
+    if err == nil or type(err) == "string" then return false end
+    local ok, actual = pcall(function() return err:kind() end)
+    return ok and actual == kind
+end
+
 -- Whether `err` is the NOT_FOUND error get_owned and update return.
 function artifact_repo.is_not_found(err: any): boolean
-    if err == nil or type(err) == "string" then return false end
-    local ok, kind = pcall(function() return err:kind() end)
-    return ok and kind == errors.NOT_FOUND
+    return has_kind(err, errors.NOT_FOUND)
+end
+
+-- Whether `err` is the CONFLICT error update returns for a stale
+-- expected_version, or for a meta that kept changing during a patch.
+function artifact_repo.is_conflict(err: any): boolean
+    return has_kind(err, errors.CONFLICT)
 end
 
 -- Conditional writes a meta patch makes before it reports a conflict. Each
