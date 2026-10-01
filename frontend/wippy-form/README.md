@@ -52,28 +52,28 @@ Set on `wippy-form` or any ancestor. Defaults are read through a private `--_x` 
 | `--wippy-form-question-size` | 15px | Question text |
 | `--wippy-form-question-weight` | `600` | Question text weight |
 | `--wippy-form-small-size` | `13px` | Descriptions, notes, hints, status |
-| `--wippy-form-surface` | `transparent` | Card background — the Host's artifact card already draws one; see "Why the card has no background" below |
+| `--wippy-form-surface` | `var(--p-content-background)` | Card background |
 | `--wippy-form-border` | `transparent` | Card and counter-pill edges |
 | `--wippy-form-text` | `var(--p-text-color)` | Main text |
 | `--wippy-form-text-muted` | `var(--p-text-muted-color)` | Descriptions, hints, icons |
-| `--wippy-form-row` | `color-mix(in srgb, var(--p-content-hover-background) 45%, transparent)` | Answer row background (resting) |
-| `--wippy-form-row-hover` | `var(--p-content-hover-background)` | Answer row under the pointer |
+| `--wippy-form-row` | `color-mix(in srgb, var(--p-content-hover-background) 40%, var(--p-content-border-color))` | Answer row background (resting) |
+| `--wippy-form-row-hover` | `color-mix(in srgb, var(--p-content-border-color) 90%, var(--p-text-color))` | Answer row under the pointer |
 | `--wippy-form-accent` | `var(--p-primary-color)` | Selection, counter, key badges, note-toggle active state, focus ring |
 | `--wippy-form-accent-soft` | `var(--p-highlight-background)` | Selected row background |
 | `--wippy-form-accent-contrast` | `var(--p-primary-contrast-color)` | Text/icons on the accent (selected key badge) |
 | `--wippy-form-danger` | `var(--p-danger-500, #b91c1c)` | Border of a review row whose required answer is missing. **Not a text colour:** error and warning text takes the theme's severity utilities (see "Errors and assistive technology"), so a retint of error text goes through the theme, not through this token |
 | `--wippy-form-focus` | the accent | Focus ring |
-| `--wippy-form-key-border` | `var(--p-content-border-color)` | Number key badges |
+| `--wippy-form-key-border` | `color-mix(in srgb, var(--p-text-muted-color) 55%, var(--p-content-border-color))` | Number key badges |
 | `--wippy-form-code-bg` | `color-mix(in srgb, var(--p-text-color) 8%, transparent)` | Inline code (backticks) |
 | `--wippy-form-radius` | `12px` | Card corners |
 | `--wippy-form-row-radius` | `8px` | Answer rows, inputs |
-| `--wippy-form-padding` | 12px | Card padding |
+| `--wippy-form-padding` | 10px | Card padding, the same on all four sides |
 | `--wippy-form-row-padding-y` | 6px | Row padding, top/bottom |
 | `--wippy-form-row-padding-x` | 10px | Row padding, left/right |
 | `--wippy-form-gap` | 4px | Space between rows |
 | `--wippy-form-key-size` | 20px | Number key badge size |
 
-**Why the card has no background by default:** the Host already wraps this component in the artifact card's own chrome, so a second background/border here would double it up. `--wippy-form-surface`/`--wippy-form-border` default to `transparent`; set them explicitly to give the card its own visible edge when it is not hosted inside another card.
+The card background is the theme content background (white in the light theme, the near-black content surface in the dark theme), so the answer rows stand out from it. Set `--wippy-form-surface` to change it, or to `transparent` to show the surface behind the card.
 
 **The four action buttons (the two "Send" buttons and the two composer send buttons) are plain, unstyled-by-us PrimeVue `Button`s** — default (filled primary) severity for Send/Send answers, `text rounded` for the composer's icon-only send. Their color comes straight from the theme's `--p-primary-*`/disabled treatment, not from `--wippy-form-accent`: a `.p-button` CSS override to route them through the token would be exactly the raw-`.p-*`-selector pattern the compliance gate rejects, and an inline-style workaround was tried and reverted — see "Known gaps". Practical effect: retinting `--wippy-form-accent` alone (without also retinting the theme's primary) leaves these four buttons on the old color while rows/counter/key-badges/focus-ring follow the new one.
 

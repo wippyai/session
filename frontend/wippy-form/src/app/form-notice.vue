@@ -13,7 +13,7 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex flex-col gap-4 min-w-0">
+  <div class="w-form gap-4 min-w-0">
     <div class="flex flex-col gap-1">
       <h2 class="text-base font-semibold text-color break-words">
         {{ definition.title }}

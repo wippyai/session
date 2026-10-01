@@ -20,16 +20,12 @@
 }
 
 /*
- * Question card — Styling API (`--wippy-form-*` tokens, `part`s, `w-form__*`
- * classes, host attributes). See this package's README for the full
- * contract. Every colour/size below is read
- * through a private `--_x` var whose own fallback is a semantic `--p-*`
- * theme var (never a raw hex as the PRIMARY fallback) — so a facade retint
- * or a dark-mode flip restyles the card with zero edits here, and only a
- * final safety-net hex (host-less dev, no theme loaded) is a literal color.
- * The Host already wraps this component in the artifact card's own
- * background/border, so `--wippy-form-surface`/`--wippy-form-border`
- * default to transparent — the card does not draw a second one.
+ * Question card styling API: `--wippy-form-*` tokens, `part`s, `w-form__*`
+ * classes and host attributes, documented in the README. Each value is read
+ * through a private `--_x` variable whose fallback is a semantic `--p-*` theme
+ * variable, so a facade retint or a dark-mode flip restyles the card without
+ * edits here. The card background is the theme's content background. The
+ * border is transparent.
  */
 :host {
   --_font: var(--wippy-form-font, inherit);
@@ -37,23 +33,23 @@
   --_q-size: var(--wippy-form-question-size, 15px);
   --_q-weight: var(--wippy-form-question-weight, 600);
   --_small: var(--wippy-form-small-size, 13px);
-  --_surface: var(--wippy-form-surface, transparent);
+  --_surface: var(--wippy-form-surface, var(--p-content-background));
   --_border: var(--wippy-form-border, transparent);
   --_text: var(--wippy-form-text, var(--p-text-color));
   --_muted: var(--wippy-form-text-muted, var(--p-text-muted-color));
-  --_row: var(--wippy-form-row, color-mix(in srgb, var(--p-content-hover-background) 45%, transparent));
-  --_row-hover: var(--wippy-form-row-hover, var(--p-content-hover-background));
+  --_row: var(--wippy-form-row, color-mix(in srgb, var(--p-content-hover-background) 40%, var(--p-content-border-color)));
+  --_row-hover: var(--wippy-form-row-hover, color-mix(in srgb, var(--p-content-border-color) 90%, var(--p-text-color)));
   --_accent: var(--wippy-form-accent, var(--p-primary-color));
   --_accent-soft: var(--wippy-form-accent-soft, var(--p-highlight-background));
   --_on-accent: var(--wippy-form-accent-contrast, var(--p-primary-contrast-color));
   /* Border of a review row with a missing required answer. Not a text colour: error text uses the theme's severity utilities (see "Error / keys / footer"). */
   --_danger: var(--wippy-form-danger, var(--p-danger-500, #b91c1c));
   --_focus: var(--wippy-form-focus, var(--_accent));
-  --_key-border: var(--wippy-form-key-border, var(--p-content-border-color));
+  --_key-border: var(--wippy-form-key-border, color-mix(in srgb, var(--p-text-muted-color) 55%, var(--p-content-border-color)));
   --_code-bg: var(--wippy-form-code-bg, color-mix(in srgb, var(--p-text-color) 8%, transparent));
   --_radius: var(--wippy-form-radius, 12px);
   --_row-radius: var(--wippy-form-row-radius, 8px);
-  --_pad: var(--wippy-form-padding, 12px);
+  --_pad: var(--wippy-form-padding, 10px);
   --_row-py: var(--wippy-form-row-padding-y, 6px);
   --_row-px: var(--wippy-form-row-padding-x, 10px);
   --_gap: var(--wippy-form-gap, 4px);
@@ -341,17 +337,32 @@ span.w-form__option-mark {
     opacity: 1;
   }
 }
+/*
+ * A fixed-height box that centers the digit on both axes. The font uses
+ * longhands because the `font` shorthand with `var(--_font)`, which can be
+ * `inherit`, is invalid at computed-value time.
+ */
 .w-form__option-key {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: var(--_key);
   height: var(--_key);
   padding: 0 4px;
-  display: grid;
-  place-items: center;
-  font: 500 12px/1 var(--_font);
+  font-family: var(--_font);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
   color: var(--_muted);
   border: 1px solid var(--_key-border);
   border-radius: 5px;
+}
+@supports (text-box: trim-both cap alphabetic) {
+  .w-form__option-key {
+    text-box: trim-both cap alphabetic;
+  }
 }
 .w-form__option--selected .w-form__option-key {
   background: var(--_accent);

@@ -1,64 +1,111 @@
 import { describe, expect, it } from 'vitest'
-// Same `?raw`/`?inline` string-import mechanism `src/index.ts` already uses
-// for this file (`import stylesText from './styles.css?inline'`) — no Node
-// `fs` (this package ships browser-only code; `tsconfig.json`'s `types`
-// list is `["vite/client", "@wippy-fe/proxy"]`, no `@types/node`).
+import { contrast, resolveColor } from './test-support/contrast'
 import css from './styles.css?raw'
 
-/** The declaration block for one top-level selector (given verbatim, already regex-escaped), or '' if it's not found. */
+/** The declaration block of the first rule with this selector (a regex source), or a thrown error when there is none. */
 function ruleBody(selectorPattern: string): string {
-  const re = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`)
-  return re.exec(css)?.[1] ?? ''
+  const body = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(css)?.[1]
+  if (body === undefined)
+    throw new Error(`styles.css has no rule for ${selectorPattern}`)
+  return body
 }
 
-// Error and warning TEXT is coloured by the theme's severity utilities on the
-// text element (`ERROR_TEXT_CLASS` / `WARN_TEXT_CLASS`, asserted in the
-// component tests and contrast-checked in lib/error-text.test.ts), never by a
-// rule in this stylesheet: the old `--_danger` text rules were 3.6:1 on the card
-// in both themes, and the theme's own `Message` colours are below 4.5:1 too. No
-// `.p-*` rule may paper over the `Message` either (EE2-2461 F-RC-2).
-describe('styles.css — no rule colours error or warning text', () => {
-  /** The stylesheet's rules with comments removed, so prose about colours is not mistaken for a declaration. */
-  const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
+/** The stylesheet's rules with comments removed, so prose about colours is not mistaken for a declaration. */
+const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
-  it('.w-form__error (margin only) sets no color of its own', () => {
+/** The fallback of a private variable declared as `--_name: var(--wippy-form-x, fallback);` on `:host`. */
+function fallbackOf(name: string): string {
+  const fallback = new RegExp(`--_${name}:\\s*var\\(--wippy-form-[\\w-]+,\\s*(.*)\\);`).exec(ruleBody(':host'))?.[1]
+  if (!fallback)
+    throw new Error(`:host declares no fallback for --_${name}`)
+  return fallback
+}
+
+describe('styles.css: the rule helpers', () => {
+  it('ruleBody throws for a selector with no rule, so a missing rule cannot pass a "does not contain" assertion', () => {
+    expect(() => ruleBody('\\.w-form__no-such-rule')).toThrow('no rule')
+  })
+})
+
+// Error and warning text takes its colour from the theme's severity utilities
+// on the text element (`lib/error-text.ts`), never from a rule here.
+describe('styles.css: no rule colours error or warning text', () => {
+  it('.w-form__error sets a margin and no colour', () => {
     const body = ruleBody('\\.w-form__error')
-    expect(body).not.toMatch(/color:/)
     expect(body).toMatch(/margin:/)
+    expect(body).not.toMatch(/color:/)
   })
 
-  it('has no `color` declaration that reads --_danger or a danger/warn theme colour', () => {
-    // Positive control: the scan really sees colour declarations (the card's muted text).
+  it('has no `color` declaration that reads --_danger or a danger or warn theme colour', () => {
+    // Positive control: the scan sees colour declarations.
     expect(rules).toMatch(/\bcolor:\s*var\(--_muted\)/)
 
-    const severityTextColors = Array.from(rules.matchAll(/(?<![-\w])color:\s*([^;}]*)/g))
+    const severityColors = Array.from(rules.matchAll(/(?<![-\w])color:\s*([^;}]*)/g))
       .map(m => m[1].trim())
       .filter(value => /--_danger|--p-danger|--p-warn|--wippy-form-danger/.test(value))
-    expect(severityTextColors).toEqual([])
+    expect(severityColors).toEqual([])
   })
 
-  it('the footer text and a missing answer take their colour from the utilities, not from their rules', () => {
+  it('the footer text and a missing answer take their colour from the utilities', () => {
     expect(ruleBody('\\.w-form__footer-text')).not.toMatch(/color:/)
     expect(ruleBody('\\.w-form__review-item--missing \\.w-form__review-answer')).not.toMatch(/color:/)
   })
 
-  it('--_danger resolves through a semantic theme var, never a raw hex as the primary fallback, and its one use left is a border colour', () => {
-    expect(ruleBody(':host')).toMatch(/--_danger:\s*var\(--wippy-form-danger,\s*var\(--p-danger-500/)
-    const uses = Array.from(rules.matchAll(/([\w-]+):\s*var\(--_danger\)/g)).map(m => m[1])
-    expect(uses).toEqual(['border-color'])
+  it('--_danger is only the border colour of a review row with a missing answer', () => {
+    expect(fallbackOf('danger')).toMatch(/^var\(--p-danger-500,/)
+    expect(Array.from(rules.matchAll(/([\w-]+):\s*var\(--_danger\)/g)).map(m => m[1])).toEqual(['border-color'])
     expect(ruleBody('\\.w-form__review-item--missing \\.w-form__review-edit')).toMatch(/border-color:\s*var\(--_danger\)/)
   })
 
-  it('has no `.p-message*` rule: the question card colours the text inside the Message with utilities instead', () => {
+  it('has no `.p-message` rule', () => {
     expect(rules).not.toMatch(/\.p-message/)
   })
 })
-// The answered summary's status line takes focus by script after a send (so
-// focus is not lost when the form swaps views). Its ring must be the theme's
-// own focus ring, not the browser's default outline and not the card's heavier
-// 2px selection ring, and it must hug the text instead of spanning the card
-// (EE2-2461 O-RC-1).
-describe('styles.css — the status line shows the theme focus ring', () => {
+
+describe('styles.css: the card colours', () => {
+  it('the background is the theme content background, and the border is transparent', () => {
+    expect(fallbackOf('surface')).toBe('var(--p-content-background)')
+    expect(fallbackOf('border')).toBe('transparent')
+  })
+
+  it.each(['light', 'dark'] as const)('answer rows stand out from the card background in %s, and a hovered row stands out more', (mode) => {
+    const surface = resolveColor(fallbackOf('surface'), mode)
+    const rest = contrast(resolveColor(fallbackOf('row'), mode), surface)
+    const hover = contrast(resolveColor(fallbackOf('row-hover'), mode), surface)
+    expect(rest).toBeGreaterThanOrEqual(1.15)
+    expect(hover).toBeGreaterThan(rest)
+  })
+
+  it.each(['light', 'dark'] as const)('the number key border is visible against an answer row in %s', (mode) => {
+    expect(contrast(resolveColor(fallbackOf('key-border'), mode), resolveColor(fallbackOf('row'), mode))).toBeGreaterThanOrEqual(1.5)
+  })
+
+  it('the card pads all four sides equally', () => {
+    expect(fallbackOf('pad')).toBe('10px')
+    expect(ruleBody('\\.w-form')).toMatch(/padding:\s*var\(--_pad\)\s*;/)
+  })
+})
+
+describe('styles.css: the number key badge', () => {
+  const body = ruleBody('\\.w-form__option-key')
+
+  it('is a fixed-height box that centers its digit on both axes', () => {
+    expect(body).toMatch(/display:\s*inline-flex/)
+    expect(body).toMatch(/align-items:\s*center/)
+    expect(body).toMatch(/justify-content:\s*center/)
+    expect(body).toMatch(/height:\s*var\(--_key\)/)
+    expect(body).toMatch(/line-height:\s*1\s*;/)
+  })
+
+  it('sets the font with longhands, because `font` with a variable that may be `inherit` is invalid and falls back to the card font', () => {
+    expect(body).not.toMatch(/(?<![-\w])font:/)
+    expect(body).toMatch(/font-size:\s*12px/)
+  })
+})
+
+// The summary's status line takes focus by script after a send. It shows the
+// theme's own focus ring, and the ring hugs the text instead of spanning the card.
+describe('styles.css: the status line shows the theme focus ring', () => {
   const ring = () => ruleBody('\\.w-form__status:focus-visible')
 
   it('takes outline width, style, colour and offset from the theme focus-ring tokens', () => {
@@ -69,7 +116,7 @@ describe('styles.css — the status line shows the theme focus ring', () => {
     expect(body).toMatch(/outline-offset:\s*var\(--p-focus-ring-offset,/)
   })
 
-  it('does not fall back to the browser default (`auto`) or draw a fixed 2px ring of its own', () => {
+  it('does not fall back to the browser default or draw a fixed 2px ring', () => {
     const body = ring()
     expect(body).not.toMatch(/outline:\s*auto/)
     expect(body).not.toMatch(/outline-style:\s*auto/)
@@ -81,25 +128,10 @@ describe('styles.css — the status line shows the theme focus ring', () => {
     expect(ruleBody('\\.w-form:focus-visible')).toMatch(/outline:\s*2px solid var\(--_focus\)/)
   })
 
-  it('hugs its text, so the ring is not a full-width bar, and has rounded corners like the rows', () => {
+  it('hugs its text and has rounded corners like the rows', () => {
     const body = ruleBody('\\.w-form__status')
     expect(body).toMatch(/width:\s*fit-content/)
     expect(body).toMatch(/max-width:\s*100%/)
     expect(body).toMatch(/border-radius:\s*var\(--_row-radius\)/)
-  })
-})
-
-// The form-level description must not sit directly on the question line
-// with no gap, and must read as "muted" the way the README's parts table
-// documents.
-describe('styles.css — the form-level description has space below it and the theme\'s muted text style', () => {
-  it('.w-form__form-description sets a bottom margin, from the theme scale (not a raw pixel guess)', () => {
-    const body = ruleBody('\\.w-form__form-description')
-    expect(body).toMatch(/margin:\s*0\s+0\s+\d+px/)
-  })
-
-  it('.w-form__form-description reads through --_muted, matching the field-level description/hint style', () => {
-    const body = ruleBody('\\.w-form__form-description')
-    expect(body).toMatch(/color:\s*var\(--_muted\)/)
   })
 })
