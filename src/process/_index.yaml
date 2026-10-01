@@ -158,5 +158,8 @@ entries:
       session_status: wippy.session.process:session_status
       form_recovery: wippy.session.forms:form_recovery
       reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      upstream: wippy.session.process:upstream
       message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
     method: run

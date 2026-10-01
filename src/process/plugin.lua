@@ -11,7 +11,10 @@ local session_status = require("session_status")
 local form_recovery = require("form_recovery")
 local funcs = require("funcs")
 local message_repo = require("message_repo")
+local message_handlers = require("message_handlers")
 local reader = require("reader")
+local writer = require("writer")
+local upstream = require("upstream")
 
 type PluginArgs = {
     user_id: string,
@@ -110,19 +113,54 @@ local function recover_session_calls(session_id)
     return message_repo.recover_pending(session_id, anchor, form_recovery.settle_call)
 end
 
--- Stores `target_status` with the interaction recovery gives it, after
--- repairing the calls an interrupted turn left pending when `recover_calls`
--- is set. Returns the status, whether it was stored, the storage error, the
--- call repair error and the interaction.
-local function settle_session(session_id: string, user_id: string, target_status: string, recover_calls: boolean)
+-- Admits, with no turn, the form answers a stopped turn left pending: the
+-- same admission a Stop the session honours runs when it settles
+-- (session.flush_held, phase "stop"), in acceptance order and each after
+-- the steering accepted before it (message_handlers.admit_in_order). The
+-- user's clients (`hub_pid`) are told each answer was received. Returns the
+-- admitted rows, to publish once the idle status is out. A row whose
+-- admission fails stays pending, and the next session start admits it with
+-- a turn.
+local function admit_stopped_answers(session_id: string, user_id: string, hub_pid: any)
+    local pending, list_err = message_repo.list_pending_answers(session_id, 1)
+    if not pending then return {}, list_err end
+    if #pending == 0 then return {}, nil end
+    local stored, read_err = session_repo.get(session_id, user_id)
+    if not stored then return {}, read_err or "Session was not found" end
+    local session_writer, writer_err = writer.new(session_id)
+    if not session_writer then return {}, writer_err end
+    return message_handlers.admit_in_order({
+        session_id = session_id,
+        writer = session_writer,
+        upstream = upstream.new(session_id, nil, hub_pid),
+        interaction = stored.meta and stored.meta.interaction,
+    }, nil)
+end
+
+-- Stores `target_status` with the interaction recovery gives it. Before
+-- that, `opts.recover_calls` repairs the calls an interrupted turn left
+-- pending, and `opts.admit_stopped` admits its pending form answers with no
+-- turn (admit_stopped_answers, clients told through `opts.hub_pid`).
+-- Returns the status, whether it was stored, the storage error, the call
+-- repair error, the interaction and the admitted answer rows.
+local function settle_session(session_id: string, user_id: string, target_status: string, opts: any?)
+    opts = opts or {}
     local recovery_err = nil
-    if recover_calls then
+    if opts.recover_calls then
         local _, err = recover_session_calls(session_id)
         recovery_err = err
     end
+    local admitted = {}
+    if opts.admit_stopped then
+        local admit_err
+        admitted, admit_err = admit_stopped_answers(session_id, user_id, opts.hub_pid)
+        if admit_err then
+            logger:warn("form answer admission failed", { session_id = session_id, error = tostring(admit_err) })
+        end
+    end
     local stored, read_err = session_repo.get(session_id, user_id)
     if not stored then
-        return target_status, false, read_err or "Session was not found", recovery_err, nil
+        return target_status, false, read_err or "Session was not found", recovery_err, nil, admitted
     end
     local meta = stored.meta or {}
     local interaction = input_policy.recovery_snapshot(stored, target_status)
@@ -130,7 +168,7 @@ local function settle_session(session_id: string, user_id: string, target_status
     local success, status_err = session_repo.update_session_meta(session_id, {
         status = target_status, meta = meta
     })
-    return target_status, success, status_err, recovery_err, interaction
+    return target_status, success, status_err, recovery_err, interaction, admitted
 end
 
 -- A session whose turn was stopped from outside: its calls are repaired and
@@ -142,13 +180,19 @@ end
 -- interaction-aware client would keep Send disabled while the only way to
 -- continue is to send a message (the plugin reopens a session on its first
 -- message, and a session process always starts idle). Nothing in the session
--- failed; its turn was interrupted from outside. A form answer the turn did
--- not answer reads as interrupted ("send a message to continue",
--- state_service.delivery_of). Clients get the recovery notice only when the
--- runtime stopped (settle_stale_running); a Stop the user asked for is not
--- reported as an error.
-local function settle_interrupted(session_id: string, user_id: string)
-    return settle_session(session_id, user_id, consts.STATUS.IDLE, true)
+-- failed; its turn was interrupted from outside. An admitted form answer the
+-- turn did not answer reads as interrupted ("send a message to continue",
+-- state_service.delivery_of). Form answers still pending differ by cause:
+-- after an enforced Stop they are admitted here with no turn
+-- (`admit_stopped`), as a Stop the session honours would; after a runtime
+-- stop they stay pending, and the next session start admits them with a
+-- turn. Clients get the recovery notice only when the runtime stopped
+-- (settle_stale_running); a Stop the user asked for is not reported as an
+-- error.
+local function settle_interrupted(session_id: string, user_id: string, opts: any?)
+    opts = opts or {}
+    return settle_session(session_id, user_id, consts.STATUS.IDLE,
+        { recover_calls = true, admit_stopped = opts.admit_stopped, hub_pid = opts.hub_pid })
 end
 
 -- Whether the plugin cancelled or terminated the session process to enforce
@@ -161,13 +205,17 @@ end
 
 -- Settles a session process that exited while the runtime keeps running. A
 -- process that exits with an error, or is cancelled for any other reason, is
--- stored failed.
-local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
+-- stored failed. After an enforced Stop the answers accepted during the
+-- stopped turn are admitted with no turn, so they never start one later;
+-- `hub_pid` receives their announcements.
+local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any,
+    exit_error: any, hub_pid: any?)
     if stop_enforced(session_info) then
-        return settle_interrupted(session_id, user_id)
+        return settle_interrupted(session_id, user_id, { admit_stopped = true, hub_pid = hub_pid })
     end
     local target_status = status_after_exit(session_info, result, exit_error)
-    return settle_session(session_id, user_id, target_status, target_status == consts.STATUS.FAILED)
+    return settle_session(session_id, user_id, target_status,
+        { recover_calls = target_status == consts.STATUS.FAILED })
 end
 
 local function run(args)
@@ -1045,8 +1093,9 @@ local function run(args)
                         end
 
                         -- Update session status in database based on termination reason
-                        local target_status, success, status_err, recovery_err, interaction =
-                            finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error)
+                        local target_status, success, status_err, recovery_err, interaction, admitted =
+                            finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error,
+                                state.user_hub_pid)
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err
@@ -1084,6 +1133,9 @@ local function run(args)
                         -- An enforced Stop is what the user asked for, so it
                         -- publishes the idle status without the recovery error.
                         report_final_status(session_id, target_status, success, err, interaction, false)
+                        -- Open views of the forms answered during an enforced
+                        -- Stop reload their delivery state once it says idle.
+                        message_handlers.publish_admitted(admitted)
                         if state.user_hub_pid then
                             publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,

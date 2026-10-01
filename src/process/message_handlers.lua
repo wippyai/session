@@ -887,7 +887,9 @@ end
 --   - the user stopped the turn: when the stop settles, with no turn; the
 --     form reads as delivered and the user continues by sending a message.
 --     Such an answer never starts a turn later, also when its admission has
---     to be retried (ctx.stopped_answers);
+--     to be retried (ctx.stopped_answers). A Stop the plugin has to enforce
+--     ends the process first; the plugin then admits the session's pending
+--     answers the same way, with no turn (plugin.finalize_exit);
 --   - the session is finishing or failed: never; it stays pending and the
 --     next session start admits it and starts a turn.
 -- Once admitted, open views of the form reload its delivery state. When a

@@ -694,9 +694,11 @@ local function run_plugin_script(actor, hub_pid, script)
 end
 
 local function add_pending_answer(session_id)
-    local _, create_err = message_repo.create(uuid.v7(), session_id, consts.MSG_TYPE.USER,
+    local message_id = uuid.v7()
+    local _, create_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER,
         "Answers to form", { session_form = { artifact_id = uuid.v7(), pending = true } })
     test.is_nil(create_err)
+    return message_id
 end
 
 local function upstream_error(run, hub_pid)
@@ -1576,6 +1578,84 @@ local function define_tests()
             test.is_true(update.interaction.can_send)
             test.is_nil(upstream_error(run, "stop-hub"), "a user Stop is not reported as an error")
             cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("admits the answers of a Stop it had to enforce without starting a turn, then or later", function()
+            -- An answer accepted during the stopped turn is still pending
+            -- when the cancelled process exits (command_bus:fail flushes
+            -- held input with phase "exit"). A Stop the session honours
+            -- admits such answers with no turn, and so must this one.
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Enforced Stop answer", "running")
+            local steering_id = uuid.v7()
+            local _, steering_err = message_repo.create(steering_id, session_id, consts.MSG_TYPE.USER,
+                "Also check the dates", { input = { state = "pending" } })
+            test.is_nil(steering_err)
+            local answer_id = add_pending_answer(session_id)
+            local stop_messages = {
+                { topic = consts.TOPICS.STOP_ESCALATION, data = { session_id = session_id,
+                    from_pid = "plugin-lifecycle-session", stop_request_id = "answer-stop" } },
+                { topic = consts.TOPICS.STOP_DEADLINE, data = { session_id = session_id,
+                    session_pid = "plugin-lifecycle-session", stop_request_id = "answer-stop", level = 1 } },
+            }
+            local run = run_plugin_lifecycle(actor, session_id, "answer-stop-hub", stop_messages,
+                { status = "shutdown", session_id = session_id, interrupted = true, intentional_exit = false })
+            test.is_nil(run.error)
+            test.eq(run.cancelled, 1)
+
+            local pending_after: any = message_repo.list_pending_answers(session_id, 50)
+            local answer: any = message_repo.get(answer_id)
+            local steering: any = message_repo.get(steering_id)
+            local stored: any = session_repo.get(session_id, actor:id())
+            test.eq(#pending_after, 0, "nothing is left for a later session start to admit with a turn")
+            test.is_nil(answer.metadata.session_form.pending, "the answer is admitted")
+            test.eq(steering.metadata.input.state, "applied",
+                "steering accepted before the answer stays ahead of it")
+            test.eq(stored.status, consts.STATUS.IDLE)
+
+            -- Clients see the answer received before the idle status, and no
+            -- error: this is the Stop the user asked for.
+            local received_at, idle_at = nil :: number?, nil :: number?
+            for index, sent in ipairs(run.sent) do
+                local payload = type(sent.payload) == "table" and sent.payload or {}
+                if sent.pid == "answer-stop-hub" and payload.type == consts.UPSTREAM_TYPES.RECEIVED
+                    and payload.message_id == answer_id then
+                    received_at = received_at or index
+                elseif sent.pid == "answer-stop-hub" and payload.type == consts.UPSTREAM_TYPES.UPDATE
+                    and payload.status == consts.STATUS.IDLE then
+                    idle_at = idle_at or index
+                end
+            end
+            test.not_nil(received_at, "the answer is announced as received")
+            test.not_nil(idle_at)
+            test.is_true((received_at :: number) < (idle_at :: number))
+            test.is_nil(upstream_error(run, "answer-stop-hub"))
+
+            -- The plugin's next scan finds nothing to start the session for.
+            local original_pending = message_repo.list_sessions_with_pending_answers
+            message_repo.list_sessions_with_pending_answers = function(user_id, _limit, opts)
+                local ids, err = original_pending(user_id, 1000, opts)
+                if not ids then return nil, err end
+                local mine = {}
+                for _, id in ipairs(ids) do
+                    if id == session_id then table.insert(mine, id) end
+                end
+                return mine
+            end
+            local original_list = session_repo.list_by_user_status
+            session_repo.list_by_user_status = function() return { sessions = {} } end
+            local started = {} :: {string}
+            local later = run_plugin_lifecycle(actor, session_id, "answer-stop-hub", {
+                { topic = consts.PLUGIN_TOPICS.RESUME_ANSWERS, data = {} }
+            }, nil, { open = false, cancel_plugin = true, on_spawn = function(init)
+                table.insert(started, init.session_id)
+            end })
+            message_repo.list_sessions_with_pending_answers = original_pending
+            session_repo.list_by_user_status = original_list
+            cleanup_session_fixture(session_id, context_id)
+
+            test.is_nil(later.error)
+            test.eq(#started, 0, "no unattended turn starts for the stopped turn's answer")
         end)
 
         it("invalidates resolved and superseded stop deadlines by request identity", function()

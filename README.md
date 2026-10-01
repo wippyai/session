@@ -63,6 +63,13 @@ starts again: pending tool calls are repaired and the session is stored idle,
 with `can_send` true, because a new message is how the user continues it.
 Until then, REST responses report such a session the same way.
 
+When a turn does not stop within 10 seconds of a Stop (for example, during a
+model call that Stop cannot interrupt), the session plugin cancels the session
+process, and terminates it if it still runs 10 seconds later. That exit is the
+Stop the user asked for, not a failure. Pending tool calls are repaired, form
+answers sent during the stopped turn are delivered without a new turn, and the
+session is stored idle with `can_send` true. Clients get no error.
+
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
@@ -254,7 +261,8 @@ turn for it. Answers and steered messages keep the order in which the user
 sent them. A step applies steered messages only up to the first pending
 answer, and a message sent before an answer stays ahead of it in the prompt.
 When the user stops a turn, its answers are delivered without starting a new
-turn, and steering sent after them stays pending as after any Stop. A turn
+turn, and steering sent after them stays pending as after any Stop. This also
+holds when the session plugin has to enforce the Stop. A turn
 that asks a form still ends there; steering sent during that turn starts the
 next turn.
 
