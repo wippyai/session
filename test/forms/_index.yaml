@@ -54,6 +54,7 @@ entries:
       - json
       - registry
     imports:
+      definition: wippy.session.forms:definition
       field_values: wippy.session.forms:field_values
       form_pattern: wippy.session.forms:form_pattern
       form_text: wippy.session.forms:form_text
@@ -106,6 +107,7 @@ entries:
     imports:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
+      form_pattern: wippy.session.forms:form_pattern
       state_service: wippy.session.forms:state_service
       control_handlers: wippy.session.process:control_handlers
       message_handlers: wippy.session.process:message_handlers

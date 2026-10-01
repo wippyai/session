@@ -306,16 +306,46 @@ function form_pattern.check(pattern: any): (boolean?, string?, string?)
         end
         error(failure, 0)
     end
-    local re, compile_err = text.regexp.compile("^(?:" .. pattern .. ")$")
+    local re, compile_err = form_pattern.compile(pattern)
     if not re then
         return nil, INVALID, "The pattern could not be compiled: " .. tostring(compile_err)
     end
     return true, nil, nil
 end
 
+-- Seam for tests: the runtime's compile, called once per pattern that is not
+-- cached.
+function form_pattern._compile_source(source: string): (any, any)
+    return text.regexp.compile(source)
+end
+
+-- The compiled expressions by pattern text. A form's pattern is compiled
+-- when the form is written (the check, then the check of its default), and
+-- again on every answer and every replay of an answer, so the expression is
+-- kept, as the email expression is. The cache is emptied when it is full: a
+-- process works with few patterns at a time, and a bound is what matters.
+form_pattern.CACHE_LIMIT = 64
+local cache: {[string]: any} = {}
+local cached = 0
+
+function form_pattern.cached_count(): integer
+    return cached
+end
+
 -- The compiled full-match expression for a pattern, or nil and the error.
+-- This is the one place that wraps a pattern as ^(?:pattern)$, so an
+-- alternation is matched as a whole and the author needs no anchors.
 function form_pattern.compile(pattern: string): (any, any)
-    return text.regexp.compile("^(?:" .. pattern .. ")$")
+    local known = cache[pattern]
+    if known ~= nil then return known, nil end
+    local expression, err = form_pattern._compile_source("^(?:" .. pattern .. ")$")
+    if not expression then return nil, err end
+    if cached >= form_pattern.CACHE_LIMIT then
+        cache, cached = {}, 0
+    end
+    cache[pattern] = expression
+    cached = cached + 1
+    return expression, nil
 end
 
 return form_pattern

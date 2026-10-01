@@ -5,6 +5,7 @@ local uuid = require("uuid")
 local security = require("security")
 local consts = require("consts")
 local definition = require("definition")
+local form_pattern = require("form_pattern")
 local state_service = require("state_service")
 local control_handlers = require("control_handlers")
 local message_handlers = require("message_handlers")
@@ -938,6 +939,32 @@ local function define_tests()
                 test.eq(status, 500)
                 test.eq(body.code, "internal")
                 test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
+            it("compiles a form's pattern once across writing the form, answering it and replaying the answer", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = {
+                    { id = "code", type = "text", label = "Code", pattern = "replay-[0-9]{3}" },
+                } }
+                local original_compile = form_pattern._compile_source
+                local sources = {} :: {string}
+                form_pattern._compile_source = function(source: string)
+                    table.insert(sources, source)
+                    return original_compile(source)
+                end
+                local ok, failure = pcall(function()
+                    local artifact_id = new_v2_form(ctx, def)
+                    test.eq(#sources, 1, "writing the form checks the pattern: one compile")
+                    local request = v2_request({ code = "replay-123" })
+                    test.eq(post(artifact_id, request), 200)
+                    test.eq(#sources, 1, "answering reuses the compiled pattern")
+                    local status, replay = post(artifact_id, request)
+                    test.eq(status, 200)
+                    test.eq(replay.replayed, true)
+                    test.eq(#sources, 1, "a replay validates the answers again and still does not compile")
+                end)
+                form_pattern._compile_source = original_compile
+                if not ok then error(failure, 0) end
             end)
 
             -- P6: the largest answers a valid form can take, with the

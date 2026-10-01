@@ -1,6 +1,7 @@
 local test = require("test")
 local json = require("json")
 local registry = require("registry")
+local definition = require("definition")
 local field_values = require("field_values")
 local form_pattern = require("form_pattern")
 local form_text = require("form_text")
@@ -238,6 +239,69 @@ local function define_tests()
                 local _, ordered = check("a{" .. string.rep("9", 90) .. "," .. string.rep("9", 89) .. "}")
                 test.eq(ordered, "unsupported_pattern")
             end)
+        end)
+    end)
+
+    describe("compiling a pattern", function()
+        local original = form_pattern._compile_source
+        local sources = {} :: {string}
+
+        before_each(function()
+            sources = {}
+            form_pattern._compile_source = function(source: string)
+                table.insert(sources, source)
+                return original(source)
+            end
+        end)
+        after_each(function() form_pattern._compile_source = original end)
+
+        it("has the check go through compile, the one owner of the whole-text wrapper", function()
+            local ok, code = form_pattern.check("owner[a-z]+")
+            test.is_true(ok, tostring(code))
+            test.eq(#sources, 1)
+            test.eq(sources[1], "^(?:owner[a-z]+)$")
+            -- Compiling it again, by compile or by check, reuses the first.
+            local expression = form_pattern.compile("owner[a-z]+")
+            test.eq(#sources, 1, "compile reuses what the check compiled")
+            test.is_true(form_pattern.check("owner[a-z]+"))
+            test.eq(#sources, 1, "a second check reuses it too")
+            test.is_true(((expression :: any):match_string("ownerabc")))
+            test.is_false(((expression :: any):match_string("xownerabc")))
+        end)
+
+        it("compiles a pattern once when a text field with a pattern and a default is written", function()
+            local normalized, errors = definition.normalize({ title = "T", fields = {
+                { id = "code", type = "text", label = "Code", pattern = "once-[0-9]{2}", default = "once-42" },
+            } })
+            test.is_nil(errors, definition.format_errors(errors))
+            test.not_nil(normalized)
+            test.eq(#sources, 1, "the check and the default's check share one compile")
+        end)
+
+        it("answers with the same compiled expression for the same pattern, and keeps a refusal's reason", function()
+            local first = form_pattern.compile("same-[a-z]")
+            local second = form_pattern.compile("same-[a-z]")
+            test.eq(first, second)
+            local missing, reason = form_pattern.compile("(")
+            test.is_nil(missing)
+            test.not_nil(reason)
+            local again, again_reason = form_pattern.compile("(")
+            test.is_nil(again)
+            test.not_nil(again_reason, "a pattern that does not compile is refused every time")
+        end)
+
+        it("keeps a bounded number of compiled patterns, and still answers correctly past the bound", function()
+            local limit = form_pattern.CACHE_LIMIT
+            test.gt(limit, 0)
+            for index = 1, limit * 3 do
+                local expression = form_pattern.compile("bounded" .. index .. "x")
+                test.is_true(((expression :: any):match_string("bounded" .. index .. "x")))
+            end
+            test.is_true(form_pattern.cached_count() <= limit, "more than the bound is cached")
+            test.gt(#sources, limit, "the bound made some patterns compile again")
+            local early = form_pattern.compile("bounded1x")
+            test.is_true(((early :: any):match_string("bounded1x")))
+            test.is_false(((early :: any):match_string("bounded2x")))
         end)
     end)
 
