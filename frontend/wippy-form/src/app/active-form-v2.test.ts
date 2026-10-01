@@ -278,3 +278,77 @@ describe('ActiveForm — styling API', () => {
     expect(wrapper.find('button[type="submit"]').attributes('part')).toContain('send')
   })
 })
+
+describe('ActiveForm — status summary stays accurate', () => {
+  function status(wrapper: ReturnType<typeof mountForm>) {
+    return wrapper.find('[role="status"]').text()
+  }
+
+  async function failSubmit(wrapper: ReturnType<typeof mountForm>) {
+    await wrapper.find('form').trigger('submit')
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+  }
+
+  it('says how many questions still need attention as each one is fixed, and clears when none do', async () => {
+    const wrapper = mountForm()
+    await failSubmit(wrapper)
+    expect(status(wrapper)).toBe('3 questions need attention.')
+
+    await inputOf(wrapper, 'Full name').setValue('Ada')
+    expect(status(wrapper)).toBe('2 questions need attention.')
+    await inputOf(wrapper, 'Email').setValue('ada@example.com')
+    expect(status(wrapper)).toBe('1 question needs attention.')
+    await inputOf(wrapper, 'I agree').setValue(true)
+    expect(status(wrapper)).toBe('')
+  })
+
+  it('does not touch the status text while the user keeps typing, only when the count changes', async () => {
+    const wrapper = mountForm()
+    await failSubmit(wrapper)
+    const statusEl = wrapper.find('[role="status"]').element
+    let changes = 0
+    const observer = new MutationObserver((records) => { changes += records.length })
+    observer.observe(statusEl, { childList: true, characterData: true, subtree: true })
+
+    // The first key fixes this field's error: the count goes 3 to 2, one change.
+    const name = inputOf(wrapper, 'Full name')
+    await name.setValue('A')
+    await Promise.resolve()
+    const afterFirstKey = changes
+    expect(afterFirstKey).toBeGreaterThan(0)
+    // The rest of the typing leaves the count alone.
+    await name.setValue('Ad')
+    await name.setValue('Ada')
+    await name.setValue('Ada L')
+    await Promise.resolve()
+    expect(changes).toBe(afterFirstKey)
+    expect(status(wrapper)).toBe('2 questions need attention.')
+    observer.disconnect()
+  })
+
+  it('clears after a server error on a field is fixed', async () => {
+    const wrapper = mountForm()
+    await fillValid(wrapper)
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void }
+    vm.setServerErrors({ mail: [{ code: 'invalid_email', message: 'That address is not accepted.' }] }, [])
+    await wrapper.vm.$nextTick()
+    expect(status(wrapper)).toBe('1 question needs attention.')
+
+    await inputOf(wrapper, 'Email').setValue('ada@elsewhere.example')
+    expect(status(wrapper)).toBe('')
+  })
+
+  it('keeps a submit-failure message in the status when a field is fixed afterwards', async () => {
+    const wrapper = mountForm()
+    await failSubmit(wrapper)
+    await wrapper.setProps({ banner: { message: 'Could not send. Check your connection.', retryable: true } })
+    expect(status(wrapper)).toBe('Could not send. Check your connection.')
+    await inputOf(wrapper, 'Full name').setValue('Ada')
+    expect(status(wrapper)).toBe('Could not send. Check your connection.')
+  })
+
+  it('starts empty and says nothing before a submit', () => {
+    expect(status(mountForm())).toBe('')
+  })
+})

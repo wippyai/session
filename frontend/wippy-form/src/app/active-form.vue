@@ -49,6 +49,9 @@ const fieldRefs: Record<string, FieldHandle | null> = {}
 // validation error summary both funnel through here instead of each having
 // their own role="alert" (which double-announces and can't be dismissed).
 const statusMessage = ref('')
+// True while the region holds the validation summary, which is kept in step
+// with the errors still showing; false once a submit-failure message took it.
+let statusIsSummary = false
 
 function setFieldRef(id: string, el: unknown) {
   fieldRefs[id] = el as FieldHandle | null
@@ -69,9 +72,30 @@ function focusFirstInvalid(ids: string[], blankOther: string[] = []) {
   })
 }
 
-function announceErrorSummary(count: number) {
-  statusMessage.value = count === 1 ? '1 question needs attention.' : `${count} questions need attention.`
+function errorSummary(count: number): string {
+  return count === 1 ? '1 question needs attention.' : `${count} questions need attention.`
 }
+
+function announceErrorSummary(count: number) {
+  statusIsSummary = true
+  statusMessage.value = errorSummary(count)
+}
+
+// Questions with an error showing (a form-level error counts as one).
+const errorCount = computed(() => Object.keys(fieldErrors.value).length + (formErrors.value.length > 0 ? 1 : 0))
+
+// A fixed question drops its error as the user types, so the summary would
+// otherwise keep saying how many needed attention at the last submit. It is
+// updated only when that count changes (once per fixed question, not once per
+// key) and emptied when none are left. A polite live region does not announce
+// text that has not changed.
+watch(errorCount, (count) => {
+  if (!statusIsSummary)
+    return
+  statusMessage.value = count === 0 ? '' : errorSummary(count)
+  if (count === 0)
+    statusIsSummary = false
+})
 
 function setServerErrors(errors: Record<string, FieldError[]> | undefined, formLevel: FieldError[] | undefined) {
   fieldErrors.value = errors ?? {}
@@ -116,8 +140,10 @@ function handleSubmit() {
 // Mirror the submit-outcome banner into the shared live region so a
 // network/server failure is announced the same way a validation failure is.
 watch(() => props.banner, (banner) => {
-  if (banner)
-    statusMessage.value = banner.message
+  if (!banner)
+    return
+  statusIsSummary = false
+  statusMessage.value = banner.message
 })
 
 const rootPart = computed(() => partClass('card'))
