@@ -346,7 +346,7 @@ local function define_tests()
 
             test.is_nil(err)
             test.not_nil(result)
-            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
 
             local trigger = find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
             test.not_nil(trigger, "first step of a user turn must schedule the background trigger check")
@@ -399,8 +399,8 @@ local function define_tests()
 
             local result, err = continue_step(ctx)
             test.is_nil(err)
-            test.is_nil(find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS))
-            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)))
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
         end)
 
         it("leads to a checkpoint anchored on the continuation step once it crosses the token threshold", function()
@@ -495,7 +495,7 @@ local function define_tests()
             local result, err = user_step(ctx)
 
             test.is_nil(err)
-            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 1)
         end)
 
@@ -514,7 +514,7 @@ local function define_tests()
             local result, err = user_step(ctx)
             test.is_nil(err)
             test.is_true(result.completed)
-            test.is_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
             test.eq(#calls, 2)
             for _, call in ipairs(calls) do
@@ -526,7 +526,7 @@ local function define_tests()
             local ctx, captured = mock_ctx(fake_agent(1000), { max_turn_iterations = 3 })
 
             local first = user_step(ctx)
-            test.not_nil(find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             for _ = 1, 2 do
                 local more = continue_step(ctx)
                 test.not_nil(find_op(more.next_ops, consts.OP_TYPE.PROCESS_TOOLS), "steps within the limit run normally")
@@ -556,7 +556,7 @@ local function define_tests()
         it("a new user message starts a fresh count", function()
             local ctx = mock_ctx(fake_agent(1000), { max_turn_iterations = 1 })
 
-            test.not_nil(find_op(user_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(user_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             test.eq(continue_step(ctx).stopped, "max_iterations")
 
             local finished, finish_err = message_handlers.finish_turn(ctx)
@@ -564,7 +564,7 @@ local function define_tests()
             test.is_true(finished.completed)
             local next_turn = user_step(ctx)
             test.is_nil(next_turn.stopped)
-            test.not_nil(find_op(next_turn.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(next_turn.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
         end)
 
         it("agent_options.loop.max_iterations overrides the session limit", function()
@@ -573,7 +573,7 @@ local function define_tests()
             local ctx = mock_ctx(agent, { max_turn_iterations = 250 })
 
             user_step(ctx)
-            test.not_nil(find_op(continue_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(continue_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             test.eq(continue_step(ctx).stopped, "max_iterations")
         end)
 
@@ -584,7 +584,7 @@ local function define_tests()
             for _ = 1, 20 do
                 local result = continue_step(ctx)
                 test.is_nil(result.stopped)
-                test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+                test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             end
         end)
 

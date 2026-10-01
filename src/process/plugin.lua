@@ -237,6 +237,10 @@ local function run(args)
         -- pending form answers that failed; the scan skips it `wait` times.
         resume_backoff = {} :: {[string]: any},
         stale_checked = false,
+        -- The grace period after the user's last client left, while it runs:
+        -- { generation, timer, cancel } (begin_shutdown).
+        shutdown_deadline = nil :: any,
+        shutdown_generation = 0,
     }
 
     process.set_options({ trap_links = true })
@@ -357,6 +361,70 @@ local function run(args)
         })
 
         process.send(session_info.pid :: string, consts.TOPICS.FINISH_AND_EXIT, {})
+    end
+
+    -- The user hub tells this plugin "shutdown" when the user's last client
+    -- disconnects and "resume" when a client connects again. A page reload is
+    -- both, a fraction of a second apart: the old socket closes before the
+    -- new one opens. Finishing a session is a Stop for its turn (the turn
+    -- ends at its next boundary, steering still unused stays pending and
+    -- form answers wait for the next session start), so the sessions are not
+    -- finished at the first "shutdown". A client has the grace period to
+    -- return; "resume" ends it, and only a grace period that runs out
+    -- finishes them (finish_sessions_for_shutdown).
+    local function clear_shutdown_deadline()
+        local deadline = state.shutdown_deadline
+        if not deadline then return end
+        state.shutdown_deadline = nil
+        deadline.timer:stop()
+        deadline.cancel:send(true)
+    end
+
+    local function begin_shutdown()
+        -- A repeated "shutdown" keeps the grace period it already started.
+        if state.shutting_down then return end
+        state.shutting_down = true
+        state.shutdown_generation = state.shutdown_generation + 1
+        local plugin_pid = process.pid()
+        local generation = state.shutdown_generation
+        local timer = time.timer(consts.TIMEOUTS.SHUTDOWN_GRACE)
+        local cancel = channel.new(1)
+        state.shutdown_deadline = { generation = generation, timer = timer, cancel = cancel }
+        coroutine.spawn(function()
+            local selected = channel.select({ timer:channel():case_receive(), cancel:case_receive() })
+            if selected.channel == timer:channel() then
+                process.send(plugin_pid, consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE, { generation = generation })
+            end
+        end)
+        logger:info("last client disconnected - sessions finish unless one reconnects", {
+            user_id = state.user_id,
+            grace = consts.TIMEOUTS.SHUTDOWN_GRACE,
+        })
+    end
+
+    -- A client connected again ("resume"): the grace period ends and nothing
+    -- is finished. Sessions the grace period already finished keep finishing.
+    local function cancel_shutdown()
+        if not state.shutting_down then return end
+        state.shutting_down = false
+        clear_shutdown_deadline()
+        logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
+    end
+
+    -- The grace period ran out. The deadline message carries the generation
+    -- of the grace period that sent it, which a message from a client never
+    -- does, and one that belongs to a cancelled or an older grace period is
+    -- ignored.
+    local function finish_sessions_for_shutdown(deadline_data: any)
+        local deadline = state.shutdown_deadline
+        if not deadline or type(deadline_data) ~= "table" or deadline_data.generation ~= deadline.generation then
+            return
+        end
+        state.shutdown_deadline = nil
+        logger:info("no client returned - notifying sessions to finish", { user_id = state.user_id })
+        for session_id, session_info in pairs(state.active_sessions) do
+            graceful_terminate_session(session_id, session_info, "shutdown")
+        end
     end
 
     local function get_oldest_session()
@@ -780,11 +848,13 @@ local function run(args)
     -- creates one without a start token.
     local function handle_wake(payload_data: any)
         if type(payload_data) ~= "table" or type(payload_data.session_id) ~= "string"
-            or payload_data.session_id == "" or state.shutting_down then
+            or payload_data.session_id == "" then
             return
         end
         local session_id: string = payload_data.session_id
         local session_info = state.active_sessions[session_id]
+        -- A session that is running (not finishing) takes its wake-up also
+        -- while the grace period after the last client's disconnect runs.
         if session_info then
             if not session_info.terminating then
                 local message_id = type(payload_data.message_id) == "string" and payload_data.message_id or nil
@@ -792,6 +862,7 @@ local function run(args)
             end
             return
         end
+        if state.shutting_down then return end
         local started_id, err = create_session({ session_id = session_id })
         if err then
             logger:warn("form answer wake could not start the session",
@@ -972,12 +1043,9 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.COMMAND then
                 handle_message_or_command(payload:data(), consts.HANDLER_TYPES.COMMAND)
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN then
-                logger:info("received shutdown signal - notifying sessions to finish", { user_id = state.user_id })
-                state.shutting_down = true
-
-                for session_id, session_info in pairs(state.active_sessions) do
-                    graceful_terminate_session(session_id, session_info, "shutdown")
-                end
+                begin_shutdown()
+            elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE then
+                finish_sessions_for_shutdown(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.WAKE then
                 handle_wake(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.RESUME_ANSWERS then
@@ -987,10 +1055,7 @@ local function run(args)
                 end
                 resume_pending_answer_sessions()
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
-                if state.shutting_down then
-                    state.shutting_down = false
-                    logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
-                end
+                cancel_shutdown()
             elseif topic == consts.TOPICS.STOP_ESCALATION then
                 local stop_data = payload:data()
                 local session_info = state.active_sessions[stop_data.session_id]
@@ -1067,6 +1132,7 @@ local function run(args)
                                     "Failed to create session: " ..
                                     tostring(exit_result.error or "Session start refused"))
                                 gc_ticker:stop()
+                                clear_shutdown_deadline()
                                 return { status = "shutdown", user_id = state.user_id,
                                     reason = "no_active_sessions" }
                             end
@@ -1144,10 +1210,21 @@ local function run(args)
                             })
                         end
 
+                        -- Finished for a disconnect whose grace period ran
+                        -- out, and a client connected again meanwhile: the
+                        -- form answers it left pending are not left for the
+                        -- next periodic scan, or for the plugin to start
+                        -- again. Steering alone starts nothing: unused
+                        -- steering stays pending, as after any Stop.
+                        if session_info.terminate_reason == "shutdown" and not state.shutting_down then
+                            resume_pending_answer_sessions()
+                        end
+
                         if state.session_count == 0 then
                             fail_inbox_requests(consts.ERROR_CODES.SESSION_NOT_FOUND,
                                 "Session exited: " .. err)
                             gc_ticker:stop()
+                            clear_shutdown_deadline()
                             logger:info("plugin shutting down - no active sessions", { user_id = state.user_id })
                             return { status = "shutdown", user_id = state.user_id, reason = "no_active_sessions" }
                         end
@@ -1164,6 +1241,7 @@ local function run(args)
     end
 
     gc_ticker:stop()
+    clear_shutdown_deadline()
     logger:info("plugin shutting down", { user_id = state.user_id, active_sessions = state.session_count })
     return { status = "shutdown", user_id = state.user_id }
 end

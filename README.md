@@ -58,6 +58,20 @@ without `interaction` retain legacy status behavior. Steering metadata uses
 application. The messages endpoint returns `pending_inputs` independently of
 history pagination.
 
+A page reload does not end a turn. The user hub tells the session plugin when
+the user's last client disconnects, and a reload closes the old connection a
+fraction of a second before the new one opens. The plugin therefore waits 10
+seconds after the last client leaves before it finishes the user's sessions,
+and a client that connects again within that time cancels the wait. A running
+turn then ends the way it does without a reload, so it applies the steering
+sent during it and admits the form answers accepted during it. When no client
+returns within 10 seconds, the plugin finishes the sessions, which works like
+a Stop for a running turn. Unused steering then remains pending, and so do the
+form answers accepted during the turn. The next session start admits those
+answers and starts a turn for them. If a client connected again while the
+session was finishing, the plugin starts the session for those answers as soon
+as it exits, and steering alone starts nothing.
+
 A turn cut off by a runtime stop is settled when the user's session plugin
 starts again: pending tool calls are repaired and the session is stored idle,
 with `can_send` true, because a new message is how the user continues it.
