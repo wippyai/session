@@ -139,6 +139,33 @@ describe('QuestionCardActive: an error is announced once', () => {
   })
 })
 
+describe('QuestionCardActive: a new send clears the previous server errors', () => {
+  it('drops a field error when the same answer is sent again, so a later failure banner shows alone', async () => {
+    const wrapper = mountCard(singleDef)
+    ;(wrapper.vm as unknown as CardVm).setServerErrors({ f1: [{ code: 'invalid', message: FIELD_ERROR }] })
+    await flushPromises()
+    expect(wrapper.text()).toContain(FIELD_ERROR)
+
+    await wrapper.setProps({ submitting: true })
+    expect(wrapper.text()).not.toContain(FIELD_ERROR)
+
+    await wrapper.setProps({ submitting: false, banner: { message: BANNER_ERROR, retryable: true } })
+    await flushPromises()
+    expect(wrapper.text()).toContain(BANNER_ERROR)
+    expect(wrapper.text()).not.toContain(FIELD_ERROR)
+  })
+
+  it('drops a form-level error when a send starts', async () => {
+    const wrapper = mountCard(singleDef)
+    ;(wrapper.vm as unknown as CardVm).setServerErrors(undefined, [{ code: 'stale', message: FORM_ERROR }])
+    await flushPromises()
+    expect(wrapper.text()).toContain(FORM_ERROR)
+
+    await wrapper.setProps({ submitting: true })
+    expect(wrapper.text()).not.toContain(FORM_ERROR)
+  })
+})
+
 describe('QuestionCardActive: the focused control names the error', () => {
   it('a single-choice row that takes focus after a field error is described by that error', async () => {
     const wrapper = mountCard(singleDef)

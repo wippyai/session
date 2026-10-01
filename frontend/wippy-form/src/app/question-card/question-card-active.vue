@@ -54,17 +54,22 @@ const cardRoot = ref<HTMLElement | null>(null)
 watch(controller.inReview, v => emit('step-change', v ? 'review' : 'active'), { immediate: true })
 watch(controller.collapsed, v => emit('collapsed-change', v), { immediate: true })
 
-// Once a send starts, the polite region must not go on describing the step the
-// reader sent from, and a failed send is announced by its own alert.
-watch(() => props.submitting, (sending) => {
-  if (sending)
-    controller.quiet()
-})
-
 // 422 field errors from the server, by field id. They show on the question that
 // owns the field, and a card with several questions jumps there.
 const serverFieldErrors = ref<Record<string, string>>({})
 const serverFormErrors = ref<string[]>([])
+
+// Once a send starts, the polite region must not go on describing the step the
+// reader sent from, and a failed send is announced by its own alert. The
+// previous send's server errors go too, as its banner does, so a resent answer
+// never shows an old 422 next to the new outcome.
+watch(() => props.submitting, (sending) => {
+  if (!sending)
+    return
+  controller.quiet()
+  serverFieldErrors.value = {}
+  serverFormErrors.value = []
+})
 
 // Only the question's own field error goes down to it. A form-level error has no
 // question to sit on, and showing it there as well would announce it twice.

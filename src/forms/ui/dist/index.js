@@ -7380,10 +7380,11 @@ const to = /* @__PURE__ */ pe({
     const r = e, o = n, i = Pu(r.state.definition, r.state.data, (h) => {
       r.offline || r.submitting || o("submit", h);
     }), s = V(() => !!r.offline || r.submitting), l = `${Rt()}-q`, a = U(null);
-    re(i.inReview, (h) => o("step-change", h ? "review" : "active"), { immediate: !0 }), re(i.collapsed, (h) => o("collapsed-change", h), { immediate: !0 }), re(() => r.submitting, (h) => {
-      h && i.quiet();
-    });
+    re(i.inReview, (h) => o("step-change", h ? "review" : "active"), { immediate: !0 }), re(i.collapsed, (h) => o("collapsed-change", h), { immediate: !0 });
     const u = U({}), d = U([]);
+    re(() => r.submitting, (h) => {
+      h && (i.quiet(), u.value = {}, d.value = []);
+    });
     function c(h) {
       return u.value[h] ?? "";
     }

@@ -146,7 +146,7 @@ Keys only work while focus is inside the card, so typing in the chat box never p
 - Sending a single-answer note closes the editor, so focus returns to the row that owns the note. With several questions, focus moves to the next question.
 - "Send answers" and "Send" stay focusable while a send is in flight. They are `aria-disabled` and carry the theme's `p-disabled` marker instead of the `disabled` attribute, which would hand focus to `<body>`, and they ignore activation. They are real disabled buttons while a required answer is missing or nothing is ticked.
 - When a failed send has left no focus, it goes to "Send answers" on the review, or otherwise to the chosen or first answer. Focus on another control of the page is left alone.
-- The polite region is emptied when a send starts, so it does not repeat the step that was sent from.
+- The polite region is emptied when a send starts, so it does not repeat the step that was sent from. The previous send's field and form-level errors are cleared at the same moment, as its banner is, so only the new send's outcome shows.
 - Error and warning text uses two constants in `src/lib/error-text.ts`, `ERROR_TEXT_CLASS` and `WARN_TEXT_CLASS`, which are at least 4.5:1 in both themes. A retryable failure banner is a warning.
 
 Tests: `question-card-errors.test.ts`, `question-card-send-focus.test.ts`, `use-question-card.test.ts`, `message-text.test.ts` and `error-text.test.ts`.
