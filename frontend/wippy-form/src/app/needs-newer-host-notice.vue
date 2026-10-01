@@ -5,6 +5,13 @@ import ChoiceField from './fields/choice-field.vue'
 
 defineProps<{
   definition: FormDefinition
+  /**
+   * The Host's own `state` prop (the package-tag lifecycle mirrored from the
+   * artifact) says `idle`: an answer was already accepted. Without the
+   * artifact-state API this component cannot read that answer back, so the
+   * notice says where it is instead of implying the form is still open.
+   */
+  answered?: boolean
 }>()
 </script>
 
@@ -29,6 +36,11 @@ defineProps<{
       no GET to fetch an answer from. Rendering the real options disabled
       gives the reader something to look at instead of "—" placeholder rows,
       without inventing an answer that was never loaded.
+
+      For the same reason the notice below points at the chat for an answer
+      that was already sent (the user's "Answered …" message and the agent's
+      reply are readable there): every option here is unselected, so the card
+      alone would look like an open, unanswered form (EE2-2461 / F-P4F-6).
     -->
     <ChoiceField
       v-for="field in definition.fields"
@@ -41,10 +53,18 @@ defineProps<{
     />
 
     <Message
+      v-if="answered"
+      severity="secondary"
+      :closable="false"
+    >
+      This form was answered. Your answer is in the chat.
+    </Message>
+    <Message
+      v-else
       severity="warn"
       :closable="false"
     >
-      This form needs a newer Web Host.
+      This form needs a newer Web Host. If you already answered it, your answer is in the chat.
     </Message>
   </div>
 </template>

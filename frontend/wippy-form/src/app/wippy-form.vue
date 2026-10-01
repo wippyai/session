@@ -37,6 +37,13 @@ const artifactId = useArtifactId()
 
 const definition = computed(() => props.value.definition)
 const statePropTrigger = computed(() => props.value.state)
+// The package-tag `state` prop is stored in the artifact content and flipped
+// to `idle` in the same transaction that accepts an answer (form_artifact
+// content_with_state), so `idle` reliably means "an answer was accepted".
+// It is the only signal an old Host (no artifact-state API) leaves us for
+// telling an answered card from an open one; `active` proves nothing (the
+// Host's copy of the content may predate the answer).
+const answeredPerHostProp = computed(() => statePropTrigger.value === 'idle')
 
 const { status, state, errorMessage, reloadError, reload, refresh } = useFormState(artifactId, statePropTrigger)
 useDeliveryNudge(state, refresh)
@@ -246,6 +253,7 @@ function handleRetry() {
     <NeedsNewerHostNotice
       v-else-if="status === 'unsupported'"
       :definition="definition"
+      :answered="answeredPerHostProp"
     />
 
     <NoArtifactNotice

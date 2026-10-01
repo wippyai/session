@@ -152,6 +152,46 @@ describe('WippyForm — Host predates the artifact-state API (no `artifactState`
     expect(wrapper.text()).toContain('Option B')
   })
 
+  it('tells the reader that an answer already sent is in the chat when the Host\'s state prop is "active" (or absent) — it cannot tell open from answered', async () => {
+    setArtifactStateExport(undefined)
+
+    for (const stateProp of ['active', undefined] as const) {
+      const wrapper = mountWippyForm({ formVersion: 1, definition, state: stateProp })
+      await flushPromises()
+
+      expect(wrapper.text()).toContain('This form needs a newer Web Host.')
+      expect(wrapper.text()).toContain('If you already answered it, your answer is in the chat.')
+      expect(wrapper.text()).not.toContain('This form was answered.')
+      // Nothing is invented: every option stays unselected and disabled.
+      expect(wrapper.findAll('input[type="radio"]').every(r => (r.element as HTMLInputElement).disabled && !(r.element as HTMLInputElement).checked)).toBe(true)
+      expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    }
+  })
+
+  it('says the form was answered and points to the chat when the Host\'s state prop is "idle" — no "newer Web Host" wording, options still shown disabled', async () => {
+    setArtifactStateExport(undefined)
+
+    const element = elementWithArtifactId(null)
+    const wrapper = mountWippyForm({ formVersion: 1, definition, state: 'idle' }, element)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('This form was answered. Your answer is in the chat.')
+    expect(wrapper.text()).not.toContain('needs a newer Web Host')
+    expect(wrapper.text()).not.toContain('If you already answered it')
+    // What was asked is still readable, but nothing is selected (the saved
+    // answer cannot be read without the state API) and nothing is submittable.
+    expect(wrapper.text()).toContain('Pick one')
+    expect(wrapper.text()).toContain('Option A')
+    expect(wrapper.text()).not.toContain('—')
+    const radios = wrapper.findAll('input[type="radio"]')
+    expect(radios.length).toBeGreaterThan(0)
+    expect(radios.every(r => (r.element as HTMLInputElement).disabled && !(r.element as HTMLInputElement).checked)).toBe(true)
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'PVButton' }).exists()).toBe(false)
+    // Styling still reports the capability gap, not an answered/interactive card.
+    expect(element.getAttribute('card-state')).toBe('unsupported')
+  })
+
   it('shows the same notice even when the element DOES carry an artifact id — the missing capability is checked first', async () => {
     setArtifactStateExport(undefined)
 
