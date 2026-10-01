@@ -61,19 +61,20 @@ entries:
       type: view.component
       title: Session Form
       description: >-
-        Renders one Session ask_user form artifact and submits the answer back to the owning session over the
-        Host's artifact-state API. When every field in `definition` has `type: "choice"` (the only field type V1
-        emits), it renders a Claude-style question card: one question at a time for several-question forms, with
-        a `‹ n/total ›` counter, per-answer notes, an Other free-text row, a review step before sending, and a
-        read-only answered summary afterward. A mixed or non-choice definition falls back to a plain
-        radio/checkbox fields form (kept for V2 standard fields). Inputs: `definition` (the immutable
-        question/option data), `form-version` (schema version gate — an unsupported version disables submission),
-        and `state` (the package-tag lifecycle: "active" while answerable, "idle" once answered). The component
-        owns its own data loading (GET on mount, reload on visibility/session-message/artifact events),
-        submission (request-id reuse, one automatic retry on a no-response network failure, 422 field-error and
-        409 already-submitted handling), and offline detection — the host only needs to mount the tag with these
-        three attributes. Edge cases handled: a stale ("asked earlier") form, a race where another client answers
-        first, a reload that fails while a view is already showing, and an unsupported form-version.
+        Renders one Session `ask_user` form artifact and submits the answer back to the owning session over
+        the Host's artifact-state API. When every field in `definition` has `type: "choice"` (the only field
+        type V1 emits), it renders a Claude-style question card: one question at a time for several-question
+        forms, with a `‹ n/total ›` counter, per-answer notes, an Other free-text row, a review step before
+        sending, and a read-only answered summary afterward. A mixed or non-choice definition falls back to a
+        plain radio/checkbox fields form (kept for V2 standard fields). Inputs: `definition` (the immutable
+        question/option data), `form-version` (schema version gate — an unsupported version disables
+        submission), and `state` (the package-tag lifecycle: "active" while answerable, "idle" once answered).
+        The component owns its own data loading (GET on mount, reload on visibility/session-message/artifact
+        events), submission (request-id reuse, one automatic retry on a no-response network failure, 422
+        field-error and 409 already-submitted handling), and offline detection — the host only needs to mount
+        the tag with these three attributes. Edge cases handled: a stale ("asked earlier") form, a race where
+        another client answers first, a reload that fails while a view is already showing, and an unsupported
+        form-version.
       tag_name: wippy-form
       auto_register: true
       announced: true
@@ -87,16 +88,17 @@ entries:
             default: 1
             description: >-
               Form definition schema version (currently 1). A value other than 1, from this prop or from the
-              loaded state's own form_version, disables the interactive form and shows a "needs a newer app"
-              notice instead.
+              loaded state's own `form_version`, disables the interactive form and shows an "needs a newer
+              app" notice instead.
           definition:
             type: object
             default: null
             description: >-
-              Immutable form definition: title, optional description, optional submit_label, optional
-              answered_message (not displayed), and fields (each { id, type: "choice", label, description?,
-              required, options: [{value, label, description?}], multiple, allow_other }). When every field is
-              type "choice" the question-card UI renders; otherwise the radio/checkbox fields form renders.
+              Immutable form definition: `title`, optional `description`, optional `submit_label`, optional
+              `answered_message` (not displayed), and `fields` (each `{ id, type: "choice", label,
+              description?, required, options: [{value, label, description?}], multiple, allow_other }`). When
+              every field is `type: "choice"` the question-card UI renders; otherwise the radio/checkbox
+              fields form renders.
           state:
             type: string
             default: active
@@ -109,8 +111,8 @@ entries:
             default: compact
             description: >-
               Question-card sizing: "compact" (default) or "comfortable", a larger size/spacing scale. Read
-              purely through the :host([density="comfortable"]) CSS selector — no JS reads it — but must be a
-              declared prop so the package-tag mount path can set it as an attribute.
+              purely through the `:host([density="comfortable"])` CSS selector — no JS reads it — but must be
+              a declared prop so the package-tag mount path can set it as an attribute.
 
   # wippy.session.forms.ui:ui_fs_answers
   - name: ui_fs_answers
@@ -143,31 +145,31 @@ entries:
       description: >-
         Invisible carrier element. The Session server writes this tag into a user's chat message immediately
         after they answer a form, carrying the raw JSON answer record (form_id, form_version, title, late,
-        answers) in its `record` attribute — e.g. "Answered questions about the delivery of your order."
-        followed by <wippy-form-answers record='{...}'></wippy-form-answers> (a single-line JSON string; the
-        server escapes ', <, >, and & inside it so it round-trips through HTML attribute parsing intact). The
-        record lives in the attribute, never in text content or children: an element the chat sanitizer strips
-        (e.g. because the Host's components list hasn't picked up this tag yet) or that hasn't finished loading
-        its script (still an unrecognized element) both render nothing when they have no children — but would
-        leak the raw JSON straight to the user if it were text content instead. `record` is declared as a prop
-        specifically so the Host adds it to the sanitizer's allowed attribute list; without that, the attribute
-        would still get stripped even once the tag itself is allowed through. The message is rendered as
-        Markdown then sanitized; the answered-form card already shown above the message is the human-readable
-        summary, so this element's entire purpose is to keep the JSON reachable in the raw message text for the
-        agent to read back on a later turn, while staying invisible to the user under every failure mode. It
-        renders nothing: no <slot> is ever created (so even stray light-DOM content would never project into
-        the shadow root) and :host { display: none; } hides the element outright as defense in depth for the
-        case where it does mount normally. Its only prop is `record` (string), it dispatches no events and opens
-        no network requests, makes no host API calls of its own (its WippyElement base class does subscribe to
-        the Host's @theme broadcast, invisibly, for consistent light/dark handling — that has no visible effect
-        here since the element renders nothing), and exposes no parts, tokens, or classes to restyle — there is
-        nothing to style. Its only public surface is a read-only `answerRecord` getter that parses that attribute and returns
-        the parsed object, or null on empty or invalid JSON; it never throws. The element deliberately owns no
-        `record` property: the Host's chat compiles message HTML as a Vue template, and Vue writes a custom
-        element's prop as a DOM property when one of that name exists, which would swallow the value instead
-        of setting the attribute. Agents must never emit this tag
-        themselves — it is written exclusively by the Session server's message-composition code, never by
-        agent-generated content.
+        answers) in its `record` attribute — e.g. `Answered questions about the delivery of your order.`
+        followed by `<wippy-form-answers record='{...}'></wippy-form-answers>` (a single-line JSON string; the
+        server escapes `'`, `<`, `>`, and `&` inside it so it round-trips through HTML attribute parsing
+        intact). The record lives in the attribute, never in text content or children: an element that the
+        chat sanitizer strips (e.g. because the Host's components list hasn't picked up this tag yet) or that
+        hasn't finished loading its script (still an unrecognized element) both render nothing when they have
+        no children — but would leak the raw JSON straight to the user if it were text content instead.
+        `record` is declared as a prop specifically so the Host adds it to the sanitizer's allowed attribute
+        list; without that, the attribute would still get stripped even once the tag itself is allowed
+        through. The message is rendered as Markdown then sanitized; the answered-form card already shown
+        above the message is the human-readable summary, so this element's entire purpose is to keep the JSON
+        reachable in the raw message text for the agent to read back on a later turn, while staying invisible
+        to the user under every failure mode. It renders nothing: no `<slot>` is ever created (so even stray
+        light-DOM content would never project into the shadow root) and `:host { display: none; }` hides the
+        element outright as defense in depth for the case where it does mount normally. Its only prop is
+        `record` (string), it dispatches no events and opens no network requests, makes no host API calls of
+        its own (its WippyElement base class does subscribe to the Host's @theme broadcast, invisibly, for
+        consistent light/dark handling — that has no visible effect here since the element renders nothing),
+        and exposes no parts, tokens, or classes to restyle — there is nothing to style. Its only public
+        surface is a read-only `answerRecord` getter that parses that attribute and returns the parsed object,
+        or `null` on empty or invalid JSON; it never throws. The element deliberately owns no `record`
+        property: the Host's chat compiles message HTML as a Vue template, and Vue writes a custom element's
+        prop as a DOM property when one of that name exists, which would swallow the value instead of setting
+        the attribute. Agents must never emit this tag themselves — it is written exclusively by the Session
+        server's message-composition code, never by agent-generated content.
       tag_name: wippy-form-answers
       auto_register: true
       announced: true
@@ -182,6 +184,6 @@ entries:
             description: >-
               The self-contained JSON answer record (form_id, form_version, title, late, answers) as a
               single-line string, written into this attribute by the Session server immediately after a form
-              is answered. The server escapes ', <, >, and & inside the JSON so the attribute value round-trips
-              through HTML parsing intact; getAttribute('record') returns it already unescaped. Agents never
-              write this attribute themselves.
+              is answered. The server escapes `'`, `<`, `>`, and `&` inside the JSON so the attribute value
+              round-trips through HTML parsing intact; getAttribute('record') returns it already unescaped.
+              Agents never write this attribute themselves.
