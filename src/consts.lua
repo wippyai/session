@@ -65,6 +65,8 @@ local consts = {
         COMMAND = "command",
         SHUTDOWN = "shutdown",
         RESUME = "resume",
+        -- Internal: the grace period after SHUTDOWN ended with no client back.
+        SHUTDOWN_DEADLINE = "shutdown_deadline",
         -- Server-side: start a stopped session so it admits a pending form answer.
         WAKE = "wake",
         -- Internal: start sessions that still hold unadmitted form answers.
