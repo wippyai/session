@@ -3,6 +3,49 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: command_bus_startup_test
+    kind: function.lua
+    meta:
+      name: Command bus startup configuration
+      type: test
+      suite: session
+    source: file://command_bus_startup_test.lua
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      command_bus: wippy.session.process:command_bus
+    method: run_tests
+
+  - name: initial_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Initial agent fixture
+    model: gpt-4o
+    prompt: Test only.
+
+  - name: session_creation_test
+    kind: function.lua
+    meta:
+      name: Session creation operation order
+      type: test
+      suite: session
+    source: file://session_creation_test.lua
+    modules: [security, uuid]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      command_bus: wippy.session.process:command_bus
+      agent_context: wippy.agent:context
+      message_handlers: wippy.session.process:message_handlers
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      writer: wippy.session.persist:writer
+    method: run_tests
+
   - name: stop_control_test
     kind: function.lua
     meta:
