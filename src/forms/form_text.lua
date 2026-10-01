@@ -1,0 +1,238 @@
+-- Text rules shared by the form definition (definition.lua) and the standard
+-- field values (field_values.lua): UTF-8 decoding and code point counts, the
+-- JavaScript trim set, blank and control character tests, and the checks for
+-- plain-text definition keys. Pure functions, no I/O.
+--
+-- Rejections are { path, code, message } items appended to an errors list, as
+-- definition.normalize returns them. Array positions in paths are 0-based, as
+-- in the JSON the agent wrote.
+
+local form_text = {}
+
+-- Decodes the UTF-8 character at byte `index` of `text`. Returns its code
+-- point and the index of the next character, or nil when the bytes there are
+-- not valid UTF-8: a malformed or truncated sequence, an overlong form, a
+-- surrogate or a value past U+10FFFF. The runtime (Lua 5.3, Wippy
+-- modification) has no utf8 library, global or required, so this is the one
+-- decoder every text rule uses.
+local function decode_at(text: string, index: integer): (integer?, integer)
+    local byte = string.byte(text, index)
+    local extra, minimum, value
+    if byte < 0x80 then
+        return byte, index + 1
+    elseif byte >= 0xC2 and byte <= 0xDF then
+        extra, minimum, value = 1, 0x80, byte - 0xC0
+    elseif byte >= 0xE0 and byte <= 0xEF then
+        extra, minimum, value = 2, 0x800, byte - 0xE0
+    elseif byte >= 0xF0 and byte <= 0xF4 then
+        extra, minimum, value = 3, 0x10000, byte - 0xF0
+    else
+        return nil, index
+    end
+    if index + extra > #text then return nil, index end
+    for offset = 1, extra do
+        local continuation = string.byte(text, index + offset)
+        if continuation < 0x80 or continuation > 0xBF then return nil, index end
+        value = value * 64 + (continuation - 0x80)
+    end
+    if value < minimum or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF) then
+        return nil, index
+    end
+    return value, index + extra + 1
+end
+
+-- Number of Unicode code points in `text`, or nil when it is not valid
+-- UTF-8. Limits count characters as users see them, as json.validate's
+-- maxLength does.
+local function char_length(text: string): number?
+    local count = 0
+    local index = 1
+    local size = #text
+    while index <= size do
+        local value
+        value, index = decode_at(text, index)
+        if not value then return nil end
+        count = count + 1
+    end
+    return count
+end
+
+-- The characters JavaScript's String.prototype.trim removes: ECMAScript
+-- WhiteSpace (tab, vertical tab, form feed, U+FEFF and every Unicode space
+-- separator) and LineTerminator (LF, CR, U+2028, U+2029). The form component
+-- trims Other text and notes with it, so the server trims them, and decides
+-- they are blank, with exactly this set. U+200B ZERO WIDTH SPACE is not in it.
+local WHITESPACE = {
+    [0x0009] = true, [0x000A] = true, [0x000B] = true, [0x000C] = true, [0x000D] = true,
+    [0x0020] = true, [0x00A0] = true, [0x1680] = true,
+    [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true, [0x2004] = true,
+    [0x2005] = true, [0x2006] = true, [0x2007] = true, [0x2008] = true, [0x2009] = true,
+    [0x200A] = true, [0x2028] = true, [0x2029] = true, [0x202F] = true, [0x205F] = true,
+    [0x3000] = true, [0xFEFF] = true,
+}
+
+-- Invisible format characters. An agent-authored title, label or message
+-- made up only of these and WHITESPACE shows nothing, so it is blank too.
+local ZERO_WIDTH = { [0x200B] = true, [0x200C] = true, [0x200D] = true, [0x2060] = true }
+
+-- True when `text` (valid UTF-8) shows nothing: empty, or every character
+-- in WHITESPACE or ZERO_WIDTH. For agent-authored definition text; answer
+-- text follows JavaScript trim instead (trim, is_whitespace_only).
+local function is_blank(text: string): boolean
+    local index = 1
+    local size = #text
+    while index <= size do
+        local value
+        value, index = decode_at(text, index)
+        if not value or not (WHITESPACE[value] or ZERO_WIDTH[value]) then
+            return false
+        end
+    end
+    return true
+end
+
+-- True when `text` (valid UTF-8) is empty or only JavaScript trim
+-- whitespace: what a user's answer text counts as blank. Unlike is_blank,
+-- zero-width characters are content here.
+local function is_whitespace_only(text: string): boolean
+    local index = 1
+    local size = #text
+    while index <= size do
+        local value
+        value, index = decode_at(text, index)
+        if not value or not WHITESPACE[value] then return false end
+    end
+    return true
+end
+
+-- True when `text` (valid UTF-8) has a control character: ASCII C0 (and
+-- DEL), other than tab and newline where `multiline`; C1 (U+0080-U+009F);
+-- the bidi override/isolate controls (U+202A-U+202E, U+2066-U+2069); or the
+-- line/paragraph separators U+2028/U+2029. Question text is shown as-is, so
+-- these are refused rather than silently changed or left to confuse a
+-- renderer that treats them as directional or line-breaking control.
+local function has_control_characters(text: string, multiline: boolean): boolean
+    local index = 1
+    local size = #text
+    while index <= size do
+        local value
+        value, index = decode_at(text, index)
+        if not value then return true end
+        if value < 0x80 then
+            local is_c0 = value < 32 or value == 127
+            if is_c0 and multiline and (value == 9 or value == 10) then
+                is_c0 = false
+            end
+            if is_c0 then return true end
+        elseif (value >= 0x80 and value <= 0x9F)
+            or (value >= 0x202A and value <= 0x202E)
+            or (value >= 0x2066 and value <= 0x2069)
+            or value == 0x2028 or value == 0x2029 then
+            return true
+        end
+    end
+    return false
+end
+
+-- `text` without the WHITESPACE characters at either end, as JavaScript's
+-- String.prototype.trim gives it. One forward pass, so it stays linear on a
+-- long run of spaces, where a "^%s*(.-)%s*$" pattern backtracks
+-- quadratically. Text that is not valid UTF-8 is returned as it is, for the
+-- caller's UTF-8 check to refuse.
+local function trim(text: string): string
+    local index = 1
+    local size = #text
+    local first, last = nil, 0
+    while index <= size do
+        local value, next_index = decode_at(text, index)
+        if not value then return text end
+        if not WHITESPACE[value] then
+            first = first or index
+            last = next_index - 1
+        end
+        index = next_index
+    end
+    if not first then return "" end
+    return string.sub(text, first, last)
+end
+
+local function add_error(errors: {any}, path: string, code: string, message: string)
+    table.insert(errors, { path = path, code = code, message = message })
+end
+
+-- Checks an optional or required plain-text definition value. Returns the
+-- value to keep (nil for an omitted optional value) and whether it was valid.
+-- opts.strict applies the rules for new definitions (control characters);
+-- stored definitions are read without them so a later tightening never makes
+-- an existing form unreadable.
+local function check_text(errors: {any}, path: string, value: any,
+    opts: {required: boolean, min: number?, max: number, strict: boolean?, multiline: boolean?})
+    if value == nil then
+        if opts.required then
+            add_error(errors, path, "required", "A value is required.")
+            return nil, false
+        end
+        return nil, true
+    end
+    if type(value) ~= "string" then
+        add_error(errors, path, "invalid_type", "Must be a string.")
+        return nil, false
+    end
+    local length = char_length(value)
+    if not length then
+        add_error(errors, path, "invalid_text", "Must be valid UTF-8 text.")
+        return nil, false
+    end
+    if opts.required and is_blank(value) then
+        add_error(errors, path, "blank", "Must contain visible text.")
+        return nil, false
+    end
+    if opts.strict and has_control_characters(value, opts.multiline == true) then
+        add_error(errors, path, "control_characters", opts.multiline
+            and "Must not contain control characters other than tabs and line breaks."
+            or "Must not contain control characters or line breaks.")
+        return nil, false
+    end
+    if length > opts.max then
+        add_error(errors, path, "too_long", string.format("Must be at most %d characters.", opts.max))
+        return nil, false
+    end
+    if not opts.required and length == 0 then
+        return nil, true
+    end
+    return value, true
+end
+
+local function check_boolean(errors: {any}, path: string, value: any): boolean
+    if value == nil then return false end
+    if type(value) ~= "boolean" then
+        add_error(errors, path, "invalid_type", "Must be true or false.")
+        return false
+    end
+    return value
+end
+
+local function check_unknown_keys(errors: {any}, path: string, value: table, allowed: {[string]: boolean})
+    local unknown = {}
+    for key in pairs(value) do
+        if not allowed[key] then table.insert(unknown, tostring(key)) end
+    end
+    table.sort(unknown)
+    for _, key in ipairs(unknown) do
+        add_error(errors, path == "" and key or (path .. "." .. key), "unknown_key",
+            "Unknown key \"" .. key .. "\".")
+    end
+end
+
+form_text.decode_at = decode_at
+form_text.char_length = char_length
+form_text.is_blank = is_blank
+form_text.is_whitespace_only = is_whitespace_only
+form_text.has_control_characters = has_control_characters
+form_text.trim = trim
+form_text.add_error = add_error
+form_text.check_text = check_text
+form_text.check_boolean = check_boolean
+form_text.check_unknown_keys = check_unknown_keys
+
+return form_text

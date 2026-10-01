@@ -23,6 +23,13 @@ entries:
       comment: Accessors for the form record in artifact meta (meta.session_form); imports nothing, so persistence can use it
     source: file://form_meta.lua
 
+  # wippy.session.forms:form_text
+  - name: form_text
+    kind: library.lua
+    meta:
+      comment: UTF-8 decoding, code point counts, the JavaScript trim set, blank and control character tests and plain-text definition key checks, shared by the definition and the standard field values
+    source: file://form_text.lua
+
   # wippy.session.forms:definition
   - name: definition
     kind: library.lua
@@ -33,6 +40,7 @@ entries:
       - json
     imports:
       ordered_json: wippy.session.forms:ordered_json
+      form_text: wippy.session.forms:form_text
 
   # wippy.session.forms:form_artifact
   - name: form_artifact
