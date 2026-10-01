@@ -30,8 +30,13 @@ field_values.LIMITS = {
     TEXT_MAX = 2000,
     TEXTAREA_MAX = 8000,
     -- The sum of the largest answers of all text, textarea and email fields
-    -- of one form. With the 20 field limit and four bytes per character this
-    -- keeps every valid submission inside the 64 KiB request cap.
+    -- of one form. At four bytes per character (UTF-8 written as it is, as a
+    -- browser's JSON.stringify writes it), those answers, the 20 field ids
+    -- and the request envelope fit the 64 KiB request cap; the state service
+    -- test sends the largest such request. Not covered: the Other text and
+    -- notes of choice fields (each has its own cap, and none counts here), and
+    -- a client that writes non-ASCII text as six-byte escape sequences, which
+    -- can take up to twelve bytes per character.
     TEXT_BUDGET = 16000,
     EMAIL_MAX = 254,
     EMAIL_LOCAL_MAX = 64,
@@ -345,7 +350,8 @@ local function check_number(field: any, value: any): (any, any)
     end
     local limit = field_values.LIMITS.NUMBER_MAGNITUDE
     if value ~= value or value > limit or value < -limit then
-        return refuse("invalid_number", "Enter a number between -1000000000000 and 1000000000000.")
+        local shown = field_values.number_text(limit)
+        return refuse("invalid_number", string.format("Enter a number between -%s and %s.", shown, shown))
     end
     local whole = value == math.floor(value)
     if field.integer and not whole then
@@ -511,7 +517,8 @@ local function read_bound(errors: {any}, path: string, value: any, code: string,
     if strict then
         local limit = field_values.LIMITS.NUMBER_MAGNITUDE
         if value > limit or value < -limit then
-            form_text.add_error(errors, path, code, "Must be between -1000000000000 and 1000000000000.")
+            local shown = field_values.number_text(limit)
+            form_text.add_error(errors, path, code, string.format("Must be between -%s and %s.", shown, shown))
             return nil
         end
         if decimals_of(value) > field_values.LIMITS.NUMBER_DECIMALS then

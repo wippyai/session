@@ -390,13 +390,110 @@ local function define_tests()
     end)
 
     describe("the ask_user tool schema", function()
-        local function field_schema(): any
+        local function root_schema(): any
             local entry, err = registry.get("wippy.session.forms:ask_user_tool")
             test.is_nil(err)
             local schema, decode_err = json.decode(tostring(entry.meta.input_schema))
             test.is_nil(decode_err)
-            return schema.properties.fields.items
+            return schema
         end
+
+        local function field_schema(): any
+            return root_schema().properties.fields.items
+        end
+
+        -- The numbers the model is told are written in the schema and the
+        -- trait prompt by hand, so each one is compared with the constant the
+        -- validator enforces. A limit that changes in one place fails here.
+        describe("the limits it states", function()
+            local LIMITS = field_values.LIMITS
+            local magnitude = field_values.number_text(LIMITS.NUMBER_MAGNITUDE)
+
+            it("are the limits of the standard fields", function()
+                local properties = field_schema().properties
+                local max_length = tostring(properties.max_length.description)
+                test.contains(max_length, string.format("default %d, at most %d", LIMITS.TEXT_DEFAULT, LIMITS.TEXT_MAX))
+                test.contains(max_length, string.format("textarea: default and at most %d", LIMITS.TEXTAREA_MAX))
+                test.contains(max_length, string.format("at most %d characters together", LIMITS.TEXT_BUDGET))
+                test.contains(max_length, string.format("an email counts %d", LIMITS.EMAIL_MAX))
+                test.contains(tostring(properties.placeholder.description),
+                    string.format("at most %d characters", LIMITS.PLACEHOLDER))
+                local decimals = string.format("at most %d decimals", LIMITS.NUMBER_DECIMALS)
+                local range = string.format("between -%s and %s", magnitude, magnitude)
+                test.contains(tostring(properties.min.description), decimals)
+                test.contains(tostring(properties.min.description), range)
+                test.contains(tostring(properties.step.description), decimals)
+                test.contains(tostring(properties.max.description), "same limits as min")
+            end)
+
+            it("are the limits of the definition", function()
+                local root = root_schema()
+                local DEFINITION = definition.LIMITS
+                test.contains(tostring(root.properties.title.description), string.format("1-%d characters", DEFINITION.TITLE))
+                test.contains(tostring(root.properties.description.description),
+                    string.format("at most %d characters", DEFINITION.DESCRIPTION))
+                test.contains(tostring(root.properties.submit_label.description),
+                    string.format("at most %d characters", DEFINITION.SUBMIT_LABEL))
+                test.contains(tostring(root.properties.answered_message.description),
+                    string.format("at most %d characters", DEFINITION.ANSWERED_MESSAGE))
+                test.contains(tostring(root.properties.fields.description), string.format("1-%d questions", DEFINITION.FIELDS))
+                local item = root.properties.fields.items.properties
+                test.contains(tostring(item.label.description), string.format("1-%d characters", DEFINITION.LABEL))
+                test.contains(tostring(item.description.description),
+                    string.format("at most %d characters", DEFINITION.DESCRIPTION))
+                test.contains(tostring(item.options.description), string.format("1-%d distinct choices, each at most %d characters",
+                    DEFINITION.OPTIONS, DEFINITION.OPTION_TEXT))
+                local entry = registry.get("wippy.session.forms:ask_user_tool")
+                test.contains(tostring(entry.meta.llm_description),
+                    string.format("about %d KiB", math.floor(DEFINITION.DEFINITION_BYTES / 1024)))
+            end)
+
+            it("are the limits the trait prompt gives the model", function()
+                local entry, err = registry.get("wippy.session.forms:ask_user")
+                test.is_nil(err)
+                local prompt = tostring(entry.data.prompt)
+                test.not_nil(string.find(prompt, string.format("at most %d%%s+characters", LIMITS.TEXT_BUDGET)),
+                    "the prompt names the text budget " .. LIMITS.TEXT_BUDGET)
+            end)
+
+            it("are enforced at the numbers the schema states", function()
+                -- The values the text promises are accepted, one more is not.
+                local function text_field(max: number)
+                    return { id = "f", type = "text", label = "Q", max_length = max }
+                end
+                test.is_nil(select(2, definition.normalize({ title = "T", fields = { text_field(LIMITS.TEXT_MAX) } })))
+                local _, over = definition.normalize({ title = "T", fields = { text_field(LIMITS.TEXT_MAX + 1) } })
+                test.eq(over[1].code, "invalid_range")
+                local _, number_over = definition.normalize({ title = "T", fields = {
+                    { id = "f", type = "number", label = "Q", max = LIMITS.NUMBER_MAGNITUDE } } })
+                test.is_nil(number_over)
+                local _, past = definition.normalize({ title = "T", fields = {
+                    { id = "f", type = "number", label = "Q", max = LIMITS.NUMBER_MAGNITUDE * 10 } } })
+                test.eq(past[1].code, "invalid_range")
+            end)
+        end)
+
+        describe("the number range message", function()
+            local saved = field_values.LIMITS.NUMBER_MAGNITUDE
+            after_each(function() field_values.LIMITS.NUMBER_MAGNITUDE = saved end)
+
+            it("names the limit the validator enforces, for an answer and for a bound", function()
+                local _, answer_err = field_values.check_answer({ type = "number" }, 1000000000000)
+                test.is_nil(answer_err)
+                local _, big = field_values.check_answer({ type = "number" }, 1000000000001)
+                test.eq(big.code, "invalid_number")
+                test.eq(big.message, "Enter a number between -1000000000000 and 1000000000000.")
+
+                field_values.LIMITS.NUMBER_MAGNITUDE = 500000
+                local _, changed = field_values.check_answer({ type = "number" }, 600000)
+                test.eq(changed.code, "invalid_number")
+                test.eq(changed.message, "Enter a number between -500000 and 500000.")
+                local _, errors = definition.normalize({ title = "T", fields = {
+                    { id = "f", type = "number", label = "Q", min = 600000 } } })
+                test.eq(errors[1].code, "invalid_range")
+                test.eq(errors[1].message, "Must be between -500000 and 500000.")
+            end)
+        end)
 
         it("is one flat field object that names all seven types and does not require options", function()
             local item = field_schema()
