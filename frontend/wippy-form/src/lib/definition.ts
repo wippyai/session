@@ -63,13 +63,11 @@ export interface NumberFormField extends FormFieldBase {
   max?: number
   step?: number
   integer?: boolean
-  placeholder?: string
   default?: number
 }
 
 export interface EmailFormField extends FormFieldBase {
   type: 'email'
-  placeholder?: string
   default?: string
 }
 

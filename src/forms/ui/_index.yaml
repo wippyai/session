@@ -104,10 +104,10 @@ entries:
               required }` plus the keys of its type: `choice` adds `options: [{value, label, description?}]`,
               `multiple`, `allow_other`; `text` and `textarea` add `min_length`, `max_length`, `placeholder` and
               `default` (`text` also `pattern`, a full-match expression that only the server evaluates and answers
-              with a 422 `pattern_mismatch` on the field); `number` adds `min`, `max`, `step`, `integer`,
-              `placeholder`, `default`; `email` adds `placeholder`, `default`; `date` adds `min`, `max` (`YYYY-MM-DD`)
-              and `default`; `checkbox` adds `default` (only `false`). When every field is `type: "choice"` the
-              question-card UI renders; otherwise the fields form renders.
+              with a 422 `pattern_mismatch` on the field); `number` adds `min`, `max`, `step`, `integer`, `default`;
+              `email` adds `default` (`placeholder` belongs to `text` and `textarea` only); `date` adds `min`, `max`
+              (`YYYY-MM-DD`) and `default`; `checkbox` adds `default` (only `false`). When every field is
+              `type: "choice"` the question-card UI renders; otherwise the fields form renders.
           state:
             type: string
             default: active
@@ -119,9 +119,10 @@ entries:
             type: string
             default: compact
             description: >-
-              Question-card sizing: "compact" (default) or "comfortable", a larger size/spacing scale. Read
-              purely through the `:host([density="comfortable"])` CSS selector — no JS reads it — but must be
-              a declared prop so the package-tag mount path can set it as an attribute.
+              Sizing of the question card and of the fields form: "compact" (default) or "comfortable", a larger
+              size/spacing scale (type sizes, padding and the space between rows or fields). Read purely through
+              the `:host([density="comfortable"])` CSS selector — no JS reads it — but must be a declared prop so
+              the package-tag mount path can set it as an attribute.
 
   # wippy.session.forms.ui:ui_fs_answers
   - name: ui_fs_answers

@@ -1,7 +1,8 @@
-import type { FieldAnswer, FieldError, FormField } from '../../lib/definition'
+import type { FieldAnswer, FieldError, FormField, NumberFormField } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import FormFieldControl from './form-field.vue'
 
 function mountField(field: FormField, props: Partial<{ modelValue: FieldAnswer | undefined, errors: FieldError[], disabled: boolean, readonly: boolean }> = {}) {
@@ -51,6 +52,15 @@ describe('text field', () => {
     expect((mountField(field, { modelValue: 'Berlin' }).find('input').element as HTMLInputElement).value).toBe('Berlin')
   })
 
+  it('takes a placeholder from the definition, and only text and textarea do', () => {
+    expect(mountField({ id: 'a', type: 'textarea', label: 'A', required: false, placeholder: 'Say more' }).find('textarea').attributes('placeholder')).toBe('Say more')
+    // The contract gives `placeholder` to text and textarea alone; a stray key on another type is not shown.
+    for (const type of ['email', 'number'] as const) {
+      const stray = { id: 'a', type, label: 'A', required: false, placeholder: 'ignored' } as unknown as FormField
+      expect(mountField(stray).find('input').attributes('placeholder'), type).toBeUndefined()
+    }
+  })
+
   it('is disabled while the form is submitting', () => {
     expect(mountField(field, { disabled: true }).find('input').attributes('disabled')).toBeDefined()
   })
@@ -87,11 +97,16 @@ describe('textarea field', () => {
 describe('email field', () => {
   const field: FormField = { id: 'mail', type: 'email', label: 'Email', required: true }
 
-  it('is an InputText of type email with the email keyboard hint and autofill token', () => {
+  it('is an InputText of type email with the email keyboard hint', () => {
     const input = mountField(field).find('input')
     expect(input.attributes('type')).toBe('email')
     expect(input.attributes('inputmode')).toBe('email')
-    expect(input.attributes('autocomplete')).toBe('email')
+  })
+
+  // An agent may ask for someone else's address (a colleague, a recipient), so
+  // the browser must not offer the user's own.
+  it('turns autofill off: the address asked for is not necessarily the user\'s own', () => {
+    expect(mountField(field).find('input').attributes('autocomplete')).toBe('off')
   })
 
   it('links its error to the input', () => {
@@ -101,13 +116,62 @@ describe('email field', () => {
 })
 
 describe('number field', () => {
-  const field: FormField = { id: 'qty', type: 'number', label: 'Parcels', required: false, integer: true }
+  const field: NumberFormField = { id: 'qty', type: 'number', label: 'Parcels', required: false, integer: true }
 
-  it('is a text input with the decimal keyboard hint, not a native number input or a spinner', () => {
-    const input = mountField(field).find('input')
-    expect(input.attributes('type')).toBe('text')
-    expect(input.attributes('inputmode')).toBe('decimal')
-    expect(mountField(field).find('[role="spinbutton"]').exists()).toBe(false)
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** Makes the browser's locale write decimals with `separator` (what `Intl.NumberFormat(undefined)` reports). */
+  function useDecimalSeparator(separator: string) {
+    // A `function`, not an arrow: the code under test calls it with `new`.
+    vi.spyOn(Intl, 'NumberFormat').mockImplementation(function () {
+      return {
+        formatToParts: () => [{ type: 'integer', value: '1' }, { type: 'decimal', value: separator }, { type: 'fraction', value: '1' }],
+      } as unknown as Intl.NumberFormat
+    })
+  }
+
+  const keypad = (f: NumberFormField) => mountField(f).find('input').attributes('inputmode')
+  const fraction: NumberFormField = { id: 'w', type: 'number', label: 'Weight', required: false }
+
+  it('is a text input, not a native number input or a spinner', () => {
+    const wrapper = mountField(field)
+    expect(wrapper.find('input').attributes('type')).toBe('text')
+    expect(wrapper.find('[role="spinbutton"]').exists()).toBe(false)
+  })
+
+  // `numeric` has no minus key and `decimal` has none on iOS, so either one
+  // locks out a negative value; the `decimal` keypad of a comma-decimal locale
+  // shows a comma, which the dot-only parser rejects.
+  it('shows the digit keypad for a whole number that cannot be negative', () => {
+    expect(keypad({ ...field, min: 0 })).toBe('numeric')
+    expect(keypad({ ...field, min: 5 })).toBe('numeric')
+  })
+
+  it('shows the full keyboard for a whole number that may be negative, so the minus key is there', () => {
+    expect(keypad(field)).toBe('text')
+    expect(keypad({ ...field, min: -5 })).toBe('text')
+    expect(keypad({ ...field, max: -1 })).toBe('text')
+  })
+
+  it('shows the decimal keypad for a fraction that cannot be negative when the locale writes a dot', () => {
+    useDecimalSeparator('.')
+    expect(keypad({ ...fraction, min: 0 })).toBe('decimal')
+    expect(keypad({ ...fraction, min: 0.5 })).toBe('decimal')
+  })
+
+  it('shows the full keyboard for a fraction in a locale that writes a comma, whose decimal keypad would type a comma', () => {
+    useDecimalSeparator(',')
+    expect(keypad({ ...fraction, min: 0 })).toBe('text')
+    // A whole number needs no separator, so the locale does not matter for it.
+    expect(keypad({ ...field, min: 0 })).toBe('numeric')
+  })
+
+  it('shows the full keyboard for a fraction that may be negative, in any locale', () => {
+    useDecimalSeparator('.')
+    expect(keypad(fraction)).toBe('text')
+    expect(keypad({ ...fraction, min: -1 })).toBe('text')
   })
 
   it('reports exactly the text typed, so the strict parser sees it (no rounding, no clamping, no group stripping)', async () => {
@@ -156,9 +220,30 @@ describe('checkbox field', () => {
     expect(wrapper.find('.p-checkbox').attributes('aria-describedby')).toBeUndefined()
   })
 
-  it('shows a checked draft and can be toggled with the keyboard', async () => {
+  it('shows a checked draft', () => {
     const wrapper = mountField(field, { modelValue: true })
     expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true)
+  })
+
+  // user-event presses the key the way a browser does (keydown, then a click
+  // on keyup for Space), which a bare `trigger('keyup')` does not. Without it
+  // this test would only prove that a click toggles.
+  it('toggles with the Space key and with no other key', async () => {
+    const user = userEvent.setup()
+    const wrapper = mountField(field)
+    ;(wrapper.find('input[type="checkbox"]').element as HTMLInputElement).focus()
+
+    await user.keyboard('a{Enter}')
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+
+    await user.keyboard(' ')
+    expect(lastValue(wrapper)).toBe(true)
+
+    // The parent hands the answer back, as the form does, so the next press unticks it.
+    await wrapper.setProps({ modelValue: true })
+    await user.keyboard(' ')
+    expect(lastValue(wrapper)).toBe(false)
+    expect(wrapper.emitted('update:modelValue')).toHaveLength(2)
   })
 
   it('focuses the checkbox on focusFirstControl', () => {
