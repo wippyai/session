@@ -9,6 +9,17 @@ local control_handlers = require("control_handlers")
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
 
+type PublicToolEvent = {
+    topic_id: string,
+    type: string,
+    payload: {
+        message_id: string?,
+        call_id: string?,
+        function_name: string?,
+        error: string?,
+    },
+}
+
 local function fake_agent(prompt_tokens: number?): any
     return {
         id = "agent:documents",
@@ -75,6 +86,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         config = config,
         reader = {
             messages = function(_self) return empty_query end,
+            list_pending_inputs = function(_self) return {}, nil end,
             contexts = function(_self) return empty_query end,
             state = function(_self) return { title = "t", meta = {}, config = {} } end,
             get_full_context = function(_self) return {}, nil end,
@@ -346,7 +358,7 @@ local function define_tests()
 
             test.is_nil(err)
             test.not_nil(result)
-            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
 
             local trigger = find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
             test.not_nil(trigger, "first step of a user turn must schedule the background trigger check")
@@ -399,8 +411,8 @@ local function define_tests()
 
             local result, err = continue_step(ctx)
             test.is_nil(err)
-            test.is_nil(find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS))
-            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)))
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
         end)
 
         it("leads to a checkpoint anchored on the continuation step once it crosses the token threshold", function()
@@ -472,24 +484,26 @@ local function define_tests()
             local result, err = user_step(ctx)
 
             test.is_nil(err)
-            test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 1)
         end)
 
         it("records cancellation for every call when stop arrives during the model step", function()
             local agent = fake_agent(nil)
+            local stopped = false
             agent.step = function()
+                stopped = true
                 return { result = "", tool_calls = {
                     { id = "call-1", name = "one", arguments = "{}", registry_id = "app:one" },
                     { id = "call-2", name = "two", arguments = "{}", registry_id = "app:two" }
                 } }
             end
             local ctx, captured = mock_ctx(agent)
-            ctx.coordinator = { stop_requested = function() return true end }
+            ctx.coordinator = { stop_requested = function() return stopped end }
             local result, err = user_step(ctx)
             test.is_nil(err)
             test.is_true(result.completed)
-            test.is_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
             test.eq(#calls, 2)
             for _, call in ipairs(calls) do
@@ -501,7 +515,7 @@ local function define_tests()
             local ctx, captured = mock_ctx(fake_agent(1000), { max_turn_iterations = 3 })
 
             local first = user_step(ctx)
-            test.not_nil(find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             for _ = 1, 2 do
                 local more = continue_step(ctx)
                 test.not_nil(find_op(more.next_ops, consts.OP_TYPE.PROCESS_TOOLS), "steps within the limit run normally")
@@ -531,12 +545,15 @@ local function define_tests()
         it("a new user message starts a fresh count", function()
             local ctx = mock_ctx(fake_agent(1000), { max_turn_iterations = 1 })
 
-            test.not_nil(find_op(user_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(user_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             test.eq(continue_step(ctx).stopped, "max_iterations")
 
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
             local next_turn = user_step(ctx)
             test.is_nil(next_turn.stopped)
-            test.not_nil(find_op(next_turn.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(next_turn.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
         end)
 
         it("agent_options.loop.max_iterations overrides the session limit", function()
@@ -545,7 +562,7 @@ local function define_tests()
             local ctx = mock_ctx(agent, { max_turn_iterations = 250 })
 
             user_step(ctx)
-            test.not_nil(find_op(continue_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+            test.not_nil((find_op(continue_step(ctx).next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             test.eq(continue_step(ctx).stopped, "max_iterations")
         end)
 
@@ -556,7 +573,7 @@ local function define_tests()
             for _ = 1, 20 do
                 local result = continue_step(ctx)
                 test.is_nil(result.stopped)
-                test.not_nil(find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS))
+                test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
             end
         end)
 
@@ -607,6 +624,32 @@ local function define_tests()
             test.eq(message_handlers.note_tool_round(ctx, b), 2, "the same call must match whatever the key order")
             test.eq(message_handlers.note_tool_round(ctx, failing), 3)
             test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
+        end)
+    end)
+
+    describe("failed queue boundary", function()
+        it("persists failed status instead of returning a failed turn to idle", function()
+            local ctx = mock_ctx(fake_agent(1000))
+            ctx.status = consts.STATUS.FAILED
+            ctx.turn_state = {
+                active = false,
+                failed = true,
+                input_policy = { while_running = "steer" },
+            }
+            local persisted = nil
+            ctx.writer.update_meta = function(_self, updates)
+                persisted = updates
+                return true
+            end
+
+            local finished, err = message_handlers.finish_turn(ctx)
+
+            test.is_nil(err)
+            test.is_true(finished.completed)
+            test.eq(ctx.status, consts.STATUS.FAILED)
+            test.is_true((ctx.turn_state :: any).failed)
+            test.eq((persisted :: any).status, consts.STATUS.FAILED)
+            test.is_false((persisted :: any).meta.interaction.can_send)
         end)
     end)
 
@@ -684,6 +727,115 @@ local function define_tests()
             }
             return ctx, captured, calls, mapped, validated
         end
+
+        it("correlates public tool events with the committed message without changing their call topic", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local events = {} :: { any }
+            ctx.upstream.send_message_update = function(_self, topic_id, event_type, payload)
+                if event_type == consts.UPSTREAM_TYPES.FUNCTION_SUCCESS then
+                    test.eq((captured.stored[1] :: any).metadata.status, consts.FUNC_STATUS.SUCCESS)
+                end
+                table.insert(events, { topic_id = topic_id, type = event_type, payload = payload })
+            end
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = { result = "done", tool_call = tools["function"] } }
+                end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = { calls[1] }, call_message_ids = ids,
+                caller = caller, validated_tools = { ["function"] = validated["function"] },
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(#events, 2)
+            test.eq(events[1].type, consts.UPSTREAM_TYPES.FUNCTION_CALL)
+            test.eq(events[2].type, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS)
+            for _, event in ipairs(events) do
+                test.eq(event.topic_id, "function")
+                test.eq(event.payload.message_id, ids["function"])
+                test.eq(event.payload.function_name, "one")
+            end
+            test.eq(events[2].payload.call_id, "function")
+        end)
+
+        it("correlates public tool errors after persistence without exposing private or delegation calls", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local events: { PublicToolEvent } = {}
+            ctx.upstream.send_message_update = function(_self, topic_id, event_type, payload)
+                if event_type == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+                    local persisted = false
+                    for _, row in ipairs(captured.stored) do
+                        if row.id == ids["function"] then
+                            test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                            test.eq(row.metadata.result, "tool failed")
+                            persisted = true
+                        end
+                    end
+                    test.is_true(persisted)
+                end
+                table.insert(events, { topic_id = topic_id, type = event_type, payload = payload })
+            end
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return {
+                        ["function"] = { error = "tool failed", tool_call = tools["function"] },
+                        ["private"] = { error = "private failure", tool_call = tools["private"] },
+                        ["delegation"] = { error = "delegation failure", tool_call = tools["delegation"] }
+                    }
+                end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = calls, call_message_ids = ids,
+                caller = caller, validated_tools = validated,
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(#events, 2)
+            test.eq(events[1].type, consts.UPSTREAM_TYPES.FUNCTION_CALL)
+            test.eq(events[2].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+            for _, event in ipairs(events) do
+                test.eq(event.topic_id, "function")
+                test.eq(event.payload.message_id, ids["function"])
+                test.eq(event.payload.function_name, "one")
+            end
+            test.eq(events[2].payload.call_id, "function")
+            test.eq(events[2].payload.error, "Function execution failed")
+            for _, row in ipairs(captured.stored) do
+                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+            end
+        end)
+
+        it("does not announce a tool error when persisting its outcome fails", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local events = {}
+            ctx.upstream.send_message_update = function(_self, _topic_id, event_type)
+                table.insert(events, event_type)
+            end
+            ctx.writer.update_message_meta = function() return nil, "message store unavailable" end
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = { error = "tool failed", tool_call = tools["function"] } }
+                end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = { calls[1] }, call_message_ids = ids,
+                caller = caller, validated_tools = { ["function"] = validated["function"] },
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(result)
+            test.contains(err, "message store unavailable")
+            test.eq(#events, 1)
+            test.eq(events[1], consts.UPSTREAM_TYPES.FUNCTION_CALL)
+            for _, row in ipairs(captured.stored) do
+                test.eq(row.metadata.status, consts.FUNC_STATUS.PENDING)
+            end
+        end)
 
         it("marks omitted private and delegation results as errors", function()
             local ctx, captured, calls, ids, validated = call_fixture()

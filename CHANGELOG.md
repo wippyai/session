@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.4](https://github.com/wippyai/session/compare/v0.6.3...v0.6.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* apply the initial agent and model before the first turn ([#50](https://github.com/wippyai/session/issues/50)) ([da1eaca](https://github.com/wippyai/session/commit/da1eacad68c22f3c43978df616c1a4aecc45f347))
+
+## [0.6.3](https://github.com/wippyai/session/compare/v0.6.2...v0.6.3) (2026-09-29)
+
+
+### Features
+
+* **EE2-2448:** add session-owned steering policy ([#48](https://github.com/wippyai/session/issues/48)) ([bd7fffd](https://github.com/wippyai/session/commit/bd7fffd45705f1184a2434fa863e89f408b055b7))
+
 ## [0.6.2](https://github.com/wippyai/session/compare/v0.6.1...v0.6.2) (2026-09-28)
 
 

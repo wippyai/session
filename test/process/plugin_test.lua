@@ -169,7 +169,10 @@ local function run_start_through_session(actor, session_id, registry, session_pi
                 end
                 return { ok = true, channel = bus_done, value = { error = nil } }
             end
-            return { ok = true, channel = session_events, value = { kind = process.event.CANCEL } }
+            if session_step == 1 then
+                return { ok = true, channel = session_events, value = { kind = process.event.CANCEL } }
+            end
+            return { ok = true, channel = bus_done, value = { error = nil } }
         end
 
         plugin_step = plugin_step + 1
@@ -223,10 +226,13 @@ local function run_graceful_shutdown(actor, session_id, scenario)
     local session_result = nil :: any
     local session_process = nil :: any
     local bus_process = nil :: any
+    local bus_started = false
     local session_started = false
     local finished = false
     local pending_call_id = nil :: string?
     local agent_steps = 0
+    local pump_resumes = 0
+    local last_sent_topic = "none"
     local plugin_channel = { case_receive = function(self) return self end }
     local plugin_events = { case_receive = function(self) return self end }
     local session_channel = { case_receive = function(self) return self end }
@@ -237,6 +243,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
         receive = function() return table.remove(bus_done_values, 1) end
     }
     local original_channel_new = channel.new
+    local fifo_channels = {}
     local original_agent_step = message_handlers.agent_step
     local scripted = {
         { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id } }
@@ -256,7 +263,28 @@ local function run_graceful_shutdown(actor, session_id, scenario)
     end
     table.insert(scripted, { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} })
 
+    if scenario == "stop" then
+        local stored = session_repo.get(session_id, actor:id())
+        local config = stored.config or {}
+        config.input_policy = { while_running = "steer" }
+        local configured, config_err = session_repo.update_session_meta(session_id, { config = config })
+        if not configured then error(config_err or "Failed to configure steering for Stop scenario") end
+    end
+
     local function resume_process(thread, value)
+        if thread == bus_process then bus_started = true end
+        pump_resumes = pump_resumes + 1
+        if pump_resumes > 100 then
+            local fifo_sizes = {}
+            for index, fifo in ipairs(fifo_channels) do
+                table.insert(fifo_sizes, tostring(index) .. ":" .. tostring(#fifo.values))
+            end
+            error("Graceful shutdown pump exceeded 100 resumes for " .. scenario
+                .. "; session=" .. tostring(session_process and coroutine.status(session_process))
+                .. "; bus=" .. tostring(bus_process and coroutine.status(bus_process))
+                .. "; fifo=" .. table.concat(fifo_sizes, ",")
+                .. "; last_topic=" .. last_sent_topic)
+        end
         current_pid = session_pid
         local ok, err = coroutine.resume(thread, value)
         current_pid = plugin_pid
@@ -264,18 +292,37 @@ local function run_graceful_shutdown(actor, session_id, scenario)
     end
 
     local function drain_session()
-        while #session_inbox > 0 and coroutine.status(session_process) == "suspended" do
-            resume_process(session_process, { ok = true, channel = session_channel,
-                value = table.remove(session_inbox, 1) })
+        local progressed = true
+        while progressed and not finished do
+            progressed = false
+            while #session_inbox > 0 and coroutine.status(session_process) == "suspended" do
+                resume_process(session_process, { ok = true, channel = session_channel,
+                    value = table.remove(session_inbox, 1) })
+                progressed = true
+            end
+            local bus_ready = not bus_started
+            for _, fifo in ipairs(fifo_channels) do
+                if #fifo.values > 0 and fifo.waiting_thread == bus_process then
+                    bus_ready = true
+                    break
+                end
+            end
+            if bus_ready and bus_process and coroutine.status(bus_process) == "suspended" then
+                resume_process(bus_process)
+                progressed = true
+            end
+            while #session_inbox > 0 and coroutine.status(session_process) == "suspended" do
+                resume_process(session_process, { ok = true, channel = session_channel,
+                    value = table.remove(session_inbox, 1) })
+                progressed = true
+            end
+            if #bus_done_values > 0 and coroutine.status(session_process) == "suspended" then
+                resume_process(session_process, { ok = true, channel = bus_done,
+                    value = table.remove(bus_done_values, 1) })
+                progressed = true
+            end
+            finished = coroutine.status(session_process) == "dead"
         end
-        if bus_process and coroutine.status(bus_process) == "suspended" then
-            resume_process(bus_process)
-        end
-        if #bus_done_values > 0 and coroutine.status(session_process) == "suspended" then
-            resume_process(session_process, { ok = true, channel = bus_done,
-                value = table.remove(bus_done_values, 1) })
-        end
-        finished = coroutine.status(session_process) == "dead"
     end
 
     mock("process.pid", function() return current_pid end)
@@ -292,6 +339,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
         end
     })
     mock("process.send", function(pid, topic, payload)
+        last_sent_topic = topic
         table.insert(sent, { pid = pid, topic = topic, payload = payload })
         if pid == plugin_pid then
             table.insert(plugin_inbox, plugin_message(topic, payload))
@@ -315,10 +363,21 @@ local function run_graceful_shutdown(actor, session_id, scenario)
     mock("channel.new", function(capacity)
         if current_pid == session_pid and capacity == nil then return bus_done end
         if current_pid == session_pid and capacity == 1 then
-            return {
-                send = function() return true end,
-                receive = function() return coroutine.yield() end
-            }
+            local fifo = { values = {} }
+            function fifo:send(value)
+                table.insert(self.values, value)
+                return true
+            end
+            function fifo:receive()
+                while #self.values == 0 do
+                    self.waiting_thread = coroutine.running()
+                    coroutine.yield()
+                end
+                self.waiting_thread = nil
+                return table.remove(self.values, 1)
+            end
+            table.insert(fifo_channels, fifo)
+            return fifo
         end
         return original_channel_new(capacity)
     end)
@@ -392,6 +451,7 @@ local function run_live_owner_through_plugin(actor, session_id, owner_pid)
     local plugin_inbox = {}
     local owner_result = nil :: any
     local owner_process = nil :: any
+    local owner_exit_delivered = false
     local owner_registry = {
         owner = nil :: string?,
         duplicate_error = setmetatable({ kind = function() return "AlreadyExists" end }, {
@@ -466,6 +526,9 @@ local function run_live_owner_through_plugin(actor, session_id, owner_pid)
             if value then
                 return { ok = true, channel = owner_inbox_channel, value = value }
             end
+            if owner_exit_delivered then
+                return { ok = true, channel = bus_done, value = { error = nil } }
+            end
             return coroutine.yield()
         end
 
@@ -500,10 +563,20 @@ local function run_live_owner_through_plugin(actor, session_id, owner_pid)
     local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = "owner-hub" })
 
     local function exit_owner()
+        owner_exit_delivered = true
         current_pid = owner_pid
+        -- A nested fixture restores channel.select to the test runner while this
+        -- owner coroutine remains suspended. Supply the shutdown drain response
+        -- explicitly while resuming the old owner.
+        local previous_select = channel.select
+        channel.select = function(cases)
+            if cases.default then return { ok = true, default = true } end
+            return { ok = true, channel = bus_done, value = { error = nil } }
+        end
         local ok, resume_err = coroutine.resume(owner_process.coroutine, {
             ok = true, channel = owner_events_channel, value = { kind = process.event.CANCEL }
         })
+        channel.select = previous_select
         current_pid = plugin_pid
         if not ok then error(resume_err) end
     end
@@ -796,8 +869,8 @@ local function define_tests()
         it("rejects queued requests when the initial status write fails", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Initial status failure")
-            local original_update_status = writer.update_status
-            writer.update_status = function() return nil, "startup disk unavailable" end
+            local original_update_meta = writer.update_meta
+            writer.update_meta = function() return nil, "startup disk unavailable" end
             local run = run_start_through_session(actor, session_id, {}, "failed-initial-status",
                 "cancel", { force_create = true, pending_after_start = {
                     { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = session_id,
@@ -806,7 +879,7 @@ local function define_tests()
                         conn_pid = "waiting-caller", request_id = "waiting-message",
                         data = { text = "waiting" } } }
                 } })
-            writer.update_status = original_update_status
+            writer.update_meta = original_update_meta
 
             local errors = {}
             for _, sent in ipairs(run.sent) do
@@ -1062,8 +1135,10 @@ local function define_tests()
                     return { ok = true, channel = inbox, value = plugin_message(consts.TOPICS.MESSAGE, {
                         data = { text = "first" }, request_id = "first"
                     }) }
+                elseif selection == 2 then
+                    return { ok = true, channel = events, value = { kind = process.event.CANCEL } }
                 end
-                return { ok = true, channel = events, value = { kind = process.event.CANCEL } }
+                return { ok = true, channel = bus_done, value = { error = nil } }
             end)
 
             local ok, result = pcall(session.run, { session_id = session_id, user_id = actor:id(),
@@ -1203,9 +1278,27 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
-        it("keeps a later stop armed when an earlier resolution arrives", function()
+        it("does not start Stop supervision before the child commits Stop", function()
             local actor = security.actor()
-            local session_id, context_id = create_session_fixture(actor, "Overlapping stops", "running")
+            local session_id, context_id = create_session_fixture(actor, "Uncommitted Stop", "running")
+            local run = run_plugin_lifecycle(actor, session_id, nil, {}, { error = "cancelled" }, {
+                after_open = {
+                    { topic = consts.PLUGIN_TOPICS.COMMAND,
+                        data = { session_id = session_id, data = { command = consts.COMMANDS.STOP } } }
+                }
+            })
+            test.is_nil(run.error)
+            test.eq(consts.get_config().on_session_end_func_id, "app:end_hook_capture")
+            -- The test environment schedules one end hook; any extra coroutine is Stop supervision.
+            test.eq(#run.scheduled - 1, 0)
+            test.eq(run.cancelled, 0)
+            test.eq(run.terminated, 0)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("keeps Stop identity until resolution and ignores stale resolutions", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Stop identity", "running")
             local stop_ids = {}
             local function stop_id(sent, ordinal)
                 local count = 0
@@ -1226,7 +1319,25 @@ local function define_tests()
                 { topic = consts.TOPICS.STOP_ESCALATION, data = function(sent)
                     stop_ids[1], stop_ids[2] = stop_id(sent, 1), stop_id(sent, 2)
                     return { session_id = session_id, from_pid = "plugin-lifecycle-session",
-                        stop_request_id = stop_ids[2], supervised = true }
+                        stop_request_id = stop_ids[1], supervised = true }
+                end },
+                { topic = consts.PLUGIN_TOPICS.COMMAND,
+                    data = { session_id = session_id, data = { command = consts.COMMANDS.STOP } } },
+                { topic = consts.TOPICS.STOP_ESCALATION, data = function(sent)
+                    stop_ids[3] = stop_id(sent, 3)
+                    return { session_id = session_id, from_pid = "plugin-lifecycle-session",
+                        stop_request_id = stop_ids[1], supervised = true }
+                end },
+                { topic = consts.TOPICS.STOP_RESOLVED, data = function()
+                    return { session_id = session_id, from_pid = "plugin-lifecycle-session",
+                        stop_request_id = stop_ids[1] }
+                end },
+                { topic = consts.PLUGIN_TOPICS.COMMAND,
+                    data = { session_id = session_id, data = { command = consts.COMMANDS.STOP } } },
+                { topic = consts.TOPICS.STOP_ESCALATION, data = function(sent)
+                    stop_ids[4] = stop_id(sent, 4)
+                    return { session_id = session_id, from_pid = "plugin-lifecycle-session",
+                        stop_request_id = stop_ids[4], supervised = true }
                 end },
                 { topic = consts.TOPICS.STOP_RESOLVED, data = function()
                     return { session_id = session_id, from_pid = "plugin-lifecycle-session",
@@ -1234,16 +1345,22 @@ local function define_tests()
                 end },
                 { topic = consts.TOPICS.STOP_DEADLINE, data = function()
                     return { session_id = session_id, session_pid = "plugin-lifecycle-session",
-                        stop_request_id = stop_ids[2], level = 1 }
+                        stop_request_id = stop_ids[4], level = 1 }
                 end }
             }
             local run = run_plugin_lifecycle(actor, session_id, nil, {}, { error = "cancelled" },
                 { after_open = after_open })
             test.is_nil(run.error)
             test.not_nil(stop_ids[1])
-            test.not_nil(stop_ids[2])
-            test.is_false(stop_ids[1] == stop_ids[2])
+            test.eq(stop_ids[1], stop_ids[2])
+            test.eq(stop_ids[1], stop_ids[3])
+            test.not_nil(stop_ids[4])
+            test.is_false(stop_ids[1] == stop_ids[4])
+            test.eq(consts.get_config().on_session_end_func_id, "app:end_hook_capture")
+            -- The test environment schedules one end hook; the other three are Stop deadlines.
+            test.eq(#run.scheduled - 1, 3)
             test.eq(run.cancelled, 1)
+            test.eq(run.terminated, 0)
             cleanup_session_fixture(session_id, context_id)
         end)
 
@@ -1308,9 +1425,35 @@ local function define_tests()
             local call_id = add_pending_call(session_id)
             local before = message_repo.count_by_session(session_id)
             local cancel_events = channel.new(1)
+            local bus_done = {
+                case_receive = function(self) return self end,
+                send = function() return true end,
+                receive = function() return nil end
+            }
+            local original_channel_new = channel.new
+            local original_channel_select = channel.select
+            local original_spawn = coroutine.spawn
+            local selection = 0
+
             cancel_events:send({ kind = process.event.CANCEL })
             mock("process.events", function() return cancel_events end)
+            mock("channel.new", function(capacity)
+                if capacity == nil then return bus_done end
+                return original_channel_new(capacity)
+            end)
+            mock("coroutine.spawn", function() end)
+            mock("channel.select", function()
+                selection = selection + 1
+                if selection == 1 then
+                    return { ok = true, channel = cancel_events,
+                        value = { kind = process.event.CANCEL } }
+                end
+                return { ok = true, channel = bus_done, value = { error = nil } }
+            end)
             local result = session.run({ session_id = session_id, user_id = actor:id() })
+            mock("channel.select", original_channel_select)
+            mock("coroutine.spawn", original_spawn)
+            mock("channel.new", original_channel_new)
             test.eq(result.status, "shutdown")
             test.is_true(result.interrupted)
             test.eq(message_repo.count_by_session(session_id), before)
@@ -1463,7 +1606,15 @@ local function define_tests()
                 if scenario ~= "idle" and not user_messages["completed input"] then
                     error("missing completed input: " .. json.encode(history.messages))
                 end
-                if scenario == "stop" then test.is_true(user_messages["held input"]) end
+                if scenario == "stop" then
+                    test.is_true(user_messages["held input"])
+                    local held_input = nil :: any
+                    for _, message in ipairs(history.messages) do
+                        if message.data == "held input" then held_input = message end
+                    end
+                    test.not_nil(held_input)
+                    test.eq(held_input.metadata.input.state, "pending")
+                end
                 if scenario == "stop" then
                     test.eq(message_repo.get(run.pending_call_id).metadata.status,
                         consts.FUNC_STATUS.ERROR)

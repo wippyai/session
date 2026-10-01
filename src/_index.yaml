@@ -1,4 +1,4 @@
-version: "0.6.2" # x-release-please-version
+version: "0.6.4" # x-release-please-version
 namespace: wippy.session
 
 entries:
@@ -463,6 +463,12 @@ entries:
               { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" } } } } }
             format: application/schema+json
 
+  - name: input_metadata
+    kind: library.lua
+    source: file://input_metadata.lua
+    imports:
+      consts: wippy.session:consts
+
   - name: prompt_builder
     kind: library.lua
     meta:
@@ -474,3 +480,4 @@ entries:
     imports:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
+      input_metadata: wippy.session:input_metadata
