@@ -211,6 +211,41 @@ local function define_tests()
             test.eq(wakes[1].payload.message_id, body.answer_message_id)
         end)
 
+        it("changes only the lifecycle state of the form content when it accepts an answer", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local before: any = artifact_repo.get(artifact_id)
+            local content: any = json.decode(tostring(before.content))
+            content.props.density = "comfortable"
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
+                { json.encode(content), artifact_id })
+            db:release()
+            test.is_nil(update_err)
+
+            local status = post(artifact_id, answer())
+            test.eq(status, 200)
+            local after_row: any = artifact_repo.get(artifact_id)
+            local after: any = json.decode(tostring(after_row.content))
+            test.eq(after.props.state, "idle")
+            test.eq(after.props.density, "comfortable", "a prop the answer does not touch is kept")
+            test.eq(after.props["form-version"], content.props["form-version"])
+            test.eq(after.specification, content.specification)
+            test.eq(after.wippy.tagName, content.wippy.tagName)
+            local function same(a: any, b: any): boolean
+                if type(a) ~= "table" or type(b) ~= "table" then return a == b end
+                for key, value in pairs(a) do
+                    if not same(value, b[key]) then return false end
+                end
+                for key in pairs(b) do
+                    if a[key] == nil then return false end
+                end
+                return true
+            end
+            test.is_true(same(after.props.definition, content.props.definition), "the stored definition is kept")
+        end)
+
         it("asks the owner's session plugin to start a stopped session", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)

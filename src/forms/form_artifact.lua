@@ -88,9 +88,24 @@ function form_artifact.created_message(title: string, artifact_id: string): stri
         title, artifact_id)
 end
 
--- Content JSON with props.state replaced, everything else kept.
+-- Content JSON with props.state replaced, everything else kept: the stored
+-- definition, the form version and any other prop or key, as `form.content`
+-- (form_artifact.parse) holds them. Accepting an answer changes only the
+-- lifecycle state.
 function form_artifact.content_with_state(form: any, state: string): (string?, string?)
-    return form_artifact.build_content(form.definition, state)
+    local stored = type(form) == "table" and form.content or nil
+    if type(stored) ~= "table" or type(stored.props) ~= "table" then
+        return nil, "Form content is missing"
+    end
+    local content = {}
+    for key, value in pairs(stored) do content[key] = value end
+    local props = {}
+    for key, value in pairs(stored.props) do props[key] = value end
+    props.state = state
+    content.props = props
+    local encoded, err = json.encode(content)
+    if err then return nil, "Failed to encode form content: " .. tostring(err) end
+    return encoded, nil
 end
 
 return form_artifact
