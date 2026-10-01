@@ -1,6 +1,7 @@
 local json = require("json")
 local ordered_json = require("ordered_json")
 local form_text = require("form_text")
+local form_checks = require("form_checks")
 local field_values = require("field_values")
 
 -- Session forms contract: the definition an agent authors and the answers a
@@ -90,10 +91,10 @@ local function is_object(value: any): boolean
 end
 
 local is_blank = form_text.is_blank
-local add_error = form_text.add_error
-local check_text = form_text.check_text
-local check_boolean = form_text.check_boolean
-local check_unknown_keys = form_text.check_unknown_keys
+local add_error = form_checks.add_error
+local check_text = form_checks.check_text
+local check_boolean = form_checks.check_boolean
+local check_unknown_keys = form_checks.check_unknown_keys
 
 ---------------------------------------------------------------------------
 -- Definition

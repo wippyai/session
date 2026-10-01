@@ -63,6 +63,19 @@ entries:
       test: wippy.test:test
     method: run
 
+  - name: form_checks_test
+    kind: function.lua
+    meta:
+      name: Definition key checks
+      type: test
+      suite: session
+      comment: The checks of the raw keys of an agent-authored definition that the definition and the standard fields share, such as plain-text values, flags and unknown keys
+    source: file://form_checks_test.lua
+    imports:
+      form_checks: wippy.session.forms:form_checks
+      test: wippy.test:test
+    method: run
+
   - name: text_pipelines_test
     kind: function.lua
     meta:

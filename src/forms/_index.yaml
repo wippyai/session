@@ -27,8 +27,17 @@ entries:
   - name: form_text
     kind: library.lua
     meta:
-      comment: UTF-8 decoding, code point counts, the JavaScript trim set, blank and control character tests and plain-text definition key checks, shared by the definition and the standard field values
+      comment: UTF-8 decoding, code point counts, the JavaScript trim set, blank and control character tests and the sequence every free-text answer takes, shared by the definition, the standard field values and the pattern checker
     source: file://form_text.lua
+
+  # wippy.session.forms:form_checks
+  - name: form_checks
+    kind: library.lua
+    meta:
+      comment: Checks of the raw keys of an agent-authored definition (plain-text values, flags, unknown keys and the error list), shared by the definition and the standard field values
+    source: file://form_checks.lua
+    imports:
+      form_text: wippy.session.forms:form_text
 
   # wippy.session.forms:form_pattern
   - name: form_pattern
@@ -53,6 +62,7 @@ entries:
       - time
     imports:
       form_text: wippy.session.forms:form_text
+      form_checks: wippy.session.forms:form_checks
       form_pattern: wippy.session.forms:form_pattern
 
   # wippy.session.forms:definition
@@ -66,6 +76,7 @@ entries:
     imports:
       ordered_json: wippy.session.forms:ordered_json
       form_text: wippy.session.forms:form_text
+      form_checks: wippy.session.forms:form_checks
       field_values: wippy.session.forms:field_values
 
   # wippy.session.forms:form_artifact
@@ -105,6 +116,7 @@ entries:
     imports:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
       form_artifact: wippy.session.forms:form_artifact
       form_meta: wippy.session.forms:form_meta
       answer_text: wippy.session.forms:answer_text

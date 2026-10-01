@@ -3,6 +3,7 @@ local uuid = require("uuid")
 local security = require("security")
 local consts = require("consts")
 local definition = require("definition")
+local field_values = require("field_values")
 local form_artifact = require("form_artifact")
 local form_meta = require("form_meta")
 local answer_text = require("answer_text")
@@ -210,10 +211,6 @@ end
 -- POST
 ---------------------------------------------------------------------------
 
-local function is_integer_number(value)
-    return type(value) == "number" and value == math.floor(value) and value >= 1
-end
-
 -- Checks the versioned envelope. The request carries the version of the form
 -- it answers (form.version), as read from GET. Returns the envelope or
 -- (nil, message).
@@ -233,7 +230,7 @@ local function parse_envelope(raw_body, form_version)
     end
     -- Optional: without it only the revision check is skipped.
     if body.expected_content_version ~= nil then
-        if not is_integer_number(body.expected_content_version) then
+        if not field_values.is_whole(body.expected_content_version) or body.expected_content_version < 1 then
             return nil, "expected_content_version must be a positive integer"
         end
         body.expected_content_version = math.floor(body.expected_content_version)

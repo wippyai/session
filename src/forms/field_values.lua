@@ -2,6 +2,7 @@ local json = require("json")
 local text = require("text")
 local time = require("time")
 local form_text = require("form_text")
+local form_checks = require("form_checks")
 local form_pattern = require("form_pattern")
 
 -- The standard field types of Session forms V2 (text, textarea, number,
@@ -77,6 +78,14 @@ function field_values.is_standard(type_name: any): boolean
     return type(type_name) == "string" and field_values.KEYS[type_name] ~= nil
 end
 
+-- Whether `value` is a number with no fractional part: finite and equal to
+-- its floor, however it was written (3, 3.0 or 3e0). The one whole-number
+-- test: the definition keys, the answers and the state service use it.
+function field_values.is_whole(value: any): boolean
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+        and value == math.floor(value)
+end
+
 local function refuse(code: string, message: string): (any, any)
     return nil, { code = code, message = message }
 end
@@ -107,7 +116,7 @@ local function decimal_of(value: number): (boolean, string, integer)
     local magnitude = negative and -value or value
     if magnitude == 0 then return false, "0", 0 end
     local digits, power
-    if magnitude == math.floor(magnitude) then
+    if field_values.is_whole(magnitude) then
         digits, power = string.format("%d", magnitude), 0
     else
         -- The shortest of 2 to 17 significant digits that parses back to the
@@ -353,7 +362,7 @@ local function check_number(field: any, value: any): (any, any)
         local shown = field_values.number_text(limit)
         return refuse("invalid_number", string.format("Enter a number between -%s and %s.", shown, shown))
     end
-    local whole = value == math.floor(value)
+    local whole = field_values.is_whole(value)
     if field.integer and not whole then
         return refuse("not_integer", "Enter a whole number.")
     end
@@ -480,10 +489,6 @@ end
 -- Definition
 ---------------------------------------------------------------------------
 
-local function is_whole(value: number): boolean
-    return value == math.floor(value)
-end
-
 -- A whole number as an integer, whatever it was written as.
 local function as_integer(value: number): number
     return math.tointeger(value) or value
@@ -494,12 +499,12 @@ end
 -- absent or refused (the refusal is in errors).
 local function read_whole(errors: {any}, path: string, value: any, low: number, high: number, strict: boolean): number?
     if value == nil then return nil end
-    if type(value) ~= "number" or value ~= value or not is_whole(value) then
-        form_text.add_error(errors, path, "invalid_type", "Must be a whole number.")
+    if not field_values.is_whole(value) then
+        form_checks.add_error(errors, path, "invalid_type", "Must be a whole number.")
         return nil
     end
     if strict and (value < low or value > high) then
-        form_text.add_error(errors, path, "invalid_range",
+        form_checks.add_error(errors, path, "invalid_range",
             string.format("Must be between %d and %d.", low, high))
         return nil
     end
@@ -511,18 +516,18 @@ end
 local function read_bound(errors: {any}, path: string, value: any, code: string, strict: boolean): number?
     if value == nil then return nil end
     if type(value) ~= "number" or value ~= value then
-        form_text.add_error(errors, path, "invalid_type", "Must be a number.")
+        form_checks.add_error(errors, path, "invalid_type", "Must be a number.")
         return nil
     end
     if strict then
         local limit = field_values.LIMITS.NUMBER_MAGNITUDE
         if value > limit or value < -limit then
             local shown = field_values.number_text(limit)
-            form_text.add_error(errors, path, code, string.format("Must be between -%s and %s.", shown, shown))
+            form_checks.add_error(errors, path, code, string.format("Must be between -%s and %s.", shown, shown))
             return nil
         end
         if decimals_of(value) > field_values.LIMITS.NUMBER_DECIMALS then
-            form_text.add_error(errors, path, code,
+            form_checks.add_error(errors, path, code,
                 string.format("Must have at most %d decimals.", field_values.LIMITS.NUMBER_DECIMALS))
             return nil
         end
@@ -533,11 +538,11 @@ end
 local function read_date_bound(errors: {any}, path: string, value: any, strict: boolean): string?
     if value == nil then return nil end
     if type(value) ~= "string" then
-        form_text.add_error(errors, path, "invalid_type", "Must be a date written YYYY-MM-DD.")
+        form_checks.add_error(errors, path, "invalid_type", "Must be a date written YYYY-MM-DD.")
         return nil
     end
     if strict and (#value > RAW_DATE_BYTES or not is_calendar_date(value)) then
-        form_text.add_error(errors, path, "invalid_range", "Must be a real date written YYYY-MM-DD.")
+        form_checks.add_error(errors, path, "invalid_range", "Must be a real date written YYYY-MM-DD.")
         return nil
     end
     return value
@@ -553,11 +558,11 @@ local function read_default(errors: {any}, path: string, raw: any, field: any, s
     if not strict then return value end
     if field.type == "checkbox" then
         if type(value) ~= "boolean" then
-            form_text.add_error(errors, path .. ".default", "invalid_default", "A default must be true or false.")
+            form_checks.add_error(errors, path .. ".default", "invalid_default", "A default must be true or false.")
             return nil
         end
         if value then
-            form_text.add_error(errors, path .. ".default", "default_not_allowed",
+            form_checks.add_error(errors, path .. ".default", "default_not_allowed",
                 "A checkbox cannot start checked: a default must not agree to anything for the user.")
             return nil
         end
@@ -569,12 +574,12 @@ local function read_default(errors: {any}, path: string, raw: any, field: any, s
     candidate.required = false
     local checked, err = field_values.check_answer(candidate, value)
     if err then
-        form_text.add_error(errors, path .. ".default", "invalid_default",
+        form_checks.add_error(errors, path .. ".default", "invalid_default",
             "The default is not a valid answer for this question (" .. tostring(err.code) .. ").")
         return nil
     end
     if checked == nil then
-        form_text.add_error(errors, path .. ".default", "invalid_default", "A default must not be blank.")
+        form_checks.add_error(errors, path .. ".default", "invalid_default", "A default must not be blank.")
         return nil
     end
     return checked
@@ -589,15 +594,15 @@ local function normalize_text_like(errors: {any}, path: string, raw: any, field:
     field.min_length = min_length or 0
     field.max_length = max_length or default_max
     if strict and min_length ~= nil and field.min_length > field.max_length then
-        form_text.add_error(errors, path .. ".min_length", "invalid_range", "Must not be more than max_length.")
+        form_checks.add_error(errors, path .. ".min_length", "invalid_range", "Must not be more than max_length.")
     end
     if raw.pattern ~= nil then
         if type(raw.pattern) ~= "string" then
-            form_text.add_error(errors, path .. ".pattern", "invalid_type", "Must be a string.")
+            form_checks.add_error(errors, path .. ".pattern", "invalid_type", "Must be a string.")
         elseif strict then
             local ok, code, message = form_pattern.check(raw.pattern)
             if not ok then
-                form_text.add_error(errors, path .. ".pattern", code :: string, message :: string)
+                form_checks.add_error(errors, path .. ".pattern", code :: string, message :: string)
             else
                 field.pattern = raw.pattern
             end
@@ -605,33 +610,33 @@ local function normalize_text_like(errors: {any}, path: string, raw: any, field:
             field.pattern = raw.pattern
         end
     end
-    field.placeholder = (form_text.check_text(errors, path .. ".placeholder", raw.placeholder,
+    field.placeholder = (form_checks.check_text(errors, path .. ".placeholder", raw.placeholder,
         { required = false, max = field_values.LIMITS.PLACEHOLDER, strict = strict }))
 end
 
 local function normalize_number(errors: {any}, path: string, raw: any, field: any, strict: boolean)
-    field.integer = form_text.check_boolean(errors, path .. ".integer", raw.integer)
+    field.integer = form_checks.check_boolean(errors, path .. ".integer", raw.integer)
     field.min = read_bound(errors, path .. ".min", raw.min, "invalid_range", strict)
     field.max = read_bound(errors, path .. ".max", raw.max, "invalid_range", strict)
     field.step = read_bound(errors, path .. ".step", raw.step, "invalid_step", strict)
     if not strict then return end
     if field.step ~= nil and field.step <= 0 then
-        form_text.add_error(errors, path .. ".step", "invalid_step", "Must be more than zero.")
+        form_checks.add_error(errors, path .. ".step", "invalid_step", "Must be more than zero.")
         field.step = nil
         return
     end
     if field.min ~= nil and field.max ~= nil and field.min > field.max then
-        form_text.add_error(errors, path .. ".min", "invalid_range", "Must not be more than max.")
+        form_checks.add_error(errors, path .. ".min", "invalid_range", "Must not be more than max.")
     end
     if field.integer then
-        if field.step ~= nil and not is_whole(field.step) then
-            form_text.add_error(errors, path .. ".step", "invalid_step", "Must be a whole number for a whole-number question.")
-        elseif field.step ~= nil and field.min ~= nil and not is_whole(field.min) then
-            form_text.add_error(errors, path .. ".step", "invalid_step",
+        if field.step ~= nil and not field_values.is_whole(field.step) then
+            form_checks.add_error(errors, path .. ".step", "invalid_step", "Must be a whole number for a whole-number question.")
+        elseif field.step ~= nil and field.min ~= nil and not field_values.is_whole(field.min) then
+            form_checks.add_error(errors, path .. ".step", "invalid_step",
                 "Steps count from min, so min must be a whole number for a whole-number question.")
         end
         if field.min ~= nil and field.max ~= nil and math.ceil(field.min) > math.floor(field.max) then
-            form_text.add_error(errors, path .. ".min", "invalid_range", "No whole number lies between min and max.")
+            form_checks.add_error(errors, path .. ".min", "invalid_range", "No whole number lies between min and max.")
         end
     end
 end
@@ -640,7 +645,7 @@ local function normalize_date(errors: {any}, path: string, raw: any, field: any,
     field.min = read_date_bound(errors, path .. ".min", raw.min, strict)
     field.max = read_date_bound(errors, path .. ".max", raw.max, strict)
     if strict and field.min ~= nil and field.max ~= nil and field.min > field.max then
-        form_text.add_error(errors, path .. ".min", "invalid_range", "Must not be after max.")
+        form_checks.add_error(errors, path .. ".min", "invalid_range", "Must not be after max.")
     end
 end
 

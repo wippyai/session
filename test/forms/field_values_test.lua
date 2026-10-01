@@ -34,6 +34,26 @@ local function define_tests()
         end)
     end)
 
+    -- The one whole-number test: the answer checks, the definition keys and
+    -- the state service's expected_content_version all use it.
+    describe("whole numbers", function()
+        it("is_whole accepts a finite number with no fraction, however it is written", function()
+            for _, value in ipairs({ 0, 1, -1, 3.0, -3.0, 100, 1e12, -1e12, 2 ^ 53, 1e300 }) do
+                test.is_true(field_values.is_whole(value), tostring(value))
+            end
+        end)
+
+        it("is_whole refuses a fraction, a non-finite number and anything that is not a number", function()
+            for _, value in ipairs({ 0.5, -0.5, 1e-7, 2.0000001, 0 / 0, math.huge, -math.huge }) do
+                test.is_false(field_values.is_whole(value), tostring(value))
+            end
+            for _, value in ipairs({ "3", true, false, {} }) do
+                test.is_false(field_values.is_whole(value), tostring(value))
+            end
+            test.is_false(field_values.is_whole(nil))
+        end)
+    end)
+
     describe("number step", function()
         local function on_step(step: number, value: number, min: number?): boolean
             local stored, err = field_values.check_answer({ type = "number", step = step, min = min }, value)

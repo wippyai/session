@@ -496,6 +496,27 @@ local function define_tests()
             test.eq(no_request, 400)
         end)
 
+        it("takes expected_content_version as a positive whole number, however it is written", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local function with_version(spelling: string)
+                return post(artifact_id, '{"form_version":1,"request_id":"r-version","expected_content_version":'
+                    .. spelling .. ',"answers":{"delivery":"Courier"}}')
+            end
+            for _, bad in ipairs({ "0", "-1", "1.5", "0.5", "\"1\"", "true", "[]" }) do
+                local status, body = with_version(bad)
+                test.eq(status, 400, bad)
+                test.eq(body.code, "invalid_request", bad)
+            end
+            test.eq(#user_rows(ctx.session_id), 0, "none of them stored an answer")
+            local conflict_status, conflict = with_version("2.0")
+            test.eq(conflict_status, 409, "2.0 is the whole number 2, which is not the current version")
+            test.eq(conflict.code, "version_conflict")
+            local ok_status, ok = with_version("1.0")
+            test.eq(ok_status, 200, "1.0 is the whole number 1, the current version")
+            test.eq(ok.success, true)
+        end)
+
         it("answers 413 for a body over 64 KiB", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
