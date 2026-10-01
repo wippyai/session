@@ -223,11 +223,18 @@ end
 -- decimals than the step and the base do together; then |value - base|, scaled
 -- to whole numbers, must be a multiple of the scaled step.
 local function on_step(field: any, value: number): boolean
-    -- A stored step that is not positive has no grid; this also keeps the
-    -- division below from looping on a zero divisor.
-    if field.step <= 0 then return false end
-    local base = field.min or 0
     local step = field.step :: number
+    local base = field.min or 0
+    -- A stored step that is not positive has no grid, which also keeps the
+    -- division below from looping on a zero divisor. A step or minimum outside
+    -- the supported magnitude and decimals (stored forms are not re-checked
+    -- for it) cannot be proved to lie on a grid either.
+    local limit = field_values.LIMITS.NUMBER_MAGNITUDE
+    if step <= 0 or step > limit or base > limit or base < -limit
+        or decimals_of(step) > field_values.LIMITS.NUMBER_DECIMALS
+        or decimals_of(base) > field_values.LIMITS.NUMBER_DECIMALS then
+        return false
+    end
     local places = decimals_of(step)
     local base_places = decimals_of(base)
     if base_places > places then places = base_places end
