@@ -74,7 +74,6 @@ local function checkpoint_options_from_agent(op): table
     return agent_options.checkpoint
 end
 
-
 local function has_checkpoint_bindings(bindings: any): boolean
     if type(bindings) ~= "table" then
         return false

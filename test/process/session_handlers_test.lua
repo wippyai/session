@@ -489,6 +489,7 @@ local function define_tests()
                 tokens = {
                     prompt_tokens = 20,
                     cache_read_tokens = 150000,
+                    cache_write_tokens = 20,
                     context_tokens = 150040,
                 },
                 message_id = "msg-1",
@@ -498,6 +499,36 @@ local function define_tests()
             test.is_true(result.checkpoint_triggered)
             test.eq(result.next_ops[1].type, "create_checkpoint")
             test.eq(result.next_ops[1].trigger_tokens, 150040)
+        end)
+
+        it("uses normalized context size across cache reports and preserves the threshold boundary", function()
+            local reports = {
+                { tokens = { prompt_tokens = 150001, context_tokens = 150001 }, expected = 150001 },
+                { tokens = { prompt_tokens = 0, cache_write_tokens = 150001,
+                    context_tokens = 150001 }, expected = 150001 },
+                { tokens = { prompt_tokens = 0, cache_read_tokens = 150001,
+                    context_tokens = 150001 }, expected = 150001 },
+                -- The LLM adapter already separates cached input from an inclusive provider count.
+                { tokens = { prompt_tokens = 10000, cache_read_tokens = 80000,
+                    context_tokens = 90000 } },
+                { tokens = { prompt_tokens = 20, cache_read_tokens = 99980,
+                    context_tokens = 100000 } },
+                { tokens = { prompt_tokens = 20, context_tokens = 0 } },
+            }
+            for _, report in ipairs(reports) do
+                local ctx = mock_checkpoint_ctx({ token_checkpoint_threshold = 100000,
+                    checkpoint_function_id = "fallback:checkpoint" })
+                local result, err = session_handlers.check_background_triggers(ctx, {
+                    tokens = report.tokens, message_id = "msg-user",
+                })
+                test.is_nil(err)
+                test.eq(result.checkpoint_triggered == true, report.expected ~= nil)
+                if report.expected then
+                    test.eq(result.next_ops[1].trigger_tokens, report.expected)
+                else
+                    test.is_true(result.skipped)
+                end
+            end
         end)
 
         it("does not trigger when the full context size is below the threshold", function()

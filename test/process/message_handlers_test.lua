@@ -436,6 +436,82 @@ local function define_tests()
             test.eq(checkpoint.message_id, captured.assistant_ids[1])
             test.eq(checkpoint.trigger_tokens, PROMPT_TOKENS_OVER_THRESHOLD)
         end)
+
+        it("checks cached context throughout a long tool loop before admitting the next step", function()
+            local steps = 0
+            local checks = 0
+            local checkpoints = {}
+            local events = {}
+            local agent = fake_agent(nil)
+            agent.step = function()
+                steps = steps + 1
+                table.insert(events, "step:" .. tostring(steps))
+                if steps == 23 then return { result = "done" } end
+                local context_tokens = 58000 + steps * 2000
+                return {
+                    result = "",
+                    tokens = {
+                        prompt_tokens = 20,
+                        cache_read_tokens = context_tokens - 40,
+                        cache_write_tokens = 20,
+                        context_tokens = context_tokens,
+                    },
+                    tool_calls = {{ id = "call-" .. tostring(steps), name = "pack_document",
+                        arguments = { round = steps }, registry_id = "app:pack_document" }},
+                }
+            end
+            local ctx, captured = mock_ctx(agent)
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop() end
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_strategy = function() end,
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(_self, calls)
+                        local call = calls[1]
+                        return { [call.id] = { valid = true, name = call.name,
+                            args = call.arguments, registry_id = call.registry_id } }, nil
+                    end,
+                    execute = function(_self, _context, tools)
+                        table.insert(events, "tools:" .. tostring(steps))
+                        local id = "call-" .. tostring(steps)
+                        return { [id] = { result = "done", tool_call = tools[id] } }
+                    end,
+                }
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, message_handlers.agent_step)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, message_handlers.agent_continue)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, function(context, op)
+                checks = checks + 1
+                return session_handlers.check_background_triggers(context, op)
+            end)
+            bus:mount_op_handler(consts.OP_TYPE.CREATE_CHECKPOINT, function(_context, op)
+                table.insert(checkpoints, op)
+                table.insert(events, "checkpoint:" .. tostring(steps))
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                message_id = "msg-user", request_id = "req-1", from_user = true })
+            local ok, err = bus:run()
+            tool_caller.new = original_new
+
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps, 23)
+            test.eq(checks, 22)
+            test.eq(#checkpoints, 1, "uncached input stays at 20 while context crosses the threshold")
+            test.eq(checkpoints[1].trigger_tokens, 102000)
+            test.eq(checkpoints[1].checkpoint_id, captured.assistant_ids[22])
+            test.eq(checkpoints[1].message_id, captured.assistant_ids[22])
+            test.eq(events[#events - 3], "step:22")
+            test.eq(events[#events - 2], "checkpoint:22")
+            test.eq(events[#events - 1], "tools:22")
+            test.eq(events[#events], "step:23")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 22)
+        end)
     end)
 
     describe("turn loop guards", function()
