@@ -20,6 +20,22 @@ entries:
       test: wippy.test:test
     method: run
 
+  - name: runtime_probe_test
+    kind: function.lua
+    meta:
+      name: Runtime facts behind the V2 field rules
+      type: test
+      suite: session
+      comment: Number decoding and arithmetic, null handling, date parsing and regexp behavior of the runtime that the V2 standard field rules rely on, asserted as observed so a runtime change shows up
+    source: file://runtime_probe_test.lua
+    modules:
+      - json
+      - time
+      - text
+    imports:
+      test: wippy.test:test
+    method: run
+
   - name: form_index_test
     kind: function.lua
     meta:
