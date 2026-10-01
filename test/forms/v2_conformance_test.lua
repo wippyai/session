@@ -42,11 +42,15 @@ local form_text = require("form_text")
 
 local FIXTURE = "/v2_conformance.json"
 
+-- The volume is test/forms/fixtures, found from the working directory: run the
+-- tests from test/, as make test does.
+local WHERE = " (app.forms:fixtures is ./forms/fixtures from the working directory: run from test/, as make test does)"
+
 local function read_fixture(): string
     local volume, volume_err = fs.get("app.forms:fixtures")
-    if not volume then error("fixture volume: " .. tostring(volume_err)) end
+    if not volume then error("fixture volume: " .. tostring(volume_err) .. WHERE) end
     local raw, read_err = volume:readfile(FIXTURE)
-    if not raw then error("fixture file: " .. tostring(read_err)) end
+    if not raw then error("fixture file: " .. tostring(read_err) .. WHERE) end
     return raw
 end
 

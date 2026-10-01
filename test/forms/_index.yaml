@@ -20,10 +20,17 @@ entries:
       test: wippy.test:test
     method: run
 
+  # The fixtures are found from the process working directory, which is test/
+  # (the app root, where wippy.lock is): make test and make.ps1 run every
+  # target from there. A host-authored entry has no module root to resolve
+  # from, so `base: module` changes nothing for it (checked on runtime
+  # 0.3.43a, where the same path resolved either way); `base: project` says
+  # which anchor is meant.
   - name: fixtures
     kind: fs.directory
     meta:
       comment: Shared JSON fixtures for the form rules, such as the V2 conformance cases the form component is tested against too
+    base: project
     directory: ./forms/fixtures
 
   - name: v2_conformance_test
