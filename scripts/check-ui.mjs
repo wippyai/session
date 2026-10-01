@@ -1,38 +1,33 @@
 #!/usr/bin/env node
-// EE2-2461 — Session frontend packaging drift guard.
+// EE2-2461: Session frontend packaging drift guard.
 //
-// Modeled on the Host's scripts/check-import-map-drift.mjs: fails loudly when
-// a hand-maintained copy of some data disagrees with its source of truth,
-// instead of letting the two quietly drift apart. Two independent checks:
+// Modeled on the Host's scripts/check-import-map-drift.mjs. It fails when a
+// hand-maintained copy of some data disagrees with its source of truth. It
+// runs two independent checks:
 //
-//   (a) dist check — the committed src/forms/ui/dist (wippy-form) and
-//       src/forms/ui/answers-dist (wippy-form-answers) bundles must be
-//       byte-identical to a fresh `npm run build` of each package. Catches
-//       "edited frontend/wippy-form*/src and forgot to rebuild".
+//   (a) Dist check. The committed src/forms/ui/dist (wippy-form) and
+//       src/forms/ui/answers-dist (wippy-form-answers) bundles must match a
+//       fresh build of each package. It catches a source edit that was not
+//       rebuilt.
 //
-//   (b) metadata check — the view.component registry entries in
-//       src/forms/ui/_index.yaml hand-copy each package's package.json
-//       `wippy` block (tag name, description, props, entry point) because
-//       the registry loader needs that metadata inline, not fetched from
+//   (b) Metadata check. The view.component registry entries in
+//       src/forms/ui/_index.yaml copy each package's package.json `wippy`
+//       block (tag name, description, props, entry point), because the
+//       registry loader needs that metadata inline and does not read
 //       package.json at load time (see the comment at the top of
-//       _index.yaml). This check fails when that copy disagrees with the
-//       package.json it was copied from. This is the check that would have
-//       caught N9: `_index.yaml`'s form-version prop description said
-//       "shows a \"needs a newer app\" notice" while package.json said
-//       "shows an" — already fixed by this change, see below.
+//       _index.yaml). The check fails when the copy disagrees with the
+//       package.json it was copied from.
 //
-// Why a CHECK, not a generator: _index.yaml's own header comment records
-// the decision already made for this file — registry.entry metadata has to
-// be inline for the Wippy registry loader to read it, and the YAML also
-// carries fields with no package.json equivalent at all (auto_register,
-// announced, base_path, the HTTP-serving wiring). Generating the whole file
-// from package.json would need a second code path the file's authors
-// deliberately avoided, and would turn a hand-authored, hand-commented
-// config file into partially generated output for the sake of 5 fields.
-// Checking keeps the one authored file and still catches the exact class of
-// bug that already shipped (N9).
-import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+// The metadata is checked rather than generated because _index.yaml is a
+// hand-authored, commented config file. Its registry entries must carry the
+// metadata inline, and it also holds fields with no package.json equivalent
+// (auto_register, announced, base_path, the HTTP serving entries).
+// Generating the file from package.json would turn it into partly generated
+// output for five fields, while a check keeps one authored file and still
+// fails on a copy that drifted.
+import { execFileSync, execSync } from 'node:child_process'
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { basename, dirname, join, relative, sep } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -40,15 +35,13 @@ import { fileURLToPath } from 'node:url'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const INDEX_YAML_PATH = join(root, 'src/forms/ui/_index.yaml')
 
-// Temp build output deliberately lives under src/forms/ui/ — a SIBLING of
-// the real dist/answers-dist directories, at the same depth under the repo
-// root — rather than under os.tmpdir(). Rollup writes each sourcemap's
-// `sources` entries as paths relative to the outDir's position in the
-// directory tree (e.g. "../../../../frontend/wippy-form/src/index.ts" for
-// the committed src/forms/ui/dist/index.js.map). Building into a directory
-// at a different depth would change that relative path count and make the
-// maps byte-different for no real reason, forcing the comparison to exclude
-// them. Same depth keeps the maps genuinely comparable instead.
+// The temp build output lives under src/forms/ui/, beside the real dist and
+// answers-dist directories and at the same depth under the repo root, and
+// not under os.tmpdir(). Rollup writes each sourcemap's `sources` entries as
+// paths relative to the outDir (e.g. "../../../../frontend/wippy-form/src/index.ts"
+// for the committed src/forms/ui/dist/index.js.map). An outDir at another
+// depth would change those paths, so the maps would differ for no real
+// reason and the comparison would have to skip them.
 const PACKAGES = [
   {
     name: 'wippy-form',
@@ -70,34 +63,39 @@ const PACKAGES = [
   },
 ]
 
+// js-yaml is a devDependency of frontend/wippy-form. The script has no
+// package.json of its own, so it loads the parser from that package.
+const YAML_OWNER = PACKAGES[0]
+
 const errors = []
 
 // ---------------------------------------------------------------------
 // (a) dist drift: fresh build vs. committed output
 // ---------------------------------------------------------------------
 
-function sh(cmd, args, cwd) {
-  execFileSync(cmd, args, { cwd, stdio: 'inherit', shell: true })
-}
-
+// `npm` is a .cmd file on Windows, and Node runs .cmd files only through a
+// shell. The command is a fixed string with no paths in it (the package
+// directory is passed as the working directory), so the shell has nothing
+// to quote.
 function ensureInstalled(pkg) {
-  if (!existsSync(join(pkg.dir, 'node_modules'))) {
-    console.log(`[check-ui] ${pkg.name}: node_modules missing, running npm ci...`)
-    sh('npm', ['ci'], pkg.dir)
-  }
+  if (existsSync(join(pkg.dir, 'node_modules')))
+    return
+  console.log(`[check-ui] ${pkg.name}: node_modules missing, running npm ci...`)
+  execSync('npm ci', { cwd: pkg.dir, stdio: 'inherit' })
 }
 
+// Runs the package's own vite build with node and vite's JavaScript entry
+// point, with the arguments as an array and no shell, so a repo path with
+// spaces reaches vite intact. The committed `build` script is not reused:
+// `npm run build -- --outDir X` would add a second --outDir after the one
+// in the script, and which one vite keeps is not something this check
+// should depend on. Here --outDir appears once.
 function buildToTemp(pkg) {
   rmSync(pkg.tmpDistDir, { recursive: true, force: true })
-  // Build through the local vite binary directly (via npx, which resolves
-  // node_modules/.bin first and never hits the network with --no-install)
-  // rather than `npm run build -- --outDir X`. The committed `build` script
-  // is `vite build --outDir ../../src/forms/ui/dist --emptyOutDir`, and
-  // `npm run build -- --outDir X` would append a second --outDir after that
-  // one — relying on "the CLI keeps the last repeated flag" is exactly the
-  // kind of unverified parsing assumption this check should not carry.
-  // Driving vite directly means --outDir appears on the command line once.
-  sh('npx', ['--no-install', 'vite', 'build', '--outDir', pkg.tmpDistDir, '--emptyOutDir'], pkg.dir)
+  const vitePackagePath = createRequire(join(pkg.dir, 'package.json')).resolve('vite/package.json')
+  const viteBin = join(dirname(vitePackagePath), JSON.parse(readFileSync(vitePackagePath, 'utf8')).bin.vite)
+  execFileSync(process.execPath, [viteBin, 'build', '--outDir', pkg.tmpDistDir, '--emptyOutDir'],
+    { cwd: pkg.dir, stdio: 'inherit' })
 }
 
 function listFilesRecursive(dir) {
@@ -116,22 +114,16 @@ function relFileSet(dir) {
   return listFilesRecursive(dir).map(f => relative(dir, f).split(sep).join('/')).sort()
 }
 
-// Line-ending normalization for the comparison below. Measured directly
-// (not assumed): this repo's .gitattributes marks every file `text=auto`,
-// and checkout-time EOL handling is independent of the OS a clone happens
-// to run `npm run build` on — the committed dist/index.js currently checks
-// out as CRLF on this machine while its own git blob, and a fresh build run
-// right here, are both plain LF. A raw byte-equality check would fail on
-// that alone, with zero actual content difference. Worse, the sourcemap's
-// `sourcesContent` entries embed the exact text of each source file at
-// build time (as JSON-escaped `\r`/`\n`), so two otherwise-identical builds
-// can disagree there too if the checkout that produced the committed map
-// and the checkout running this check don't resolve the SAME source file's
-// line endings the same way. None of this is a real content difference, so
-// both .js and .map (and, harmlessly, the plain-ASCII wippy-meta.json) are
-// compared with CRLF folded to LF first — for .map, after JSON-parsing, so
-// the fold also reaches `\r\n` escaped *inside* string values, not just raw
-// bytes in the file's own formatting.
+// Line endings are folded before the comparison. The repo's .gitattributes
+// marks every file `text=auto`, so a Windows checkout can hold the committed
+// dist/index.js with CRLF while its git blob, and a fresh build, use LF. A
+// raw byte comparison would fail on that alone. The sourcemap's
+// `sourcesContent` entries also embed each source file's text as it was
+// checked out at build time (as JSON-escaped `\r`/`\n`), so two builds of
+// the same source can differ there too. None of that is a content change,
+// so .js, .map and wippy-meta.json are compared with CRLF folded to LF. For
+// .map and .json the fold runs after JSON parsing, so it also reaches the
+// escaped `\r\n` inside string values.
 function normalizeEol(text) {
   return text.replace(/\r\n/g, '\n')
 }
@@ -181,9 +173,9 @@ function compareDist(pkg) {
     const committedNorm = normalizedTextFor(relPath, committedBytes)
     const freshNorm = normalizedTextFor(relPath, freshBytes)
     if (committedNorm === freshNorm)
-      continue // only an EOL-representation difference (see normalizeEol* above) — not real drift
+      continue // only the line endings differ (see normalizeEol above)
     if (relPath.endsWith('.map')) {
-      errors.push(`dist (${pkg.name}): ${pkg.distDirRel}/${relPath} differs from a fresh build (beyond line-ending normalization). check-ui builds into src/forms/ui/.check-ui-tmp-* — a sibling of ${pkg.distDirRel} at the same depth — so the sourcemap's relative "sources" paths line up with the committed map; this is not expected to be a path-depth artifact. Rebuild with \`npm run build\` in ${pkg.dirRel} and commit the result, or inspect the diff for an actual source change (e.g. a dependency version bump that shifts the mapped source list)`)
+      errors.push(`dist (${pkg.name}): ${pkg.distDirRel}/${relPath} differs from a fresh build (beyond line-ending normalization). check-ui builds into src/forms/ui/.check-ui-tmp-*, beside ${pkg.distDirRel} at the same depth, so the sourcemap's relative "sources" paths match the committed map and the difference is not a path-depth effect. Rebuild with \`npm run build\` in ${pkg.dirRel} and commit the result, or inspect the diff for a real source change (e.g. a dependency version bump that changes the mapped source list)`)
       continue
     }
     errors.push(`dist (${pkg.name}): ${pkg.distDirRel}/${relPath} differs from a fresh build (beyond line-ending normalization). Rebuild with \`npm run build\` in ${pkg.dirRel} and commit the result`)
@@ -193,129 +185,24 @@ function compareDist(pkg) {
 // ---------------------------------------------------------------------
 // (b) metadata drift: _index.yaml vs. package.json
 // ---------------------------------------------------------------------
-//
-// A minimal YAML-SUBSET mapping parser — NOT a general YAML parser. It
-// supports only what the two view.component `meta` blocks in
-// src/forms/ui/_index.yaml use: block mappings (one "key: value" per line),
-// folded (">-") block scalars, and plain/quoted scalars. No sequences,
-// anchors, flow collections or multi-document markers — those constructs
-// exist elsewhere in this same file (e.g. the `targets:` lists on the
-// ns.requirement entry) but never inside the two meta blocks this check
-// reads, and parseMapping throws on anything outside that subset rather
-// than silently mis-parsing it.
 
-function splitIndent(line) {
-  const m = line.match(/^( *)(.*)$/)
-  return { indent: m[1].length, content: m[2] }
-}
-
-function isBlockScalarIndicator(raw) {
-  return /^[>|][+-]?\d*$/.test(raw)
-}
-
-function coerceScalar(raw) {
-  if (raw === '' || raw === 'null' || raw === '~')
-    return null
-  if (raw === 'true')
-    return true
-  if (raw === 'false')
-    return false
-  if (/^-?\d+(?:\.\d+)?$/.test(raw))
-    return Number(raw)
-  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"'))
-    return JSON.parse(raw)
-  if (raw.length >= 2 && raw.startsWith('\'') && raw.endsWith('\''))
-    return raw.slice(1, -1).replace(/''/g, '\'')
-  return raw
-}
-
-function parseMapping(lines, startIdx, indent) {
-  const obj = {}
-  let i = startIdx
-  while (i < lines.length) {
-    const { indent: li, content } = splitIndent(lines[i])
-    if (li < indent)
-      break
-    if (li > indent)
-      throw new Error(`check-ui: unexpected indentation parsing _index.yaml near "${lines[i]}"`)
-    if (content.startsWith('- '))
-      throw new Error(`check-ui: unsupported YAML sequence inside a metadata block near "${lines[i]}" (this parser only supports mappings there)`)
-    const m = content.match(/^([^:]+):(.*)$/)
-    if (!m)
-      throw new Error(`check-ui: expected "key: value" parsing _index.yaml near "${lines[i]}"`)
-    const key = m[1].trim()
-    const rawVal = m[2].trim()
-    i++
-    if (rawVal === '') {
-      if (i < lines.length && splitIndent(lines[i]).indent > indent) {
-        const childIndent = splitIndent(lines[i]).indent
-        const result = parseMapping(lines, i, childIndent)
-        obj[key] = result.value
-        i = result.next
-      }
-      else {
-        obj[key] = null
-      }
-    }
-    else if (isBlockScalarIndicator(rawVal)) {
-      const folded = rawVal.startsWith('>')
-      const parts = []
-      let childIndent = null
-      while (i < lines.length) {
-        const { indent: ci } = splitIndent(lines[i])
-        if (ci <= indent)
-          break
-        if (childIndent === null)
-          childIndent = ci
-        parts.push(lines[i].slice(childIndent))
-        i++
-      }
-      obj[key] = folded ? parts.join(' ') : parts.join('\n')
-    }
-    else {
-      obj[key] = coerceScalar(rawVal)
-    }
+function loadYaml() {
+  let yaml
+  try {
+    yaml = createRequire(join(YAML_OWNER.dir, 'package.json'))('js-yaml')
   }
-  return { value: obj, next: i }
-}
-
-function readYamlLines() {
-  const text = readFileSync(INDEX_YAML_PATH, 'utf8')
-  return text.split(/\r\n|\n/).filter(line => line.trim() !== '' && !/^\s*#/.test(line))
-}
-
-function extractEntryBlock(allLines, entryName) {
-  const marker = new RegExp(`^( *)- name: ${entryName}\\s*$`)
-  let start = -1
-  let listIndent = -1
-  for (let i = 0; i < allLines.length; i++) {
-    const m = allLines[i].match(marker)
-    if (m) {
-      start = i
-      listIndent = m[1].length
-      break
-    }
+  catch (err) {
+    throw new Error(`check-ui: cannot load js-yaml from ${YAML_OWNER.dirRel} (run \`npm ci\` there): ${err.message}`)
   }
-  if (start === -1)
+  return yaml.load(readFileSync(INDEX_YAML_PATH, 'utf8'))
+}
+
+function getEntryMeta(indexYaml, entryName) {
+  const entries = Array.isArray(indexYaml?.entries) ? indexYaml.entries : []
+  const entry = entries.find(e => e && e.name === entryName)
+  if (!entry)
     throw new Error(`check-ui: registry entry "${entryName}" not found in src/forms/ui/_index.yaml`)
-  let end = allLines.length
-  for (let i = start + 1; i < allLines.length; i++) {
-    if (splitIndent(allLines[i]).indent <= listIndent) {
-      end = i
-      break
-    }
-  }
-  const block = allLines.slice(start, end)
-  // Normalize "  - name: X" into a plain mapping line two columns deeper, so
-  // the rest of the (already consistently indented) block parses uniformly.
-  block[0] = `${' '.repeat(listIndent + 2)}${block[0].slice(listIndent + 2)}`
-  return { lines: block, indent: listIndent + 2 }
-}
-
-function getEntryMeta(allLines, entryName) {
-  const { lines, indent } = extractEntryBlock(allLines, entryName)
-  const { value } = parseMapping(lines, 0, indent)
-  return value.meta || {}
+  return entry.meta || {}
 }
 
 function diffValues(yamlVal, pkgVal, path, out) {
@@ -332,19 +219,17 @@ function diffValues(yamlVal, pkgVal, path, out) {
   out.push(`${path}: _index.yaml has ${JSON.stringify(yamlVal)}, package.json has ${JSON.stringify(pkgVal)}`)
 }
 
-function checkMetadata(pkg, allLines) {
+function checkMetadata(pkg, indexYaml) {
   const pkgJson = JSON.parse(readFileSync(join(pkg.dir, 'package.json'), 'utf8'))
   const wippy = pkgJson.wippy || {}
-  const meta = getEntryMeta(allLines, pkg.entryName)
+  const meta = getEntryMeta(indexYaml, pkg.entryName)
   const expectedEntryPoint = basename(pkgJson.browser || '')
 
-  // Fields actually hand-copied from package.json's `wippy` block into
-  // _index.yaml's `meta`. meta.type ("view.component") is NOT compared here:
-  // it is a fixed registry-entry-kind literal required by the Wippy registry
-  // schema, not a copy of package.json's unrelated `wippy.type` ("widget",
-  // a Host-side loading-strategy hint) — there is no package.json field it
-  // could drift from. base_path is likewise YAML-only (the HTTP mount path),
-  // with nothing in package.json to compare it against.
+  // These are the fields _index.yaml's `meta` copies from package.json.
+  // meta.type ("view.component") is not compared. It is the registry entry
+  // kind the Wippy registry schema requires, and package.json's unrelated
+  // `wippy.type` ("widget") is a Host loading hint, so there is nothing for
+  // it to drift from. base_path is also YAML-only (the HTTP mount path).
   const diffs = []
   diffValues(meta.tag_name, wippy.tagName, 'tag_name / wippy.tagName', diffs)
   diffValues(meta.title, pkgJson.title, 'title / package.json "title"', diffs)
@@ -369,9 +254,9 @@ for (const pkg of PACKAGES) {
   }
 }
 
-const yamlLines = readYamlLines()
+const indexYaml = loadYaml()
 for (const pkg of PACKAGES)
-  checkMetadata(pkg, yamlLines)
+  checkMetadata(pkg, indexYaml)
 
 if (errors.length) {
   console.error('\n✖ check-ui failed (EE2-2461 packaging drift guard):\n')

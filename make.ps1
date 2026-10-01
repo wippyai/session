@@ -80,11 +80,10 @@ function Invoke-TestTarget { Clear-TestDatabase; Invoke-Wippy @('test') }
 function Invoke-LintTarget { Invoke-Wippy @('lint', '--level', 'error') }
 
 function Invoke-TestUiTarget {
-    # Each call throws on failure (Invoke-Npm) except it doesn't abort the
-    # whole case silently — PowerShell propagates the exception up to the
-    # outer try/catch, same as build-ui: a failing wippy-form test never
-    # lets wippy-form-answers start, and a failing wippy-form-answers test
-    # still fails the target even though wippy-form passed.
+    # Invoke-Npm throws on a failure, and the outer try/catch turns the
+    # exception into exit 1, the same as build-ui. A failing wippy-form step
+    # stops the target before wippy-form-answers starts, and a failing
+    # wippy-form-answers step fails the target even though wippy-form passed.
     Invoke-Npm @('ci') $uiDir
     Invoke-Npm @('test') $uiDir
     Invoke-Npm @('ci') $uiAnswersDir

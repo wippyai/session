@@ -28,6 +28,7 @@
     "cross-env": "^7.0.3",
     "eslint": "^8.57.0",
     "eslint-plugin-vue": "^9.0.0",
+    "js-yaml": "^4.3.2",
     "jsdom": "^25.0.1",
     "pinia": "^2.1.0",
     "postcss": "^8.4.0",
