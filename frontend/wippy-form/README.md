@@ -202,7 +202,7 @@ A form with only choices never reaches it (that is the question card). A form th
 | `email` | `InputText` | `type="email"`, `inputmode="email"`, `autocomplete="email"` | The typed text |
 | `number` | `InputText` | `type="text"`, `inputmode="decimal"`; not `InputNumber` (it clamps to min/max, rounds extra digits and strips the locale's group character) | The typed text, judged by a strict parser: dot decimal, optional minus, no separators or exponent |
 | `textarea` | `Textarea` (auto-resize, three rows) | Enter adds a line and never submits | The typed text with its line breaks |
-| `date` | `DatePicker`, `updateModelType="string"`, `dateFormat="yy-mm-dd"` | A calendar from its button (not on focus); `min`/`max` grey out days; typing allowed | The text in the box |
+| `date` | `DatePicker`, `updateModelType="string"`, `dateFormat="yy-mm-dd"` | A calendar from its button (not on focus); `min`/`max` grey out days; typing allowed | The text in the box, as typed. A date the picker reads from loose text (`2026-6-5`) is held as the full date (`2026-06-05`), and the box shows that once it is left |
 | `checkbox` | `Checkbox` (binary) | The label is clickable | An explicit boolean |
 
 A definition `default` prefills the control; clearing an optional prefilled value sends nothing for that field. A checkbox starts unchecked (its only possible default is `false`).
@@ -251,6 +251,7 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 | `field-description` | | The field's own description |
 | `field-control` | | Wrapper around the control |
 | `field-input` | | The PrimeVue control: the input, the textarea, the checkbox, the date picker |
+| `field-calendar` | | The date picker's calendar panel (class `w-form__field-calendar`). It opens in the theme plugin's overlay layer, not inside the form, so it is never clipped by the message around a short form; it carries the form's `w-theme-dark` or `w-theme-light` class, so it follows the theme |
 | `field-error` | | The error list; linked to the control by `aria-describedby` |
 | `field-value` | `empty` | The stored answer in the read-only view ("Skipped" when empty) |
 | `field-note` | | The note on a chosen option in the read-only view |
@@ -267,14 +268,19 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 
 ### Accessibility and keyboard
 
-- Every control has a label whose `for` points at the real input. The description and the error list are linked by `aria-describedby` on that input (for a checkbox or a date picker, whose wrapper would otherwise take the attribute, through the PrimeVue pass-through). A choice is a `fieldset` with a `legend`, described as a whole. `aria-invalid` and `aria-required` follow the state.
-- The form is `novalidate`: the browser's own bubble never replaces the form's error flow. A failed submit names each field, focuses the first invalid control, and announces "N questions need attention." in one polite status region. Errors carry no `role="alert"` of their own, so nothing is announced twice.
+- Every control has a label whose `for` points at the real input. The description and the error list are linked by `aria-describedby` on that input (for a checkbox or a date picker, whose wrapper would otherwise take the attribute, through the PrimeVue pass-through). A choice is a `fieldset` with a `legend`, described as a whole, and every radio or checkbox in it carries `aria-invalid` while the group is in error (a `group` role may not carry the attribute, so it sits on the inputs a screen reader lands on). `aria-invalid` and `aria-required` follow the state.
+- The form is `novalidate`: the browser's own bubble never replaces the form's error flow. A failed submit names each field, focuses the first invalid control, and announces "N questions need attention." in one polite status region. As the user fixes questions the count in that region is updated, once per fixed question and not once per key, and the text is emptied when none are left. Errors carry no `role="alert"` of their own, so nothing is announced twice.
 - Required is text ("(required)"), never colour alone. A read-only answer is plain selectable text.
 - Enter in a single-line field submits the form; Enter in a textarea adds a line; Space toggles a checkbox.
-- Date: type `YYYY-MM-DD`, press the calendar button or ArrowDown to open the calendar, Escape closes it. The calendar opens in the component's own shadow root (the theme's PrimeVue plugin keeps overlays there). Text the picker cannot parse is never dropped: it stays in the box and is named on submit (`invalid_date`, or `below_min` / `above_max` for a well-formed date out of range). On a touch screen PrimeVue sets `inputmode="none"` on the box, so the date is chosen from the calendar.
+- Date: type `YYYY-MM-DD` one key at a time, press the calendar button or ArrowDown to open the calendar, Escape closes it. The box always shows what the user typed, including after an error appears and after the box is left. Text the picker cannot parse is never dropped or replaced by the last good date: it stays in the box and is named on submit (`invalid_date`, or `below_min` / `above_max` for a well-formed date out of range). The calendar opens in the theme plugin's overlay layer inside the component's shadow root. On a touch screen PrimeVue sets `inputmode="none"` on the box, so the date is chosen from the calendar.
+- How the date box keeps the typed text. PrimeVue's `DatePicker` box is uncontrolled: it follows only the last date the picker accepted, and Vue writes that date over the box on every re-render of the box (an error appearing, the form changing, a submit disabling the control), which erased each key as it was typed. The field owns the box text and hands it to the box as its `value` through the picker's pass-through, so every render writes exactly what was typed (Vue skips a write that changes nothing, so the caret stays). The one thing PrimeVue still does on its own is reset the box to the last accepted date when it loses focus; the typed text is put back after that.
 
 ### Known gaps
 
 - The error text and the "(required)" marker take their colour from the theme's severity utilities (contrast-tuned for light and dark), not from `--wippy-form-danger`.
 - The unchecked checkbox and input edge contrast is the theme's (decision D27, deferred to a theme-level fix); there is no local `.p-*` override.
 - A `pattern` mistake is only reported after submit (by the server), not as the user types; see "Pattern" above.
+- The calendar's day cells have no accessible name beyond the day number (PrimeVue's default); the panel itself is a dialog labelled "Choose Date". Not changed here.
+- The calendar carries the form's theme class by a small observer (`src/composables/use-theme-mode-class.ts`) because the theme plugin's overlay layer is a sibling of the themed container and does not get the class itself. `appendTo="self"` would put the calendar inside the themed container, but the message bubble around a form clips it (a one-question form showed about a quarter of the calendar), and `@wippy-fe/theme` documents it as the wrong setting. When the plugin's layer carries the theme class, the observer can be removed.
+- PrimeVue writes an inline `min-width` on the calendar equal to the width of the whole date control (the whole form for a full-width box). `.w-form__field-calendar` lifts it with `min-width: 0 !important`, the only way to beat an inline style.
+- In the Dark theme the textarea is darker than the single-line inputs. Both are the same PrimeVue components this form uses for the other fields; the difference is in the theme's own styles (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`), so it is a theme-level change, not something to override here.
