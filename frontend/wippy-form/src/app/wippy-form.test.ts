@@ -21,6 +21,12 @@ function mockArtifactState() {
   return vi.mocked(WippyProxy.artifactState)
 }
 
+/** Simulates a Host whose proxy predates the artifact-state API (no `artifactState` export at all). */
+function setArtifactStateExport(fn: unknown) {
+  const proxyModule = WippyProxy as unknown as { artifactState?: unknown }
+  proxyModule.artifactState = fn
+}
+
 function flushPromises() {
   return new Promise(resolve => setTimeout(resolve, 0))
 }
@@ -114,6 +120,67 @@ describe('WippyForm — no artifact identity', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('This form cannot be submitted here.')
+    expect(mockArtifactState()).not.toHaveBeenCalled()
+  })
+})
+
+describe('WippyForm — Host predates the artifact-state API (no `artifactState` export)', () => {
+  afterEach(() => {
+    // `beforeEach` above does `mockArtifactState().mockReset()`, which calls
+    // `vi.mocked(WippyProxy.artifactState)` — that throws once this
+    // describe block has set `artifactState` to `undefined`, so every other
+    // test in this file must find a function back in place before its own
+    // `beforeEach` runs.
+    setArtifactStateExport(vi.fn())
+  })
+
+  it('shows the "needs a newer Web Host" notice — not "cannot be submitted here" — with no submit control and no "—" placeholder rows, even with no artifact id', async () => {
+    setArtifactStateExport(undefined)
+
+    const wrapper = mountWippyForm({ formVersion: 1, definition })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('This form needs a newer Web Host.')
+    expect(wrapper.text()).not.toContain('This form cannot be submitted here.')
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'PVButton' }).exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('—')
+    // The real question/options still render (disabled) instead of being
+    // blanked out to a placeholder dash.
+    expect(wrapper.text()).toContain('Pick one')
+    expect(wrapper.text()).toContain('Option A')
+    expect(wrapper.text()).toContain('Option B')
+  })
+
+  it('shows the same notice even when the element DOES carry an artifact id — the missing capability is checked first', async () => {
+    setArtifactStateExport(undefined)
+
+    const wrapper = mountWippyForm({ formVersion: 1, definition }, elementWithArtifactId('artifact-1'))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('This form needs a newer Web Host.')
+    expect(wrapper.text()).not.toContain('This form cannot be submitted here.')
+  })
+
+  it('reflects card-state="unsupported" instead of leaving it stuck on "loading"', async () => {
+    setArtifactStateExport(undefined)
+
+    const element = elementWithArtifactId(null)
+    const wrapper = mountWippyForm({ formVersion: 1, definition }, element)
+    await flushPromises()
+
+    expect(wrapper.find('wippy-loading').exists()).toBe(false)
+    expect(element.getAttribute('card-state')).toBe('unsupported')
+  })
+})
+
+describe('WippyForm — Host supports artifactState but sets no artifact id', () => {
+  it('still shows "This form cannot be submitted here." (unchanged), not the newer-Host notice', async () => {
+    const wrapper = mountWippyForm({ formVersion: 1, definition }, elementWithArtifactId(null))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('This form cannot be submitted here.')
+    expect(wrapper.text()).not.toContain('This form needs a newer Web Host.')
     expect(mockArtifactState()).not.toHaveBeenCalled()
   })
 })

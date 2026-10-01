@@ -95,18 +95,26 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
   }
 
   async function performLoad(): Promise<void> {
+    // Checked BEFORE the artifact-id branch below: a Host that predates the
+    // artifact-state API never sets `data-wippy-artifact-id` either (every
+    // published Host older than the one that added `artifactState` sets
+    // neither), so checking `!id` first left this branch unreachable in
+    // practice — `status` fell through to 'idle' forever instead of ever
+    // reporting 'unsupported', and the caller (wippy-form.vue) had no signal
+    // to show anything other than the generic "no artifact id" notice
+    // (EE2-2461 / F-P4-1).
+    const artifactStateFn = getArtifactStateFn()
+    if (typeof artifactStateFn !== 'function') {
+      status.value = 'unsupported'
+      errorMessage.value = 'This form needs a newer Web Host.'
+      return
+    }
+
     const id = artifactId.value
     if (!id) {
       status.value = 'idle'
       state.value = null
       reloadError.value = null
-      return
-    }
-
-    const artifactStateFn = getArtifactStateFn()
-    if (typeof artifactStateFn !== 'function') {
-      status.value = 'unsupported'
-      errorMessage.value = 'This form needs a newer Web Host.'
       return
     }
 

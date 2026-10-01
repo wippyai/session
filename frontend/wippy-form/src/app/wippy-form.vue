@@ -13,6 +13,7 @@ import { useOnlineStatus } from '../composables/use-online-status'
 import { useArtifactId } from '../element-context'
 import ActiveForm from './active-form.vue'
 import IdleForm from './idle-form.vue'
+import NeedsNewerHostNotice from './needs-newer-host-notice.vue'
 import NoArtifactNotice from './no-artifact-notice.vue'
 import QuestionCardActive from './question-card/question-card-active.vue'
 import QuestionCardSummary from './question-card/question-card-summary.vue'
@@ -118,6 +119,13 @@ const hostState = computed<HostState>(() => {
   // renders an interactive/submittable card (see the v-else-if chain
   // below), so styling must not keep reporting "active" for it either.
   if (unsupportedVersion.value)
+    return 'unsupported'
+  // Same priority for a Host that predates the artifact-state API: `status`
+  // flips to 'unsupported' the moment `useFormState` finds no `artifactState`
+  // export on the proxy (see use-form-state.ts), before any GET is even
+  // attempted — `state` then stays null forever for this instance, so
+  // without this check it would otherwise read as 'loading' indefinitely.
+  if (status.value === 'unsupported')
     return 'unsupported'
   // `state` is only ever null before the artifact's first GET has resolved
   // — the template shows <wippy-loading> for exactly this window (see the
@@ -227,6 +235,19 @@ function handleRetry() {
       This form needs a newer version of the app.
     </Message>
 
+    <!--
+      Checked BEFORE the artifact-id branch below: a Host that predates the
+      artifact-state API never sets `data-wippy-artifact-id` either, so
+      checking `!artifactId` first made this branch unreachable on every
+      published older Host — every card fell through to the generic "cannot
+      be submitted here" notice with no hint that a Web Host update was the
+      actual fix (EE2-2461 / F-P4-1).
+    -->
+    <NeedsNewerHostNotice
+      v-else-if="status === 'unsupported'"
+      :definition="definition"
+    />
+
     <NoArtifactNotice
       v-else-if="!artifactId"
       :definition="definition"
@@ -304,14 +325,12 @@ function handleRetry() {
       title="Loading form…"
     />
 
-    <Message
-      v-else-if="status === 'unsupported'"
-      severity="warn"
-      :closable="false"
-    >
-      This form needs a newer Web Host.
-    </Message>
-
+    <!--
+      No `status === 'unsupported'` branch here: that case is now handled by
+      the NeedsNewerHostNotice branch above, before the `!artifactId` check
+      and before `state` is even considered — reaching this far down the
+      chain already implies `status !== 'unsupported'`.
+    -->
     <Message
       v-else-if="status === 'error'"
       severity="error"
