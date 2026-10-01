@@ -33,6 +33,12 @@ const emit = defineEmits<{
 
 const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
 
+// A PrimeVue `Message` is a live region (`role="alert"`, `aria-live="assertive"`).
+// The submit-failure banner is announced by the form's polite status region
+// instead, so the Message is made a plain element: its text is still shown,
+// and read by anyone browsing the form, but never spoken a second time.
+const QUIET_MESSAGE_PT = { root: { 'role': undefined, 'aria-live': undefined, 'aria-atomic': undefined } }
+
 // Keyed by field id: the raw value of each control — matches AnswerDraft.
 const draft = reactive<Record<string, FieldAnswer | undefined>>(
   draftFromAnswers(props.state.definition, props.state.data),
@@ -47,7 +53,9 @@ const fieldRefs: Record<string, FieldHandle | null> = {}
 
 // Single polite live region for the form: submission-result banners and the
 // validation error summary both funnel through here instead of each having
-// their own role="alert" (which double-announces and can't be dismissed).
+// their own role="alert" (which double-announces and can't be dismissed). The
+// banner's own PrimeVue `Message` is made a plain element for that reason
+// (`QUIET_MESSAGE_PT`), so a failure is announced once, here.
 const statusMessage = ref('')
 // True while the region holds the validation summary, which is kept in step
 // with the errors still showing; false once a submit-failure message took it.
@@ -76,35 +84,43 @@ function errorSummary(count: number): string {
   return count === 1 ? '1 question needs attention.' : `${count} questions need attention.`
 }
 
-function announceErrorSummary(count: number) {
-  statusIsSummary = true
-  statusMessage.value = errorSummary(count)
-}
+// What the validation summary says: how many questions (fields) have an error,
+// then each form-level message as its own text. A form-level error is about
+// the form, not a question, so it is never counted as one.
+const errorSummaryText = computed(() => {
+  const parts: string[] = []
+  const questions = Object.keys(fieldErrors.value).length
+  if (questions > 0)
+    parts.push(errorSummary(questions))
+  for (const error of formErrors.value)
+    parts.push(error.message)
+  return parts.join(' ')
+})
 
-// Questions with an error showing (a form-level error counts as one).
-const errorCount = computed(() => Object.keys(fieldErrors.value).length + (formErrors.value.length > 0 ? 1 : 0))
+function announceErrorSummary() {
+  statusIsSummary = true
+  statusMessage.value = errorSummaryText.value
+}
 
 // A fixed question drops its error as the user types, so the summary would
 // otherwise keep saying how many needed attention at the last submit. It is
-// updated only when that count changes (once per fixed question, not once per
-// key) and emptied when none are left. A polite live region does not announce
-// text that has not changed.
-watch(errorCount, (count) => {
+// updated only when its text changes (once per fixed question, not once per
+// key) and emptied when nothing is left. A polite live region does not
+// announce text that has not changed.
+watch(errorSummaryText, (text) => {
   if (!statusIsSummary)
     return
-  statusMessage.value = count === 0 ? '' : errorSummary(count)
-  if (count === 0)
+  statusMessage.value = text
+  if (text === '')
     statusIsSummary = false
 })
 
 function setServerErrors(errors: Record<string, FieldError[]> | undefined, formLevel: FieldError[] | undefined) {
   fieldErrors.value = errors ?? {}
   formErrors.value = formLevel ?? []
-  const ids = Object.keys(fieldErrors.value)
-  focusFirstInvalid(ids)
-  const count = ids.length + (formErrors.value.length > 0 ? 1 : 0)
-  if (count > 0)
-    announceErrorSummary(count)
+  focusFirstInvalid(Object.keys(fieldErrors.value))
+  if (errorSummaryText.value !== '')
+    announceErrorSummary()
 }
 
 // A changed answer drops that question's errors; the next submit re-checks it.
@@ -129,7 +145,7 @@ function handleSubmit() {
     // A blank Other is the one failure where the text box, not the group, needs focus.
     const blankOther = invalidIds.filter(id => errors[id].some(e => e.code === 'blank'))
     focusFirstInvalid(invalidIds, blankOther)
-    announceErrorSummary(invalidIds.length)
+    announceErrorSummary()
     return
   }
   fieldErrors.value = {}
@@ -241,6 +257,7 @@ defineExpose({
       v-if="banner"
       :severity="banner.retryable ? 'warn' : 'error'"
       :closable="false"
+      :pt="QUIET_MESSAGE_PT"
     >
       <div class="flex items-center gap-2">
         <span>{{ banner.message }}</span>

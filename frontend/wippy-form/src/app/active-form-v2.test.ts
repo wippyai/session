@@ -352,3 +352,90 @@ describe('ActiveForm — status summary stays accurate', () => {
     expect(status(mountForm())).toBe('')
   })
 })
+
+describe('ActiveForm — a form-level error is its own text, not a question', () => {
+  type ServerErrors = { setServerErrors: (e?: Record<string, { code: string, message: string }[]>, f?: { code: string, message: string }[]) => void }
+  const STALE = { code: 'stale', message: 'This form changed since you loaded it.' }
+  const MAIL = { code: 'invalid_email', message: 'That address is not accepted.' }
+  const status = (wrapper: ReturnType<typeof mountForm>) => wrapper.find('[role="status"]').text()
+
+  async function serverErrors(wrapper: ReturnType<typeof mountForm>, fields: Record<string, { code: string, message: string }[]>, form: { code: string, message: string }[]) {
+    await fillValid(wrapper)
+    ;(wrapper.vm as unknown as ServerErrors).setServerErrors(fields, form)
+    await wrapper.vm.$nextTick()
+  }
+
+  it('says the form-level message in the status region and counts no question for it', async () => {
+    const wrapper = mountForm()
+    await serverErrors(wrapper, {}, [STALE])
+    expect(status(wrapper)).toBe('This form changed since you loaded it.')
+    expect(status(wrapper)).not.toContain('question')
+  })
+
+  it('counts only the fields in error as questions and adds the form-level message after them', async () => {
+    const wrapper = mountForm()
+    await serverErrors(wrapper, { mail: [MAIL] }, [STALE])
+    expect(status(wrapper)).toBe('1 question needs attention. This form changed since you loaded it.')
+  })
+
+  it('joins several form-level messages', async () => {
+    const wrapper = mountForm()
+    await serverErrors(wrapper, {}, [STALE, { code: 'closed', message: 'This form is closed.' }])
+    expect(status(wrapper)).toBe('This form changed since you loaded it. This form is closed.')
+  })
+
+  it('keeps the form-level message when the last field error is fixed, and drops the count', async () => {
+    const wrapper = mountForm()
+    await serverErrors(wrapper, { mail: [MAIL] }, [STALE])
+    await inputOf(wrapper, 'Email').setValue('ada@elsewhere.example')
+    expect(status(wrapper)).toBe('This form changed since you loaded it.')
+  })
+
+  it('shows the form-level message under the fields as before', async () => {
+    const wrapper = mountForm()
+    await serverErrors(wrapper, { mail: [MAIL] }, [STALE])
+    expect(wrapper.find('[part~="fields-error"]').text()).toBe('This form changed since you loaded it.')
+  })
+
+  it('clears the form-level message from the status when the form is submitted again', async () => {
+    const wrapper = mountForm()
+    await serverErrors(wrapper, {}, [STALE])
+    expect(status(wrapper)).toBe('This form changed since you loaded it.')
+    await wrapper.find('form').trigger('submit')
+    await wrapper.vm.$nextTick()
+    // The client check passes and hands the answers over; the server decides again.
+    expect(wrapper.emitted('submit')).toHaveLength(1)
+    expect(status(wrapper)).toBe('')
+    expect(wrapper.find('[part~="fields-error"]').exists()).toBe(false)
+  })
+})
+
+describe('ActiveForm — a submit-failure banner is announced once', () => {
+  const BANNER = { message: 'Could not send. Check your connection.', retryable: true }
+
+  /** Every element a screen reader treats as a live region. */
+  const liveRegions = (wrapper: ReturnType<typeof mountForm>) => wrapper.findAll('[role="alert"], [role="status"], [role="log"], [aria-live]')
+
+  it('puts the message in the polite status region and nowhere else that is live', async () => {
+    const wrapper = mountForm()
+    await wrapper.setProps({ banner: BANNER })
+    const announcing = liveRegions(wrapper).filter(el => el.text().includes(BANNER.message))
+    expect(announcing).toHaveLength(1)
+    expect(announcing[0].attributes('role')).toBe('status')
+  })
+
+  it('still shows the message and its Retry button, which is not a live region', async () => {
+    const wrapper = mountForm()
+    await wrapper.setProps({ banner: BANNER })
+    expect(wrapper.find('.p-message').text()).toContain(BANNER.message)
+    expect(wrapper.find('.p-message button').text()).toBe('Retry')
+    expect(wrapper.find('.p-message').attributes('role')).toBeUndefined()
+    expect(wrapper.find('.p-message').attributes('aria-live')).toBeUndefined()
+  })
+
+  it('does the same for a message that cannot be retried', async () => {
+    const wrapper = mountForm()
+    await wrapper.setProps({ banner: { message: 'This form was already answered.' } })
+    expect(liveRegions(wrapper).filter(el => el.text().includes('This form was already answered.'))).toHaveLength(1)
+  })
+})

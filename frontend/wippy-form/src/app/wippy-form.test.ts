@@ -976,7 +976,8 @@ describe('WippyForm — form version 2', () => {
     // The first invalid field in definition order takes focus.
     expect(document.activeElement).toBe(mail.element)
     expect((qty.element as HTMLInputElement).value).toBe('4')
-    expect(wrapper.find('[role="status"]').text()).toBe('3 questions need attention.')
+    // Two questions have an error; the form-level message is spoken as its own text.
+    expect(wrapper.find('[role="status"]').text()).toBe('2 questions need attention. This form changed since you loaded it.')
   })
 
   it('shows a stored version 2 answer read-only once answered', async () => {
