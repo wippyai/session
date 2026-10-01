@@ -47,6 +47,8 @@ export interface QuestionCardController {
   go: (i: number, focus?: FocusTarget) => void
   submitAll: () => void
   requestFocus: (target: FocusTarget) => void
+  /** Empties the polite live region — used when a send starts, so it does not keep announcing the step that was sent from. */
+  quiet: () => void
   buildAnswers: () => FormAnswers
 }
 
@@ -130,9 +132,21 @@ export function useQuestionCard(
       .filter(({ field }) => field.required && !answered(field)),
   )
 
+  // The polite region speaks by changing its text, so it is cleared first and
+  // set a moment later. One pending timer at most: a newer message, or `quiet`,
+  // replaces the one still waiting.
+  let sayTimer: ReturnType<typeof setTimeout> | undefined
+
   function say(text: string) {
+    clearTimeout(sayTimer)
     liveMessage.value = ''
-    setTimeout(() => { liveMessage.value = text }, 30)
+    sayTimer = setTimeout(() => { liveMessage.value = text }, 30)
+  }
+
+  /** Empties the polite region (and drops a message still waiting to be spoken), so it never keeps describing a step the reader has left. */
+  function quiet() {
+    clearTimeout(sayTimer)
+    liveMessage.value = ''
   }
 
   function requestFocus(target: FocusTarget) {
@@ -359,6 +373,7 @@ export function useQuestionCard(
     go,
     submitAll,
     requestFocus,
+    quiet,
     buildAnswers,
   }
 }

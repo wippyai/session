@@ -26,7 +26,7 @@ const props = defineProps<{
    * `aria-describedby` so the control that has focus names them too.
    */
   cardErrorIds?: string
-  /** True while offline or a submit is already in flight — disables the explicit send actions. */
+  /** True while offline or a submit is already in flight — blocks the explicit send actions ("Send" stays focusable but is marked `aria-disabled` and ignores activation). */
   disabled?: boolean
 }>()
 
@@ -101,6 +101,13 @@ const otherDescribedBy = computed(() => [
 // failed send, a form-level error) describe the control but do not make it
 // invalid.
 const otherInvalid = computed(() => otherTooLong.value || !!displayError.value)
+
+function onSend() {
+  // Focusable but inert while the card is blocked (see the template comment).
+  if (props.disabled)
+    return
+  props.controller.commit(props.question)
+}
 
 function onOtherWrapperClick(event: MouseEvent) {
   const target = event.target as HTMLElement
@@ -238,14 +245,24 @@ function onOptionsFocusIn(event: FocusEvent) {
     :part="footerPart.part"
     :class="footerPart.class"
   >
+    <!--
+      "Send" is the control that just failed when a send is rejected, and it
+      usually still has focus. While the card is blocked (a send in flight, or
+      offline) it is marked `aria-disabled` and dimmed with the theme's own
+      `p-disabled` marker, not given the `disabled` attribute: a focused button
+      that becomes disabled hands focus to <body>. Activation is ignored in
+      `onSend`. With nothing ticked it stays a real disabled button; focus is on
+      a row then, not on this button.
+    -->
     <Button
       type="button"
       :part="sendPart.part"
-      :class="sendPart.class"
+      :class="[sendPart.class, disabled && 'p-disabled']"
       data-focus="send"
       :aria-describedby="errorIds"
-      :disabled="controller.ans(question).chosen.length === 0 || disabled"
-      @click="controller.commit(question)"
+      :aria-disabled="disabled ? 'true' : undefined"
+      :disabled="controller.ans(question).chosen.length === 0"
+      @click="onSend"
     >
       Send
       <Icon

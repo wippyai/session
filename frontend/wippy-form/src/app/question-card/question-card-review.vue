@@ -12,7 +12,7 @@ import QuestionCardRichText from './question-card-rich-text.vue'
 const props = defineProps<{
   definition: FormDefinition
   controller: QuestionCardController
-  /** True while offline or a submit is already in flight — disables "Send answers". */
+  /** True while offline or a submit is already in flight — "Send answers" stays focusable but is marked `aria-disabled` and ignores activation. */
   disabled?: boolean
   /**
    * Space-separated ids of the card-wide error messages on screen (the
@@ -37,6 +37,13 @@ function itemPart(missing: boolean) {
 }
 function editPart() {
   return partClass('review-edit')
+}
+
+function onSendAll() {
+  // Focusable but inert while the card is blocked (see the template comment).
+  if (props.disabled)
+    return
+  props.controller.submitAll()
 }
 
 const missingList = computed(() => props.controller.missingRequired.value)
@@ -112,14 +119,25 @@ const missingText = computed(() => {
     >
       {{ missingText }}
     </p>
+    <!--
+      "Send answers" is the control that just failed when a send is rejected,
+      and it has focus. While the card is blocked (a send in flight, or
+      offline) it is marked `aria-disabled` and dimmed with the theme's own
+      `p-disabled` marker, not given the `disabled` attribute: a focused button
+      that becomes disabled hands focus to <body>, so a rejected send left the
+      reader with nothing focused. Activation is ignored in `onSendAll`. While a
+      required answer is missing it stays a real disabled button; focus is on
+      that question's row then (see `go` in use-question-card.ts).
+    -->
     <Button
       type="button"
       :part="sendAllPart.part"
-      :class="sendAllPart.class"
+      :class="[sendAllPart.class, disabled && 'p-disabled']"
       data-focus="send-all"
       :aria-describedby="cardErrorIds"
-      :disabled="missingList.length > 0 || disabled"
-      @click="controller.submitAll()"
+      :aria-disabled="disabled ? 'true' : undefined"
+      :disabled="missingList.length > 0"
+      @click="onSendAll"
     >
       Send answers
       <Icon

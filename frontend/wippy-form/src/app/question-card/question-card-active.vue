@@ -60,6 +60,15 @@ const cardRoot = ref<HTMLElement | null>(null)
 watch(controller.inReview, v => emit('update:state', v ? 'review' : 'active'), { immediate: true })
 watch(controller.collapsed, v => emit('update:collapsed', v), { immediate: true })
 
+// The polite region last said which step this is ("Review your answers",
+// "Question 2 of 3"). Once a send starts that is no longer true, and if the send
+// fails the failure is announced by its own alert, so the region must not go on
+// describing the step the reader sent from.
+watch(() => props.submitting, (sending) => {
+  if (sending)
+    controller.quiet()
+})
+
 // 422 field errors from the server, by field id — the question-card
 // equivalent of ActiveForm's fieldErrors, shown on the question that owns
 // the field; a several-question card jumps there.
@@ -134,6 +143,8 @@ defineExpose({
     const firstIndex = props.state.definition.fields.findIndex(f => flat[f.id])
     if (firstIndex >= 0)
       controller.go(firstIndex, 'first')
+    else
+      void nextTick(restoreFocusAfterFailure)
   },
   retry() {
     emit('submit', controller.buildAnswers())
@@ -192,6 +203,41 @@ watch(controller.focusSeq, () => {
     if (target)
       focusOn(target)
   })
+})
+
+/** True when nothing on the page has focus: the document's focus is on <body> (or the root element), as after a focused control is removed. */
+function pageHasNoFocus(): boolean {
+  const doc = cardRoot.value?.ownerDocument
+  if (!doc)
+    return false
+  const active = doc.activeElement
+  return !active || active === doc.body || active === doc.documentElement
+}
+
+/**
+ * After a send fails, make sure the reader is still somewhere in the card.
+ *
+ * The send buttons stay focusable while a send is in flight, so normally the one
+ * that was pressed still has focus and nothing needs doing. Focus can be missing
+ * all the same: the failure banner's Retry button is removed from the page the
+ * moment it is pressed, a browser may not focus a button on click, and the small
+ * send buttons in the Other and note boxes are disabled while sending. Then it
+ * goes to the control that sends — "Send answers" on the review step, otherwise
+ * the chosen (or first) answer. Focus that has moved to another control on the
+ * page, such as the chat box the reader went on to use, is not taken back.
+ */
+function restoreFocusAfterFailure() {
+  if (!pageHasNoFocus())
+    return
+  controller.requestFocus(controller.inReview.value ? 'send-all' : 'first')
+}
+
+// A submit-failure banner means the send was rejected (a 422 field error has no
+// banner; it moves focus to its question itself, and a form-level one is handled
+// in `setServerErrors`).
+watch(() => props.banner, (banner) => {
+  if (banner)
+    void nextTick(restoreFocusAfterFailure)
 })
 
 function toggleCollapse() {

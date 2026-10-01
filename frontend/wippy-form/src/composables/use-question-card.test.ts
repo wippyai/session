@@ -276,6 +276,56 @@ describe('useQuestionCard — review focus on a missing required answer', () => 
   })
 })
 
+describe('useQuestionCard — the polite live region', () => {
+  it('speaks the step a moment after it changes, and quiet() empties it so it stops describing a step that was sent from', () => {
+    vi.useFakeTimers()
+    try {
+      const c = useQuestionCard(twoQDef, { f1: 'a' }, vi.fn())
+      c.go(2)
+      expect(c.liveMessage.value).toBe('')
+      vi.advanceTimersByTime(30)
+      // Positive control: it really said something to be emptied.
+      expect(c.liveMessage.value).toBe('Review your answers')
+
+      c.quiet()
+      expect(c.liveMessage.value).toBe('')
+      vi.advanceTimersByTime(100)
+      expect(c.liveMessage.value).toBe('')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('quiet() also drops a message that is still waiting to be spoken', () => {
+    vi.useFakeTimers()
+    try {
+      const c = useQuestionCard(twoQDef, { f1: 'a' }, vi.fn())
+      c.go(2)
+      c.quiet()
+      vi.advanceTimersByTime(100)
+      expect(c.liveMessage.value).toBe('')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a newer message replaces one still waiting, so only the last is spoken', () => {
+    vi.useFakeTimers()
+    try {
+      const c = useQuestionCard(twoQDef, null, vi.fn())
+      c.go(1)
+      c.go(2)
+      vi.advanceTimersByTime(100)
+      expect(c.liveMessage.value).toBe('Review your answers')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('useQuestionCard — hydrating from a previously loaded answer', () => {
   it('reads back a plain value, a {value, note}, and an {other} shape', () => {
     const def: FormDefinition = {
