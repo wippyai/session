@@ -13,6 +13,12 @@ import FieldShell from './field-shell.vue'
  * the shared `FieldShell`. This is how a choice renders inside a form that
  * also holds standard fields; a form of choices only renders as the question
  * card instead. No per-option notes here — the card has those.
+ *
+ * A group in error marks every radio or checkbox `aria-invalid` (the
+ * PrimeVue `invalid` prop), the inputs a screen reader lands on, as the other
+ * controls do; the fieldset is described by the error list. A `group` role
+ * (several answers) may not carry `aria-invalid`, so the state sits on the
+ * inputs and not on the group.
  */
 const props = defineProps<{
   field: ChoiceFormField
@@ -54,6 +60,10 @@ const otherInputPart = computed(() => partClass('field-other-input'))
 
 // The answer a choice field holds is always a choice answer.
 const answer = computed(() => props.modelValue as ChoiceAnswer | undefined)
+
+// A blank Other is the one error that is about the text box rather than the
+// choice, so only then is the box itself marked invalid.
+const otherTextInvalid = computed(() => props.errors.some(e => e.code === 'blank'))
 
 // ── Single choice ──────────────────────────────────────────────
 // Local sentinel value for the "Other" radio's v-model binding — never sent
@@ -149,6 +159,7 @@ defineExpose({
 
 <template>
   <FieldShell
+    v-slot="{ invalid }"
     ref="shell"
     :field="field"
     :model-value="modelValue"
@@ -177,6 +188,7 @@ defineExpose({
             :name="groupId"
             :value="option.value"
             :disabled="disabled"
+            :invalid="invalid"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
           />
@@ -204,6 +216,7 @@ defineExpose({
             :name="groupId"
             :value="OTHER_TOKEN"
             :disabled="disabled"
+            :invalid="invalid"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
           />
@@ -226,6 +239,7 @@ defineExpose({
               :id="otherTextId"
               v-model="singleOtherText"
               :disabled="disabled || singleSelected !== OTHER_TOKEN"
+              :invalid="invalid && otherTextInvalid"
               :part="otherInputPart.part"
               :class="otherInputPart.class"
               size="small"
@@ -247,6 +261,7 @@ defineExpose({
             binary
             :input-id="optionId(index)"
             :disabled="disabled"
+            :invalid="invalid"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
             @update:model-value="(checked) => toggleOption(option.value, !!checked)"
@@ -274,6 +289,7 @@ defineExpose({
             binary
             :input-id="otherControlId"
             :disabled="disabled"
+            :invalid="invalid"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
             @update:model-value="(checked) => toggleOther(!!checked)"
@@ -297,6 +313,7 @@ defineExpose({
               :id="otherTextId"
               v-model="multiOtherText"
               :disabled="disabled || !multiOtherChecked"
+              :invalid="invalid && otherTextInvalid"
               :part="otherInputPart.part"
               :class="otherInputPart.class"
               size="small"

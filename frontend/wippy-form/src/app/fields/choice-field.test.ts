@@ -1,4 +1,4 @@
-import type { ChoiceFormField } from '../../lib/definition'
+import type { ChoiceFormField, FieldError } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
@@ -126,5 +126,53 @@ describe('ChoiceField — required indicator hidden when read-only', () => {
   it('still renders "(required)" for an editable required field', () => {
     const wrapper = mountField({ readonly: false })
     expect(wrapper.text()).toContain('(required)')
+  })
+})
+
+describe('ChoiceField — invalid state for assistive technology', () => {
+  const REQUIRED: FieldError[] = [{ code: 'required', message: 'This question is required.' }]
+  const BLANK: FieldError[] = [{ code: 'blank', message: 'Write your answer in the Other box.' }]
+
+  function invalidStates(wrapper: ReturnType<typeof mountField>, selector: string) {
+    return wrapper.findAll(selector).map(input => input.attributes('aria-invalid'))
+  }
+
+  it('marks every radio of a single-choice group in error as invalid, on the input a screen reader lands on', () => {
+    const wrapper = mountField({ errors: REQUIRED })
+    // Two options plus Other.
+    expect(invalidStates(wrapper, 'input[type="radio"]')).toEqual(['true', 'true', 'true'])
+  })
+
+  it('marks every checkbox of a multiple-choice group in error as invalid', () => {
+    const wrapper = mountField({ field: { ...trickyField, multiple: true }, errors: REQUIRED })
+    expect(invalidStates(wrapper, 'input[type="checkbox"]')).toEqual(['true', 'true', 'true'])
+  })
+
+  it('marks no control invalid while the group has no error', () => {
+    expect(invalidStates(mountField(), 'input[type="radio"]')).toEqual([undefined, undefined, undefined])
+    expect(invalidStates(mountField({ field: { ...trickyField, multiple: true } }), 'input[type="checkbox"]')).toEqual([undefined, undefined, undefined])
+  })
+
+  it('drops the invalid state when the error is gone', async () => {
+    const wrapper = mountField({ errors: REQUIRED })
+    await wrapper.setProps({ errors: [] })
+    expect(invalidStates(wrapper, 'input[type="radio"]')).toEqual([undefined, undefined, undefined])
+  })
+
+  it('shows no invalid state on a read-only group', () => {
+    const wrapper = mountField({ errors: REQUIRED, readonly: true, disabled: true, modelValue: 'other' })
+    expect(wrapper.find('[aria-invalid]').exists()).toBe(false)
+  })
+
+  it('marks the Other text box invalid when that blank text is what is wrong, and not for a missing choice', () => {
+    const blank = mountField({ errors: BLANK, modelValue: { other: '' } })
+    expect(blank.find('input[type="text"]').attributes('aria-invalid')).toBe('true')
+    const required = mountField({ errors: REQUIRED })
+    expect(required.find('input[type="text"]').attributes('aria-invalid')).toBeUndefined()
+  })
+
+  it('keeps the error linked to the group as before', () => {
+    const wrapper = mountField({ errors: REQUIRED })
+    expect(wrapper.find('fieldset').attributes('aria-describedby')).toBe(wrapper.find('ul').attributes('id'))
   })
 })
