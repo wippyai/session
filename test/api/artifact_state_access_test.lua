@@ -99,14 +99,15 @@ local function define_tests()
                 { label = "no stream", opts = { stream_error = "stream unavailable" } },
             }
             for _, case in ipairs(cases) do
+                local label = tostring(case.label)
                 case.opts.content_type = "application/json"
                 local req, res = fake_exchange(case.opts)
                 artifact_state_access.serve_submit(req, res, "user-1")
 
-                test.eq(res.status, 500, case.label)
+                test.eq(res.status, 500, label)
                 local body = decoded(res)
-                test.eq(body.code, "internal", case.label)
-                test.eq(body.message, "Failed to read the request body.", case.label)
+                test.eq(body.code, "internal", label)
+                test.eq(body.message, "Failed to read the request body.", label)
             end
         end)
     end)

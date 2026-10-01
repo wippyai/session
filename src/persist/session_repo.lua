@@ -36,7 +36,7 @@ end
 
 -- Decodes a session row's JSON fields in place; a missing or malformed value
 -- reads as an empty table.
-local function decode_json_fields(session)
+local function decode_json_fields(session: any): any
     for _, field in ipairs({ "meta", "config", "public_meta" }) do
         local value = session[field]
         local decoded = nil

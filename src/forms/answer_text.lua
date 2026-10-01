@@ -99,10 +99,10 @@ function answer_text.model_text(row: any): string?
     local text = row.data
     if type(text) ~= "string" then return "" end
     if message_repo.is_form_answer(row) then return text end
-    return answer_text.neutralize(text)
+    return answer_text.neutralize(text) :: string
 end
 
-local ATTRIBUTE_SAFE ={ ["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }
+local ATTRIBUTE_SAFE = {["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }
 
 -- Only valid on encoded JSON: these characters occur there only inside
 -- strings, where the \u escapes decode to the same text.

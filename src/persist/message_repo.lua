@@ -27,7 +27,7 @@ local get_db
 
 -- Replaces the JSON text in row.metadata with the table it decodes to. A
 -- missing, empty or malformed value stays as it is.
-local function decode_json_metadata(row)
+local function decode_json_metadata(row: any): any
     if type(row.metadata) == "string" and row.metadata ~= "" then
         local decoded, err = json.decode(row.metadata :: string)
         if not err then row.metadata = decoded end
@@ -876,7 +876,7 @@ local SCAN_PAGE = 100
 
 -- A row's metadata as a table: the decoded JSON, or an empty table when it
 -- has none or cannot be decoded.
-local function decode_metadata(row)
+local function decode_metadata(row: any): any
     decode_json_metadata(row)
     if type(row.metadata) ~= "table" then row.metadata = {} end
     return row
