@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.4](https://github.com/wippyai/session/compare/v0.6.3...v0.6.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* apply the initial agent and model before the first turn ([#50](https://github.com/wippyai/session/issues/50)) ([da1eaca](https://github.com/wippyai/session/commit/da1eacad68c22f3c43978df616c1a4aecc45f347))
+
 ## [0.6.3](https://github.com/wippyai/session/compare/v0.6.2...v0.6.3) (2026-09-29)
 
 
