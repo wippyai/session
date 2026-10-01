@@ -6,6 +6,7 @@ local context_repo = require("context_repo")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
+local tx = require("tx")
 local wait_for_boot = require("wait_for_boot")
 
 local function define_tests()
@@ -298,6 +299,115 @@ local function define_tests()
             result, err = session_repo.delete(uuid.v7())
             test.is_nil(result)
             test.contains(tostring(err), "Session not found")
+        end)
+
+        -- session_repo.delete removes the session's artifacts, session
+        -- contexts and messages, then the session row, in one tx.run. The
+        -- helpers below write those rows directly, so a test can also place
+        -- them under a session id that has no session row (the SQLite test
+        -- database does not enforce the foreign keys).
+        local function add_dependents(session_id)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local now = os.time()
+            local stamp = time.now():format(time.RFC3339)
+            local _, artifact_err = db:execute(
+                "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at)"
+                    .. " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                { uuid.v7(), session_id, test_data.user_id, "static", "Delete test", "content", nil, stamp, stamp })
+            local _, context_err = db:execute(
+                "INSERT INTO session_contexts (id, session_id, type, text, time) VALUES ($1, $2, $3, $4, $5)",
+                { uuid.v7(), session_id, "note", "Delete test", now })
+            local _, message_err = db:execute(
+                "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
+                { uuid.v7(), session_id, now, "user", "Delete test", "{}" })
+            db:release()
+            test.is_nil(artifact_err)
+            test.is_nil(context_err)
+            test.is_nil(message_err)
+        end
+
+        local function rows_of(session_id)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local counts = {}
+            for _, table_name in ipairs({ "artifacts", "session_contexts", "messages", "sessions" }) do
+                local rows, query_err = db:query(
+                    "SELECT COUNT(*) AS n FROM " .. table_name .. " WHERE session_id = $1", { session_id })
+                test.is_nil(query_err)
+                counts[table_name] = tonumber(rows and rows[1] and rows[1].n) or -1
+            end
+            db:release()
+            return counts
+        end
+
+        local function remove_rows(session_id)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            for _, table_name in ipairs({ "artifacts", "session_contexts", "messages", "sessions" }) do
+                db:execute("DELETE FROM " .. table_name .. " WHERE session_id = $1", { session_id })
+            end
+            db:release()
+        end
+
+        it("deletes a session with its artifacts, session contexts and messages", function()
+            local session_id = uuid.v7()
+            test.is_nil(select(2, session_repo.create(session_id, test_data.user_id, test_data.context_id,
+                "Delete with dependents", "test")))
+            add_dependents(session_id)
+
+            local result, err = session_repo.delete(session_id)
+            local after = rows_of(session_id)
+            remove_rows(session_id)
+
+            test.is_nil(err)
+            test.is_true(result and result.deleted)
+            test.eq(after.artifacts, 0)
+            test.eq(after.session_contexts, 0)
+            test.eq(after.messages, 0)
+            test.eq(after.sessions, 0)
+        end)
+
+        it("rolls back the dependent deletes when the session row is missing", function()
+            local session_id = uuid.v7()
+            add_dependents(session_id)
+
+            local result, err = session_repo.delete(session_id)
+            local after = rows_of(session_id)
+            remove_rows(session_id)
+
+            test.is_nil(result)
+            test.contains(tostring(err), "Session not found")
+            test.eq(after.artifacts, 1, "the artifact delete was rolled back")
+            test.eq(after.session_contexts, 1, "the session context delete was rolled back")
+            test.eq(after.messages, 1, "the message delete was rolled back")
+        end)
+
+        it("refuses to run inside another transaction and deletes nothing", function()
+            local session_id = uuid.v7()
+            test.is_nil(select(2, session_repo.create(session_id, test_data.user_id, test_data.context_id,
+                "Delete inside a transaction", "test")))
+            add_dependents(session_id)
+
+            local inner_result, inner_err = nil, nil
+            local outer, outer_err = tx.run(function()
+                inner_result, inner_err = session_repo.delete(session_id)
+                return true
+            end)
+            local after = rows_of(session_id)
+            local deleted, delete_err = session_repo.delete(session_id)
+            remove_rows(session_id)
+
+            test.is_nil(outer_err)
+            test.is_true(outer)
+            test.is_nil(inner_result)
+            test.contains(tostring(inner_err), "Nested tx.run")
+            test.eq(after.artifacts, 1)
+            test.eq(after.session_contexts, 1)
+            test.eq(after.messages, 1)
+            test.eq(after.sessions, 1)
+            test.is_nil(delete_err, "outside a transaction the same delete succeeds")
+            test.is_true(deleted and deleted.deleted)
         end)
 
         it("should only update the target session without affecting others", function()
