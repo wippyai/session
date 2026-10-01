@@ -1000,10 +1000,13 @@ local function define_tests()
             test.eq(#errors, 1, definition.format_errors(errors))
         end)
 
-        it("still lists every type for an unknown one", function()
+        it("lists only the accepted types for an unknown one too", function()
             local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }),
                 { types = definition.CHOICE_TYPES })
-            test.eq(errors[1].message, "Supported types: " .. field_values.TYPE_NAMES .. ".")
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].message, "Supported types: choice.")
+            local _, unlimited = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
+            test.eq(unlimited[1].message, "Supported types: " .. field_values.TYPE_NAMES .. ".")
         end)
 
         it("accepts a choice form when only choices are accepted, and every type without a limit", function()

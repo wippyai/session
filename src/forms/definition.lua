@@ -163,15 +163,12 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         seen_ids[id] = true
     end
 
-    -- A known type the calling tool does not accept (`types`) is reported
-    -- like an unknown one, with the types that tool does accept.
+    -- An unknown type, and a known type the calling tool does not accept
+    -- (`types`), are both reported with the types that tool does accept.
     local unsupported = false
     if raw.type == nil then
         add_error(errors, path .. ".type", "required", "A field type is required.")
-    elseif raw.type ~= "choice" and not standard then
-        unsupported = true
-        add_error(errors, path .. ".type", "unsupported_type", supported_types(nil))
-    elseif types and not types[raw.type] then
+    elseif (raw.type ~= "choice" and not standard) or (types and not types[raw.type]) then
         unsupported = true
         add_error(errors, path .. ".type", "unsupported_type", supported_types(types))
     end
