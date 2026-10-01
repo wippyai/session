@@ -33,6 +33,20 @@ const props = defineProps<{
   /** True while offline or a submit is already in flight — blocks the row click and the note composer's send. */
   disabled?: boolean
   /**
+   * Id(s) of the error message(s) on screen for this question — set on the
+   * row's `aria-describedby` so the row that has focus names the error. Also
+   * set on the note box this row opens.
+   */
+  describedBy?: string
+  /**
+   * True while this question has its own error (validation or server field
+   * error). Surfaced as `aria-invalid` on a checkbox row only: ARIA supports
+   * that state on `checkbox` and on `radiogroup`, but not on `radio`, so a
+   * single-choice question carries it on its radiogroup instead
+   * (question-card-question.vue).
+   */
+  invalid?: boolean
+  /**
    * Single-choice (`role="radio"`) only: true when this is the ONE row the
    * roving tabindex currently sits on (WAI-ARIA radio group pattern — the
    * group is a single Tab stop, arrow keys move within it). Ignored for
@@ -62,6 +76,12 @@ const errorPart = computed(() => partClass('error'))
 // Links the note textarea's aria-invalid/aria-describedby to its own
 // too-long notice, instead of leaving it an unlinked role="alert" paragraph.
 const noteErrorId = `${useId()}-note-err`
+// The note box names its own too-long notice first, then whatever error is on
+// screen for the question (see `describedBy`).
+const noteDescribedBy = computed(() => [
+  props.noteTooLong ? noteErrorId : '',
+  props.describedBy ?? '',
+].filter(Boolean).join(' ') || undefined)
 
 function onRowClick(event: MouseEvent) {
   if (props.disabled)
@@ -91,6 +111,8 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
       :role="multiple ? 'checkbox' : 'radio'"
       :aria-checked="selected ? 'true' : 'false'"
       :aria-disabled="disabled ? 'true' : undefined"
+      :aria-describedby="describedBy"
+      :aria-invalid="multiple && invalid ? 'true' : undefined"
       :tabindex="multiple || rovingTabbable ? 0 : -1"
       :data-focus="`opt-${index}`"
       :aria-keyshortcuts="keyLabel ? `${keyLabel} Shift+${keyLabel} N` : 'N'"
@@ -170,7 +192,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
         :send-label="noteSendLabel"
         :enabled="!noteTooLong && !disabled"
         :invalid="noteTooLong"
-        :described-by="noteTooLong ? noteErrorId : undefined"
+        :described-by="noteDescribedBy"
         :data-focus="`note-${option.value}`"
         @update:model-value="(v) => emit('update:noteDraft', v)"
         @send="emit('send-note')"

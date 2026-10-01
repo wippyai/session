@@ -66,11 +66,11 @@ watch(controller.collapsed, v => emit('update:collapsed', v), { immediate: true 
 const serverFieldErrors = ref<Record<string, string>>({})
 const serverFormErrors = ref<string[]>([])
 
+// Only the question's OWN field error: a form-level error has no per-question
+// place (see `generalServerError`). Passing it down here as well drew the same
+// text in two `role="alert"` messages, so a screen reader announced it twice.
 function serverErrorFor(fieldId: string): string {
-  const parts = [...serverFormErrors.value]
-  if (serverFieldErrors.value[fieldId])
-    parts.push(serverFieldErrors.value[fieldId])
-  return parts.join(' ')
+  return serverFieldErrors.value[fieldId] ?? ''
 }
 
 const knownFieldIds = computed(() => new Set(props.state.definition.fields.map(f => f.id)))
@@ -86,6 +86,17 @@ const generalServerError = computed(() => {
     .map(([, message]) => message)
   return [...serverFormErrors.value, ...unknown].join(' ')
 })
+
+// Ids of the two card-wide error messages (the always-visible notice above and
+// the submit-failure banner). Each is announced once by its own alert; the ids
+// let the answer control that has focus name it in `aria-describedby` too, so
+// the error is read with the control and not only when it first appears.
+const generalErrorId = `${qid}-general-err`
+const bannerId = `${qid}-banner`
+const cardErrorIds = computed(() => [
+  generalServerError.value ? generalErrorId : '',
+  props.banner ? bannerId : '',
+].filter(Boolean).join(' ') || undefined)
 
 // A changed answer clears that question's own server error — the same
 // "the next submit re-checks it" contract ActiveForm.vue's updateField()
@@ -315,6 +326,7 @@ function onKeydown(event: KeyboardEvent) {
 
     <Message
       v-if="generalServerError"
+      :id="generalErrorId"
       severity="error"
       :closable="false"
     >
@@ -354,6 +366,7 @@ function onKeydown(event: KeyboardEvent) {
 
     <Message
       v-if="banner"
+      :id="bannerId"
       :severity="banner.retryable ? 'warn' : 'error'"
       :closable="false"
     >
@@ -376,6 +389,7 @@ function onKeydown(event: KeyboardEvent) {
         v-if="controller.inReview.value"
         :definition="state.definition"
         :controller="controller"
+        :card-error-ids="cardErrorIds"
         :disabled="inputsBlocked"
       />
       <QuestionCardQuestion
@@ -385,6 +399,7 @@ function onKeydown(event: KeyboardEvent) {
         :qid="qid"
         :stale="!!state.stale"
         :server-error="serverErrorFor(controller.currentQuestion.value.id)"
+        :card-error-ids="cardErrorIds"
         :disabled="inputsBlocked"
       />
     </template>

@@ -19,6 +19,13 @@ const props = defineProps<{
   qid: string
   stale: boolean
   serverError: string
+  /**
+   * Space-separated ids of the card-wide error messages on screen (the
+   * submit-failure banner, a form-level server error). Each is announced by
+   * its own alert; they are added to every answer control's
+   * `aria-describedby` so the control that has focus names them too.
+   */
+  cardErrorIds?: string
   /** True while offline or a submit is already in flight — disables the explicit send actions. */
   disabled?: boolean
 }>()
@@ -70,19 +77,29 @@ const otherEnabled = computed(() => {
 // instead of only surfacing as a 422.
 const otherTooLong = computed(() => isOtherTextTooLong(answerState().other))
 const otherErrorId = `${props.qid}-other-err`
-// Links the Other textarea's aria-invalid/aria-describedby to whichever
-// role="alert" text actually applies to it right now — the too-long notice
-// and/or the question's server/validation error (`displayError`, already
-// shown in the Message with id `${qid}-err`) — instead of leaving both
-// alerts unlinked to any control.
-const otherDescribedBy = computed(() => {
-  const ids: string[] = []
-  if (otherTooLong.value)
-    ids.push(otherErrorId)
-  if (displayError.value)
-    ids.push(`${props.qid}-err`)
-  return ids.join(' ') || undefined
-})
+const errorId = `${props.qid}-err`
+
+// The error text that applies to ANY answer control of this question right
+// now: the question's own server/validation error (`displayError`, shown in
+// the Message with id `${qid}-err`) and the card-wide messages (banner,
+// form-level error). Whichever control has focus — an answer row, the Other
+// box, a note box — names these in `aria-describedby`, so the error is read
+// with the control instead of living only in an alert that was announced
+// once, before focus arrived.
+const errorIds = computed(() => [
+  displayError.value ? errorId : '',
+  props.cardErrorIds ?? '',
+].filter(Boolean).join(' ') || undefined)
+
+// The Other textarea additionally names its own too-long notice.
+const otherDescribedBy = computed(() => [
+  otherTooLong.value ? otherErrorId : '',
+  errorIds.value ?? '',
+].filter(Boolean).join(' ') || undefined)
+// `aria-invalid` is only for a problem with what was entered: the Other
+// text too long, or the question's own error. The card-wide messages (a
+// failed send, a form-level error) describe the control but do not make it
+// invalid.
 const otherInvalid = computed(() => otherTooLong.value || !!displayError.value)
 
 function onOtherWrapperClick(event: MouseEvent) {
@@ -150,7 +167,8 @@ function onOptionsFocusIn(event: FocusEvent) {
     :class="optionsPart.class"
     :role="question.multiple ? 'group' : 'radiogroup'"
     :aria-labelledby="qid"
-    :aria-describedby="`${qid}-err`"
+    :aria-describedby="errorId"
+    :aria-invalid="!question.multiple && displayError ? 'true' : undefined"
     @focusin="onOptionsFocusIn"
   >
     <QuestionCardOption
@@ -166,6 +184,8 @@ function onOptionsFocusIn(event: FocusEvent) {
       :key-label="keyLabelFor(i)"
       :note-too-long="isNoteTextTooLong(controller.ans(question).notes[option.value] || '')"
       :disabled="!!disabled"
+      :described-by="errorIds"
+      :invalid="!!displayError"
       :roving-tabbable="i === rovingIndex"
       @activate="controller.activate(question, i)"
       @toggle-note="controller.toggleNote(question, option.value)"
@@ -223,6 +243,7 @@ function onOptionsFocusIn(event: FocusEvent) {
       :part="sendPart.part"
       :class="sendPart.class"
       data-focus="send"
+      :aria-describedby="errorIds"
       :disabled="controller.ans(question).chosen.length === 0 || disabled"
       @click="controller.commit(question)"
     >
@@ -236,7 +257,7 @@ function onOptionsFocusIn(event: FocusEvent) {
 
   <Message
     v-if="displayError"
-    :id="`${qid}-err`"
+    :id="errorId"
     severity="error"
     variant="simple"
     size="small"
@@ -248,7 +269,7 @@ function onOptionsFocusIn(event: FocusEvent) {
   </Message>
   <p
     v-else
-    :id="`${qid}-err`"
+    :id="errorId"
     class="hidden"
   />
 

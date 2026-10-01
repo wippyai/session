@@ -14,6 +14,12 @@ const props = defineProps<{
   controller: QuestionCardController
   /** True while offline or a submit is already in flight — disables "Send answers". */
   disabled?: boolean
+  /**
+   * Space-separated ids of the card-wide error messages on screen (the
+   * submit-failure banner, a form-level server error). "Send answers" is the
+   * control that just failed and usually still has focus, so it names them.
+   */
+  cardErrorIds?: string
 }>()
 
 const reviewPart = computed(() => partClass('review'))
@@ -111,6 +117,7 @@ const missingText = computed(() => {
       :part="sendAllPart.part"
       :class="sendAllPart.class"
       data-focus="send-all"
+      :aria-describedby="cardErrorIds"
       :disabled="missingList.length > 0 || disabled"
       @click="controller.submitAll()"
     >
