@@ -33,8 +33,8 @@
  */
 :host {
   --_font: var(--wippy-form-font, inherit);
-  --_size: var(--wippy-form-font-size, var(--_d-size));
-  --_q-size: var(--wippy-form-question-size, var(--_d-q-size));
+  --_size: var(--wippy-form-font-size, 14px);
+  --_q-size: var(--wippy-form-question-size, 15px);
   --_q-weight: var(--wippy-form-question-weight, 600);
   --_small: var(--wippy-form-small-size, 13px);
   --_surface: var(--wippy-form-surface, transparent);
@@ -53,33 +53,14 @@
   --_code-bg: var(--wippy-form-code-bg, color-mix(in srgb, var(--p-text-color) 8%, transparent));
   --_radius: var(--wippy-form-radius, 12px);
   --_row-radius: var(--wippy-form-row-radius, 8px);
-  --_pad: var(--wippy-form-padding, var(--_d-pad));
-  --_row-py: var(--wippy-form-row-padding-y, var(--_d-row-py));
-  --_row-px: var(--wippy-form-row-padding-x, var(--_d-row-px));
-  --_gap: var(--wippy-form-gap, var(--_d-gap));
-  --_key: var(--wippy-form-key-size, var(--_d-key));
-
-  /* Compact density internals (density="comfortable" below overrides these). */
-  --_d-size: 14px;
-  --_d-q-size: 15px;
-  --_d-pad: 12px;
-  --_d-row-py: 6px;
-  --_d-row-px: 10px;
-  --_d-gap: 4px;
-  --_d-key: 20px;
+  --_pad: var(--wippy-form-padding, 12px);
+  --_row-py: var(--wippy-form-row-padding-y, 6px);
+  --_row-px: var(--wippy-form-row-padding-x, 10px);
+  --_gap: var(--wippy-form-gap, 4px);
+  --_key: var(--wippy-form-key-size, 20px);
 
   display: block;
   container-type: inline-size;
-}
-
-:host([density='comfortable']) {
-  --_d-size: 15px;
-  --_d-q-size: 17px;
-  --_d-pad: 16px;
-  --_d-row-py: 10px;
-  --_d-row-px: 12px;
-  --_d-gap: 6px;
-  --_d-key: 24px;
 }
 
 .w-form {

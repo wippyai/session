@@ -18,7 +18,6 @@ A question card: one question at a time for several-question forms, with per-ans
 
 | Event | Payload | When |
 | --- | --- | --- |
-| `answer-submitted` | `{ requestId, answerMessageId, late }` | After a submission is durably accepted (including an exact replay). |
 | `load` | — | Reserved (bootstrap lifecycle). |
 | `unload` | — | Reserved (bootstrap lifecycle). |
 | `error` | `{ message, error }` | An unrecoverable component-level error. |
@@ -44,13 +43,13 @@ The Claude-style question card for a `choice`-only form: one question with immed
 
 ### Tokens
 
-Set on `wippy-form` or any ancestor. Defaults are read through a private `--_x` variable whose own fallback is a semantic `--p-*` theme variable (never a raw hex as the *primary* fallback) — a facade retint or a dark-mode flip restyles the card with zero edits here. Only a final, literal hex value guards host-less dev (no theme loaded at all). Compact density is the default; `density="comfortable"` raises the size/spacing internals the last column lists — an explicit token value always wins over either.
+Set on `wippy-form` or any ancestor. Defaults are read through a private `--_x` variable whose own fallback is a semantic `--p-*` theme variable (never a raw hex as the *primary* fallback) — a facade retint or a dark-mode flip restyles the card with zero edits here. Only a final, literal hex value guards host-less dev (no theme loaded at all).
 
 | Token | Default (as coded) | Used for |
 | --- | --- | --- |
 | `--wippy-form-font` | `inherit` | Font family |
-| `--wippy-form-font-size` | 14px compact / 15px comfortable | Answer labels and inputs |
-| `--wippy-form-question-size` | 15px compact / 17px comfortable | Question text |
+| `--wippy-form-font-size` | 14px | Answer labels and inputs |
+| `--wippy-form-question-size` | 15px | Question text |
 | `--wippy-form-question-weight` | `600` | Question text weight |
 | `--wippy-form-small-size` | `13px` | Descriptions, notes, hints, status |
 | `--wippy-form-surface` | `transparent` | Card background — the Host's artifact card already draws one; see "Why the card has no background" below |
@@ -68,11 +67,11 @@ Set on `wippy-form` or any ancestor. Defaults are read through a private `--_x` 
 | `--wippy-form-code-bg` | `color-mix(in srgb, var(--p-text-color) 8%, transparent)` | Inline code (backticks) |
 | `--wippy-form-radius` | `12px` | Card corners |
 | `--wippy-form-row-radius` | `8px` | Answer rows, inputs |
-| `--wippy-form-padding` | 12px compact / 16px comfortable | Card padding |
-| `--wippy-form-row-padding-y` | 6px compact / 10px comfortable | Row padding, top/bottom |
-| `--wippy-form-row-padding-x` | 10px compact / 12px comfortable | Row padding, left/right |
-| `--wippy-form-gap` | 4px compact / 6px comfortable | Space between rows |
-| `--wippy-form-key-size` | 20px compact / 24px comfortable | Number key badge size |
+| `--wippy-form-padding` | 12px | Card padding |
+| `--wippy-form-row-padding-y` | 6px | Row padding, top/bottom |
+| `--wippy-form-row-padding-x` | 10px | Row padding, left/right |
+| `--wippy-form-gap` | 4px | Space between rows |
+| `--wippy-form-key-size` | 20px | Number key badge size |
 
 **Why the card has no background by default:** the Host already wraps this component in the artifact card's own chrome, so a second background/border here would double it up. `--wippy-form-surface`/`--wippy-form-border` default to `transparent`; set them explicitly to give the card its own visible edge when it is not hosted inside another card.
 
@@ -118,7 +117,6 @@ Each part has a matching class `w-form__<part>`. A state adds a part `<part>-<st
 
 | Attribute | Values | Notes |
 | --- | --- | --- |
-| `density` | `compact` (default), `comfortable` | Set by the host app; read purely via the `:host([density="comfortable"])` CSS selector — no JS reads it |
 | `card-state` | `loading`, `active`, `review`, `answered`, `unsupported` | Reflected by the component; read-only for styling. Named `card-state`, not `state` — `state` is already this element's own observed prop (`"active" \| "idle"`, the package-tag lifecycle mirrored from the artifact); reflecting under that same name previously fought with the prop and misfired a reload on every review/collapse change (fixed — see `use-host-reflection.ts`). `unsupported` takes priority over every other value: an unrecognized `form-version` (from the prop or the loaded state) never renders an interactive/submittable card, so styling must not keep reporting `active` for it. The same value is also reflected when the Host itself predates the artifact-state API (no `artifactState` export on the proxy) — the component then shows a read-only notice (`NeedsNewerHostNotice`) with the real question options disabled, instead of leaving `card-state` stuck on `loading` forever (EE2-2461). The options are all unselected, because the saved answer cannot be read without the state API, so the notice points to the chat for an answer already sent: "This form needs a newer Web Host. If you already answered it, your answer is in the chat." When the Host's own `state` prop is `idle` it reads "This form was answered. Your answer is in the chat." instead (the artifact content stores `idle` in the same transaction that accepts the answer; `active` proves nothing, because the Host's copy of the content may predate the answer, so it keeps the first wording). `loading` covers only the window before the artifact's first GET resolves (no `state` loaded yet, `<wippy-loading>` shown instead of the card) — it used to fall through to `active` there, reporting an interactive card for the tens of milliseconds before any options existed to interact with |
 | `collapsed` | present or absent | Reflected by the component; only while the card is active |
 

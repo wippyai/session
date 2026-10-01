@@ -8,7 +8,7 @@ import { useFormState } from '../composables/use-form-state'
 import { useFormSubmit } from '../composables/use-form-submit'
 import { useHostReflection } from '../composables/use-host-reflection'
 import { useOnlineStatus } from '../composables/use-online-status'
-import { useComponentEvents, useComponentProps, useComponentPropsErrors } from '../constants'
+import { useComponentProps, useComponentPropsErrors } from '../constants'
 import { useArtifactId } from '../element-context'
 import { CANNOT_SUBMIT_MESSAGE, LOAD_FAILED_MESSAGE, NEEDS_NEWER_HOST_MESSAGE, SUBMIT_FAILED_MESSAGE } from '../lib/messages'
 import FormMessage from './form-message.vue'
@@ -25,7 +25,6 @@ const SUPPORTED_FORM_VERSION = 1
 
 const props = useComponentProps()
 const propErrors = useComponentPropsErrors()
-const emit = useComponentEvents()
 const artifactId = useArtifactId()
 
 const definition = computed(() => props.value.definition)
@@ -125,7 +124,6 @@ async function handleSubmit(answers: FormAnswers) {
       answer_message_id: accepted.answer_message_id,
       delivery: accepted.delivery,
     }
-    emit('answer-submitted', { requestId: accepted.request_id, answerMessageId: accepted.answer_message_id, late: accepted.late })
     // The submit button is gone with the card, so focus moves to the summary.
     void nextTick(() => summaryRef.value?.focusStatus())
     // The accepted response lacks the canonical `submitted_at` and normalized data.

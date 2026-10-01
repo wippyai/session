@@ -67,11 +67,6 @@
           "type": "string",
           "default": "active",
           "description": "Package-tag lifecycle state mirrored from the artifact: \"active\" (still answerable) or \"idle\" (already answered, shown read-only). Changing this prop triggers a reload of the canonical form state from the Host."
-        },
-        "density": {
-          "type": "string",
-          "default": "compact",
-          "description": "Question-card sizing: \"compact\" (default) or \"comfortable\", a larger size/spacing scale. Read purely through the `:host([density=\"comfortable\"])` CSS selector — no JS reads it — but must be a declared prop so the package-tag mount path can set it as an attribute."
         }
       }
     },
