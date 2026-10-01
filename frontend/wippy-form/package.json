@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "specification": "wippy-component-1.0",
   "title": "Session Form",
-  "description": "Renders one Session ask_user form and submits the answer back to the owning session: a choice-only form as a question card, a form with standard fields (text, textarea, number, email, date, checkbox, alone or mixed with choices) as one fields form.",
+  "description": "Renders one Session form and submits the answer back to the owning session: a choice-only form as a question card, a form with standard fields (text, textarea, number, email, date, checkbox, alone or mixed with choices) as one fields form.",
   "browser": "dist/index.js",
   "files": [
     "dist/",
@@ -51,7 +51,7 @@
   "wippy": {
     "tagName": "wippy-form",
     "type": "widget",
-    "description": "Renders one Session `ask_user` form and sends the answer back to the owning session through the Host's artifact-state API. A form of choice questions only (form version 1) renders as a question card: each question supports per-answer notes and, when the definition allows it, an Other free-text row, and a form with several questions shows one at a time, with a counter and a review step before sending. A form with at least one standard field (form version 2: `text`, `textarea`, `number`, `email`, `date` or `checkbox`, alone or with choices) renders as a fields form: a labelled control for every field, each error tied to its control, and one Submit button. Once the answer is accepted, either becomes a read-only summary. The inputs are `definition` (the questions), `form-version` (1 and 2 render; a higher version, or a field type this version does not know, disables submission), and `state` (`active` while the form can be answered, `idle` after it was answered). The component loads and submits by itself, so the tag only needs these attributes. Agents must never write the `<wippy-form>` tag, because it is created only through the Session `ask_user` tool.",
+    "description": "Renders one Session form (from the `ask_user` or `ask_user_fields` tool) and sends the answer back to the owning session through the Host's artifact-state API. A form of choice questions only (form version 1) renders as a question card: each question supports per-answer notes and, when the definition allows it, an Other free-text row, and a form with several questions shows one at a time, with a counter and a review step before sending. A form with at least one standard field (form version 2: `text`, `textarea`, `number`, `email`, `date` or `checkbox`, alone or with choices) renders as a fields form: a labelled control for every field, each error tied to its control, and one Submit button. Once the answer is accepted, either becomes a read-only summary. The inputs are `definition` (the questions), `form-version` (1 and 2 render; a higher version, or a field type this version does not know, disables submission), and `state` (`active` while the form can be answered, `idle` after it was answered). The component loads and submits by itself, so the tag only needs these attributes. Agents must never write the `<wippy-form>` tag, because it is created only through the Session `ask_user` and `ask_user_fields` tools.",
     "props": {
       "type": "object",
       "properties": {

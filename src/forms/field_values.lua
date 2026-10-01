@@ -75,7 +75,9 @@ field_values.KEYS = {
     checkbox = keys_of({ "default" }),
 }
 
-field_values.TYPE_NAMES = "choice, text, textarea, number, email, date, checkbox"
+-- Every field type, in the order messages list them.
+field_values.TYPES = { "choice", "text", "textarea", "number", "email", "date", "checkbox" }
+field_values.TYPE_NAMES = table.concat(field_values.TYPES, ", ")
 
 function field_values.is_standard(type_name: any): boolean
     return type(type_name) == "string" and field_values.KEYS[type_name] ~= nil

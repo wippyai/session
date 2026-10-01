@@ -1,6 +1,6 @@
 # @wippy-session/wippy-form
 
-The `<wippy-form>` web component renders one Session `ask_user` form artifact, as a question card or a fields form, and sends the answer back to the owning session through the Host's artifact-state API. Agents never write the tag. The Session `ask_user` tool creates it.
+The `<wippy-form>` web component renders one Session form artifact, as a question card or a fields form, and sends the answer back to the owning session through the Host's artifact-state API. Agents never write the tag. The Session `ask_user` and `ask_user_fields` tools create it.
 
 ## What it renders
 

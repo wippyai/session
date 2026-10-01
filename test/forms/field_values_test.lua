@@ -409,14 +409,63 @@ local function define_tests()
         end)
     end)
 
-    describe("the ask_user tool schema", function()
-        local function root_schema(): any
-            local entry, err = registry.get("wippy.session.forms:ask_user_tool")
+    describe("the ask_user_fields tool schema", function()
+        local CHOICE_TOOL = "wippy.session.forms:ask_user_tool"
+        local FIELDS_TOOL = "wippy.session.forms:ask_user_fields_tool"
+
+        local function schema_of(tool_id: string): any
+            local entry, err = registry.get(tool_id)
             test.is_nil(err)
             local schema, decode_err = json.decode(tostring(entry.meta.input_schema))
             test.is_nil(decode_err)
             return schema
         end
+
+        local function root_schema(): any
+            return schema_of(FIELDS_TOOL)
+        end
+
+        -- Each tool advertises exactly the types its handler accepts, and
+        -- each trait carries its own tool and names it in its prompt.
+        describe("the field types each tool accepts", function()
+            local function type_enum(tool_id: string): any
+                return schema_of(tool_id).properties.fields.items.properties.type.enum
+            end
+
+            it("are choice only for ask_user, as its handler enforces", function()
+                local enum = type_enum(CHOICE_TOOL)
+                test.eq(#enum, 1)
+                test.eq(enum[1], "choice")
+                local accepted = {}
+                for name in pairs(definition.CHOICE_TYPES) do table.insert(accepted, name) end
+                test.eq(#accepted, 1)
+                test.eq(accepted[1], "choice")
+            end)
+
+            it("are every type for ask_user_fields, in the server's order", function()
+                local enum = type_enum(FIELDS_TOOL)
+                test.eq(#enum, #field_values.TYPES)
+                for index, name in ipairs(field_values.TYPES) do
+                    test.eq(enum[index], name)
+                end
+            end)
+
+            it("belong to the trait that carries the tool, and its prompt names it", function()
+                for trait_id, tool_id in pairs({
+                    ["wippy.session.forms:ask_user"] = CHOICE_TOOL,
+                    ["wippy.session.forms:ask_user_fields"] = FIELDS_TOOL,
+                }) do
+                    local trait, err = registry.get(trait_id)
+                    test.is_nil(err)
+                    local tools = trait.data.tools
+                    test.eq(#tools, 2)
+                    test.eq(tools[1], tool_id)
+                    test.eq(tools[2], "wippy.session.forms:read_form_tool")
+                    local tool = registry.get(tool_id)
+                    test.contains(tostring(trait.data.prompt), "the " .. tostring(tool.meta.llm_alias) .. " tool")
+                end
+            end)
+        end)
 
         local function field_schema(): any
             return root_schema().properties.fields.items
@@ -446,30 +495,33 @@ local function define_tests()
                 test.contains(tostring(properties.max.description), "same limits as min")
             end)
 
-            it("are the limits of the definition", function()
-                local root = root_schema()
-                local DEFINITION = definition.LIMITS
-                test.contains(tostring(root.properties.title.description), string.format("1-%d characters", DEFINITION.TITLE))
-                test.contains(tostring(root.properties.description.description),
-                    string.format("at most %d characters", DEFINITION.DESCRIPTION))
-                test.contains(tostring(root.properties.submit_label.description),
-                    string.format("at most %d characters", DEFINITION.SUBMIT_LABEL))
-                test.contains(tostring(root.properties.answered_message.description),
-                    string.format("at most %d characters", DEFINITION.ANSWERED_MESSAGE))
-                test.contains(tostring(root.properties.fields.description), string.format("1-%d questions", DEFINITION.FIELDS))
-                local item = root.properties.fields.items.properties
-                test.contains(tostring(item.label.description), string.format("1-%d characters", DEFINITION.LABEL))
-                test.contains(tostring(item.description.description),
-                    string.format("at most %d characters", DEFINITION.DESCRIPTION))
-                test.contains(tostring(item.options.description), string.format("1-%d distinct choices, each at most %d characters",
-                    DEFINITION.OPTIONS, DEFINITION.OPTION_TEXT))
-                local entry = registry.get("wippy.session.forms:ask_user_tool")
-                test.contains(tostring(entry.meta.llm_description),
-                    string.format("about %d KiB", math.floor(DEFINITION.DEFINITION_BYTES / 1024)))
-            end)
+            -- Both tools state the same definition limits.
+            for _, tool_id in ipairs({ CHOICE_TOOL, FIELDS_TOOL }) do
+                it("are the limits of the definition in " .. tool_id, function()
+                    local root = schema_of(tool_id)
+                    local DEFINITION = definition.LIMITS
+                    test.contains(tostring(root.properties.title.description), string.format("1-%d characters", DEFINITION.TITLE))
+                    test.contains(tostring(root.properties.description.description),
+                        string.format("at most %d characters", DEFINITION.DESCRIPTION))
+                    test.contains(tostring(root.properties.submit_label.description),
+                        string.format("at most %d characters", DEFINITION.SUBMIT_LABEL))
+                    test.contains(tostring(root.properties.answered_message.description),
+                        string.format("at most %d characters", DEFINITION.ANSWERED_MESSAGE))
+                    test.contains(tostring(root.properties.fields.description), string.format("1-%d questions", DEFINITION.FIELDS))
+                    local item = root.properties.fields.items.properties
+                    test.contains(tostring(item.label.description), string.format("1-%d characters", DEFINITION.LABEL))
+                    test.contains(tostring(item.description.description),
+                        string.format("at most %d characters", DEFINITION.DESCRIPTION))
+                    test.contains(tostring(item.options.description), string.format("1-%d distinct choices, each at most %d characters",
+                        DEFINITION.OPTIONS, DEFINITION.OPTION_TEXT))
+                    local entry = registry.get(tool_id)
+                    test.contains(tostring(entry.meta.llm_description),
+                        string.format("about %d KiB", math.floor(DEFINITION.DEFINITION_BYTES / 1024)))
+                end)
+            end
 
             it("are the limits the trait prompt gives the model", function()
-                local entry, err = registry.get("wippy.session.forms:ask_user")
+                local entry, err = registry.get("wippy.session.forms:ask_user_fields")
                 test.is_nil(err)
                 local prompt = tostring(entry.data.prompt)
                 test.not_nil(string.find(prompt, string.format("at most %d%%s+characters", LIMITS.TEXT_BUDGET)),

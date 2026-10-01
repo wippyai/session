@@ -26,6 +26,10 @@ local definition = {}
 -- a notice for a version 2 form instead of rendering it wrongly.
 definition.VERSIONS = { CHOICES = 1, FIELDS = 2 }
 
+-- The field types of the ask_user tool (trait wippy.session.forms:ask_user).
+-- The ask_user_fields tool passes no limit and accepts every type.
+definition.CHOICE_TYPES = { choice = true }
+
 function definition.version_of(def: any): integer
     for _, field in ipairs(def.fields) do
         if field.type ~= "choice" then return definition.VERSIONS.FIELDS end
@@ -123,7 +127,19 @@ local function normalize_option(errors: {any}, path: string, raw: any, strict: b
     return { value = value, label = label, description = description }
 end
 
-local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: {[string]: boolean}, strict: boolean): any
+-- The supported-types message for a tool that accepts only `types`, or
+-- for every type when `types` is nil.
+local function supported_types(types: {[string]: boolean}?): string
+    if not types then return "Supported types: " .. field_values.TYPE_NAMES .. "." end
+    local names = {}
+    for _, name in ipairs(field_values.TYPES) do
+        if types[name] then table.insert(names, name) end
+    end
+    return "Supported types: " .. table.concat(names, ", ") .. "."
+end
+
+local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: {[string]: boolean}, strict: boolean,
+    types: {[string]: boolean}?): any
     if type(raw) ~= "table" or not is_object(raw) or next(raw) == nil then
         add_error(errors, path, "invalid_type", "A field is an object.")
         return nil
@@ -147,13 +163,17 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         seen_ids[id] = true
     end
 
+    -- A known type the calling tool does not accept (`types`) is reported
+    -- like an unknown one, with the types that tool does accept.
     local unsupported = false
     if raw.type == nil then
         add_error(errors, path .. ".type", "required", "A field type is required.")
     elseif raw.type ~= "choice" and not standard then
         unsupported = true
-        add_error(errors, path .. ".type", "unsupported_type",
-            "Supported types: " .. field_values.TYPE_NAMES .. ".")
+        add_error(errors, path .. ".type", "unsupported_type", supported_types(nil))
+    elseif types and not types[raw.type] then
+        unsupported = true
+        add_error(errors, path .. ".type", "unsupported_type", supported_types(types))
     end
 
     local label = check_text(errors, path .. ".label", raw.label,
@@ -162,6 +182,10 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         { required = false, max = definition.LIMITS.DESCRIPTION, strict = strict, multiline = true })
     local required = check_boolean(errors, path .. ".required", raw.required)
 
+    -- A field of an unsupported type is not a choice that forgot its options:
+    -- the type is the one thing to fix, so no rule of any type is applied to it.
+    if unsupported then return nil end
+
     if standard then
         local field = field_values.normalize(errors, path, raw, {
             id = id, type = raw.type, label = label, description = description, required = required,
@@ -169,10 +193,6 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         if #errors > before then return nil end
         return field
     end
-
-    -- A field of an unknown type is not a choice that forgot its options:
-    -- the type is the one thing to fix, so no choice rule is applied to it.
-    if unsupported then return nil end
 
     local multiple = check_boolean(errors, path .. ".multiple", raw.multiple)
     local allow_other = check_boolean(errors, path .. ".allow_other", raw.allow_other)
@@ -226,9 +246,12 @@ end
 -- it stays readable: the control-character rule and, for standard fields, the
 -- policy checks (pattern subset, default, ranges and the text budget). The
 -- structural checks still apply.
-function definition.normalize(raw: any, opts: {stored: boolean?}?): (any, {any}?)
+-- opts.types limits the field types to the ones the calling tool accepts,
+-- such as definition.CHOICE_TYPES; without it every type is accepted.
+function definition.normalize(raw: any, opts: {stored: boolean?, types: {[string]: boolean}?}?): (any, {any}?)
     local errors = {}
     local strict = not (opts and opts.stored)
+    local types = opts and opts.types
     if type(raw) ~= "table" or not is_object(raw) or next(raw) == nil then
         add_error(errors, "", "invalid_type", "The form definition must be an object with title and fields.")
         return nil, errors
@@ -265,7 +288,7 @@ function definition.normalize(raw: any, opts: {stored: boolean?}?): (any, {any}?
     else
         local seen_ids = {}
         for index, raw_field in ipairs(raw.fields) do
-            local field = normalize_field(errors, string.format("fields[%d]", index - 1), raw_field, seen_ids, strict)
+            local field = normalize_field(errors, string.format("fields[%d]", index - 1), raw_field, seen_ids, strict, types)
             if field then table.insert(fields, field) end
         end
         -- Every answer of the form must fit the request body cap: see

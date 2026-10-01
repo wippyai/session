@@ -1,6 +1,7 @@
 local test = require("test")
 local json = require("json")
 local definition = require("definition")
+local field_values = require("field_values")
 local answer_text = require("answer_text")
 
 local function choice(id, extra)
@@ -975,6 +976,42 @@ local function define_tests()
             test.eq(found["fields[0].id"], "invalid_id")
             test.eq(found["fields[0].label"], "blank")
             test.is_nil(found["fields[0].options"])
+        end)
+    end)
+
+    describe("the field types a tool accepts", function()
+        local text_field = { id = "name", type = "text", label = "Name", max_length = 40, placeholder = "Ada" }
+        local choice_field = { id = "pick", type = "choice", label = "Pick", options = { "a", "b" } }
+
+        it("refuses a standard field when only choices are accepted, naming the accepted types", function()
+            local normalized, errors = definition.normalize(form({ choice_field, text_field }),
+                { types = definition.CHOICE_TYPES })
+            test.is_nil(normalized)
+            test.eq(#errors, 1, definition.format_errors(errors))
+            test.eq(errors[1].path, "fields[1].type")
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].message, "Supported types: choice.")
+        end)
+
+        it("does not report the keys of a type the tool refuses", function()
+            -- max_length and placeholder belong to text; the type is the only
+            -- thing the agent has to change.
+            local _, errors = definition.normalize(form({ text_field }), { types = definition.CHOICE_TYPES })
+            test.eq(#errors, 1, definition.format_errors(errors))
+        end)
+
+        it("still lists every type for an unknown one", function()
+            local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }),
+                { types = definition.CHOICE_TYPES })
+            test.eq(errors[1].message, "Supported types: " .. field_values.TYPE_NAMES .. ".")
+        end)
+
+        it("accepts a choice form when only choices are accepted, and every type without a limit", function()
+            local choices = definition.normalize(form({ choice_field }), { types = definition.CHOICE_TYPES })
+            test.not_nil(choices)
+            local mixed = definition.normalize(form({ choice_field, text_field }))
+            test.not_nil(mixed)
+            test.eq(definition.version_of(mixed), definition.VERSIONS.FIELDS)
         end)
     end)
 end

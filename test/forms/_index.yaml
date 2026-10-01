@@ -16,6 +16,7 @@ entries:
       - time
     imports:
       definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
       answer_text: wippy.session.forms:answer_text
       test: wippy.test:test
     method: run

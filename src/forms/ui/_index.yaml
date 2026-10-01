@@ -49,7 +49,7 @@ entries:
       type: view.component
       title: Session Form
       description: >-
-        Renders one Session `ask_user` form and sends the answer back to the owning session through the Host's
+        Renders one Session form (from the `ask_user` or `ask_user_fields` tool) and sends the answer back to the owning session through the Host's
         artifact-state API. A form of choice questions only (form version 1) renders as a question card: each
         question supports per-answer notes and, when the definition allows it, an Other free-text row, and a
         form with several questions shows one at a time, with a counter and a review step before sending. A
@@ -60,7 +60,7 @@ entries:
         higher version, or a field type this version does not know, disables submission), and `state`
         (`active` while the form can be answered, `idle` after it was answered). The component loads and
         submits by itself, so the tag only needs these attributes. Agents must never write the `<wippy-form>`
-        tag, because it is created only through the Session `ask_user` tool.
+        tag, because it is created only through the Session `ask_user` and `ask_user_fields` tools.
       tag_name: wippy-form
       auto_register: true
       announced: true

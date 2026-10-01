@@ -32,6 +32,8 @@ local wait_for_boot = require("wait_for_boot")
 -- show of an answer that is not admitted yet.
 
 local TOOL_ID = "wippy.session.forms:ask_user_tool"
+local FIELDS_TOOL_ID = "wippy.session.forms:ask_user_fields_tool"
+local TOOL_NAMES = { [TOOL_ID] = "ask_user", [FIELDS_TOOL_ID] = "ask_user_fields" }
 
 local DEFINITION = {
     title = "Delivery preference",
@@ -124,15 +126,18 @@ local function define_tests()
             return out
         end
 
-        -- One ask_user call through the real tool and process_tools.
-        local function ask(ctx, args)
+        -- One call of a forms tool (ask_user unless `tool_id` names another)
+        -- through the real tool and process_tools.
+        local function ask(ctx, args, tool_id: string?)
+            local tool = tool_id or TOOL_ID
+            local name = TOOL_NAMES[tool]
             local call_id = "call-" .. uuid.v7()
             local _, ids: any, store_err = ctx.writer:add_response("", {}, {
-                { id = call_id, name = "ask_user", arguments = args, registry_id = TOOL_ID,
+                { id = call_id, name = name, arguments = args, registry_id = tool,
                     type = consts.MSG_TYPE.FUNCTION },
             })
             test.is_nil(store_err)
-            local tool_result, tool_err = funcs.new():call(TOOL_ID, args)
+            local tool_result, tool_err = funcs.new():call(tool, args)
             local caller = {
                 set_strategy = function() end,
                 execute = function(_self, _context, tools)
@@ -142,9 +147,9 @@ local function define_tests()
                     return { [call_id] = { result = tool_result, tool_call = tools[call_id] } }
                 end,
             }
-            local validated = { [call_id] = { valid = true, name = "ask_user", args = args, registry_id = TOOL_ID } }
+            local validated = { [call_id] = { valid = true, name = name, args = args, registry_id = tool } }
             local result, err = message_handlers.process_tools(ctx, {
-                tool_calls = { { id = call_id, name = "ask_user", registry_id = TOOL_ID, arguments = args } },
+                tool_calls = { { id = call_id, name = name, registry_id = tool, arguments = args } },
                 call_message_ids = ids, caller = caller, validated_tools = validated,
                 message_id = "user-message", agent = { id = "agent:forms" },
             })
@@ -500,9 +505,22 @@ local function define_tests()
                 test.eq(#rows_of(ctx, consts.MSG_TYPE.ARTIFACT), 0)
             end)
 
+            it("refuses standard fields through ask_user and stores nothing", function()
+                local ctx = new_ctx()
+                local result, err, call_id, ids = ask(ctx, DETAILS_DEFINITION)
+                test.is_nil(err)
+                test.is_true(has_continue(result), "the agent gets a step to use a tool it has")
+                local call_row = message_repo.get((ids :: any)[call_id])
+                test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                local text = tostring(call_row.metadata.result)
+                test.contains(text, "fields[0].type: unsupported_type")
+                test.contains(text, "Supported types: choice.")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 0)
+            end)
+
             it("stores a form with standard fields as version 2 and ends the turn", function()
                 local ctx = new_ctx()
-                local result, err = ask(ctx, DETAILS_DEFINITION)
+                local result, err = ask(ctx, DETAILS_DEFINITION, FIELDS_TOOL_ID)
                 test.is_nil(err)
                 test.is_false(has_continue(result), "a created form ends the turn")
                 local artifact: any = artifact_repo.get(form_id_of(ctx))
@@ -521,7 +539,7 @@ local function define_tests()
                     { id = "n", type = "number", label = "N", min = 5, max = 1 },
                     { id = "c", type = "text", label = "C", pattern = "(?=a)a" },
                     { id = "d", type = "date", label = "D", default = "2023-02-30" },
-                } })
+                } }, FIELDS_TOOL_ID)
                 test.is_nil(err)
                 test.is_true(has_continue(result), "the agent gets a step to correct the definition")
                 local call_row = message_repo.get((ids :: any)[call_id])
@@ -919,7 +937,7 @@ local function define_tests()
 
             it("reads a form with standard fields, then its answer record with the values as typed", function()
                 local ctx = new_ctx()
-                ask(ctx, DETAILS_DEFINITION)
+                ask(ctx, DETAILS_DEFINITION, FIELDS_TOOL_ID)
                 local form_id = form_id_of(ctx)
                 local caller = funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
                 local open = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
