@@ -1198,6 +1198,7 @@ function message_handlers.process_tools(ctx, op)
 
                 if not is_delegation and not is_private then
                     ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+                        message_id = message_id,
                         call_id = call_id,
                         function_name = result_data.tool_call.name,
                         error = "Function execution failed"

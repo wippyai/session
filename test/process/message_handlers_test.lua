@@ -9,6 +9,17 @@ local control_handlers = require("control_handlers")
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
 
+type PublicToolEvent = {
+    topic_id: string,
+    type: string,
+    payload: {
+        message_id: string?,
+        call_id: string?,
+        function_name: string?,
+        error: string?,
+    },
+}
+
 local function fake_agent(prompt_tokens: number?): any
     return {
         id = "agent:documents",
@@ -747,6 +758,82 @@ local function define_tests()
                 test.eq(event.payload.function_name, "one")
             end
             test.eq(events[2].payload.call_id, "function")
+        end)
+
+        it("correlates public tool errors after persistence without exposing private or delegation calls", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local events: { PublicToolEvent } = {}
+            ctx.upstream.send_message_update = function(_self, topic_id, event_type, payload)
+                if event_type == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+                    local persisted = false
+                    for _, row in ipairs(captured.stored) do
+                        if row.id == ids["function"] then
+                            test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                            test.eq(row.metadata.result, "tool failed")
+                            persisted = true
+                        end
+                    end
+                    test.is_true(persisted)
+                end
+                table.insert(events, { topic_id = topic_id, type = event_type, payload = payload })
+            end
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return {
+                        ["function"] = { error = "tool failed", tool_call = tools["function"] },
+                        ["private"] = { error = "private failure", tool_call = tools["private"] },
+                        ["delegation"] = { error = "delegation failure", tool_call = tools["delegation"] }
+                    }
+                end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = calls, call_message_ids = ids,
+                caller = caller, validated_tools = validated,
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(#events, 2)
+            test.eq(events[1].type, consts.UPSTREAM_TYPES.FUNCTION_CALL)
+            test.eq(events[2].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+            for _, event in ipairs(events) do
+                test.eq(event.topic_id, "function")
+                test.eq(event.payload.message_id, ids["function"])
+                test.eq(event.payload.function_name, "one")
+            end
+            test.eq(events[2].payload.call_id, "function")
+            test.eq(events[2].payload.error, "Function execution failed")
+            for _, row in ipairs(captured.stored) do
+                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+            end
+        end)
+
+        it("does not announce a tool error when persisting its outcome fails", function()
+            local ctx, captured, calls, ids, validated = call_fixture()
+            local events = {}
+            ctx.upstream.send_message_update = function(_self, _topic_id, event_type)
+                table.insert(events, event_type)
+            end
+            ctx.writer.update_message_meta = function() return nil, "message store unavailable" end
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = { error = "tool failed", tool_call = tools["function"] } }
+                end
+            }
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = { calls[1] }, call_message_ids = ids,
+                caller = caller, validated_tools = { ["function"] = validated["function"] },
+                message_id = "user", agent = { id = "agent:documents" }
+            })
+            test.is_nil(result)
+            test.contains(err, "message store unavailable")
+            test.eq(#events, 1)
+            test.eq(events[1], consts.UPSTREAM_TYPES.FUNCTION_CALL)
+            for _, row in ipairs(captured.stored) do
+                test.eq(row.metadata.status, consts.FUNC_STATUS.PENDING)
+            end
         end)
 
         it("marks omitted private and delegation results as errors", function()
