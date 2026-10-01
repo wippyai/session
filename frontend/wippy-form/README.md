@@ -112,7 +112,7 @@ Each part has a matching class `w-form__<part>`. A state adds a part `<part>-<st
 | `footer`, `footer-text`, `send-all` | | Review footer, its missing-answers text, "Send answers" |
 | `summary`, `summary-item`, `summary-question`, `summary-answer` | | Read-only answered summary |
 | `answer-item`, `answer-note`, `answer-own`, `answer-empty` | | One answer, its note, "Own answer:", "Skipped" — shared by the review and the summary |
-| `error`, `keys`, `status` | | Error line (question-level and per-note-length), keyboard hint, "Answered at …" |
+| `error`, `keys`, `status` | | Error line (question-level and per-note-length), keyboard hint, "Answered at …". After an answer is sent, `status` takes focus by script (`tabindex="-1"`, not a tab stop) so focus is not lost when the card swaps to the summary; it shows the theme's focus ring (`--p-focus-ring-width`, `-style`, `-color`, `-offset`, with `--wippy-form-focus` overriding the colour) and the ring hugs the text rather than spanning the card |
 | `code` | | Inline code from backticks |
 
 ### Host attributes

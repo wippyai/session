@@ -100,12 +100,9 @@
  * box, both move focus to the card root (`focusOn('card')` in
  * question-card-active.vue). `outline: none` above with no replacement left
  * that landing spot invisible; this restores a visible ring for exactly
- * that case. `.w-form__status` is the equivalent landing spot on the
- * read-only answered summary (question-card-summary.vue), focused after a
- * successful submit.
+ * that case.
  */
-.w-form:focus-visible,
-.w-form__status:focus-visible {
+.w-form:focus-visible {
   outline: 2px solid var(--_focus);
   outline-offset: 2px;
 }
@@ -569,10 +566,31 @@ span.w-form__option-mark {
   margin: 0;
   font-weight: 500;
 }
+/*
+ * `.w-form__status` is the landing spot on the read-only answered summary
+ * (question-card-summary.vue): it is focused after a successful submit so
+ * focus is not lost when the form swaps views (`tabindex="-1"`, focusable by
+ * script only). It is a status line, not a control, so it shows the theme's own
+ * focus ring — the width, style, colour and offset every PrimeVue control uses
+ * (`--p-focus-ring-*`, defined by theme-config.css) — instead of the card's
+ * heavier 2px selection ring, and the ring hugs the text (`fit-content`)
+ * instead of spanning the whole card. The literal fallbacks are the theme's own
+ * defaults, for host-less dev only. `--wippy-form-focus` still overrides the
+ * colour.
+ */
 .w-form__status {
   margin: 10px 0 0;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: var(--_row-radius);
   font-size: 12px;
   color: var(--_muted);
+}
+.w-form__status:focus-visible {
+  outline-width: var(--p-focus-ring-width, 1px);
+  outline-style: var(--p-focus-ring-style, solid);
+  outline-color: var(--wippy-form-focus, var(--p-focus-ring-color, var(--_accent)));
+  outline-offset: var(--p-focus-ring-offset, 2px);
 }
 .w-form__card--answered .w-form__title {
   font-size: var(--_q-size);

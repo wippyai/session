@@ -47,6 +47,20 @@ describe('QuestionCardSummary — required indicator hidden on the read-only ans
   })
 })
 
+describe('QuestionCardSummary — the status line is the focus target after a send', () => {
+  it('is focusable by script only (tabindex -1, not a tab stop) and focusStatus() puts focus on it', () => {
+    const wrapper = mount(QuestionCardSummary, { props: { state: baseState }, attachTo: document.body, global: { plugins: [PrimeVuePlugin] } })
+    const status = wrapper.find('.w-form__status')
+    expect(status.exists()).toBe(true)
+    expect(status.attributes('tabindex')).toBe('-1')
+    expect(status.attributes('part')).toBe('status')
+
+    ;(wrapper.vm as unknown as { focusStatus: () => void }).focusStatus()
+    expect(document.activeElement).toBe(status.element)
+    wrapper.unmount()
+  })
+})
+
 describe('QuestionCardSummary — form-level description (same gap as the active card)', () => {
   it('shows the form-level description, muted, with backticks as inline code', () => {
     const withFormDescription: FormState = {

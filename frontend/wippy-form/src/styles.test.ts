@@ -57,6 +57,42 @@ describe('styles.css — no rule fights the theme\'s Message colours', () => {
   })
 })
 
+// The answered summary's status line takes focus by script after a send (so
+// focus is not lost when the form swaps views). Its ring must be the theme's
+// own focus ring, not the browser's default outline and not the card's heavier
+// 2px selection ring, and it must hug the text instead of spanning the card
+// (EE2-2461 O-RC-1).
+describe('styles.css — the status line shows the theme focus ring', () => {
+  const ring = () => ruleBody('\\.w-form__status:focus-visible')
+
+  it('takes outline width, style, colour and offset from the theme focus-ring tokens', () => {
+    const body = ring()
+    expect(body).toMatch(/outline-width:\s*var\(--p-focus-ring-width,/)
+    expect(body).toMatch(/outline-style:\s*var\(--p-focus-ring-style,/)
+    expect(body).toMatch(/outline-color:\s*var\(--wippy-form-focus,\s*var\(--p-focus-ring-color,/)
+    expect(body).toMatch(/outline-offset:\s*var\(--p-focus-ring-offset,/)
+  })
+
+  it('does not fall back to the browser default (`auto`) or draw a fixed 2px ring of its own', () => {
+    const body = ring()
+    expect(body).not.toMatch(/outline:\s*auto/)
+    expect(body).not.toMatch(/outline-style:\s*auto/)
+    expect(body).not.toMatch(/\b2px\s+solid\b/)
+  })
+
+  it('stays out of the card root\'s own ring rule', () => {
+    expect(css).not.toMatch(/\.w-form:focus-visible\s*,/)
+    expect(ruleBody('\\.w-form:focus-visible')).toMatch(/outline:\s*2px solid var\(--_focus\)/)
+  })
+
+  it('hugs its text, so the ring is not a full-width bar, and has rounded corners like the rows', () => {
+    const body = ruleBody('\\.w-form__status')
+    expect(body).toMatch(/width:\s*fit-content/)
+    expect(body).toMatch(/max-width:\s*100%/)
+    expect(body).toMatch(/border-radius:\s*var\(--_row-radius\)/)
+  })
+})
+
 // The form-level description must not sit directly on the question line
 // with no gap, and must read as "muted" the way the README's parts table
 // documents.
