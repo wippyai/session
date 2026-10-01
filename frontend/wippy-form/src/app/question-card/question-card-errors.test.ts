@@ -3,7 +3,7 @@ import type { FormDefinition, FormState } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WARN_TEXT_CLASS } from '../../lib/error-text'
+import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../../lib/error-text'
 import ChoiceField from '../fields/choice-field.vue'
 import QuestionCardActive from './question-card-active.vue'
 
@@ -513,6 +513,87 @@ describe('QuestionCardActive: error text takes the same theme severity utilities
   it('does not carry the utilities when there is no error (no stray error colour on other text)', () => {
     const wrapper = mountCard(singleDef)
     expect(wrapper.element.querySelector('[class*="text-danger"]')).toBeNull()
+  })
+})
+
+describe('QuestionCardActive: the rest of the error text takes the severity utilities, not a stylesheet colour', () => {
+  // The length notices, the review footer and a missing answer's "Not answered
+  // yet" used to read `--wippy-form-danger` (3.6:1 on the card in both themes).
+  // Their rules no longer set a colour (styles.test.ts), so the utilities on the
+  // element are the only thing that makes them an error colour (EE2-2461).
+
+  function hasErrorText(el: Element | null | undefined): boolean {
+    return !!el && ERROR_TEXT_CLASS.split(' ').every(c => el.classList.contains(c))
+  }
+
+  function alertSaying(root: Element, text: string): HTMLElement {
+    const found = Array.from(root.querySelectorAll<HTMLElement>('[role="alert"]')).find(el => el.textContent?.trim() === text)
+    if (!found)
+      throw new Error(`no alert says "${text}"`)
+    return found
+  }
+
+  it('draws the note-too-long notice in them, keeping its part, class, role and id', async () => {
+    const wrapper = mountCard(singleDef)
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await flushPromises()
+    await wrapper.find('textarea.w-form__note-input').setValue('x'.repeat(1001))
+    await flushPromises()
+
+    const alert = alertSaying(wrapper.element, 'Use at most 1,000 characters.')
+    expect(hasErrorText(alert)).toBe(true)
+    expect(alert.classList.contains('w-form__error')).toBe(true)
+    expect(alert.getAttribute('part')).toBe('error')
+    expect(alert.id.endsWith('-note-err')).toBe(true)
+  })
+
+  it('draws the Other-too-long notice in them, keeping its part, class, role and id', async () => {
+    const wrapper = mountCard(singleDef)
+    await wrapper.find('textarea.w-form__other-input').setValue('x'.repeat(2001))
+    await flushPromises()
+
+    const alert = alertSaying(wrapper.element, 'Use at most 2,000 characters.')
+    expect(hasErrorText(alert)).toBe(true)
+    expect(alert.classList.contains('w-form__error')).toBe(true)
+    expect(alert.getAttribute('part')).toBe('error')
+    expect(alert.id.endsWith('-other-err')).toBe(true)
+  })
+
+  it('draws the review footer and a missing required answer in them, and no other review row', async () => {
+    const threeQuestions: FormDefinition = {
+      title: 'Release',
+      fields: [
+        { ...singleDef.fields[0], id: 'a', label: 'Required, left open', allow_other: false },
+        { ...singleDef.fields[0], id: 'b', label: 'Optional, skipped', required: false, allow_other: false },
+        { ...singleDef.fields[0], id: 'c', label: 'Required, answered', allow_other: false },
+      ],
+    }
+    const wrapper = mountCard(threeQuestions)
+    await wrapper.find('.w-form__next').trigger('click')
+    await wrapper.find('.w-form__next').trigger('click')
+    await flushPromises()
+    await wrapper.find('[role="radio"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.w-form__review').exists()).toBe(true)
+
+    const footer = wrapper.find('.w-form__footer-text')
+    expect(footer.text()).toBe('Question 1 still needs an answer.')
+    expect(hasErrorText(footer.element)).toBe(true)
+
+    const answers = wrapper.findAll('.w-form__review-answer')
+    expect(answers).toHaveLength(3)
+    expect(answers[0].text()).toBe('Not answered yet')
+    expect(answers[1].text()).toBe('Skipped')
+    expect(answers[2].text()).toContain('Yes')
+    expect(answers.map(a => hasErrorText(a.element))).toEqual([true, false, false])
+    // The missing row is still outlined (the one use of the --wippy-form-danger token) and still carries its state part.
+    expect(wrapper.findAll('.w-form__review-item')[0].classes()).toContain('w-form__review-item--missing')
+  })
+
+  it('draws no message in them when nothing is wrong', async () => {
+    const wrapper = mountCard(singleDef)
+    await flushPromises()
+    expect(wrapper.element.querySelector('[class*="text-danger"], [class*="text-warn"]')).toBeNull()
   })
 })
 

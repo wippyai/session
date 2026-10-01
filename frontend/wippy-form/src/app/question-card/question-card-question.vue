@@ -233,7 +233,7 @@ function onOptionsFocusIn(event: FocusEvent) {
         v-if="otherTooLong"
         :id="otherErrorId"
         :part="errorPart.part"
-        :class="errorPart.class"
+        :class="[errorPart.class, ERROR_TEXT_CLASS]"
         role="alert"
       >
         Use at most 2,000 characters.

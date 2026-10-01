@@ -11,6 +11,7 @@ import { useFormSubmit } from '../composables/use-form-submit'
 import { useHostReflection } from '../composables/use-host-reflection'
 import { useOnlineStatus } from '../composables/use-online-status'
 import { useArtifactId } from '../element-context'
+import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../lib/error-text'
 import ActiveForm from './active-form.vue'
 import IdleForm from './idle-form.vue'
 import NeedsNewerHostNotice from './needs-newer-host-notice.vue'
@@ -223,7 +224,7 @@ function handleRetry() {
       severity="error"
       :closable="false"
     >
-      Invalid form configuration.
+      <span :class="ERROR_TEXT_CLASS">Invalid form configuration.</span>
     </Message>
 
     <Message
@@ -231,7 +232,7 @@ function handleRetry() {
       severity="error"
       :closable="false"
     >
-      This form has no definition to render.
+      <span :class="ERROR_TEXT_CLASS">This form has no definition to render.</span>
     </Message>
 
     <Message
@@ -239,7 +240,7 @@ function handleRetry() {
       severity="warn"
       :closable="false"
     >
-      This form needs a newer version of the app.
+      <span :class="WARN_TEXT_CLASS">This form needs a newer version of the app.</span>
     </Message>
 
     <!--
@@ -345,7 +346,7 @@ function handleRetry() {
       :closable="false"
     >
       <div class="flex items-center gap-2">
-        <span>{{ errorMessage || 'Could not load this form.' }}</span>
+        <span :class="ERROR_TEXT_CLASS">{{ errorMessage || 'Could not load this form.' }}</span>
         <Button
           type="button"
           link

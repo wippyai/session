@@ -11,52 +11,48 @@ function ruleBody(selectorPattern: string): string {
   return re.exec(css)?.[1] ?? ''
 }
 
-// The note-too-long and Other-too-long alerts must not read as plain body
-// text with no error styling. They render through the shared `error`
-// part/class — both the plain `<p role="alert">` length errors AND the
-// question-level `Message severity="error"` share `.w-form__error`
-// (question-card-option.vue, question-card-question.vue). The styling must
-// not touch id-linked DOM structure (the note/Other alerts' aria-describedby
-// linking relies on those staying plain `<p :id>` elements, not PrimeVue
-// `Message`s, whose `inheritAttrs: false` would silently drop that `id`) —
-// so this is styled with the same danger token the rest of the card already
-// uses for errors (`.w-form__footer-text`, `.w-form__review-item--missing
-// .w-form__review-answer`), not a local color hack.
-//
-// `color` is scoped to `:not(.p-message)`: a `Message` already carries its
-// own severity color from the theme's `.p-message-error`/`.p-message-simple`
-// classes, so adding a second, competing `color` here would be exactly the
-// raw-theme-fighting the compliance rules reject. The theme's own Message
-// colors are below 4.5:1 in at least one theme (see the comment at the rule
-// itself for the audited numbers); the question card fixes the text inside its
-// Messages with the theme's severity utilities instead (`ERROR_TEXT_CLASS`,
-// asserted in question-card-errors.test.ts), never with a `.p-*` rule.
-describe('styles.css — length-error text uses the theme error token, not the default text color', () => {
+// Error and warning TEXT is coloured by the theme's severity utilities on the
+// text element (`ERROR_TEXT_CLASS` / `WARN_TEXT_CLASS`, asserted in the
+// component tests and contrast-checked in lib/error-text.test.ts), never by a
+// rule in this stylesheet: the old `--_danger` text rules were 3.6:1 on the card
+// in both themes, and the theme's own `Message` colours are below 4.5:1 too. No
+// `.p-*` rule may paper over the `Message` either (EE2-2461 F-RC-2).
+describe('styles.css — no rule colours error or warning text', () => {
+  /** The stylesheet's rules with comments removed, so prose about colours is not mistaken for a declaration. */
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
+
   it('.w-form__error (margin only) sets no color of its own', () => {
     const body = ruleBody('\\.w-form__error')
     expect(body).not.toMatch(/color:/)
     expect(body).toMatch(/margin:/)
   })
 
-  it('.w-form__error:not(.p-message) sets color to the shared --_danger token — the plain role="alert" case, never a Message', () => {
-    const body = ruleBody('\\.w-form__error:not\\(\\.p-message\\)')
-    expect(body).toMatch(/color:\s*var\(--_danger\)/)
+  it('has no `color` declaration that reads --_danger or a danger/warn theme colour', () => {
+    // Positive control: the scan really sees colour declarations (the card's muted text).
+    expect(rules).toMatch(/\bcolor:\s*var\(--_muted\)/)
+
+    const severityTextColors = Array.from(rules.matchAll(/(?<![-\w])color:\s*([^;}]*)/g))
+      .map(m => m[1].trim())
+      .filter(value => /--_danger|--p-danger|--p-warn|--wippy-form-danger/.test(value))
+    expect(severityTextColors).toEqual([])
   })
 
-  it('--_danger itself resolves through a semantic theme var, never a raw hex as the primary fallback (existing contract)', () => {
-    const body = ruleBody(':host')
-    expect(body).toMatch(/--_danger:\s*var\(--wippy-form-danger,\s*var\(--p-danger-500/)
+  it('the footer text and a missing answer take their colour from the utilities, not from their rules', () => {
+    expect(ruleBody('\\.w-form__footer-text')).not.toMatch(/color:/)
+    expect(ruleBody('\\.w-form__review-item--missing \\.w-form__review-answer')).not.toMatch(/color:/)
+  })
+
+  it('--_danger resolves through a semantic theme var, never a raw hex as the primary fallback, and its one use left is a border colour', () => {
+    expect(ruleBody(':host')).toMatch(/--_danger:\s*var\(--wippy-form-danger,\s*var\(--p-danger-500/)
+    const uses = Array.from(rules.matchAll(/([\w-]+):\s*var\(--_danger\)/g)).map(m => m[1])
+    expect(uses).toEqual(['border-color'])
+    expect(ruleBody('\\.w-form__review-item--missing \\.w-form__review-edit')).toMatch(/border-color:\s*var\(--_danger\)/)
+  })
+
+  it('has no `.p-message*` rule: the question card colours the text inside the Message with utilities instead', () => {
+    expect(rules).not.toMatch(/\.p-message/)
   })
 })
-
-describe('styles.css — no rule fights the theme\'s Message colours', () => {
-  it('has no `.p-message*` rule (the question card colours the text inside the Message with utilities instead); only the `:not(.p-message)` guard on the plain alerts', () => {
-    const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
-    expect(rules).toMatch(/:not\(\.p-message\)/)
-    expect(rules.replace(/:not\(\.p-message\)/g, '')).not.toMatch(/\.p-message/)
-  })
-})
-
 // The answered summary's status line takes focus by script after a send (so
 // focus is not lost when the form swaps views). Its ring must be the theme's
 // own focus ring, not the browser's default outline and not the card's heavier

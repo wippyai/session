@@ -4,6 +4,7 @@ import Button from 'primevue/button'
 import Message from 'primevue/message'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, fieldsWithBlankOther, fieldsWithOverlongOtherText, missingRequiredFields, serializeAnswers } from '../lib/answers'
+import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../lib/error-text'
 import ChoiceField from './fields/choice-field.vue'
 
 const props = defineProps<{
@@ -18,6 +19,9 @@ const emit = defineEmits<{
   submit: [answers: FormAnswers]
   retry: []
 }>()
+
+// The banner's text follows its severity, the same as the question card's (lib/error-text.ts).
+const bannerTextClass = computed(() => props.banner?.retryable ? WARN_TEXT_CLASS : ERROR_TEXT_CLASS)
 
 const TOO_LONG_MESSAGE = 'Use at most 2,000 characters.'
 const BLANK_OTHER_MESSAGE = 'Enter the other answer.'
@@ -195,7 +199,7 @@ defineExpose({
       :closable="false"
     >
       <div class="flex items-center gap-2">
-        <span>{{ banner.message }}</span>
+        <span :class="bannerTextClass">{{ banner.message }}</span>
         <Button
           v-if="banner.retryable"
           type="button"

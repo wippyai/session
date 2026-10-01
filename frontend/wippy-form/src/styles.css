@@ -46,6 +46,7 @@
   --_accent: var(--wippy-form-accent, var(--p-primary-color));
   --_accent-soft: var(--wippy-form-accent-soft, var(--p-highlight-background));
   --_on-accent: var(--wippy-form-accent-contrast, var(--p-primary-contrast-color));
+  /* Border of a review row with a missing required answer. Not a text colour: error text uses the theme's severity utilities (see "Error / keys / footer"). */
   --_danger: var(--wippy-form-danger, var(--p-danger-500, #b91c1c));
   --_focus: var(--wippy-form-focus, var(--_accent));
   --_key-border: var(--wippy-form-key-border, var(--p-content-border-color));
@@ -412,33 +413,28 @@ span.w-form__option-mark {
   margin: 6px 0 0;
 }
 /*
- * `color` applies ONLY outside a PrimeVue `Message` (severity="error"),
- * i.e. only to the plain `role="alert"` elements above, which have no
- * theme styling of their own and need an explicit color to read as an
- * error (text alone is not enough contrast against the surrounding copy):
- * the same danger token `.w-form__footer-text` and
- * `.w-form__review-item--missing .w-form__review-answer` already use, not
- * a local color hack.
+ * No rule in this file colours error or warning TEXT. Error text is coloured
+ * by the theme's severity utilities on the text element itself, one constant
+ * per severity in src/lib/error-text.ts (`ERROR_TEXT_CLASS` =
+ * `text-danger-600 dark:text-danger-400`, the classes the fields form uses;
+ * `WARN_TEXT_CLASS` = `text-warn-700 dark:text-warn-400`), because the colours
+ * that used to live here and in the theme's own `Message` are below WCAG
+ * 1.4.3's 4.5:1 for small text in at least one theme: `--wippy-form-danger`
+ * (`--p-danger-500`) 3.6:1 on the card in both themes; `Message` error/simple
+ * `danger-500` rgb(239,68,68) on rgb(251,247,255) 3.56:1 light and
+ * `danger-600` on the Message's own translucent red box rgb(82,45,64) 2.1:1
+ * dark; the retryable `warn` banner 4.0:1 light and 3.9:1 dark. The utilities
+ * give 5.0:1 to 5.2:1 light and 6.8:1 to 9.0:1 dark (computed from the theme
+ * tokens in src/lib/error-text.test.ts). They sit on the TEXT inside a PrimeVue
+ * `Message` (field error, submit-failure banner, form-level notice), so the
+ * `Message` keeps its box, outline and `role="alert"`, and on the plain
+ * `role="alert"` length errors, the review footer and a missing answer's
+ * "Not answered yet". Fixing the `Message` colours themselves is a theme-level
+ * change, tracked separately and NOT patched here with a `.p-*` rule.
  *
- * A `Message` carries its OWN severity color via the theme's
- * `.p-message-error`/`.p-message-simple` classes, and `:not(.p-message)`
- * leaves that alone rather than adding a second, competing `color` (a
- * `.p-*` override is against the rules anyway, see never-do.md). Those theme
- * colors are below WCAG 1.4.3's 4.5:1 for small text in at least one theme
- * (`Message` error/simple: `danger-500` rgb(239,68,68) on rgb(251,247,255) =
- * 3.56:1 light, `danger-600` rgb(191,54,54) on the Message's own translucent
- * red box rgb(82,45,64) = 2.1:1 dark; the retryable `warn` banner: 4.0:1 light,
- * 3.9:1 dark). Fixing the `Message` colors is a theme-level change, tracked
- * separately and NOT patched here with a `.p-*` rule. Instead the question card
- * puts the theme's severity utilities on the TEXT inside its field error,
- * submit-failure banner and form-level notice (`ERROR_TEXT_CLASS` in
- * src/lib/error-text.ts, the same `text-danger-600 dark:text-danger-400` the
- * fields form uses): 5.2:1 light, 6.4:1 to 7.9:1 dark, and the `Message` keeps
- * its box, outline and `role="alert"`.
+ * `--wippy-form-danger` is kept for the one non-text use left: the border of a
+ * review row whose required answer is missing.
  */
-.w-form__error:not(.p-message) {
-  color: var(--_danger);
-}
 .w-form__keys {
   margin: 8px 0 0;
   font-size: 12px;
@@ -455,7 +451,6 @@ span.w-form__option-mark {
 .w-form__footer-text {
   margin: 0 auto 0 0;
   font-size: var(--_small);
-  color: var(--_danger);
 }
 .w-form__send,
 .w-form__send-all {
@@ -515,7 +510,6 @@ span.w-form__option-mark {
   border-color: var(--_danger);
 }
 .w-form__review-item--missing .w-form__review-answer {
-  color: var(--_danger);
   font-weight: 400;
 }
 .w-form__answer-item {

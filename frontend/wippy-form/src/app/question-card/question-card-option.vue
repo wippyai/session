@@ -4,6 +4,7 @@ import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
 import { computed, useId } from 'vue'
+import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
 import { plainText } from '../../lib/rich-text'
 import QuestionCardComposer from './question-card-composer.vue'
@@ -202,7 +203,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
         v-if="noteTooLong"
         :id="noteErrorId"
         :part="errorPart.part"
-        :class="errorPart.class"
+        :class="[errorPart.class, ERROR_TEXT_CLASS]"
         role="alert"
       >
         Use at most 1,000 characters.

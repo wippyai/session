@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
-import type { FormDefinition } from '../../lib/definition'
+import type { FormDefinition, FormField } from '../../lib/definition'
 import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import { computed } from 'vue'
+import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partClass } from '../../lib/part-class'
 import QuestionCardAnswerItems from './question-card-answer-items.vue'
 import QuestionCardRichText from './question-card-rich-text.vue'
@@ -35,6 +36,11 @@ const answerEmptyPart = computed(() => partClass('answer-empty'))
 function itemPart(missing: boolean) {
   return partClass('review-item', missing && 'missing')
 }
+
+/** A required question with no answer yet: its row is outlined and its "Not answered yet" text is in the error colour. */
+function isMissing(field: FormField): boolean {
+  return !props.controller.answerItemsFor(field) && field.required
+}
 function editPart() {
   return partClass('review-edit')
 }
@@ -65,8 +71,8 @@ const missingText = computed(() => {
     <li
       v-for="(field, i) in definition.fields"
       :key="field.id"
-      :part="itemPart(!controller.answerItemsFor(field) && field.required).part"
-      :class="itemPart(!controller.answerItemsFor(field) && field.required).class"
+      :part="itemPart(isMissing(field)).part"
+      :class="itemPart(isMissing(field)).class"
     >
       <button
         type="button"
@@ -89,7 +95,7 @@ const missingText = computed(() => {
         </span>
         <span
           :part="reviewAnswerPart.part"
-          :class="reviewAnswerPart.class"
+          :class="[reviewAnswerPart.class, isMissing(field) && ERROR_TEXT_CLASS]"
         >
           <QuestionCardAnswerItems
             v-if="controller.answerItemsFor(field)"
@@ -115,7 +121,7 @@ const missingText = computed(() => {
     <p
       v-if="missingText"
       :part="footerTextPart.part"
-      :class="footerTextPart.class"
+      :class="[footerTextPart.class, ERROR_TEXT_CLASS]"
     >
       {{ missingText }}
     </p>

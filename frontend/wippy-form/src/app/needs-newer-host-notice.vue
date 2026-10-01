@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FormDefinition } from '../lib/definition'
 import Message from 'primevue/message'
+import { WARN_TEXT_CLASS } from '../lib/error-text'
 import ChoiceField from './fields/choice-field.vue'
 
 defineProps<{
@@ -64,7 +65,7 @@ defineProps<{
       severity="warn"
       :closable="false"
     >
-      This form needs a newer Web Host. If you already answered it, your answer is in the chat.
+      <span :class="WARN_TEXT_CLASS">This form needs a newer Web Host. If you already answered it, your answer is in the chat.</span>
     </Message>
   </div>
 </template>
