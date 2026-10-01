@@ -1,6 +1,6 @@
 import type { ScalarFormField } from './definition'
 import type { FieldHandler } from './scalar-answers'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { isValidEmail, isValidIsoDate, SCALAR_HANDLERS } from './scalar-answers'
 
 type FieldOf<T extends ScalarFormField['type']> = Extract<ScalarFormField, { type: T }>
@@ -64,26 +64,36 @@ describe('text', () => {
     expect(codes(field('text'), '\n  ')).toEqual(['invalid_text'])
   })
 
-  it('matches the pattern against the whole value', () => {
+  // The pattern is agent-authored and a browser regex engine backtracks, so
+  // the server (linear-time RE2) is the only place it is evaluated; a 422
+  // `pattern_mismatch` shows on the field (see wippy-form.test.ts).
+  it('does not evaluate the pattern: a value that does not match is accepted for the server to judge', () => {
     const coded = field('text', { pattern: '[A-Z]{2}\\d{3}' })
-    expect(codes(coded, 'AB123')).toEqual([])
-    expect(codes(coded, 'xAB123')).toEqual(['pattern_mismatch'])
-    expect(codes(coded, 'AB1234')).toEqual(['pattern_mismatch'])
+    expect(evaluate(coded, 'AB123')).toEqual({ answer: 'AB123', errors: [] })
+    expect(evaluate(coded, 'not-a-code')).toEqual({ answer: 'not-a-code', errors: [] })
   })
 
-  it('anchors an alternation as a whole, not per branch', () => {
-    const either = field('text', { pattern: 'a|b' })
-    expect(codes(either, 'a')).toEqual([])
-    expect(codes(either, 'b')).toEqual([])
-    expect(codes(either, 'ab')).toEqual(['pattern_mismatch'])
+  it('never builds a regular expression from the definition, so no pattern can freeze the tab', () => {
+    const construct = vi.spyOn(globalThis, 'RegExp').mockImplementation(() => {
+      throw new Error('a RegExp was built while checking an answer')
+    })
+    try {
+      // Both patterns backtrack without bound on a long run of "a" in a browser engine.
+      expect(evaluate(field('text', { pattern: '(a|a)*b', max_length: 2000 }), 'a'.repeat(2000)).errors).toEqual([])
+      expect(evaluate(field('text', { pattern: 'a*a*a*a*b', max_length: 2000 }), 'a'.repeat(2000)).errors).toEqual([])
+      expect(construct).not.toHaveBeenCalled()
+    }
+    finally {
+      construct.mockRestore()
+    }
   })
 
-  it('skips the pattern check when the pattern does not compile in this browser', () => {
-    expect(codes(field('text', { pattern: '(' }), 'anything')).toEqual([])
-  })
-
-  it('does not run the pattern against an omitted optional value', () => {
-    expect(codes(field('text', { pattern: '\\d+' }), '')).toEqual([])
+  it('still applies every other text rule to a field that has a pattern', () => {
+    const coded = field('text', { pattern: '[A-Z]+', min_length: 3, max_length: 5, required: true })
+    expect(codes(coded, '')).toEqual(['required'])
+    expect(codes(coded, 'AB')).toEqual(['too_short'])
+    expect(codes(coded, 'ABCDEF')).toEqual(['too_long'])
+    expect(codes(coded, 'A\tB')).toEqual(['invalid_text'])
   })
 })
 

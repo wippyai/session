@@ -43,7 +43,7 @@ export interface TextFormField extends FormFieldBase {
   type: 'text'
   min_length?: number
   max_length?: number
-  /** Full-match pattern in the RE2/JS common subset; the server has already vetted it. */
+  /** Full-match pattern the server checks (RE2, linear time). The browser never evaluates it. */
   pattern?: string
   placeholder?: string
   default?: string

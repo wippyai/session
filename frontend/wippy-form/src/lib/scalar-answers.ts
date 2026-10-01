@@ -20,6 +20,8 @@ import { codePointLength, hasControlCharacters, isBlank, normalizeNewlines, trim
  * the value exactly as the server will accept it. The Session state API
  * stays the authority and its 422 errors are what the form ultimately shows.
  * Error codes are the server's stable codes; messages never echo the value.
+ *
+ * Never evaluated in the browser: a text field's `pattern` (see `evaluateText`).
  */
 
 /** What judging one field's draft gives: the wire answer (undefined = omitted) and any findings. */
@@ -65,21 +67,6 @@ export function effectiveMaxLength(field: TextFormField | TextareaFormField): nu
   return Math.min(field.max_length ?? TEXT_DEFAULT_MAX, TEXT_MAX_CAP)
 }
 
-/**
- * The definition's pattern as a full-match regular expression, or `null` when
- * this browser cannot compile it. The server has already vetted the pattern
- * against the RE2/JS common subset; if it still does not compile here, the
- * client skips the check and the server decides.
- */
-function fullMatchPattern(pattern: string): RegExp | null {
-  try {
-    return new RegExp(`^(?:${pattern})$`, 'u')
-  }
-  catch {
-    return null
-  }
-}
-
 function evaluateText(field: TextFormField | TextareaFormField, draft: FieldAnswer | undefined): FieldOutcome {
   const multiline = field.type === 'textarea'
   const typed = typeof draft === 'string' ? draft : ''
@@ -98,11 +85,11 @@ function evaluateText(field: TextFormField | TextareaFormField, draft: FieldAnsw
   const max = effectiveMaxLength(field)
   if (length > max)
     return fail('too_long', `Use at most ${max} characters.`)
-  if (field.type === 'text' && field.pattern) {
-    const re = fullMatchPattern(field.pattern)
-    if (re && !re.test(text))
-      return fail('pattern_mismatch', 'This does not match the expected format.')
-  }
+  // A text field's `pattern` is deliberately NOT checked here: it is written
+  // by the agent, and a browser regex engine backtracks, so an overlapping
+  // repeat such as `(a|a)*b` or `a*a*a*b` on a long value can freeze the
+  // tab. The server checks it with a linear-time engine and answers 422
+  // `pattern_mismatch`, which the form shows on this field like any other error.
   return { answer: text, errors: [] }
 }
 

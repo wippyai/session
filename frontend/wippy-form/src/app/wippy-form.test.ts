@@ -894,6 +894,91 @@ describe('WippyForm — form version 2', () => {
     expect(envelope.answers).toEqual({ name: 'Ada', qty: 4, consent: true })
   })
 
+  it('leaves a field\'s pattern to the server: a value that does not match is sent, and the 422 shows on that field', async () => {
+    const patterned = {
+      title: 'Parcel',
+      fields: [{ id: 'code', type: 'text' as const, label: 'Parcel code', required: true, pattern: '[A-Z]{2}\\d{3}' }],
+    }
+    // The body the Session sends is { code: 'validation_failed', errors: { code: [{ code, message }] } };
+    // the Host client rejects with those on the ArtifactStateError.
+    const unprocessable = Object.assign(new Error('Some answers are not valid.'), {
+      name: 'ArtifactStateError',
+      [ARTIFACT_STATE_ERROR_BRAND]: true,
+      status: 422,
+      code: 'validation_failed',
+      errors: { code: [{ code: 'pattern_mismatch', message: 'Does not match the expected format.' }] },
+      formErrors: [],
+    })
+    const submitFn = vi.fn().mockRejectedValue(unprocessable)
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State({ definition: patterned })), submit: submitFn })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: patterned, state: 'active' }, elementWithArtifactId('artifact-1'), { attachToBody: true })
+    await flushPromises()
+
+    const input = wrapper.find('input[type="text"]')
+    await input.setValue('not-a-code')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    // The browser never judged the pattern: the value went to the server.
+    expect(submitFn).toHaveBeenCalledTimes(1)
+    expect(submitFn.mock.calls[0][0].answers).toEqual({ code: 'not-a-code' })
+    // The server's refusal reads like any client error: text under the field,
+    // linked to the real input, field invalid, focus there, typed value kept.
+    const error = wrapper.find('ul')
+    expect(error.text()).toBe('Does not match the expected format.')
+    expect(input.attributes('aria-describedby')).toBe(error.attributes('id'))
+    expect(input.attributes('aria-invalid')).toBe('true')
+    expect(document.activeElement).toBe(input.element)
+    expect((input.element as HTMLInputElement).value).toBe('not-a-code')
+    expect(wrapper.find('[part~="field-invalid"]').exists()).toBe(true)
+    // A refusal is not a failed delivery: no banner, the form stays open.
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(true)
+    expect(wrapper.find('[role="status"]').text()).toBe('1 question needs attention.')
+  })
+
+  it('shows any other per-field 422 code on its own field, and a form-level one under the fields', async () => {
+    const unprocessable = Object.assign(new Error('Some answers are not valid.'), {
+      name: 'ArtifactStateError',
+      [ARTIFACT_STATE_ERROR_BRAND]: true,
+      status: 422,
+      code: 'validation_failed',
+      errors: {
+        qty: [{ code: 'not_on_step', message: 'Not on the allowed step.' }],
+        mail: [{ code: 'invalid_email', message: 'That address is not accepted.' }],
+      },
+      formErrors: [{ code: 'stale', message: 'This form changed since you loaded it.' }],
+    })
+    const submitFn = vi.fn().mockRejectedValue(unprocessable)
+    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State()), submit: submitFn })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, elementWithArtifactId('artifact-1'), { attachToBody: true })
+    await flushPromises()
+
+    const byLabel = (label: string) => {
+      const l = wrapper.findAll('label').find(el => el.text().startsWith(label))
+      return wrapper.find(`[id="${l?.attributes('for')}"]`)
+    }
+    await byLabel('Full name').setValue('Ada')
+    await byLabel('Email').setValue('ada@example.com')
+    await byLabel('Parcels').setValue('4')
+    await byLabel('I agree').setValue(true)
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    const mail = byLabel('Email')
+    const qty = byLabel('Parcels')
+    expect(wrapper.text()).toContain('That address is not accepted.')
+    expect(wrapper.text()).toContain('Not on the allowed step.')
+    expect(wrapper.text()).toContain('This form changed since you loaded it.')
+    expect(mail.attributes('aria-invalid')).toBe('true')
+    expect(qty.attributes('aria-invalid')).toBe('true')
+    // The first invalid field in definition order takes focus.
+    expect(document.activeElement).toBe(mail.element)
+    expect((qty.element as HTMLInputElement).value).toBe('4')
+    expect(wrapper.find('[role="status"]').text()).toBe('3 questions need attention.')
+  })
+
   it('shows a stored version 2 answer read-only once answered', async () => {
     const idle = v2State({ status: 'idle', data: { name: 'Ada', qty: 4, consent: true }, submitted_at: '2026-10-01T10:00:00.000Z', delivery: 'complete' })
     mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(idle), submit: vi.fn() })

@@ -25,13 +25,19 @@ import { effectiveMaxLength } from './scalar-answers'
  * What the client checks: every answer case for the six standard fields
  * (expect `ok`, `same`, `unanswered`, `error`), and, for definition cases
  * that state a normalized `max_length`, that the client derives the same
- * effective limit from the raw field. Skipped, and counted: definition
- * validation (the server vets definitions before a form exists), a value of
- * the wrong JSON type for its field (a control always hands the checker the
- * right kind of draft), and an unanswered optional checkbox (the UI always
- * sends an explicit boolean), and a carriage return in a textarea value (the
- * client turns every line break into LF before sending). Any other shape
- * fails loudly.
+ * effective limit from the raw field.
+ *
+ * Skipped, counted and named by reason (`SkipReason`): definition validation
+ * (the server vets definitions before a form exists); a value of the wrong JSON
+ * type for its field (a control always hands the checker the right kind of
+ * draft); an unanswered optional checkbox (the UI always sends an explicit
+ * boolean); a carriage return in a textarea value (the client turns every
+ * line break into LF before sending); and every case about a text field's
+ * `pattern`. The pattern is agent-authored and a browser regex engine
+ * backtracks without bound (`(a|a)*b`, `a*a*a*a*b` on a long value can freeze
+ * the tab), so the client never evaluates it: the server (RE2, linear time)
+ * checks it on submit and its 422 `pattern_mismatch` shows on the field. Any
+ * other shape fails loudly.
  */
 
 const SCALAR_TYPES = new Set(['text', 'textarea', 'number', 'email', 'date', 'checkbox'])
@@ -45,7 +51,12 @@ export interface RawCase {
   expect?: Record<string, unknown>
 }
 
-export type Verdict = 'checked' | 'skipped'
+export type SkipReason = 'definition' | 'not-standard-field' | 'pattern' | 'wrong-type' | 'checkbox-absent' | 'textarea-cr'
+export type Verdict = 'checked' | `skipped:${SkipReason}`
+
+function skip(reason: SkipReason): Verdict {
+  return `skipped:${reason}`
+}
 
 function expandValue(raw: RawCase): unknown {
   if (raw.value_concat === undefined)
@@ -78,12 +89,12 @@ export function runCase(raw: unknown, index: number): Verdict {
 
   // Several fields: always a definition case.
   if (entry.fields !== undefined)
-    return 'skipped'
+    return skip('definition')
   const rawField = entry.field
   if (!rawField || typeof rawField.type !== 'string')
     throw new Error(`conformance case ${index} (${name}): no field`)
   if (!SCALAR_TYPES.has(rawField.type))
-    return 'skipped'
+    return skip('not-standard-field')
   const field = { id: 'f', label: 'Question', required: false, ...rawField } as unknown as ScalarFormField
 
   const isDefinitionCase = 'definition_ok' in expected || 'definition_error' in expected || 'normalized' in expected
@@ -93,26 +104,30 @@ export function runCase(raw: unknown, index: number): Verdict {
       expect(effectiveMaxLength(field), name).toBe(normalized.max_length)
       return 'checked'
     }
-    return 'skipped'
+    return skip('definition')
   }
 
   const knownExpectation = 'ok' in expected || 'same' in expected || 'unanswered' in expected || 'error' in expected
   if (!knownExpectation)
     throw new Error(`conformance case ${index} (${name}): unrecognized expect (keys: ${Object.keys(expected).join(', ')})`)
 
+  // The browser never evaluates a pattern; the server's 422 shows on the field instead.
+  if (rawField.pattern !== undefined)
+    return skip('pattern')
+
   const value = expandValue(entry)
   // The server answers a wrong JSON type with `invalid_type`; no control can send one.
   if (expected.error === 'invalid_type')
-    return 'skipped'
+    return skip('wrong-type')
   const draft = draftFor(field, value)
   if (draft === null)
-    return 'skipped'
+    return skip('wrong-type')
   // The client turns every line break of a textarea into LF, so it never sends the CR the server refuses.
   if (field.type === 'textarea' && typeof value === 'string' && value.includes(String.fromCharCode(13)))
-    return 'skipped'
+    return skip('textarea-cr')
   // A checkbox always reports a boolean, so an optional one is never absent.
   if (field.type === 'checkbox' && draft === undefined && !field.required)
-    return 'skipped'
+    return skip('checkbox-absent')
 
   const outcome = evaluateField(field as FormField, draft)
   if (typeof expected.error === 'string') {
@@ -161,13 +176,21 @@ describe('conformance runner (inline cases)', () => {
     expect(() => runCase({ name: 'wrong', field: { type: 'text' }, expect: { normalized: { max_length: 400 } } }, 2)).toThrow()
   })
 
-  it('skips what the UI cannot produce or the server alone decides', () => {
-    expect(runCase({ name: 'type', field: { type: 'number' }, value: '3', expect: { error: 'invalid_type' } }, 0)).toBe('skipped')
-    expect(runCase({ name: 'wrong json type', field: { type: 'number' }, value: true, expect: { error: 'whatever' } }, 1)).toBe('skipped')
-    expect(runCase({ name: 'definition', field: { type: 'number', min: 5, max: 1 }, expect: { definition_error: 'invalid_range', path: 'fields[0].max' } }, 2)).toBe('skipped')
-    expect(runCase({ name: 'choice', field: { type: 'choice', options: ['a'] }, value: 'a', expect: { same: true } }, 3)).toBe('skipped')
-    expect(runCase({ name: 'several', fields: [{ type: 'text' }], expect: { definition_ok: true } }, 4)).toBe('skipped')
-    expect(runCase({ name: 'checkbox', field: { type: 'checkbox' }, expect: { unanswered: true } }, 5)).toBe('skipped')
+  it('skips what the UI cannot produce or the server alone decides, naming the reason', () => {
+    expect(runCase({ name: 'type', field: { type: 'number' }, value: '3', expect: { error: 'invalid_type' } }, 0)).toBe('skipped:wrong-type')
+    expect(runCase({ name: 'wrong json type', field: { type: 'number' }, value: true, expect: { error: 'whatever' } }, 1)).toBe('skipped:wrong-type')
+    expect(runCase({ name: 'definition', field: { type: 'number', min: 5, max: 1 }, expect: { definition_error: 'invalid_range', path: 'fields[0].max' } }, 2)).toBe('skipped:definition')
+    expect(runCase({ name: 'choice', field: { type: 'choice', options: ['a'] }, value: 'a', expect: { same: true } }, 3)).toBe('skipped:not-standard-field')
+    expect(runCase({ name: 'several', fields: [{ type: 'text' }], expect: { definition_ok: true } }, 4)).toBe('skipped:definition')
+    expect(runCase({ name: 'checkbox', field: { type: 'checkbox' }, expect: { unanswered: true } }, 5)).toBe('skipped:checkbox-absent')
+    expect(runCase({ name: 'cr', field: { type: 'textarea' }, value: 'a\r\nb', expect: { error: 'invalid_text' } }, 6)).toBe('skipped:textarea-cr')
+  })
+
+  it('skips every answer case about a pattern, whatever it expects: the server alone evaluates patterns', () => {
+    const pattern = { type: 'text', pattern: '[A-Z]{2}\\d{3}' }
+    expect(runCase({ name: 'mismatch', field: pattern, value: 'xx', expect: { error: 'pattern_mismatch' } }, 0)).toBe('skipped:pattern')
+    expect(runCase({ name: 'match', field: pattern, value: 'AB123', expect: { same: true } }, 1)).toBe('skipped:pattern')
+    expect(runCase({ name: 'backtracks', field: { type: 'text', max_length: 2000, pattern: '(a|a)*b' }, value_concat: [{ repeat: 'a', times: 2000 }], expect: { error: 'pattern_mismatch' } }, 2)).toBe('skipped:pattern')
   })
 
   it('fails loudly on a shape it does not understand', () => {
@@ -199,19 +222,27 @@ describe('conformance fixture (test/forms/fixtures/v2_conformance.json)', () => 
 
   it('agrees with the client checker on every case it covers', () => {
     const failures: string[] = []
+    const skipped: Record<string, number> = {}
     let checked = 0
     for (const [index, raw] of cases.entries()) {
       try {
-        if (runCase(raw, index) === 'checked')
+        const verdict = runCase(raw, index)
+        if (verdict === 'checked')
           checked++
+        else
+          skipped[verdict.slice('skipped:'.length)] = (skipped[verdict.slice('skipped:'.length)] ?? 0) + 1
       }
       catch (error) {
         failures.push(`${(raw as RawCase).name ?? index}: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`)
       }
     }
+    const skippedTotal = Object.values(skipped).reduce((sum, n) => sum + n, 0)
+    // The counts go to the test output, so a drop in coverage is visible.
+    console.warn(`conformance: ${checked} of ${cases.length} cases checked, ${skippedTotal} skipped (${Object.entries(skipped).map(([reason, n]) => `${reason} ${n}`).join(', ')})`)
     // One list of every disagreement, not just the first.
     expect(failures).toEqual([])
     // A fixture whose every case was skipped would prove nothing.
-    expect(checked).toBeGreaterThan(200)
+    expect(checked).toBeGreaterThan(150)
+    expect(checked + skippedTotal).toBe(cases.length)
   })
 })
