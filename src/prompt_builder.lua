@@ -1,7 +1,6 @@
 local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
-local message_repo = require("message_repo")
 local form_index = require("form_index")
 local answer_text = require("answer_text")
 local input_metadata = require("input_metadata")
@@ -155,17 +154,13 @@ function prompt_builder.build(messages, contexts, session_meta, options)
 
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
-        elseif message_repo.is_pending_answer(msg) then
-            -- A form answer accepted while a turn was running. It is committed
-            -- but not yet admitted: the session admits it after the turn ends
-            -- (moving it to the end of the history), so it stays out until then.
         elseif msg.type == consts.MSG_TYPE.USER then
-            local text = msg.data
-            if not message_repo.is_form_answer(msg) then
-                -- A <wippy-form-answers> tag the user typed is not a record.
-                text = answer_text.neutralize(text)
-            end
-            builder:add_user(text :: string)
+            -- nil for a form answer accepted while a turn was running: the
+            -- session admits it after the turn ends (moving it to the end of
+            -- the history), so it stays out until then.
+            local text = answer_text.model_text(msg)
+            if text == nil then return end
+            builder:add_user(text)
 
             if include_files and metadata.file_uuids and #metadata.file_uuids > 0 then
                 local file_info = {}

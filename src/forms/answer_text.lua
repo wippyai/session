@@ -1,5 +1,6 @@
 local definition = require("definition")
 local ordered_json = require("ordered_json")
+local message_repo = require("message_repo")
 
 -- Builds the text of the user message that carries an accepted form answer
 -- (spec section 13). The server writes it from the immutable definition and
@@ -87,6 +88,18 @@ local TAG_PATTERN = "<(/?)(" .. TAG_NAME_PATTERN .. ")"
 function answer_text.neutralize(text: any): any
     if type(text) ~= "string" then return text end
     return (string.gsub(text, TAG_PATTERN, "&lt;%1%2"))
+end
+
+-- The text of a stored user row as the model and the checkpoint summary read
+-- it, or nil for a form answer the session has not admitted yet, which
+-- neither may show. A server-written answer row keeps its answer element,
+-- and the same tag in typed text is neutralized.
+function answer_text.model_text(row: any): string?
+    if message_repo.is_pending_answer(row) then return nil end
+    local text = row.data
+    if type(text) ~= "string" then return "" end
+    if message_repo.is_form_answer(row) then return text end
+    return answer_text.neutralize(text)
 end
 
 local ATTRIBUTE_SAFE ={ ["'"] = "\\u0027", ["<"] = "\\u003c", [">"] = "\\u003e", ["&"] = "\\u0026" }

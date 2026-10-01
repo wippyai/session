@@ -55,6 +55,7 @@ entries:
     imports:
       definition: wippy.session.forms:definition
       ordered_json: wippy.session.forms:ordered_json
+      message_repo: wippy.session.persist:message_repo
 
   # wippy.session.forms:state_service
   - name: state_service
