@@ -60,6 +60,25 @@ history pagination.
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
+## Checkpoints and prompt caching
+
+When a checkpoint function or binding is configured, the session compares each
+model response's normalized `tokens.context_tokens` with
+`token_checkpoint_threshold`. It checks tool continuations too, and schedules
+the checkpoint before the next tool round and model step. The existing strict
+`>` threshold is unchanged; reaching the threshold exactly does not trigger it.
+
+This is the current prompt size, not cumulative usage across the turn. Cached
+input still occupies context even when `prompt_tokens` reports only a small
+uncached suffix. The LLM module normalizes provider accounting; the session does
+not add cache counters again.
+
+The conversation carries rolling cache markers so a provider can reuse the
+stable history prefix on later requests. Caching is provider-dependent, can
+expire or miss, and cached reads still have a cost. Checkpointing shortens the
+active prompt after a successful summary; neither mechanism is a hard spending
+limit or a preflight guarantee against one oversized tool result.
+
 ## Artifacts
 
 An artifact is generated content that outlives the message that produced it. A

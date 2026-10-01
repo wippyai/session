@@ -208,9 +208,12 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
     local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
-    if checkpoint_available and tokens.prompt_tokens and token_threshold and token_threshold > 0 then
+    -- context_tokens is the full prompt size (uncached input plus cache reads
+    -- and writes); prompt_tokens alone counts only the uncached input.
+    local context_tokens = tokens.context_tokens
+    if checkpoint_available and context_tokens and token_threshold and token_threshold > 0 then
 
-        if tokens.prompt_tokens > token_threshold then
+        if context_tokens > token_threshold then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
@@ -218,7 +221,7 @@ function session_handlers.check_background_triggers(ctx, op)
                 checkpoint_bindings = op.checkpoint_bindings,
                 checkpoint_id = anchor_id,
                 message_id = anchor_id,
-                trigger_tokens = tokens.prompt_tokens,
+                trigger_tokens = context_tokens,
                 agent = op.agent,
                 agent_options = op.agent_options,
                 run_context_binding = op.run_context_binding

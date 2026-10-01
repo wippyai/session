@@ -504,6 +504,38 @@ local function define_tests()
                 test.eq(second[#second].marker_id, "history_tail")
             end)
 
+            it("keeps the cacheable prefix stable as successive tool results extend a long turn", function()
+                local history = turn()
+                local previous = nil
+                for round = 1, 22 do
+                    history[#history + 1] = {
+                        message_id = "tool-" .. tostring(round), type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ round = round }),
+                        metadata = { function_name = "search", call_id = "call-" .. tostring(round),
+                            status = consts.FUNC_STATUS.SUCCESS, result = "hits-" .. tostring(round) },
+                    }
+                    local builder, err = prompt_builder.build(history, {}, {}, {
+                        include_contexts = false, include_files = false,
+                    })
+                    test.is_nil(err)
+                    local built = builder:get_messages()
+                    if previous then
+                        for index = 1, #previous - 1 do
+                            test.eq((json.encode(built[index])), (json.encode(previous[index])))
+                        end
+                    end
+                    test.eq(built[#built].role, "cache_marker")
+                    test.eq(built[#built].marker_id, "history_tail")
+                    test.eq(built[#built - 1].role, "function_result")
+                    local mapped = claude_mapper.map_messages(built)
+                    local tail = mapped.messages[#mapped.messages]
+                    local result = tail.content[#tail.content]
+                    test.eq(result.type, "tool_result")
+                    test.eq(result.cache_control.type, "ephemeral")
+                    previous = built
+                end
+            end)
+
             it("adds no marker when cache_markers is false", function()
                 local builder, err = prompt_builder.build(turn(), {}, {}, {
                     include_contexts = false, include_files = false, cache_markers = false
