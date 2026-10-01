@@ -74,7 +74,8 @@ entries:
         field-error and 409 already-submitted handling), and offline detection — the host only needs to mount
         the tag with these three attributes. Edge cases handled: a stale ("asked earlier") form, a race where
         another client answers first, a reload that fails while a view is already showing, and an unsupported
-        form-version.
+        form-version. Agents must never write the `<wippy-form>` tag themselves, because it is created only
+        through the Session `ask_user` tool and never from agent-generated content.
       tag_name: wippy-form
       auto_register: true
       announced: true
@@ -88,8 +89,8 @@ entries:
             default: 1
             description: >-
               Form definition schema version (currently 1). A value other than 1, from this prop or from the
-              loaded state's own `form_version`, disables the interactive form and shows an "needs a newer
-              app" notice instead.
+              loaded state's own `form_version`, disables the interactive form and shows the notice "This form
+              needs a newer version of the app." instead.
           definition:
             type: object
             default: null
