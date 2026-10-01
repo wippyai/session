@@ -11,7 +11,7 @@ local session_status = require("session_status")
 local form_recovery = require("form_recovery")
 local funcs = require("funcs")
 local message_repo = require("message_repo")
-local message_handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local reader = require("reader")
 local writer = require("writer")
 local upstream = require("upstream")
@@ -116,7 +116,7 @@ end
 -- Admits, with no turn, the form answers a stopped turn left pending: the
 -- same admission a Stop the session honours runs when it settles
 -- (session.flush_held, phase "stop"), in acceptance order and each after
--- the steering accepted before it (message_handlers.admit_in_order). The
+-- the steering accepted before it (answer_admission.admit_in_order). The
 -- user's clients (`hub_pid`) are told each answer was received. Returns the
 -- admitted rows, to publish once the idle status is out. A row whose
 -- admission fails stays pending, and the next session start admits it with
@@ -129,7 +129,7 @@ local function admit_stopped_answers(session_id: string, user_id: string, hub_pi
     if not stored then return {}, read_err or "Session was not found" end
     local session_writer, writer_err = writer.new(session_id)
     if not session_writer then return {}, writer_err end
-    return message_handlers.admit_in_order({
+    return answer_admission.admit_in_order({
         session_id = session_id,
         writer = session_writer,
         upstream = upstream.new(session_id, nil, hub_pid),
@@ -1201,7 +1201,7 @@ local function run(args)
                         report_final_status(session_id, target_status, success, err, interaction, false)
                         -- Open views of the forms answered during an enforced
                         -- Stop reload their delivery state once it says idle.
-                        message_handlers.publish_admitted(admitted)
+                        answer_admission.publish_admitted(admitted)
                         if state.user_hub_pid then
                             publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,

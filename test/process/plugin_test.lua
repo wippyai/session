@@ -2,6 +2,7 @@ local test = require("test")
 local plugin = require("plugin")
 local session = require("session")
 local message_handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local writer = require("writer")
 local uuid = require("uuid")
 local json = require("json")
@@ -457,7 +458,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
         if mid_turn then
             -- A real step builds its prompt first: steering that arrives
             -- while the model works is applied by the next step.
-            local _, apply_err = message_handlers.apply_pending_inputs(ctx, op.from_user and op.message_id or nil)
+            local _, apply_err = answer_admission.apply_pending_inputs(ctx, op.from_user and op.message_id or nil)
             if apply_err then error(apply_err) end
             if agent_steps == 1 then
                 step_parked = true

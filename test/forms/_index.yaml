@@ -52,7 +52,7 @@ entries:
       definition: wippy.session.forms:definition
       state_service: wippy.session.forms:state_service
       control_handlers: wippy.session.process:control_handlers
-      message_handlers: wippy.session.process:message_handlers
+      answer_admission: wippy.session.process:answer_admission
       artifact_repo: wippy.session.persist:artifact_repo
       message_repo: wippy.session.persist:message_repo
       context_repo: wippy.session.persist:context_repo
