@@ -3,23 +3,11 @@ local consts = require("consts")
 
 -- Shared transaction helper for the persist layer.
 --
--- tx.run(fn) opens a new transaction on the session database resource, calls
--- fn(dbtx) under pcall, commits when fn succeeds and rolls back when it fails
--- (either fn raises, or fn returns a non-nil error as its second value). The
--- connection is always released, on every path. Callers follow the ordinary
--- Lua (result, err) convention inside fn: return the value(s) to hand back to
--- tx.run's caller, or (nil, err) to abort and roll back.
---
--- Repos that need to participate in a transaction started by someone else
--- (e.g. a caller-supplied opts.tx) do not go through this helper at all -
--- they run their statements directly on the given transaction and leave
--- begin/commit/rollback/release to whoever owns it.
---
--- Inside fn every repository call must pass opts.tx = dbtx. A call without it
--- would take a second pooled connection: it would not see the transaction's
--- uncommitted rows, and when the pool has a single connection it would wait
--- forever for the one fn holds. So while fn runs, the same coroutine gets an
--- error instead from a nested tx.run and from tx.connect.
+-- tx.run(fn) runs fn(dbtx) in a transaction. It commits when fn returns
+-- without an error, and it rolls back when fn raises or returns (nil, err).
+-- Inside fn every repository call must pass opts.tx = dbtx. A nested tx.run
+-- or tx.connect on the same coroutine returns an error instead of taking a
+-- second connection, which would deadlock a one-connection pool.
 local tx = {}
 
 local OUTSIDE_ONLY = "inside tx.run without opts.tx: pass the open transaction as opts.tx"

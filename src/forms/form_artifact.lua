@@ -67,8 +67,9 @@ function form_artifact.parse(artifact: any): (any, string?)
         return nil, "Unsupported form version"
     end
     -- The stored definition was normalized at creation; normalizing again
-    -- rebuilds the answer rules from it and rejects a damaged record. Rules
-    -- added after creation are not applied (stored = true).
+    -- rebuilds the answer rules from it and rejects a damaged record. `stored`
+    -- skips the control-character rule so a form accepted earlier stays
+    -- readable.
     local def, def_errors = definition.normalize(content.props.definition, { stored = true })
     if not def then
         return nil, "Stored form definition is invalid: " .. definition.format_errors(def_errors)

@@ -242,9 +242,7 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
         system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
         artifact_id = artifact_id
     }, write_opts)
-    -- On a caller's transaction the rows go in together or not at all. Without
-    -- one the artifact is already stored and this informational row stays
-    -- best effort, as before.
+    -- Atomic with the other rows on a caller's transaction; best effort otherwise.
     if system_err and opts.tx then
         return nil, "Failed to store artifact created message: " .. tostring(system_err)
     end

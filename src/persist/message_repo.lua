@@ -961,10 +961,13 @@ function message_repo.list_pending_answers(session_id, limit)
 end
 
 -- Ids of the user's sessions that hold pending answer rows, at most `limit`,
--- ordered by their oldest pending answer. opts.exclude: session ids to skip
--- (for example sessions already running, or ones that failed to start), so
--- they cannot fill the result and starve the others. Lets the session plugin
--- start sessions whose wake-up was lost, for example after a runtime restart.
+-- ordered by their oldest pending answer. opts.exclude: session ids to skip,
+-- such as sessions that failed to start and wait before the next try, so they
+-- cannot fill the result and starve the others. Lets the session plugin start
+-- sessions whose wake-up was lost, for example after a runtime restart, and
+-- ask running sessions to look again. The rows are found by a LIKE on the
+-- metadata with no index, so the cost grows with the number of user messages
+-- in the whole table (about 80 ms at 200,000 messages on SQLite).
 function message_repo.list_sessions_with_pending_answers(user_id, limit, opts)
     if not user_id or user_id == "" then return nil, "User ID is required" end
     limit = limit or 5

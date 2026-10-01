@@ -383,8 +383,8 @@ end
 -- (nil, errors) where errors is a list of { path, code, message }.
 -- Strings in `options` become { value = s, label = s }; booleans default to
 -- false; empty optional descriptions are dropped.
--- opts.stored: the definition was accepted earlier and is being read back;
--- rules added since (control characters) are not applied to it.
+-- opts.stored skips the control-character rule so a form accepted earlier
+-- stays readable.
 function definition.normalize(raw: any, opts: {stored: boolean?}?): (any, {any}?)
     local errors = {}
     local strict = not (opts and opts.stored)
