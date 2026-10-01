@@ -141,6 +141,104 @@ local function define_tests()
             test.is_nil(ok)
             test.eq(code, "invalid_pattern")
         end)
+
+        -- RE2 reads a repeat count that starts with a zero followed by another
+        -- digit as text, not as a repeat: "{" becomes a literal brace. The
+        -- checker refuses such a count, or the pattern would pass the check and
+        -- then match the wrong answers.
+        describe("repeat counts", function()
+            local saved_max = form_pattern.MAX_REPEAT
+            after_each(function() form_pattern.MAX_REPEAT = saved_max end)
+
+            it("refuses a count with a leading zero, as RE2 does not read it as a repeat", function()
+                for _, pattern in ipairs({ "a{01}", "a{1,02}", "a{00}", "a{01,}", "a{0100,0050}", "a{007,9}", "a{0,00}" }) do
+                    local ok, code, message = check(pattern)
+                    test.is_nil(ok, pattern)
+                    test.eq(code, "invalid_pattern", pattern)
+                    test.contains(message, "zero", pattern)
+                end
+            end)
+
+            it("shows in RE2 itself what the refusal protects against", function()
+                -- The positive control: the refused spellings compile, and
+                -- mean a literal brace, so the checker's view of them (a
+                -- repeat) would have been wrong.
+                local literal = form_pattern.compile("a{01}")
+                test.is_true(((literal :: any):match_string("a{01}")))
+                test.is_false(((literal :: any):match_string("a")))
+                local counted = form_pattern.compile("a{1}")
+                test.is_true(((counted :: any):match_string("a")))
+                test.is_false(((counted :: any):match_string("a{1}")))
+            end)
+
+            it("accepts a count of zero, which RE2 reads as a repeat", function()
+                for _, pattern in ipairs({ "a{0}", "a{0,0}", "a{0,5}", "a{10}", "a{100}", "a{1,100}" }) do
+                    local ok, code = check(pattern)
+                    test.is_true(ok, pattern .. " -> " .. tostring(code))
+                end
+                local zero = form_pattern.compile("ba{0}")
+                test.is_true(((zero :: any):match_string("b")))
+                test.is_false(((zero :: any):match_string("ba")))
+            end)
+
+            it("matches exactly the lengths its counts name, for every accepted count", function()
+                local counts = { 0, 1, 2, 3, 10, 99, 100 }
+                for _, low in ipairs(counts) do
+                    local forms = { { string.format("a{%d}", low), low, low }, { string.format("a{%d,}", low), low, nil } }
+                    for _, high in ipairs(counts) do
+                        if high >= low then
+                            table.insert(forms, { string.format("a{%d,%d}", low, high), low, high })
+                        end
+                    end
+                    for _, form in ipairs(forms) do
+                        local ok, code = check(form[1])
+                        test.is_true(ok, form[1] .. " -> " .. tostring(code))
+                        local expression = form_pattern.compile(form[1])
+                        for length = 0, 102 do
+                            local expected = length >= form[2] and (form[3] == nil or length <= form[3])
+                            test.eq(((expression :: any):match_string(string.rep("a", length))), expected,
+                                form[1] .. " against " .. length .. " characters")
+                        end
+                    end
+                end
+            end)
+
+            it("refuses a count over the bound and a range out of order, whatever the bound is written with", function()
+                local ok, code = check("a{100}")
+                test.is_true(ok, tostring(code))
+                local _, over = check("a{101}")
+                test.eq(over, "unsupported_pattern")
+                local _, order, order_message = check("a{9,2}")
+                test.eq(order, "invalid_pattern")
+                test.contains(order_message, "out of order")
+
+                -- A one-digit and a four-digit bound: nothing in the checks
+                -- may assume three digits.
+                form_pattern.MAX_REPEAT = 5
+                test.is_true(check("a{5}"))
+                local _, small = check("a{6}")
+                test.eq(small, "unsupported_pattern")
+                local _, small_range = check("a{1,6}")
+                test.eq(small_range, "unsupported_pattern")
+
+                form_pattern.MAX_REPEAT = 1000
+                test.is_true(check("a{1000}"))
+                test.is_true(check("a{999,1000}"))
+                local _, big = check("a{1001}")
+                test.eq(big, "unsupported_pattern")
+                local _, big_order, big_message = check("a{1000,999}")
+                test.eq(big_order, "invalid_pattern")
+                test.contains(big_message, "out of order")
+            end)
+
+            it("refuses a count of any length without reading it as a number", function()
+                local _, code, message = check("a{" .. string.rep("9", 150) .. "}")
+                test.eq(code, "unsupported_pattern")
+                test.contains(message, "at most 100")
+                local _, ordered = check("a{" .. string.rep("9", 90) .. "," .. string.rep("9", 89) .. "}")
+                test.eq(ordered, "unsupported_pattern")
+            end)
+        end)
     end)
 
     describe("a stored text field whose pattern no longer compiles", function()

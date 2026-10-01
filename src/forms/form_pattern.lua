@@ -22,7 +22,8 @@ local form_text = require("form_text")
 -- backtracking engine can stall on them: lookaround, backreferences, named
 -- groups, flags, \s \S \D \W \b \B \p \x \A \z and the other letter escapes.
 --
--- Bounds: 200 characters, 3 nested groups, repeat counts up to 100, and no
+-- Bounds: 200 characters, 3 nested groups, repeat counts up to 100 (written
+-- without a leading zero, because RE2 reads {01} as the text "{01}"), and no
 -- unbounded repeat (* + {n,}) of a group that itself holds an unbounded
 -- repeat, such as (a+)+.
 --
@@ -149,11 +150,20 @@ local function parse(chars: {string}, points: {integer})
     -- repeat is unbounded.
     local function parse_braces(): boolean
         position = position + 1 -- the {
+        -- The digits of one count, or nil when there are none. A count is
+        -- never longer than one digit when it starts with a zero: RE2 does not
+        -- read "{01}" as a repeat but as the text "{01}", so the pattern
+        -- would mean something other than what it says.
         local function read_number(): string?
             local start = position
             while is_digit(chars[position]) do position = position + 1 end
             if position == start then return nil end
-            return table.concat(chars, "", start, position - 1)
+            local digits = table.concat(chars, "", start, position - 1)
+            if #digits > 1 and string.sub(digits, 1, 1) == "0" then
+                reject(INVALID, "A repeat count must not start with a zero, as {01} does; write {1}. "
+                    .. "A count of zero is written {0}.")
+            end
+            return digits
         end
         local low = read_number()
         if low == nil then reject(INVALID, "A { must start a repeat such as {2}, {2,} or {2,5}; write \\{ for a brace.") end
@@ -167,14 +177,20 @@ local function parse(chars: {string}, points: {integer})
             reject(INVALID, "A repeat such as {2,5} is not closed with }.")
         end
         position = position + 1
-        local function too_big(digits: string): boolean
-            local trimmed = (string.gsub(digits, "^0+", ""))
-            return #trimmed > 3 or (#trimmed == 3 and trimmed > tostring(form_pattern.MAX_REPEAT))
+        -- The counts are digit strings without a leading zero, so one is
+        -- larger than another when it is longer, or equally long and later in
+        -- the alphabet of digits. Nothing here depends on how many digits the
+        -- bound has, or turns a count into a number.
+        local function compare(a: string, b: string): integer
+            if #a ~= #b then return #a < #b and -1 or 1 end
+            if a == b then return 0 end
+            return a < b and -1 or 1
         end
-        if too_big(low :: string) or (high ~= nil and too_big(high)) then
+        local bound = string.format("%d", form_pattern.MAX_REPEAT)
+        if compare(low :: string, bound) > 0 or (high ~= nil and compare(high, bound) > 0) then
             reject(UNSUPPORTED, string.format("A repeat count is at most %d.", form_pattern.MAX_REPEAT))
         end
-        if high ~= nil and #tostring(high) <= 3 and #tostring(low) <= 3 and tonumber(high) < tonumber(low) then
+        if high ~= nil and compare(high, low :: string) < 0 then
             reject(INVALID, "A repeat range is out of order.")
         end
         return unbounded
