@@ -96,7 +96,7 @@ local function steering_updates(scan, start_id)
     return updates
 end
 
-function answer_admission.prepare_pending_inputs(ctx: any, new_user_id: string?)
+function answer_admission.prepare_pending_inputs(ctx: any, new_user_id: any?)
     local scan, err = scan_inputs(ctx, new_user_id)
     if not scan then return nil, err end
     return steering_updates(scan, new_user_id)
@@ -129,7 +129,7 @@ local function commit_pending_inputs(ctx: any, updates)
     return count
 end
 
-function answer_admission.apply_pending_inputs(ctx: any, new_user_id: string?)
+function answer_admission.apply_pending_inputs(ctx: any, new_user_id: any?)
     local updates, err = answer_admission.prepare_pending_inputs(ctx, new_user_id)
     if not updates then return nil, err end
     return commit_pending_inputs(ctx, updates)
@@ -202,7 +202,7 @@ end
 
 -- Tells open views of the admitted answers' forms that the delivery state
 -- changed; they reload it.
-function answer_admission.publish_admitted(rows: {any}?)
+function answer_admission.publish_admitted(rows: any?)
     if not rows then return end
     for _, row in ipairs(rows) do
         local form_id = type(row) == "table" and message_repo.answer_form_id(row) or nil
@@ -220,7 +220,7 @@ end
 
 -- Called once the session status is idle again.
 function answer_admission.publish_deferred(ctx: any)
-    local rows: {any}? = ctx.deferred_admissions
+    local rows = ctx.deferred_admissions
     ctx.deferred_admissions = nil
     answer_admission.publish_admitted(rows)
 end
