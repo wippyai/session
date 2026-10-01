@@ -376,7 +376,7 @@ local function define_tests()
                 local origin = artifact.meta.session_form.origin
                 test.eq(artifact.meta.session_form.version, 1)
                 test.is_nil(artifact.meta.session_form.submission)
-                test.eq(origin.turn_id, ctx.turn_state.id)
+                test.is_nil(origin.turn_id, "the origin binds the form to its call, not to the turn")
                 test.eq(origin.call_id, call_id)
                 test.eq(origin.tool_message_id, (ids :: any)[call_id])
 
@@ -1358,27 +1358,26 @@ local function define_tests()
                 test.eq(message_repo.get(steps[1].message_id).data, "Typed meanwhile")
             end)
 
-            it("stores only a list of UUID strings as a message's attachments", function()
+            it("stores a message's attachments as the client sent them, and a client value that looks like an answer marker stays attachment data", function()
                 local attachment = uuid.v7()
+                local lookalike = { session_form = { artifact_id = uuid.v7(), pending = true } }
                 local cases = {
-                    { value = { session_form = { pending = true } }, expected = nil },
-                    { value = { "not-a-uuid" }, expected = nil },
-                    { value = { attachment, 7 }, expected = nil },
-                    { value = { attachment }, expected = attachment },
+                    { label = "a list of ids", value = { attachment },
+                        check = function(stored) test.eq(stored[1], attachment) end },
+                    { label = "a lookalike marker", value = lookalike,
+                        check = function(stored) test.eq(stored.session_form.artifact_id, lookalike.session_form.artifact_id) end },
                 }
                 for _, case in ipairs(cases) do
                     -- Each on an idle session: the message id is the server's.
                     local ctx = new_ctx()
                     local result: any, err = message_handlers.handle_message(ctx,
                         { data = { text = "with files", file_uuids = case.value } })
-                    test.is_nil(err)
+                    test.is_nil(err, case.label)
                     local row: any = message_repo.get(result.message_id)
-                    local stored = row.metadata and row.metadata.file_uuids
-                    if case.expected then
-                        test.eq(stored[1], case.expected)
-                    else
-                        test.is_nil(stored)
-                    end
+                    case.check(row.metadata.file_uuids)
+                    test.is_false(message_repo.is_form_answer(row), case.label .. ": not an answer row")
+                    test.eq(#message_repo.list_pending_answers(ctx.session_id, 50), 0,
+                        case.label .. ": not a pending answer")
                 end
             end)
 

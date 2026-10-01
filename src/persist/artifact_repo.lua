@@ -292,14 +292,13 @@ end
 --                       (adds "AND content_version = ?"); a mismatch or a
 --                       deleted row is reported as CONFLICT/NOT_FOUND.
 --
--- updates.meta replaces the whole meta object, as before. updates.meta_patch
--- (table) sets individual keys and updates.meta_remove (list of keys)
--- deletes individual keys, both read-merge-write against the current meta on
--- the same connection/transaction. The write is conditional on the meta
--- still being the text that was read, so a patch never drops a key another
--- writer set in between; on a lost race it reads and merges again. Stored
--- meta that is not a JSON object is an error, not an empty object. meta may
--- not be combined with meta_patch/meta_remove.
+-- updates.meta replaces the whole meta object. updates.meta_patch (table)
+-- sets individual keys, read-merge-write against the current meta on the
+-- same connection/transaction. The write is conditional on the meta still
+-- being the text that was read, so a patch never drops a key another writer
+-- set in between; on a lost race it reads and merges again. Stored meta that
+-- is not a JSON object is an error, not an empty object. meta may not be
+-- combined with meta_patch.
 --
 -- Returns { artifact_id, updated = true, content_version } on success, read
 -- back on the same connection so the caller always has the value it produced
@@ -313,13 +312,13 @@ function artifact_repo.update(artifact_id, updates, opts)
         return nil, "Updates must be a table"
     end
 
-    if updates.meta ~= nil and (updates.meta_patch ~= nil or updates.meta_remove ~= nil) then
-        return nil, "Cannot combine meta with meta_patch or meta_remove"
+    if updates.meta ~= nil and updates.meta_patch ~= nil then
+        return nil, "Cannot combine meta with meta_patch"
     end
 
     opts = opts or {}
 
-    local patching = updates.meta_patch ~= nil or updates.meta_remove ~= nil
+    local patching = updates.meta_patch ~= nil
 
     -- A full replace is encoded once; a patch is merged on every attempt.
     local replace_value = nil
@@ -362,19 +361,12 @@ function artifact_repo.update(artifact_id, updates, opts)
             read_raw = raw
             if artifact_repo._on_meta_read then artifact_repo._on_meta_read(conn, artifact_id) end
 
-            if updates.meta_patch then
-                for k, v in pairs(updates.meta_patch) do
-                    current_meta[k] = v
-                end
-            end
-            if updates.meta_remove then
-                for _, k in ipairs(updates.meta_remove) do
-                    current_meta[k] = nil
-                end
+            for k, v in pairs(updates.meta_patch) do
+                current_meta[k] = v
             end
 
             if next(current_meta) == nil then
-                -- An emptied meta is still an object.
+                -- An empty meta is still an object.
                 meta_value = "{}"
             else
                 local encoded, encode_err = json.encode(current_meta)
@@ -709,9 +701,7 @@ function artifact_repo.get_content(artifact_id)
     return results[1].content
 end
 
--- Update artifact content. Thin delegation to update() (content_version is
--- bumped inside the same UPDATE as before, and now read back on the same
--- connection as part of update()'s own result - see its comment).
+-- Update artifact content. Delegates to update(), which bumps content_version.
 function artifact_repo.update_content(artifact_id, content)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"

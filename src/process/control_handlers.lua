@@ -443,7 +443,6 @@ function control_handlers.control_forms(ctx, op)
             local _, meta_err = artifact_repo.update(stored.artifact_id, {
                 meta_patch = {
                     [form_meta.KEY] = form_artifact.new_meta({
-                        turn_id = op.turn_id,
                         call_id = op.call_id,
                         tool_message_id = op.tool_message_id,
                         created_cursor = stored.message_date,

@@ -188,7 +188,6 @@ local function define_tests()
             test.eq(submission.request_id, request_id)
             test.eq(submission.message_id, body.answer_message_id)
             test.eq(submission.answers.extras[1], "Gift wrap")
-            test.eq(artifact.meta.session_form.origin.turn_id ~= nil, true)
 
             local row: any = message_repo.get(body.answer_message_id)
             test.eq(row.type, consts.MSG_TYPE.USER)

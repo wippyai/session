@@ -721,25 +721,6 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
-local MAX_FILE_UUIDS = 100
-
--- The client's attachment ids, kept only when they are a list of UUID
--- strings. Message metadata is also matched as text (form answer markers),
--- so nothing else the client sends may reach it.
-local function file_uuids_of(value: any): {string}?
-    if type(value) ~= "table" then return nil end
-    local count = 0
-    for _ in pairs(value) do count = count + 1 end
-    if count == 0 or count > MAX_FILE_UUIDS then return nil end
-    local out: {string} = {}
-    for index = 1, count do
-        local item = value[index]
-        if type(item) ~= "string" or not string.match(item, consts.UUID_PATTERN) then return nil end
-        out[index] = item
-    end
-    return out
-end
-
 -- Persists one input message and announces a user message as received once it is stored.
 -- opts.tx writes on a caller's transaction; opts.announce = false leaves the
 -- announcement to the caller (after its commit).
@@ -751,9 +732,8 @@ function message_handlers.write_input(ctx, item, opts)
         msg_type = consts.MSG_TYPE.USER
     end
     local text = type(data.text) == "string" and data.text or ""
-    local file_uuids = file_uuids_of(data.file_uuids)
     local message_id, err = ctx.writer:add_message(msg_type, text, {
-        message_id = item.message_id, file_uuids = file_uuids
+        message_id = item.message_id, file_uuids = data.file_uuids
     }, opts.tx and { tx = opts.tx } or nil)
     if err then return nil, err end
     if opts.announce ~= false then message_handlers.announce_input(ctx, message_id, msg_type, item) end
@@ -764,7 +744,7 @@ function message_handlers.announce_input(ctx, message_id, msg_type, item)
     if msg_type ~= consts.MSG_TYPE.USER or not ctx.upstream then return end
     local data = type(item.data) == "table" and item.data or {}
     ctx.upstream:message_received(message_id, type(data.text) == "string" and data.text or "",
-        file_uuids_of(data.file_uuids))
+        data.file_uuids)
 end
 
 local function bus_state(ctx)
@@ -814,9 +794,8 @@ function message_handlers.handle_message(ctx, op)
     end
 
     local text = type(data.text) == "string" and data.text or ""
-    local file_uuids = file_uuids_of(data.file_uuids)
     local input = active and { state = "pending" } or nil
-    local metadata = { file_uuids = file_uuids }
+    local metadata = { file_uuids = data.file_uuids }
     if input then metadata.input = input end
     local message_id, err
     local committed_interaction
@@ -856,7 +835,7 @@ function message_handlers.handle_message(ctx, op)
         return nil, err or "Failed to persist input"
     end
 
-    ctx.upstream:message_received(message_id, text, file_uuids, input, op.request_id)
+    ctx.upstream:message_received(message_id, text, data.file_uuids, input, op.request_id)
     if committed_interaction then input_policy.accept_committed(ctx, committed_interaction) end
     -- After the running status, so their forms read as being answered.
     message_handlers.publish_admitted(answers)
