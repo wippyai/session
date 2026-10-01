@@ -103,10 +103,11 @@ entries:
               `answered_message` (not displayed), and `fields`. Every field is `{ id, type, label, description?,
               required }` plus the keys of its type: `choice` adds `options: [{value, label, description?}]`,
               `multiple`, `allow_other`; `text` and `textarea` add `min_length`, `max_length`, `placeholder` and
-              `default` (`text` also `pattern`); `number` adds `min`, `max`, `step`, `integer`, `placeholder`,
-              `default`; `email` adds `placeholder`, `default`; `date` adds `min`, `max` (`YYYY-MM-DD`) and `default`;
-              `checkbox` adds `default` (only `false`). When every field is `type: "choice"` the question-card UI
-              renders; otherwise the fields form renders.
+              `default` (`text` also `pattern`, a full-match expression that only the server evaluates and answers
+              with a 422 `pattern_mismatch` on the field); `number` adds `min`, `max`, `step`, `integer`,
+              `placeholder`, `default`; `email` adds `placeholder`, `default`; `date` adds `min`, `max` (`YYYY-MM-DD`)
+              and `default`; `checkbox` adds `default` (only `false`). When every field is `type: "choice"` the
+              question-card UI renders; otherwise the fields form renders.
           state:
             type: string
             default: active
