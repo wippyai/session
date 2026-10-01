@@ -278,25 +278,24 @@ local function check_free_text(field: any, value: any): (any, any)
     if type(value) ~= "string" then
         return refuse("invalid_type", "Must be text.")
     end
-    if #value > field.max_length * BYTES_PER_CHARACTER then
+    local multiline = field.type == "textarea"
+    -- Text is kept exactly as typed (no trim); only a value of nothing but
+    -- whitespace counts as no answer.
+    local _, length, problem = form_text.read_answer(value, {
+        max = field.max_length, raw_factor = BYTES_PER_CHARACTER, trim = false, multiline = multiline })
+    if problem == "blank" then return unanswered(field) end
+    if problem == "too_long" then
         return refuse("too_long", string.format("Must be at most %d characters.", field.max_length))
     end
-    local length = form_text.char_length(value)
-    if not length then
+    if problem == "not_utf8" then
         return refuse("invalid_text", "Must be valid UTF-8 text.")
     end
-    if form_text.has_control_characters(value, field.type == "textarea") then
-        return refuse("invalid_text", field.type == "textarea"
+    if problem then
+        return refuse("invalid_text", multiline
             and "Must not contain control characters other than tabs and line breaks."
             or "Must not contain control characters or line breaks.")
     end
-    -- Text is kept exactly as typed; only a value of nothing but whitespace
-    -- counts as no answer.
-    if form_text.is_whitespace_only(value) then return unanswered(field) end
-    if length > field.max_length then
-        return refuse("too_long", string.format("Must be at most %d characters.", field.max_length))
-    end
-    if length < (field.min_length or 0) then
+    if (length :: number) < (field.min_length or 0) then
         return refuse("too_short", string.format("Must be at least %d characters.", field.min_length))
     end
     if field.pattern ~= nil then
@@ -319,13 +318,15 @@ local function check_email(field: any, value: any): (any, any)
     if type(value) ~= "string" then
         return refuse("invalid_type", "Must be text.")
     end
-    if #value > field_values.LIMITS.EMAIL_MAX * RAW_EMAIL_MULTIPLIER then
-        return refuse("invalid_email", "Enter a valid email address.")
-    end
-    local address = form_text.trim(value)
-    if address == "" then return unanswered(field) end
-    local at = string.find(address, "@", 1, true)
-    if #address > field_values.LIMITS.EMAIL_MAX or (at ~= nil and at - 1 > field_values.LIMITS.EMAIL_LOCAL_MAX) then
+    -- Every problem with the text itself (too much of it, bad bytes, control
+    -- characters, too many characters) is one refusal; the address syntax and
+    -- the local part's length follow.
+    local address, _, problem = form_text.read_answer(value, {
+        max = field_values.LIMITS.EMAIL_MAX, raw_factor = RAW_EMAIL_MULTIPLIER, trim = true, multiline = false })
+    if problem == "blank" then return unanswered(field) end
+    if problem then return refuse("invalid_email", "Enter a valid email address.") end
+    local at = string.find(address :: string, "@", 1, true)
+    if at ~= nil and at - 1 > field_values.LIMITS.EMAIL_LOCAL_MAX then
         return refuse("invalid_email", "Enter a valid email address.")
     end
     if email_expression == nil then

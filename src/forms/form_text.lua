@@ -156,6 +156,35 @@ local function trim(text: string): string
     return string.sub(text, first, last)
 end
 
+-- The sequence every free-text answer takes: the Other text and the note of a
+-- choice, and the text, textarea and email fields. One function, so the six
+-- cannot drift apart. It stops at the first problem, in this order:
+--   1. the size guard: more than opts.max * opts.raw_factor bytes is
+--      "too_long", before anything scans the value. The factor is the bytes a
+--      character can take (4), with room for surrounding whitespace where the
+--      answer is trimmed;
+--   2. trim, when opts.trim, with the JavaScript set;
+--   3. UTF-8 ("not_utf8"), which counts the characters;
+--   4. control characters ("control_characters"); a tab and a line break are
+--      allowed when opts.multiline;
+--   5. blank ("blank"): nothing but whitespace, where a zero-width character
+--      is content;
+--   6. more than opts.max characters ("too_long").
+-- Returns the text (trimmed when opts.trim, else as it came) and its length
+-- in characters, or nil, nil and the problem. The codes and messages are the
+-- caller's: they differ per answer.
+local function read_answer(value: string,
+    opts: {max: number, raw_factor: number, trim: boolean, multiline: boolean}): (string?, number?, string?)
+    if #value > opts.max * opts.raw_factor then return nil, nil, "too_long" end
+    local kept = opts.trim and trim(value) or value
+    local length = char_length(kept)
+    if not length then return nil, nil, "not_utf8" end
+    if has_control_characters(kept, opts.multiline) then return nil, nil, "control_characters" end
+    if is_whitespace_only(kept) then return nil, nil, "blank" end
+    if length > opts.max then return nil, nil, "too_long" end
+    return kept, length, nil
+end
+
 local function add_error(errors: {any}, path: string, code: string, message: string)
     table.insert(errors, { path = path, code = code, message = message })
 end
@@ -230,6 +259,7 @@ form_text.is_blank = is_blank
 form_text.is_whitespace_only = is_whitespace_only
 form_text.has_control_characters = has_control_characters
 form_text.trim = trim
+form_text.read_answer = read_answer
 form_text.add_error = add_error
 form_text.check_text = check_text
 form_text.check_boolean = check_boolean

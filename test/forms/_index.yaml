@@ -61,6 +61,20 @@ entries:
       test: wippy.test:test
     method: run
 
+  - name: text_pipelines_test
+    kind: function.lua
+    meta:
+      name: Free-text answers
+      type: test
+      suite: session
+      comment: The sequence every free-text answer takes (size guard, trim, UTF-8, control characters, blank, length), pinned for the Other text and note of a choice and for the text, textarea and email fields, and the shared helper on its own
+    source: file://text_pipelines_test.lua
+    imports:
+      definition: wippy.session.forms:definition
+      form_text: wippy.session.forms:form_text
+      test: wippy.test:test
+    method: run
+
   - name: runtime_probe_test
     kind: function.lua
     meta:

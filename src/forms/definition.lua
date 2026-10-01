@@ -89,10 +89,7 @@ local function is_object(value: any): boolean
     return true
 end
 
-local char_length = form_text.char_length
 local is_blank = form_text.is_blank
-local has_control_characters = form_text.has_control_characters
-local trim = form_text.trim
 local add_error = form_text.add_error
 local check_text = form_text.check_text
 local check_boolean = form_text.check_boolean
@@ -316,6 +313,31 @@ local function option_index(field: any)
     return index
 end
 
+-- What each problem of form_text.read_answer is called and said for the Other
+-- text and for a note. Both are trimmed, as the form component does before
+-- sending, and may have tabs and line breaks. A blank Other text is refused;
+-- a blank note is dropped (check_noted).
+local OTHER_WORDING = {
+    too_long = { code = "too_long",
+        message = string.format("The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) },
+    not_utf8 = { code = "invalid_text", message = "The other answer must be valid UTF-8 text." },
+    control_characters = { code = "invalid_text",
+        message = "The other answer must not contain control characters other than tabs and line breaks." },
+    blank = { code = "blank", message = "Enter the other answer." },
+}
+local NOTE_WORDING = {
+    too_long = { code = "too_long",
+        message = string.format("A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) },
+    not_utf8 = { code = "invalid_text", message = "The note must be valid UTF-8 text." },
+    control_characters = { code = "invalid_text",
+        message = "The note must not contain control characters other than tabs and line breaks." },
+}
+
+local function refusal(wording: {[string]: any}, problem: string): any
+    local entry = wording[problem] :: any
+    return { code = entry.code, message = entry.message }
+end
+
 -- Validates the `{ other = "text" }` object. Returns the normalized object or
 -- nil plus the error.
 local function check_other(field: any, value: table): (any, any)
@@ -327,32 +349,12 @@ local function check_other(field: any, value: table): (any, any)
             return nil, { code = "invalid_type", message = "An other answer is an object with only \"other\"." }
         end
     end
-    local text = value.other
-    if type(text) ~= "string" then
+    if type(value.other) ~= "string" then
         return nil, { code = "invalid_type", message = "The other answer must be text." }
     end
-    -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it; a real answer never needs this much raw text.
-    if #text > definition.LIMITS.OTHER_TEXT * RAW_TEXT_MULTIPLIER then
-        return nil, { code = "too_long", message = string.format(
-            "The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) }
-    end
-    -- Outer whitespace is dropped, as the form component does before sending.
-    text = trim(text)
-    local length = char_length(text :: string)
-    if not length then
-        return nil, { code = "invalid_text", message = "The other answer must be valid UTF-8 text." }
-    end
-    if has_control_characters(text :: string, true) then
-        return nil, { code = "invalid_text", message = "The other answer must not contain control characters other than tabs and line breaks." }
-    end
-    if text == "" then
-        return nil, { code = "blank", message = "Enter the other answer." }
-    end
-    if length > definition.LIMITS.OTHER_TEXT then
-        return nil, { code = "too_long", message = string.format(
-            "The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) }
-    end
+    local text, _, problem = form_text.read_answer(value.other, {
+        max = definition.LIMITS.OTHER_TEXT, raw_factor = RAW_TEXT_MULTIPLIER, trim = true, multiline = true })
+    if problem then return nil, refusal(OTHER_WORDING, problem) end
     return { other = text }, nil
 end
 
@@ -374,26 +376,11 @@ local function check_noted(value: table, positions: {[string]: number}): (any, a
     if type(note) ~= "string" then
         return nil, { code = "invalid_type", message = "A note must be text." }
     end
-    -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it; a real note never needs this much raw text.
-    if #note > definition.LIMITS.NOTE_TEXT * RAW_TEXT_MULTIPLIER then
-        return nil, { code = "too_long", message = string.format(
-            "A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) }
-    end
-    note = trim(note)
-    local length = char_length(note :: string)
-    if not length then
-        return nil, { code = "invalid_text", message = "The note must be valid UTF-8 text." }
-    end
-    if has_control_characters(note :: string, true) then
-        return nil, { code = "invalid_text", message = "The note must not contain control characters other than tabs and line breaks." }
-    end
-    if note == "" then return chosen, nil end
-    if length > definition.LIMITS.NOTE_TEXT then
-        return nil, { code = "too_long", message = string.format(
-            "A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) }
-    end
-    return { value = chosen, note = note }, nil
+    local kept, _, problem = form_text.read_answer(note, {
+        max = definition.LIMITS.NOTE_TEXT, raw_factor = RAW_TEXT_MULTIPLIER, trim = true, multiline = true })
+    if problem == "blank" then return chosen, nil end
+    if problem then return nil, refusal(NOTE_WORDING, problem) end
+    return { value = chosen, note = kept }, nil
 end
 
 -- An answer object is either an own answer `{ other }` or a noted option
