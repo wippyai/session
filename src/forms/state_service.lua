@@ -191,7 +191,7 @@ function state_service.get_state(user_id, artifact_id)
     end
 
     return 200, ordered_json.object({
-        { "form_version", definition.FORM_VERSION },
+        { "form_version", form.version },
         { "artifact_id", artifact.artifact_id },
         { "session_id", artifact.session_id },
         { "status", submission and form_artifact.STATE.IDLE or form_artifact.STATE.ACTIVE },
@@ -214,14 +214,16 @@ local function is_integer_number(value)
     return type(value) == "number" and value == math.floor(value) and value >= 1
 end
 
--- Checks the versioned envelope. Returns the envelope or (nil, message).
-local function parse_envelope(raw_body)
+-- Checks the versioned envelope. The request carries the version of the form
+-- it answers (form.version), as read from GET. Returns the envelope or
+-- (nil, message).
+local function parse_envelope(raw_body, form_version)
     if raw_body == "" then return nil, "Request body is required" end
     local body, decode_err = json.decode(raw_body)
     if decode_err or type(body) ~= "table" or not definition.is_object(body) or next(body) == nil then
         return nil, "Request body must be a JSON object"
     end
-    if body.form_version ~= definition.FORM_VERSION then
+    if body.form_version ~= form_version then
         return nil, "Unsupported form_version"
     end
     local request_id = body.request_id
@@ -333,7 +335,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
         return failure(403, "forbidden", "You cannot answer forms in this session.")
     end
 
-    local envelope, envelope_err = parse_envelope(raw_body)
+    local envelope, envelope_err = parse_envelope(raw_body, form.version)
     if not envelope then return failure(400, "invalid_request", tostring(envelope_err)) end
     local request_id = envelope.request_id
 
@@ -349,6 +351,11 @@ function state_service.submit(user_id, artifact_id, raw_body)
     end
     local normalized, field_errors, form_errors = definition.validate_answers(form.definition, envelope.answers)
     if not normalized then
+        if form_errors and form_errors[1].code == "internal" then
+            -- The form itself cannot be checked (a stored pattern that no
+            -- longer compiles): nothing the user can fix.
+            return failure(500, "internal", "This form cannot be checked right now.")
+        end
         return 422, validation_body(field_errors, form_errors)
     end
 

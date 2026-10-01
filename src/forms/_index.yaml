@@ -1,9 +1,9 @@
 version: "1.0"
 namespace: wippy.session.forms
 
-# Session forms (V1: choice questions). The ask_user trait lets an agent ask
-# the user a structured question; the answer comes back as an ordinary user
-# message. Storage, turn handling and the state API live in the session
+# Session forms (V1: choice questions; V2: text, textarea, number, email, date
+# and checkbox fields). The ask_user trait lets an agent ask the user a
+# structured question; the answer comes back as an ordinary user message. Storage, turn handling and the state API live in the session
 # module: see src/process/control_handlers.lua (creation), src/api (state
 # endpoints) and src/process/message_handlers.lua (answer admission).
 entries:
@@ -30,17 +30,43 @@ entries:
       comment: UTF-8 decoding, code point counts, the JavaScript trim set, blank and control character tests and plain-text definition key checks, shared by the definition and the standard field values
     source: file://form_text.lua
 
+  # wippy.session.forms:form_pattern
+  - name: form_pattern
+    kind: library.lua
+    meta:
+      comment: The bounded regular expression subset a text field may carry (the same meaning in RE2 and in JavaScript with the u flag), its check and its full-match compile
+    source: file://form_pattern.lua
+    modules:
+      - text
+    imports:
+      form_text: wippy.session.forms:form_text
+
+  # wippy.session.forms:field_values
+  - name: field_values
+    kind: library.lua
+    meta:
+      comment: Standard field types (text, textarea, number, email, date, checkbox) - definition keys, answer checks with stable codes, canonical answer text and the question descriptions for an agent
+    source: file://field_values.lua
+    modules:
+      - json
+      - text
+      - time
+    imports:
+      form_text: wippy.session.forms:form_text
+      form_pattern: wippy.session.forms:form_pattern
+
   # wippy.session.forms:definition
   - name: definition
     kind: library.lua
     meta:
-      comment: Form definition normalizer and per-field answer validator (V1 choice fields) with stable error codes
+      comment: Form definition normalizer and per-field answer validator (choice fields here, standard fields through field_values) with stable error codes and the form version
     source: file://definition.lua
     modules:
       - json
     imports:
       ordered_json: wippy.session.forms:ordered_json
       form_text: wippy.session.forms:form_text
+      field_values: wippy.session.forms:field_values
 
   # wippy.session.forms:form_artifact
   - name: form_artifact
@@ -62,6 +88,7 @@ entries:
     source: file://answer_text.lua
     imports:
       definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
       ordered_json: wippy.session.forms:ordered_json
 
   # wippy.session.forms:state_service
@@ -99,8 +126,10 @@ entries:
       comment: Validates a form definition and asks the session to show it to the user
       llm_alias: ask_user
       llm_description: |
-        Show the user a short form of choice questions and end your turn. Use it only when
-        you need the user to decide between concrete options before you can continue.
+        Show the user a short form and end your turn. Use it when you need the user's
+        input before you can continue: a choice between concrete options (type "choice"),
+        or details such as free text ("text", "textarea"), a "number", an "email" address,
+        a "date" or a "checkbox".
         The user's answers arrive later as a user message whose <wippy-form-answers>
         element carries a JSON record. Ask at most one form per turn.
         Keep the whole definition under about 32 KiB. That is measured after normalization,
@@ -141,8 +170,8 @@ entries:
                   },
                   "type": {
                     "type": "string",
-                    "enum": ["choice"],
-                    "description": "Always \"choice\"."
+                    "enum": ["choice", "text", "textarea", "number", "email", "date", "checkbox"],
+                    "description": "\"choice\": pick from options (needs options). \"text\": one line of text. \"textarea\": several lines of text. \"number\": a number. \"email\": an email address. \"date\": a calendar date, YYYY-MM-DD. \"checkbox\": a yes/no box. Each type takes only its own keys below; any other key is an error."
                   },
                   "label": {
                     "type": "string",
@@ -154,11 +183,11 @@ entries:
                   },
                   "required": {
                     "type": "boolean",
-                    "description": "Whether an answer is required. Default false."
+                    "description": "Whether an answer is required. Default false. A required checkbox must be checked, so use it for consent."
                   },
                   "options": {
                     "type": "array",
-                    "description": "1-20 distinct choices, each at most 240 characters of text. A string is both the value and the label; use {\"value\", \"label\", \"description\"} when the stored value should differ from the text shown (value and label at most 240 characters each, description at most 1000).",
+                    "description": "choice only, required there: 1-20 distinct choices, each at most 240 characters of text. A string is both the value and the label; use {\"value\", \"label\", \"description\"} when the stored value should differ from the text shown (value and label at most 240 characters each, description at most 1000).",
                     "items": {
                       "anyOf": [
                         { "type": "string" },
@@ -177,14 +206,50 @@ entries:
                   },
                   "multiple": {
                     "type": "boolean",
-                    "description": "Allow selecting several options. Default false."
+                    "description": "choice only: allow selecting several options. Default false."
                   },
                   "allow_other": {
                     "type": "boolean",
-                    "description": "Offer an \"Other\" free-text answer. Default false."
+                    "description": "choice only: offer an \"Other\" free-text answer. Default false."
+                  },
+                  "min_length": {
+                    "type": "integer",
+                    "description": "text, textarea: fewest characters. Default 0."
+                  },
+                  "max_length": {
+                    "type": "integer",
+                    "description": "text: most characters, default 500, at most 2000. textarea: default and at most 8000. The text, textarea and email questions of one form hold at most 16000 characters together, counting the most each allows (an email counts 254), so lower max_length where less is enough."
+                  },
+                  "pattern": {
+                    "type": "string",
+                    "description": "text only: the whole answer must match this regular expression, at most 200 characters. Allowed: literal characters, . [a-z] [^0-9] \\d \\w ( ) (?: ) | * + ? {n} {n,m}, and a backslash before a punctuation character. Not allowed: lookahead or lookbehind, backreferences, named groups, flags, \\s \\b \\p, repeats of repeats such as (a+)+."
+                  },
+                  "placeholder": {
+                    "type": "string",
+                    "description": "text, textarea: a hint shown in the empty box, at most 200 characters."
+                  },
+                  "min": {
+                    "anyOf": [{ "type": "number" }, { "type": "string" }],
+                    "description": "number: the smallest allowed value, a number (at most 6 decimals, between -1000000000000 and 1000000000000). date: the earliest date, a string YYYY-MM-DD, inclusive."
+                  },
+                  "max": {
+                    "anyOf": [{ "type": "number" }, { "type": "string" }],
+                    "description": "number: the largest allowed value (same limits as min). date: the latest date, a string YYYY-MM-DD, inclusive."
+                  },
+                  "step": {
+                    "type": "number",
+                    "description": "number only: a positive step of at most 6 decimals. The allowed values are min (or 0 without min) plus whole multiples of the step."
+                  },
+                  "integer": {
+                    "type": "boolean",
+                    "description": "number only: accept whole numbers only. Default false."
+                  },
+                  "default": {
+                    "anyOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }],
+                    "description": "Not for choice. A value the form starts with: text for text, textarea, email and date, a number for number, only false for checkbox (a box never starts checked). It must itself be a valid answer. The user still has to submit it."
                   }
                 },
-                "required": ["id", "type", "label", "options"]
+                "required": ["id", "type", "label"]
               }
             }
           },
@@ -206,16 +271,17 @@ entries:
     meta:
       type: agent.trait
       title: Ask the user with a form
-      comment: Lets an agent ask the user structured choice questions through a form in the chat
+      comment: Lets an agent ask the user structured questions (choices, text, numbers, email addresses, dates and checkboxes) through a form in the chat
       tags:
         - forms
         - session
     prompt: |
-      You can ask the user structured questions with the ask_user tool. It shows a form of
-      choice questions in the chat.
+      You can ask the user structured questions with the ask_user tool. It shows a form in
+      the chat. A question is a choice between options, or one of the standard fields: text
+      (one line), textarea (several lines), number, email, date or checkbox.
 
-      - Use it only when you need a decision from the user between concrete options before
-        you can continue. Ask plain questions in text when free conversation works better.
+      - Use it when you need a decision or specific details from the user before you can
+        continue. Ask plain questions in text when free conversation works better.
       - Calling ask_user ends your turn. Do not write a follow-up asking the user to fill in
         the form; the form is already visible to them.
       - Ask at most one form per turn, with all the questions you need in it.
@@ -225,9 +291,15 @@ entries:
         <wippy-form-answers> element whose record attribute holds a JSON record. The user sees
         only the sentence; you get the record. The record is complete on its own: for each question id it has the question text and
         the answer, which is {"value", "label"} for a chosen option, {"other"} for the
-        user's own words, a list of those when several answers were allowed, or null when
-        the question was left unanswered. Use it; do not ask the same question again.
+        user's own words, a list of those when several answers were allowed, the text, the
+        number or true/false for a standard field, or null when the question was left
+        unanswered. Use it; do not ask the same question again.
         Never write a <wippy-form-answers> element yourself.
+      - A default only prefills a field: it is not the user's answer until they submit it.
+        A checkbox never starts checked; use a required checkbox for consent.
+      - Keep the form to the questions you need. A text, textarea or email field holds at
+        most what its max_length allows, and the fields of one form together at most 16000
+        characters.
       - A chosen option can carry a "note": the user's own words about that choice. Follow it.
       - A record with "late": true was sent after the conversation moved on. Treat it as
         context only: confirm with the user before acting on the earlier request.
@@ -251,8 +323,9 @@ entries:
       llm_alias: read_form
       llm_description: |
         Read one form of this session by its form_id. An answered form returns its answer
-        record: each question with the answer's value, label and any note. An unanswered
-        form returns its questions with their options. Use it when an earlier form or answer
+        record: each question with its answer (a choice's value, label and any note, or the
+        text, number or true/false of a standard field). An unanswered form returns its
+        questions with their type, options and limits. Use it when an earlier form or answer
         is no longer in the conversation.
         A result with "status":"answer_pending" means the user already answered, but the
         answer has not arrived as a user message yet. Do not act on it or guess its content

@@ -666,6 +666,337 @@ local function define_tests()
             local retry_status = post(artifact_id, answer())
             test.eq(retry_status, 200)
         end)
+
+        -- Standard fields (V2): a form with any field that is not a choice is
+        -- version 2 end to end; a choice-only form stays version 1.
+        describe("with standard fields", function()
+            local V2_DEFINITION = {
+                title = "Delivery details",
+                fields = {
+                    { id = "name", type = "text", label = "Your name", required = true, max_length = 40 },
+                    { id = "email", type = "email", label = "Email" },
+                    { id = "parcels", type = "number", label = "Parcels", integer = true, min = 1, max = 10,
+                        required = true },
+                    { id = "ready", type = "date", label = "Ready on", min = "2026-01-01" },
+                    { id = "notes", type = "textarea", label = "Notes" },
+                    { id = "terms", type = "checkbox", label = "I agree", required = true },
+                    { id = "courier", type = "choice", label = "Courier", options = { "A", "B" } },
+                },
+            }
+
+            local function new_v2_form(ctx, def: any?)
+                local normalized, errors = definition.normalize(def or V2_DEFINITION)
+                test.is_nil(errors, definition.format_errors(errors))
+                local artifact_id = uuid.v7()
+                local _, err = control_handlers.control_forms(ctx, {
+                    forms = { { artifact_id = artifact_id, definition = normalized } },
+                    turn_id = "turn-" .. uuid.v7(), call_id = "call-1", tool_message_id = "tool-row-1",
+                })
+                test.is_nil(err)
+                return artifact_id
+            end
+
+            local function v2_answers()
+                return { name = "Ann Lee", email = "  ann@example.org ", parcels = 3.0, ready = "2026-05-06",
+                    notes = "Line one\nLine two", terms = true, courier = "A" }
+            end
+
+            local function v2_request(answers: any?, request_id: any?, version: any?)
+                return { form_version = 2, request_id = request_id or uuid.v7(), expected_content_version = version or 1,
+                    answers = answers or v2_answers() }
+            end
+
+            -- Replaces the stored content of a form, as an older or damaged
+            -- record would hold it.
+            local function rewrite_content(artifact_id: string, change: any)
+                local row: any = artifact_repo.get(artifact_id)
+                local content: any = json.decode(tostring(row.content))
+                change(content)
+                local db, db_err = sql.get(consts.get_db_resource())
+                test.is_nil(db_err)
+                local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
+                    { json.encode(content), artifact_id })
+                db:release()
+                test.is_nil(update_err)
+            end
+
+            it("stores a form with a standard field as version 2 and a choice-only form as version 1", function()
+                local ctx = new_session()
+                local v2_id = new_v2_form(ctx)
+                local v1_id = new_form(ctx)
+                local v2_row: any = artifact_repo.get(v2_id)
+                local v1_row: any = artifact_repo.get(v1_id)
+                test.eq(json.decode(tostring(v2_row.content)).props["form-version"], 2)
+                test.eq(json.decode(tostring(v1_row.content)).props["form-version"], 1)
+
+                local _, v2_state = get(v2_id)
+                test.eq(v2_state.form_version, 2)
+                local _, v1_state = get(v1_id)
+                test.eq(v1_state.form_version, 1)
+            end)
+
+            it("reads the definition with its defaults filled in", function()
+                local ctx = new_session()
+                local _, state = get(new_v2_form(ctx))
+                local fields = state.definition.fields
+                test.eq(fields[1].type, "text")
+                test.eq(fields[1].min_length, 0)
+                test.eq(fields[1].max_length, 40)
+                test.eq(fields[2].type, "email")
+                test.eq(fields[3].integer, true)
+                test.eq(fields[3].min, 1)
+                test.eq(fields[5].max_length, 8000)
+                test.eq(fields[6].type, "checkbox")
+                test.eq(fields[7].options[1].value, "A")
+            end)
+
+            it("answers 400 when the envelope names another form version, in both directions", function()
+                local ctx = new_session()
+                local v2_id = new_v2_form(ctx)
+                local v1_id = new_form(ctx)
+                local old_envelope = v2_request()
+                old_envelope.form_version = 1
+                local status, body = post(v2_id, old_envelope)
+                test.eq(status, 400)
+                test.eq(body.code, "invalid_request")
+                local new_envelope = answer()
+                new_envelope.form_version = 2
+                local v1_status, v1_body = post(v1_id, new_envelope)
+                test.eq(v1_status, 400)
+                test.eq(v1_body.code, "invalid_request")
+                test.eq(#user_rows(ctx.session_id), 0)
+                test.eq(post(v2_id, v2_request()), 200)
+                test.eq(post(v1_id, answer()), 200)
+            end)
+
+            it("accepts standard answers, stores them canonically and reads them back", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local status, body = post(artifact_id, v2_request())
+                test.eq(status, 200)
+                test.eq(body.success, true)
+
+                local submission = artifact_repo.get(artifact_id).meta.session_form.submission
+                test.eq(submission.answers.email, "ann@example.org", "an address is stored trimmed")
+                test.eq(submission.answers.parcels, 3)
+                test.eq(math.type(submission.answers.parcels), "integer", "a whole number is stored as an integer")
+                test.eq(submission.answers.terms, true)
+                test.eq(submission.answers.notes, "Line one\nLine two")
+                test.eq(submission.answers.courier, "A")
+
+                local status_after, state, raw = get(artifact_id)
+                test.eq(status_after, 200)
+                test.eq(state.data.name, "Ann Lee")
+                test.eq(state.data.parcels, 3)
+                test.contains(raw, '"parcels":3,')
+                test.contains(raw, '"terms":true,')
+                test.contains(raw, '"email":"ann@example.org",')
+            end)
+
+            it("keeps an optional checkbox that was left unchecked as an answer", function()
+                local ctx = new_session()
+                local def = { title = "Consent", fields = {
+                    { id = "news", type = "checkbox", label = "Send me news" },
+                    { id = "terms", type = "checkbox", label = "Terms", required = true },
+                } }
+                local artifact_id = new_v2_form(ctx, def)
+                local status = post(artifact_id, v2_request({ news = false, terms = true }))
+                test.eq(status, 200)
+                local _, state, raw = get(artifact_id)
+                test.eq(state.data.news, false)
+                test.contains(raw, '"news":false')
+            end)
+
+            it("returns a stable code for each field that is not valid", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local status, body = post(artifact_id, v2_request({
+                    name = "", email = "nope", parcels = 11, ready = "2025-12-31", terms = false, notes = 5,
+                    courier = "Z", ghost = 1,
+                }))
+                test.eq(status, 422)
+                test.eq(body.code, "validation_failed")
+                test.eq(body.errors.name[1].code, "required")
+                test.eq(body.errors.email[1].code, "invalid_email")
+                test.eq(body.errors.parcels[1].code, "above_max")
+                test.eq(body.errors.ready[1].code, "below_min")
+                test.eq(body.errors.terms[1].code, "required")
+                test.eq(body.errors.notes[1].code, "invalid_type")
+                test.eq(body.errors.courier[1].code, "invalid_option")
+                test.eq(body.form_errors[1].code, "unknown_field")
+                test.is_nil(string.find(tostring(body.errors.email[1].message), "nope", 1, true), "no value is echoed")
+                test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                test.eq(#user_rows(ctx.session_id), 0)
+
+                local string_status, as_string = post(artifact_id, v2_request({ name = "A", parcels = "3", terms = true }))
+                test.eq(string_status, 422)
+                test.eq(as_string.errors.parcels[1].code, "invalid_type", "a numeric string is not a number")
+            end)
+
+            it("reads a null answer as an answer not sent", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local body = '{"form_version":2,"request_id":"r-null","expected_content_version":1,"answers":'
+                    .. '{"name":"Ann","parcels":2,"terms":true,"email":null,"notes":null}}'
+                local status = post(artifact_id, body)
+                test.eq(status, 200)
+                local answers = artifact_repo.get(artifact_id).meta.session_form.submission.answers
+                test.is_nil(answers.email)
+                test.is_nil(answers.notes)
+                test.eq(answers.name, "Ann")
+            end)
+
+            it("answers 400 for a number the runtime cannot read", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local body = '{"form_version":2,"request_id":"r-big","answers":{"name":"Ann","parcels":1e400,"terms":true}}'
+                local status, response = post(artifact_id, body)
+                test.eq(status, 400)
+                test.eq(response.code, "invalid_request")
+                test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
+            it("replays a retry whose keys, spacing and number spellings differ", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local request_id = uuid.v7()
+                local first_body = '{"form_version":2,"request_id":' .. (json.encode(request_id))
+                    .. ',"expected_content_version":1,"answers":{"name":"Ann Lee","email":"ann@example.org",'
+                    .. '"parcels":3,"ready":"2026-05-06","terms":true,"courier":"A"}}'
+                local retry_body = '{"answers":{"courier":"A","terms":true,"parcels":3.0,"ready":"2026-05-06",'
+                    .. '"email":"  ann@example.org  ","name":"Ann Lee"},"expected_content_version":1,'
+                    .. '"request_id":' .. (json.encode(request_id)) .. ',"form_version":2}'
+                local status, first = post(artifact_id, first_body)
+                test.eq(status, 200)
+                test.eq(first.replayed, false)
+                local retry_status, retry = post(artifact_id, retry_body)
+                test.eq(retry_status, 200, "a retry, not a request_conflict")
+                test.eq(retry.replayed, true)
+                test.eq(retry.answer_message_id, first.answer_message_id)
+                test.eq(#user_rows(ctx.session_id), 1)
+                test.eq(#wakes, 1)
+            end)
+
+            it("rejects the same request id with a different standard answer", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local request = v2_request()
+                test.eq(post(artifact_id, request), 200)
+                request.answers.parcels = 4
+                local status, body = post(artifact_id, request)
+                test.eq(status, 409)
+                test.eq(body.code, "request_conflict")
+                request.answers.parcels = 3
+                request.answers.terms = true
+                request.answers.notes = "Line one\nLine two "
+                local note_status, note_body = post(artifact_id, request)
+                test.eq(note_status, 409, "text is stored as typed, so trailing spaces are a different answer")
+                test.eq(note_body.code, "request_conflict")
+            end)
+
+            it("writes the answer message with the version and the answers as JSON literals", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local status, body = post(artifact_id, v2_request({ name = "Ann", parcels = 2.0, terms = true }))
+                test.eq(status, 200)
+                local row: any = message_repo.get(body.answer_message_id)
+                test.contains(row.data, '"form_version":2,')
+                test.contains(row.data, '"name":{"question":"Your name","answer":"Ann"}')
+                test.contains(row.data, '"parcels":{"question":"Parcels","answer":2}')
+                test.contains(row.data, '"terms":{"question":"I agree","answer":true}')
+                test.contains(row.data, '"email":{"question":"Email","answer":null}')
+                test.contains(row.data, '"courier":{"question":"Courier","answer":null}')
+            end)
+
+            it("refuses a stored version lower than the definition needs and any unknown version", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 1 end)
+                local status, body = get(artifact_id)
+                test.eq(status, 400)
+                test.eq(body.code, "not_a_form")
+                local post_status, post_body = post(artifact_id, v2_request())
+                test.eq(post_status, 400)
+                test.eq(post_body.code, "not_a_form")
+
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 3 end)
+                test.eq(get(artifact_id), 400)
+
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 2 end)
+                test.eq(get(artifact_id), 200)
+            end)
+
+            it("answers 500, not 422, when a stored pattern no longer compiles, and still reads the form", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
+                local artifact_id = new_v2_form(ctx, def)
+                rewrite_content(artifact_id, function(content)
+                    content.props.definition.fields[1].pattern = "("
+                end)
+                test.eq(get(artifact_id), 200)
+                local status, body = post(artifact_id, v2_request({ code = "ABC" }))
+                test.eq(status, 500)
+                test.eq(body.code, "internal")
+                test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
+            -- P6: the largest answers a valid form can take, with the
+            -- characters the record escapes six-fold, through acceptance and
+            -- the answer message.
+            it("accepts the largest text a form can hold, and keeps it exact in the record", function()
+                local ctx = new_session()
+                local def = { title = "Letters", fields = {
+                    { id = "first", type = "textarea", label = "First" },
+                    { id = "second", type = "textarea", label = "Second" },
+                } }
+                local artifact_id = new_v2_form(ctx, def)
+                local text = string.rep("'<>&", 2000)
+                test.eq(#text, 8000)
+                -- Written by hand: a browser's JSON.stringify leaves ', < > and &
+                -- as they are, where json.encode would write < > & as six-byte
+                -- escapes and push the body over the cap.
+                local request = '{"form_version":2,"request_id":"r-largest","expected_content_version":1,'
+                    .. '"answers":{"first":"' .. text .. '","second":"' .. text .. '"}}'
+                test.lt(#request, state_service.MAX_BODY_BYTES)
+                local status, body = post(artifact_id, request)
+                test.eq(status, 200)
+
+                local row: any = message_repo.get(body.answer_message_id)
+                test.gt(#row.data, 90000, "each of the 16,000 characters is written as a six-byte escape")
+                local record = string.match(tostring(row.data), "record='([^']*)'")
+                test.not_nil(record)
+                local decoded: any = json.decode(record)
+                test.eq(decoded.answers.first.answer, text)
+                test.eq(decoded.answers.second.answer, text)
+
+                local _, state = get(artifact_id)
+                test.eq(state.data.first, text)
+                local stored = artifact_repo.get(artifact_id).meta.session_form.submission.answers
+                test.eq(stored.second, text)
+            end)
+
+            it("accepts the largest request a valid form can send under the 64 KiB body cap", function()
+                local ctx = new_session()
+                local fields = {}
+                local answers = {}
+                for index = 1, 20 do
+                    local id = string.format("f%037d_x", index)
+                    test.eq(#id, 40)
+                    table.insert(fields, { id = id, type = index == 20 and "textarea" or "text", label = "Q" .. index,
+                        max_length = 800 })
+                    answers[id] = string.rep("😀", 800)
+                end
+                local artifact_id = new_v2_form(ctx, { title = "Everything", fields = fields })
+                local request_id = string.rep("r", 128)
+                local raw = json.encode(v2_request(answers, request_id))
+                test.gt(#raw, 64000)
+                test.lt(#raw, state_service.MAX_BODY_BYTES, "a valid form never needs more than the cap")
+                local status, body = post(artifact_id, raw)
+                test.eq(status, 200, tostring(body and body.message))
+                local row: any = message_repo.get(body.answer_message_id)
+                test.gt(#row.data, 64000)
+            end)
+        end)
     end)
 end
 

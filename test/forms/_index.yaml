@@ -20,6 +20,46 @@ entries:
       test: wippy.test:test
     method: run
 
+  - name: fixtures
+    kind: fs.directory
+    meta:
+      comment: Shared JSON fixtures for the form rules, such as the V2 conformance cases the form component is tested against too
+    directory: ./forms/fixtures
+
+  - name: v2_conformance_test
+    kind: function.lua
+    meta:
+      name: V2 standard fields conformance
+      type: test
+      suite: session
+      comment: Every case of the shared V2 conformance fixture through the definition normalizer and the answer validator
+    source: file://v2_conformance_test.lua
+    modules:
+      - json
+      - fs
+    imports:
+      definition: wippy.session.forms:definition
+      test: wippy.test:test
+    method: run
+
+  - name: field_values_test
+    kind: function.lua
+    meta:
+      name: Standard field rules
+      type: test
+      suite: session
+      comment: Decimal number text and step arithmetic, the pattern subset checker, a stored form whose pattern no longer compiles, the ask_user schema against the accepted keys, and the shared text helpers
+    source: file://field_values_test.lua
+    modules:
+      - json
+      - registry
+    imports:
+      field_values: wippy.session.forms:field_values
+      form_pattern: wippy.session.forms:form_pattern
+      form_text: wippy.session.forms:form_text
+      test: wippy.test:test
+    method: run
+
   - name: runtime_probe_test
     kind: function.lua
     meta:

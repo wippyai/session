@@ -40,6 +40,16 @@ local DEFINITION = {
     },
 }
 
+-- A form with standard fields (version 2).
+local DETAILS_DEFINITION = {
+    title = "Delivery details",
+    fields = {
+        { id = "name", type = "text", label = "Your name", required = true, max_length = 40 },
+        { id = "parcels", type = "number", label = "Parcels", integer = true, min = 1 },
+        { id = "terms", type = "checkbox", label = "I agree", required = true },
+    },
+}
+
 local function define_tests()
     describe("session forms in the session process", function()
         local user_id = ""
@@ -236,9 +246,9 @@ local function define_tests()
             return artifacts[1].artifact_id
         end
 
-        local function submit(artifact_id, answers)
+        local function submit(artifact_id, answers, form_version)
             local status, body = state_service.submit(user_id, artifact_id, json.encode({
-                form_version = 1, request_id = uuid.v7(), expected_content_version = 1,
+                form_version = form_version or 1, request_id = uuid.v7(), expected_content_version = 1,
                 answers = answers or { delivery = "Courier" },
             }))
             test.eq(status, 200, body)
@@ -476,6 +486,39 @@ local function define_tests()
                 test.contains(tostring(call_row.metadata.result), "fields[0].options[1]: duplicate_option")
                 test.eq(#artifact_repo.list_by_session(ctx.session_id), 0)
                 test.eq(#rows_of(ctx, consts.MSG_TYPE.ARTIFACT), 0)
+            end)
+
+            it("stores a form with standard fields as version 2 and ends the turn", function()
+                local ctx = new_ctx()
+                local result, err = ask(ctx, DETAILS_DEFINITION)
+                test.is_nil(err)
+                test.is_false(has_continue(result), "a created form ends the turn")
+                local artifact: any = artifact_repo.get(form_id_of(ctx))
+                local content = json.decode(tostring(artifact.content))
+                test.eq(content.props["form-version"], 2)
+                test.eq(content.props.definition.fields[1].type, "text")
+                test.eq(content.props.definition.fields[1].max_length, 40)
+                test.eq(content.props.definition.fields[1].min_length, 0)
+                test.eq(content.props.definition.fields[2].integer, true)
+                test.eq(artifact.meta.session_form.version, 1, "the record layout is a separate number from the form version")
+            end)
+
+            it("returns a tool error naming the path and code of each standard field that is not valid", function()
+                local ctx = new_ctx()
+                local result, err, call_id, ids = ask(ctx, { title = "Broken", fields = {
+                    { id = "n", type = "number", label = "N", min = 5, max = 1 },
+                    { id = "c", type = "text", label = "C", pattern = "(?=a)a" },
+                    { id = "d", type = "date", label = "D", default = "2023-02-30" },
+                } })
+                test.is_nil(err)
+                test.is_true(has_continue(result), "the agent gets a step to correct the definition")
+                local call_row = message_repo.get((ids :: any)[call_id])
+                test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                local text = tostring(call_row.metadata.result)
+                test.contains(text, "fields[0].min: invalid_range")
+                test.contains(text, "fields[1].pattern: unsupported_pattern")
+                test.contains(text, "fields[2].default: invalid_default")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 0)
             end)
 
             it("allows one form per turn and marks the refused call as an error", function()
@@ -860,6 +903,33 @@ local function define_tests()
                 local none, foreign_err = foreign:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(none)
                 test.contains(tostring(foreign_err), "No form")
+            end)
+
+            it("reads a form with standard fields, then its answer record with the values as typed", function()
+                local ctx = new_ctx()
+                ask(ctx, DETAILS_DEFINITION)
+                local form_id = form_id_of(ctx)
+                local caller = funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
+                local open = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(open.message, '"status":"unanswered"')
+                test.contains(open.message,
+                    '"name":{"question":"Your name","type":"text","required":true,"min_length":0,"max_length":40}')
+                test.contains(open.message,
+                    '"parcels":{"question":"Parcels","type":"number","required":false,"integer":true,"min":1}')
+                test.contains(open.message, '"terms":{"question":"I agree","type":"checkbox","required":true}')
+
+                submit(form_id, { name = "Ann Lee", parcels = 3, terms = true }, 2)
+                local hidden = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(hidden.message, '"status":"answer_pending"')
+                test.is_false(string.find(hidden.message, "Ann Lee", 1, true) ~= nil)
+
+                message_handlers.admit_in_order(ctx, nil)
+                local answered = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(answered.message, '"status":"answered"')
+                test.contains(answered.message, '"form_version":2')
+                test.contains(answered.message, '"name":{"question":"Your name","answer":"Ann Lee"}')
+                test.contains(answered.message, '"parcels":{"question":"Parcels","answer":3}')
+                test.contains(answered.message, '"terms":{"question":"I agree","answer":true}')
             end)
 
             it("gives read_form in a running turn no values of an answer the turn may not see yet", function()

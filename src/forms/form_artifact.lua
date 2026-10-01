@@ -25,7 +25,7 @@ function form_artifact.build_content(def: any, state: string): (string?, string?
         specification = form_artifact.SPECIFICATION,
         wippy = { tagName = form_artifact.TAG_NAME },
         props = {
-            ["form-version"] = definition.FORM_VERSION,
+            ["form-version"] = definition.version_of(def),
             definition = def,
             state = state,
         },
@@ -44,8 +44,10 @@ function form_artifact.new_meta(origin: any): any
 end
 
 -- Reads a form out of an artifact row (meta already decoded). Returns
--- { definition, state, meta } or nil plus a reason when the artifact is not
--- a supported form.
+-- { definition, version, state, meta, content } or nil plus a reason when the
+-- artifact is not a supported form. `version` is the form version stored in
+-- the content (1 for choices only, 2 with standard fields; see
+-- definition.version_of).
 function form_artifact.parse(artifact: any): (any, string?)
     local meta = type(artifact) == "table" and form_meta.of(artifact.meta) or nil
     if not meta or meta.version ~= form_artifact.META_VERSION then
@@ -63,7 +65,8 @@ function form_artifact.parse(artifact: any): (any, string?)
         or type(content.props) ~= "table" then
         return nil, "Form content is not a wippy-form package"
     end
-    if content.props["form-version"] ~= definition.FORM_VERSION then
+    local version = content.props["form-version"]
+    if version ~= definition.VERSIONS.CHOICES and version ~= definition.VERSIONS.FIELDS then
         return nil, "Unsupported form version"
     end
     -- The stored definition was normalized at creation; normalizing again
@@ -73,8 +76,14 @@ function form_artifact.parse(artifact: any): (any, string?)
     if not def then
         return nil, "Stored form definition is invalid: " .. definition.format_errors(def_errors)
     end
+    -- A record labeled with a lower version than its fields need would be
+    -- read by an older component as a form it can render.
+    if version < definition.version_of(def) then
+        return nil, "Unsupported form version"
+    end
     return {
         definition = def,
+        version = version,
         state = content.props.state,
         meta = meta,
         content = content,

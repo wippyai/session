@@ -1,8 +1,12 @@
 local json = require("json")
 local ordered_json = require("ordered_json")
+local form_text = require("form_text")
+local field_values = require("field_values")
 
--- Session forms V1 contract: the definition an agent authors (choice fields
--- only) and the answers a user submits for it.
+-- Session forms contract: the definition an agent authors and the answers a
+-- user submits for it. A field is a choice (defined here) or one of the
+-- standard types text, textarea, number, email, date and checkbox (defined
+-- in field_values.lua).
 --
 -- Pure functions, no I/O. Every rejection carries a stable `code`, a `path`
 -- (definition) or field id (answers) and a plain `message`. Array positions
@@ -15,7 +19,18 @@ local ordered_json = require("ordered_json")
 
 local definition = {}
 
-definition.FORM_VERSION = 1
+-- The version of a form follows its definition: a form of choice fields only
+-- is version 1, exactly as it was before standard fields existed, and a form
+-- with any other field is version 2. A reader that only knows version 1 shows
+-- a notice for a version 2 form instead of rendering it wrongly.
+definition.VERSIONS = { CHOICES = 1, FIELDS = 2 }
+
+function definition.version_of(def: any): integer
+    for _, field in ipairs(def.fields) do
+        if field.type ~= "choice" then return definition.VERSIONS.FIELDS end
+    end
+    return definition.VERSIONS.CHOICES
+end
 
 definition.LIMITS = {
     TITLE = 160,
@@ -74,7 +89,6 @@ local function is_object(value: any): boolean
     return true
 end
 
-local decode_at = form_text.decode_at
 local char_length = form_text.char_length
 local is_blank = form_text.is_blank
 local has_control_characters = form_text.has_control_characters
@@ -117,7 +131,9 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         return nil
     end
     local before = #errors
-    check_unknown_keys(errors, path, raw, FIELD_KEYS)
+    -- The keys a field may carry depend on its type.
+    local standard = field_values.is_standard(raw.type)
+    check_unknown_keys(errors, path, raw, standard and field_values.KEYS[raw.type] or FIELD_KEYS)
 
     local id = raw.id
     if id == nil then
@@ -135,8 +151,9 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
 
     if raw.type == nil then
         add_error(errors, path .. ".type", "required", "A field type is required.")
-    elseif raw.type ~= "choice" then
-        add_error(errors, path .. ".type", "unsupported_type", "Only the \"choice\" type is supported.")
+    elseif raw.type ~= "choice" and not standard then
+        add_error(errors, path .. ".type", "unsupported_type",
+            "Supported types: " .. field_values.TYPE_NAMES .. ".")
     end
 
     local label = check_text(errors, path .. ".label", raw.label,
@@ -144,6 +161,15 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
     local description = check_text(errors, path .. ".description", raw.description,
         { required = false, max = definition.LIMITS.DESCRIPTION, strict = strict, multiline = true })
     local required = check_boolean(errors, path .. ".required", raw.required)
+
+    if standard then
+        local field = field_values.normalize(errors, path, raw, {
+            id = id, type = raw.type, label = label, description = description, required = required,
+        }, strict)
+        if #errors > before then return nil end
+        return field
+    end
+
     local multiple = check_boolean(errors, path .. ".multiple", raw.multiple)
     local allow_other = check_boolean(errors, path .. ".allow_other", raw.allow_other)
 
@@ -235,6 +261,14 @@ function definition.normalize(raw: any, opts: {stored: boolean?}?): (any, {any}?
         for index, raw_field in ipairs(raw.fields) do
             local field = normalize_field(errors, string.format("fields[%d]", index - 1), raw_field, seen_ids, strict)
             if field then table.insert(fields, field) end
+        end
+        -- Every answer of the form must fit the request body cap: see
+        -- field_values.LIMITS.TEXT_BUDGET. Not applied to a stored form.
+        local budget = field_values.text_budget(fields)
+        if strict and budget > field_values.LIMITS.TEXT_BUDGET then
+            add_error(errors, "fields", "text_budget_exceeded", string.format(
+                "The text, textarea and email fields can hold %d characters in all, over the %d allowed. "
+                .. "Lower max_length on some of them, or use fewer.", budget, field_values.LIMITS.TEXT_BUDGET))
         end
     end
 
@@ -443,7 +477,10 @@ end
 --   field_errors       - { [field_id] = { { code, message } } } (first
 --                        violation per field), or nil when valid
 --   form_errors        - list of { code, message, field? } for problems that
---                        belong to no defined field, or nil when valid
+--                        belong to no defined field, or nil when valid. The
+--                        code "internal" is a fault in the stored form (a
+--                        pattern that no longer compiles), not in the
+--                        answers: the caller answers 500, not 422
 function definition.validate_answers(def: any, answers: any): (any, any, any)
     local field_errors = {}
     local form_errors = {}
@@ -473,17 +510,27 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
     local has_field_errors = false
     for _, field in ipairs(def.fields) do
         local value = answers[field.id]
-        local positions = option_index(field)
         local result, err = nil, nil
-        if value ~= nil then
-            if field.multiple then
-                result, err = check_multiple(field, value, positions)
-            else
-                result, err = check_single(field, value, positions)
+        if field.type == "choice" then
+            local positions = option_index(field)
+            if value ~= nil then
+                if field.multiple then
+                    result, err = check_multiple(field, value, positions)
+                else
+                    result, err = check_single(field, value, positions)
+                end
             end
-        end
-        if not err and result == nil and field.required then
-            err = required_error()
+            if not err and result == nil and field.required then
+                err = required_error()
+            end
+        else
+            -- A standard field decides `required` itself: an unchecked
+            -- required checkbox is a value (false) that still fails it.
+            result, err = field_values.check_answer(field, value)
+            if err and err.internal then
+                -- A fault in the stored form, not in the answers.
+                return nil, nil, { { code = "internal", field = field.id, message = err.message } }
+            end
         end
         if err then
             field_errors[field.id] = { err }
@@ -499,11 +546,12 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
     return normalized, nil, nil
 end
 
--- Encodes one normalized answer value (string, { value, note }, { other }, or
--- a list of them) with a fixed key order, so equal answers encode equally.
+-- Encodes one normalized answer value (a string, a number or a boolean,
+-- { value, note }, { other }, or a list of choice answers) with a fixed key
+-- order, so equal answers encode equally.
 local function encode_value(value: any): string
-    if type(value) == "string" then
-        return (json.encode(value))
+    if type(value) ~= "table" then
+        return field_values.literal(value)
     end
     if is_array(value) and #value > 0 then
         local parts = {}
