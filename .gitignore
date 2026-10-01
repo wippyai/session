@@ -11,6 +11,12 @@
 /vendor
 /frontend/*/node_modules
 
+# scripts/check-ui.mjs builds a fresh copy here (sibling-depth to dist/ and
+# answers-dist/, so sourcemap-relative paths line up) and always deletes it
+# afterward; ignored defensively in case a run is interrupted.
+/src/forms/ui/.check-ui-tmp-dist
+/src/forms/ui/.check-ui-tmp-answers-dist
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
