@@ -1,8 +1,7 @@
 /**
- * Generates a client request id for a form submission. `crypto.randomUUID`
- * is available in every browser the Host targets; the fallback only guards
- * against an unusual embedding context (e.g. a non-secure origin, where the
- * Crypto API is restricted) so submission never hard-fails on id generation.
+ * A client request id for one submit. The fallback covers an embedding
+ * context without `crypto.randomUUID`, such as a non-secure origin, so
+ * generating an id never stops a submit.
  */
 export function generateRequestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')

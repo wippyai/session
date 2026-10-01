@@ -85,15 +85,6 @@
   outline-offset: 2px;
 }
 
-.w-form__sr {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-}
-
 .w-form__code {
   font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
   font-size: 0.9em;

@@ -2,35 +2,26 @@
 import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import { computed } from 'vue'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
-/** Counter/nav + question text + collapse chevron — the line above every question and the review step. */
+/** The line above every question and the review step: the counter with its buttons, the question text and the collapse button. */
 const props = defineProps<{
   multi: boolean
   index: number
   n: number
   review: boolean
-  /** Raw (backtick-aware) question text — ignored in review, where a fixed review heading shows instead. */
+  /** The question text, which may contain backticks. A fixed heading replaces it in the review. */
   questionText: string
   collapsed: boolean
   qid: string
 }>()
 
 const emit = defineEmits<{
-  prev: []
-  next: []
-  toggleCollapse: []
+  'prev': []
+  'next': []
+  'toggle-collapse': []
 }>()
-
-const headerPart = computed(() => partClass('header', !props.multi && 'single'))
-const navPart = computed(() => partClass('nav'))
-const prevPart = computed(() => partClass('prev'))
-const counterPart = computed(() => partClass('counter'))
-const nextPart = computed(() => partClass('next'))
-const questionPart = computed(() => partClass('question'))
-const actionsPart = computed(() => partClass('actions'))
-const collapsePart = computed(() => partClass('collapse'))
 
 const counterText = computed(() => props.review ? 'Review' : `${props.index + 1}/${props.n}`)
 const counterSrText = computed(() => props.review ? 'Review' : `Question ${props.index + 1} of ${props.n}`)
@@ -38,23 +29,18 @@ const nextLabel = computed(() => props.index === props.n - 1 ? 'Review answers' 
 </script>
 
 <template>
-  <div
-    :part="headerPart.part"
-    :class="headerPart.class"
-  >
+  <div v-bind="partAttrs('header', !multi && 'single')">
     <div
       v-if="multi"
-      :part="navPart.part"
-      :class="navPart.class"
+      v-bind="partAttrs('nav')"
       role="group"
       aria-label="Questions"
     >
       <Button
+        v-bind="partAttrs('prev')"
         type="button"
         text
         size="small"
-        :part="prevPart.part"
-        :class="prevPart.class"
         aria-label="Previous question"
         title="Previous question"
         :disabled="index === 0"
@@ -64,19 +50,15 @@ const nextLabel = computed(() => props.index === props.n - 1 ? 'Review answers' 
           <Icon icon="tabler:chevron-left" />
         </template>
       </Button>
-      <span
-        :part="counterPart.part"
-        :class="counterPart.class"
-      >
+      <span v-bind="partAttrs('counter')">
         <span aria-hidden="true">{{ counterText }}</span>
-        <span class="w-form__sr">{{ counterSrText }}</span>
+        <span class="sr-only">{{ counterSrText }}</span>
       </span>
       <Button
+        v-bind="partAttrs('next')"
         type="button"
         text
         size="small"
-        :part="nextPart.part"
-        :class="nextPart.class"
         :aria-label="nextLabel"
         :title="nextLabel"
         :disabled="review"
@@ -88,9 +70,8 @@ const nextLabel = computed(() => props.index === props.n - 1 ? 'Review answers' 
       </Button>
     </div>
     <h3
+      v-bind="partAttrs('question')"
       :id="qid"
-      :part="questionPart.part"
-      :class="questionPart.class"
     >
       <template v-if="review">
         Check your answers, then send them.
@@ -100,20 +81,16 @@ const nextLabel = computed(() => props.index === props.n - 1 ? 'Review answers' 
         :text="questionText"
       />
     </h3>
-    <div
-      :part="actionsPart.part"
-      :class="actionsPart.class"
-    >
+    <div v-bind="partAttrs('actions')">
       <Button
+        v-bind="partAttrs('collapse')"
         type="button"
         text
         size="small"
-        :part="collapsePart.part"
-        :class="collapsePart.class"
         :aria-expanded="collapsed ? 'false' : 'true'"
         :aria-label="collapsed ? 'Show answers' : 'Hide answers'"
         :title="collapsed ? 'Show answers' : 'Hide answers'"
-        @click="emit('toggleCollapse')"
+        @click="emit('toggle-collapse')"
       >
         <template #icon>
           <Icon :icon="collapsed ? 'tabler:chevron-down' : 'tabler:chevron-up'" />

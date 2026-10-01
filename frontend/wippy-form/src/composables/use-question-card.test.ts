@@ -156,7 +156,7 @@ describe('useQuestionCard — single question, several answers', () => {
     expect(c.ans(q).chosen).toEqual(['b'])
   })
 
-  it('activate() on a row whose OWN note is open still ticks it (M16: was silently dropped)', () => {
+  it('activate() on a row whose OWN note is open still ticks it', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(multiDef, null, onSubmit)
     const q = multiDef.fields[0]
@@ -228,10 +228,9 @@ describe('useQuestionCard — commits an unsent multi-choice tick on navigating 
 
     c.activate(twoQDef.fields[1], 0) // tick Q2's first option — no footer Send, no Enter
     expect(c.ans(twoQDef.fields[1]).chosen).toEqual(['x'])
-    expect(c.answered(twoQDef.fields[1])).toBe(false) // not yet committed
+    expect(c.answerItemsFor(twoQDef.fields[1])).toBeNull() // not yet committed
 
     c.go(2) // navigate to review without an explicit send
-    expect(c.answered(twoQDef.fields[1])).toBe(true)
     expect(c.answerItemsFor(twoQDef.fields[1])).toEqual([{ label: 'X', note: undefined }])
   })
 
@@ -241,7 +240,6 @@ describe('useQuestionCard — commits an unsent multi-choice tick on navigating 
     expect(c.index.value).toBe(1)
 
     c.go(2)
-    expect(c.answered(twoQDef.fields[1])).toBe(false)
     expect(c.answerItemsFor(twoQDef.fields[1])).toBeNull()
   })
 })

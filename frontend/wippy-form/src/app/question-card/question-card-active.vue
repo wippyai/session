@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import type { FocusTarget } from '../../composables/use-question-card'
 import type { FieldError, FormAnswers, FormState } from '../../lib/definition'
+import type { FocusTarget } from '../../lib/focus-key'
 import type { SubmitBanner } from '../../lib/submit-error'
-import { Icon } from '@iconify/vue'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
 import { trimAnswerText } from '../../lib/answers'
-import { partClass } from '../../lib/part-class'
+import { joinIds } from '../../lib/aria'
+import { optionIndexOf, optionKey } from '../../lib/focus-key'
+import { partAttrs, partSelector } from '../../lib/part-attrs'
 import FormMessage from '../form-message.vue'
 import QuestionCardHeader from './question-card-header.vue'
+import QuestionCardHeading from './question-card-heading.vue'
 import QuestionCardQuestion from './question-card-question.vue'
 import QuestionCardReview from './question-card-review.vue'
-import QuestionCardRichText from './question-card-rich-text.vue'
 
 /**
  * The interactive question card. It owns the interaction state through
@@ -26,10 +27,10 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  submit: [answers: FormAnswers]
-  retry: []
-  'update:state': ['active' | 'review']
-  'update:collapsed': [boolean]
+  'submit': [answers: FormAnswers]
+  'retry': []
+  'step-change': [step: 'active' | 'review']
+  'collapsed-change': [collapsed: boolean]
 }>()
 
 const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
@@ -44,19 +45,17 @@ const controller = useQuestionCard(props.state.definition, props.state.data, (an
   emit('submit', answers)
 })
 
-/** True while any answer input must be blocked — offline, or a submit already in flight. */
+/** True while any answer input must be blocked: offline, or a send in flight. */
 const inputsBlocked = computed(() => !!props.offline || props.submitting)
 
 const qid = `${useId()}-q`
 const cardRoot = ref<HTMLElement | null>(null)
 
-watch(controller.inReview, v => emit('update:state', v ? 'review' : 'active'), { immediate: true })
-watch(controller.collapsed, v => emit('update:collapsed', v), { immediate: true })
+watch(controller.inReview, v => emit('step-change', v ? 'review' : 'active'), { immediate: true })
+watch(controller.collapsed, v => emit('collapsed-change', v), { immediate: true })
 
-// The polite region last said which step this is ("Review your answers",
-// "Question 2 of 3"). Once a send starts that is no longer true, and if the send
-// fails the failure is announced by its own alert, so the region must not go on
-// describing the step the reader sent from.
+// Once a send starts, the polite region must not go on describing the step the
+// reader sent from, and a failed send is announced by its own alert.
 watch(() => props.submitting, (sending) => {
   if (sending)
     controller.quiet()
@@ -67,9 +66,8 @@ watch(() => props.submitting, (sending) => {
 const serverFieldErrors = ref<Record<string, string>>({})
 const serverFormErrors = ref<string[]>([])
 
-// Only the question's OWN field error: a form-level error has no per-question
-// place (see `generalServerError`). Passing it down here as well drew the same
-// text in two `role="alert"` messages, so a screen reader announced it twice.
+// Only the question's own field error goes down to it. A form-level error has no
+// question to sit on, and showing it there as well would announce it twice.
 function serverErrorFor(fieldId: string): string {
   return serverFieldErrors.value[fieldId] ?? ''
 }
@@ -77,10 +75,8 @@ function serverErrorFor(fieldId: string): string {
 const knownFieldIds = computed(() => new Set(props.state.definition.fields.map(f => f.id)))
 
 // Form-level errors, and field errors for an id this definition does not
-// recognize, have no per-question place to show — the review step and an
-// id-not-found rejection both hit this. Shown as one always-visible
-// notice (regardless of which question/review is currently showing)
-// instead of nowhere.
+// know, have no question to show on. They appear in one notice that stays
+// visible on every question and on the review.
 const generalServerError = computed(() => {
   const unknown = Object.entries(serverFieldErrors.value)
     .filter(([id]) => !knownFieldIds.value.has(id))
@@ -88,19 +84,15 @@ const generalServerError = computed(() => {
   return [...serverFormErrors.value, ...unknown].join(' ')
 })
 
-// Ids of the two card-wide error messages (the always-visible notice above and
-// the submit-failure banner). Each is announced once by its own alert; the ids
-// let the answer control that has focus name it in `aria-describedby` too, so
-// the error is read with the control and not only when it first appears.
+// The ids of the two card-wide messages, the notice above and the submit
+// failure banner. Each is announced once by its own alert, and the answer
+// control that has focus names them in `aria-describedby` too.
 const generalErrorId = `${qid}-general-err`
 const bannerId = `${qid}-banner`
-const cardErrorIds = computed(() => [
-  generalServerError.value ? generalErrorId : '',
-  props.banner ? bannerId : '',
-].filter(Boolean).join(' ') || undefined)
+const cardErrorIds = computed(() => joinIds(generalServerError.value && generalErrorId, props.banner && bannerId))
 
-// A changed answer clears that question's own server error, and the next submit
-// checks it again. The snapshot is per field because a deep watch on the
+// A changed answer clears the server error of that question, and the next
+// submit checks it again. The snapshot is per field because a deep watch on the
 // reactive answers cannot tell old from new, so only a field that changed
 // loses its error.
 watch(
@@ -139,13 +131,9 @@ defineExpose({
     emit('submit', controller.buildAnswers())
   },
   /**
-   * True once ANY question has a chosen/ticked answer, a note, or Other
-   * text that has not yet been sent — a saved-but-never-submitted draft.
-   * `wippy-form.vue` reads this before showing the "answered elsewhere"
-   * notice for a background state flip (another tab/client answering the
-   * same artifact): a passive copy that never touched this card must just
-   * switch to the read-only summary, not claim an answer went unsent when
-   * nothing was ever entered.
+   * True when any question has a chosen answer, a note or Other text that was
+   * never sent. `wippy-form.vue` reads it when another client answers first, to
+   * tell a card that holds a draft from one nothing was entered into.
    */
   hasUnsentInput(): boolean {
     return Object.values(controller.answers).some(a =>
@@ -154,11 +142,9 @@ defineExpose({
   },
 })
 
-const cardPart = computed(() => partClass('card'))
-const titlePart = computed(() => partClass('title'))
-const formDescriptionPart = computed(() => partClass('form-description'))
+const ANSWER_CONTROLS = `${partSelector('option-main')}, ${partSelector('other-input')}`
 
-function focusOn(target: FocusTarget | string) {
+function focusOn(target: FocusTarget) {
   const root = cardRoot.value
   if (!root)
     return
@@ -167,14 +153,13 @@ function focusOn(target: FocusTarget | string) {
     el = root
   }
   else if (target === 'first') {
-    el = root.querySelector<HTMLElement>('.w-form__option--selected .w-form__option-main')
-      ?? root.querySelector<HTMLElement>('.w-form__option-main, .w-form__other-input')
+    el = root.querySelector<HTMLElement>(`${partSelector('option', 'selected')} ${partSelector('option-main')}`)
+      ?? root.querySelector<HTMLElement>(ANSWER_CONTROLS)
   }
   else {
-    // Matched by comparing the dataset value directly (not by building a CSS
-    // attribute-selector string) — option values can contain characters
-    // that are awkward to escape into a selector, and this needs no
-    // `CSS.escape` (not polyfilled in every test/host environment).
+    // The `data-focus` values are compared directly. Option values can contain
+    // characters that are awkward in a selector, and `CSS.escape` is not
+    // available everywhere.
     el = Array.from(root.querySelectorAll<HTMLElement>('[data-focus]')).find(node => node.dataset.focus === target) ?? null
   }
   if (!el)
@@ -194,7 +179,7 @@ watch(controller.focusSeq, () => {
   })
 })
 
-/** True when nothing on the page has focus: the document's focus is on <body> (or the root element), as after a focused control is removed. */
+/** True when nothing on the page has focus, because it is on <body> or the root element, as after a focused control is removed. */
 function pageHasNoFocus(): boolean {
   const doc = cardRoot.value?.ownerDocument
   if (!doc)
@@ -204,16 +189,14 @@ function pageHasNoFocus(): boolean {
 }
 
 /**
- * After a send fails, make sure the reader is still somewhere in the card.
- *
- * The send buttons stay focusable while a send is in flight, so normally the one
- * that was pressed still has focus and nothing needs doing. Focus can be missing
- * all the same: the failure banner's Retry button is removed from the page the
- * moment it is pressed, a browser may not focus a button on click, and the small
- * send buttons in the Other and note boxes are disabled while sending. Then it
- * goes to the control that sends — "Send answers" on the review step, otherwise
- * the chosen (or first) answer. Focus that has moved to another control on the
- * page, such as the chat box the reader went on to use, is not taken back.
+ * After a failed send, keeps the reader inside the card. The send buttons stay
+ * focusable while a send is in flight, so usually the one pressed still has
+ * focus. Focus can be missing all the same: the Retry button of the banner is
+ * removed when pressed, a browser may not focus a button on click, and the small
+ * send buttons of the Other and note boxes are disabled while sending. Then
+ * focus goes to the control that sends, "Send answers" on the review and
+ * otherwise the chosen or first answer. Focus on another control of the page,
+ * such as the chat box, is left alone.
  */
 function restoreFocusAfterFailure() {
   if (!pageHasNoFocus())
@@ -221,9 +204,8 @@ function restoreFocusAfterFailure() {
   controller.requestFocus(controller.inReview.value ? 'send-all' : 'first')
 }
 
-// A submit-failure banner means the send was rejected (a 422 field error has no
-// banner; it moves focus to its question itself, and a form-level one is handled
-// in `setServerErrors`).
+// A banner means the send was rejected. A 422 field error has no banner and
+// moves focus to its question, and a form-level one is handled in `setServerErrors`.
 watch(() => props.banner, (banner) => {
   if (banner)
     void nextTick(restoreFocusAfterFailure)
@@ -236,19 +218,12 @@ function toggleCollapse() {
 
 function onKeydown(event: KeyboardEvent) {
   const target = event.composedPath()[0] as HTMLElement
-  // Enter/Escape inside a note or the Other box are fully handled by
-  // question-card-composer.vue's own keydown listener; every other key
-  // while typing is left alone (normal text input). This also covers "ignore
-  // when typing in Other/note": every keystroke while one of those textareas
-  // has focus is filtered out here before any answer-affecting key below can
-  // match it.
+  // The note and Other boxes handle Enter and Escape themselves, and every other
+  // key typed there is ordinary text.
   if (target?.tagName === 'TEXTAREA')
     return
-  // An IME composing a character (e.g. picking a candidate with a digit key,
-  // or Escape to cancel the composition) must never be read as an answer
-  // shortcut — only reachable here for a non-textarea focus target (rare,
-  // but the row/card itself is still focusable), the textarea case above
-  // already covers the far more common in-composer path.
+  // An input method composing a character, for example choosing a candidate with
+  // a digit key, must not be read as a shortcut.
   if (event.isComposing)
     return
   if (event.ctrlKey || event.metaKey || event.altKey || controller.collapsed.value || inputsBlocked.value)
@@ -267,15 +242,10 @@ function onKeydown(event: KeyboardEvent) {
     return
   const a = controller.ans(q)
 
-  // A plain digit is read from `event.key`, not `.code`: a numpad digit's
-  // `.code` (`Numpad2`, …) stays the same physical-key identity regardless
-  // of NumLock, but with NumLock off the browser turns it into navigation
-  // (`event.key` becomes `"ArrowDown"`, etc.) — matching `.code` there
-  // answered a question the user meant to navigate with. `.key` naturally
-  // reports the digit only when NumLock actually produces one, on either
-  // the top row or the numpad. Shift+digit (open the note) keeps matching
-  // `.code`'s `Digit*` instead, since `.key` for Shift+number differs by
-  // keyboard layout (not `1`..`9` at all on some) while `.code` does not.
+  // A plain digit is read from `event.key`. With NumLock off a numpad digit
+  // keeps its `.code` but reports `.key` as an arrow, and answering from `.code`
+  // would answer when the reader meant to navigate. Shift plus a digit is read
+  // from `.code`, because its `.key` depends on the keyboard layout.
   const digitMatch = event.shiftKey
     ? /^Digit([1-9])$/.exec(event.code)
     : /^([1-9])$/.exec(event.key)
@@ -291,11 +261,10 @@ function onKeydown(event: KeyboardEvent) {
     return
   }
 
-  const focusAttr = target?.dataset?.focus ?? ''
-  const at = focusAttr.startsWith('opt-') ? Number(focusAttr.slice(4)) : -1
+  const at = optionIndexOf(target?.dataset?.focus)
 
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    const list = Array.from(cardRoot.value?.querySelectorAll<HTMLElement>('.w-form__option-main, .w-form__other-input') ?? [])
+    const list = Array.from(cardRoot.value?.querySelectorAll<HTMLElement>(ANSWER_CONTROLS) ?? [])
     if (list.length === 0)
       return
     event.preventDefault()
@@ -319,14 +288,13 @@ function onKeydown(event: KeyboardEvent) {
     controller.activate(q, at)
     return
   }
-  if (event.key === 'Enter' && q.multiple && !(target as HTMLElement)?.matches?.('button')) {
+  if (event.key === 'Enter' && q.multiple && !target?.matches?.('button')) {
     event.preventDefault()
     if (a.chosen.length > 0 || trimAnswerText(a.other))
       controller.commit(q)
     else {
       controller.error.value = 'Tick at least one answer, or type your own.'
-      // `focusAttr` is a live DOM data-focus value, not one of FocusTarget's literal template forms.
-      controller.requestFocus((at >= 0 ? focusAttr : 'first') as FocusTarget)
+      controller.requestFocus(at >= 0 ? optionKey(at) : 'first')
     }
   }
 }
@@ -335,8 +303,8 @@ function onKeydown(event: KeyboardEvent) {
 <template>
   <section
     ref="cardRoot"
-    :part="cardPart.part"
-    :class="`w-form ${cardPart.class}`"
+    class="w-form"
+    v-bind="partAttrs('card')"
     role="group"
     :aria-labelledby="qid"
     :aria-busy="submitting ? 'true' : 'false'"
@@ -367,23 +335,10 @@ function onKeydown(event: KeyboardEvent) {
       {{ generalServerError }}
     </FormMessage>
 
-    <p
-      :part="titlePart.part"
-      :class="titlePart.class"
-    >
-      <Icon
-        icon="tabler:messages"
-        aria-hidden="true"
-      />
-      {{ state.definition.title }}
-    </p>
-    <p
-      v-if="state.definition.description"
-      :part="formDescriptionPart.part"
-      :class="formDescriptionPart.class"
-    >
-      <QuestionCardRichText :text="state.definition.description" />
-    </p>
+    <QuestionCardHeading
+      :definition="state.definition"
+      icon="tabler:messages"
+    />
 
     <QuestionCardHeader
       :multi="controller.multi"
@@ -430,7 +385,7 @@ function onKeydown(event: KeyboardEvent) {
 
     <p
       aria-live="polite"
-      class="w-form__sr"
+      class="sr-only"
     >
       {{ controller.liveMessage.value }}
     </p>

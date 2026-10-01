@@ -1,40 +1,26 @@
 <script setup lang="ts">
 import type { AnswerDisplayItem } from '../../lib/answers'
 import { Icon } from '@iconify/vue'
-import { computed } from 'vue'
 import { trimAnswerText } from '../../lib/answers'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 import { textLines } from '../../lib/rich-text'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
-/** One field's answered items — shared by the review step and the post-submit summary. */
-const props = defineProps<{
+/** The answered items of one question, shared by the review step and the answered summary. */
+defineProps<{
   items: AnswerDisplayItem[]
 }>()
-
-const itemPart = computed(() => partClass('answer-item'))
-const notePart = computed(() => partClass('answer-note'))
-const ownPart = computed(() => partClass('answer-own'))
 </script>
 
 <template>
   <span
-    v-for="(item, i) in props.items"
+    v-for="(item, i) in items"
     :key="i"
-    :part="itemPart.part"
-    :class="itemPart.class"
+    v-bind="partAttrs('answer-item')"
   >
     <template v-if="item.own">
-      <span
-        :part="ownPart.part"
-        :class="ownPart.class"
-      >Own answer: </span>
-      <!--
-        Free text, split on line breaks and joined back with real <br>s —
-        never a `\n` left in a single text node (CSS `white-space` would
-        depend on a stylesheet the consuming page may not have loaded) and
-        never HTML/markup parsed from the user's own text.
-      -->
+      <span v-bind="partAttrs('answer-own')">Own answer: </span>
+      <!-- Each line is followed by a real <br>, so no `\n` is left in one text node and no markup is parsed from the user's text. -->
       <!-- eslint-disable-next-line vue/singleline-html-element-content-newline -->
       <template
         v-for="(line, li) in textLines(item.label)"
@@ -47,8 +33,7 @@ const ownPart = computed(() => partClass('answer-own'))
     />
     <span
       v-if="trimAnswerText(item.note || '')"
-      :part="notePart.part"
-      :class="notePart.class"
+      v-bind="partAttrs('answer-note')"
     >
       <Icon
         icon="tabler:note"

@@ -4,91 +4,68 @@ import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
 import { computed, useId } from 'vue'
-import { ERROR_TEXT_CLASS } from '../../lib/error-text'
-import { partClass } from '../../lib/part-class'
+import { NOTE_TEXT_MAX } from '../../lib/answers'
+import { joinIds } from '../../lib/aria'
+import { noteKey, optionKey } from '../../lib/focus-key'
+import { partAttrs, partSelector } from '../../lib/part-attrs'
 import { plainText } from '../../lib/rich-text'
 import QuestionCardComposer from './question-card-composer.vue'
+import QuestionCardLengthAlert from './question-card-length-alert.vue'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
 /**
- * One answer row: label + description, a tick mark (multi-choice) or check
- * (single-choice, once selected), a saved note (or its editor), the note
- * toggle button, and a number-key badge. Clicking the row (outside the
- * note toggle / note composer) answers or ticks it — see
- * `use-question-card.ts`'s `activate`.
+ * One answer row: the label and description, a tick box for several answers or
+ * a check once a single answer is chosen, the saved note or its editor, the note
+ * toggle and the number key. A click on the row outside the note toggle and the
+ * note editor answers or ticks it.
  */
 const props = defineProps<{
   option: FormFieldOption
   index: number
   multiple: boolean
   selected: boolean
-  /** Saved note text, or '' when this answer has none. */
+  /** The saved note text, or an empty string. */
   note: string
-  /** Whether this answer's note editor is open. */
+  /** Whether the note editor is open. */
   editing: boolean
-  /** Live text in the note editor while `editing`. */
+  /** The text in the note editor while `editing`. */
   noteDraft: string
-  /** Number-key badge text (\"1\"–\"9\"), or null past the keyed rows. */
+  /** The number key badge text ("1" to "9"), or null past the keyed rows. */
   keyLabel: string | null
   noteTooLong: boolean
-  /** True while offline or a submit is already in flight — blocks the row click and the note composer's send. */
+  /** True while offline or a send is in flight, which blocks the row click and the note's send. */
   disabled?: boolean
-  /**
-   * Id(s) of the error message(s) on screen for this question — set on the
-   * row's `aria-describedby` so the row that has focus names the error. Also
-   * set on the note box this row opens.
-   */
+  /** The ids of the error messages on screen for the question. The row names them in `aria-describedby`, and so does the note box. */
   describedBy?: string
   /**
-   * True while this question has its own error (validation or server field
-   * error). Surfaced as `aria-invalid` on a checkbox row only: ARIA supports
-   * that state on `checkbox` and on `radiogroup`, but not on `radio`, so a
-   * single-choice question carries it on its radiogroup instead
-   * (question-card-question.vue).
+   * True while the question has its own error. It is `aria-invalid` on a
+   * checkbox row only, because ARIA supports that state on `checkbox` and
+   * `radiogroup` but not on `radio`. A single-answer question carries it on its
+   * radiogroup instead.
    */
   invalid?: boolean
-  /**
-   * Single-choice (`role="radio"`) only: true when this is the ONE row the
-   * roving tabindex currently sits on (WAI-ARIA radio group pattern — the
-   * group is a single Tab stop, arrow keys move within it). Ignored for
-   * `multiple` (checkbox) rows, which stay individually tabbable — see
-   * `tabindex` below.
-   */
+  /** Single answer only: true for the one row the roving tabindex sits on. Several-answer rows are always tabbable. */
   rovingTabbable?: boolean
 }>()
 
 const emit = defineEmits<{
-  activate: []
+  'activate': []
   'toggle-note': []
   'update:noteDraft': [value: string]
   'send-note': []
   'escape-note': []
 }>()
 
-const rowPart = computed(() => partClass('option', props.selected && 'selected', props.note && 'has-note', props.editing && 'editing'))
-const mainPart = computed(() => partClass('option-main'))
-const labelPart = computed(() => partClass('option-label'))
-const markPart = computed(() => partClass('option-mark'))
-const descPart = computed(() => partClass('option-description'))
-const notePart = computed(() => partClass('option-note'))
-const togglePart = computed(() => partClass('note-toggle', props.note && 'has-note', props.editing && 'editing'))
-const keyPart = computed(() => partClass('option-key'))
-const errorPart = computed(() => partClass('error'))
-// Links the note textarea's aria-invalid/aria-describedby to its own
-// too-long notice, instead of leaving it an unlinked role="alert" paragraph.
 const noteErrorId = `${useId()}-note-err`
-// The note box names its own too-long notice first, then whatever error is on
-// screen for the question (see `describedBy`).
-const noteDescribedBy = computed(() => [
-  props.noteTooLong ? noteErrorId : '',
-  props.describedBy ?? '',
-].filter(Boolean).join(' ') || undefined)
+// The note box names its own length alert first, then the question's errors.
+const noteDescribedBy = computed(() => joinIds(props.noteTooLong && noteErrorId, props.describedBy))
+
+const NOTE_CONTROLS = `${partSelector('note-toggle')}, ${partSelector('composer')}`
 
 function onRowClick(event: MouseEvent) {
   if (props.disabled)
     return
-  const target = event.target as HTMLElement
-  if (target.closest('.w-form__note-toggle, .w-form__composer'))
+  if ((event.target as HTMLElement).closest(NOTE_CONTROLS))
     return
   emit('activate')
 }
@@ -102,56 +79,47 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
 
 <template>
   <div
-    :part="rowPart.part"
-    :class="rowPart.class"
+    v-bind="partAttrs('option', selected && 'selected', note && 'has-note', editing && 'editing')"
     @click="onRowClick"
   >
     <div
-      :part="mainPart.part"
-      :class="mainPart.class"
+      v-bind="partAttrs('option-main')"
       :role="multiple ? 'checkbox' : 'radio'"
       :aria-checked="selected ? 'true' : 'false'"
       :aria-disabled="disabled ? 'true' : undefined"
       :aria-describedby="describedBy"
       :aria-invalid="multiple && invalid ? 'true' : undefined"
       :tabindex="multiple || rovingTabbable ? 0 : -1"
-      :data-focus="`opt-${index}`"
+      :data-focus="optionKey(index)"
       :aria-keyshortcuts="keyLabel ? `${keyLabel} Shift+${keyLabel} N` : 'N'"
     >
-      <span
-        :part="labelPart.part"
-        :class="labelPart.class"
-      >
+      <span v-bind="partAttrs('option-label')">
         <Checkbox
           v-if="multiple"
+          v-bind="partAttrs('option-mark')"
           :model-value="selected"
           binary
           readonly
           size="small"
           :tabindex="-1"
           aria-hidden="true"
-          :part="markPart.part"
-          :class="markPart.class"
         />
         <span
           v-else-if="selected"
-          :part="markPart.part"
-          :class="markPart.class"
+          v-bind="partAttrs('option-mark')"
           aria-hidden="true"
         ><Icon icon="tabler:check" /></span>
         <QuestionCardRichText :text="option.label" />
       </span>
       <span
         v-if="option.description"
-        :part="descPart.part"
-        :class="descPart.class"
+        v-bind="partAttrs('option-description')"
       >
         <QuestionCardRichText :text="option.description" />
       </span>
       <span
         v-if="note && !editing"
-        :part="notePart.part"
-        :class="notePart.class"
+        v-bind="partAttrs('option-note')"
       >
         <Icon
           icon="tabler:note"
@@ -161,13 +129,12 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
       </span>
     </div>
     <Button
+      v-bind="partAttrs('note-toggle', note && 'has-note', editing && 'editing')"
       type="button"
       text
       size="small"
       :tabindex="-1"
       :disabled="disabled"
-      :part="togglePart.part"
-      :class="togglePart.class"
       :aria-expanded="editing ? 'true' : 'false'"
       :aria-label="noteToggleLabel"
       :title="note ? 'Edit the note' : 'Add a note'"
@@ -179,8 +146,7 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
     </Button>
     <kbd
       v-if="keyLabel"
-      :part="keyPart.part"
-      :class="keyPart.class"
+      v-bind="partAttrs('option-key')"
       aria-hidden="true"
     >{{ keyLabel }}</kbd>
     <span v-else />
@@ -194,20 +160,16 @@ const noteSendLabel = computed(() => props.multiple ? 'Save the note' : 'Answer 
         :enabled="!noteTooLong && !disabled"
         :invalid="noteTooLong"
         :described-by="noteDescribedBy"
-        :data-focus="`note-${option.value}`"
+        :data-focus="noteKey(option.value)"
         @update:model-value="(v) => emit('update:noteDraft', v)"
         @send="emit('send-note')"
         @escape="emit('escape-note')"
       />
-      <p
+      <QuestionCardLengthAlert
         v-if="noteTooLong"
         :id="noteErrorId"
-        :part="errorPart.part"
-        :class="[errorPart.class, ERROR_TEXT_CLASS]"
-        role="alert"
-      >
-        Use at most 1,000 characters.
-      </p>
+        :max="NOTE_TEXT_MAX"
+      />
     </template>
   </div>
 </template>

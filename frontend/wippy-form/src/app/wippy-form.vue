@@ -204,8 +204,8 @@ function handleRetry() {
         :offline="!isOnline"
         @submit="handleSubmit"
         @retry="handleRetry"
-        @update:state="(v) => { cardStep = v }"
-        @update:collapsed="(v) => { cardCollapsed = v }"
+        @step-change="(v) => { cardStep = v }"
+        @collapsed-change="(v) => { cardCollapsed = v }"
       />
       <template v-else>
         <p

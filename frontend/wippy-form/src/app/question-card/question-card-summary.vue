@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import type { FormState } from '../../lib/definition'
-import { Icon } from '@iconify/vue'
 import { computed, ref } from 'vue'
 import { answerDisplayItems } from '../../lib/answers'
-import { partClass } from '../../lib/part-class'
+import { partAttrs } from '../../lib/part-attrs'
 import QuestionCardAnswerItems from './question-card-answer-items.vue'
+import QuestionCardHeading from './question-card-heading.vue'
 import QuestionCardRichText from './question-card-rich-text.vue'
 
 /** The read-only card shown once the form is answered: each answer, then the delivery status and the time it was answered. */
@@ -12,34 +12,21 @@ const props = defineProps<{
   state: FormState
 }>()
 
-function formatTime(iso: string | null): string | null {
-  if (!iso)
-    return null
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
-}
+const rows = computed(() => props.state.definition.fields.map(field => ({
+  field,
+  items: answerDisplayItems(field, props.state.data?.[field.id]),
+})))
 
-const cardPart = computed(() => partClass('card', 'answered'))
-const titlePart = computed(() => partClass('title'))
-const formDescriptionPart = computed(() => partClass('form-description'))
-const summaryPart = computed(() => partClass('summary'))
-const itemPart = computed(() => partClass('summary-item'))
-const questionPart = computed(() => partClass('summary-question'))
-const answerPart = computed(() => partClass('summary-answer'))
-const emptyPart = computed(() => partClass('answer-empty'))
-const statusPart = computed(() => partClass('status'))
-
-function itemsFor(fieldId: string) {
-  const field = props.state.definition.fields.find(f => f.id === fieldId)
-  if (!field)
-    return null
-  return answerDisplayItems(field, props.state.data ? props.state.data[fieldId] : undefined)
-}
+const answeredAt = computed(() => {
+  const iso = props.state.submitted_at
+  const date = iso ? new Date(iso) : null
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : null
+})
 
 const statusEl = ref<HTMLElement | null>(null)
 
 defineExpose({
-  /** Moves focus to the status text after a successful submit, so focus isn't lost when the form swaps to this read-only view. */
+  /** Moves focus to the status line after a send, so focus is not lost when the form swaps to this view. */
   focusStatus() {
     statusEl.value?.focus()
   },
@@ -48,56 +35,32 @@ defineExpose({
 
 <template>
   <section
-    :part="cardPart.part"
-    :class="`w-form ${cardPart.class}`"
+    class="w-form"
+    v-bind="partAttrs('card', 'answered')"
     :aria-label="`${state.definition.title}, answered`"
   >
-    <p
-      :part="titlePart.part"
-      :class="titlePart.class"
-    >
-      <Icon
-        icon="tabler:circle-check"
-        aria-hidden="true"
-      />
-      {{ state.definition.title }}
-    </p>
-    <p
-      v-if="state.definition.description"
-      :part="formDescriptionPart.part"
-      :class="formDescriptionPart.class"
-    >
-      <QuestionCardRichText :text="state.definition.description" />
-    </p>
+    <QuestionCardHeading
+      :definition="state.definition"
+      icon="tabler:circle-check"
+    />
 
-    <dl
-      :part="summaryPart.part"
-      :class="summaryPart.class"
-    >
+    <dl v-bind="partAttrs('summary')">
       <div
-        v-for="field in state.definition.fields"
-        :key="field.id"
-        :part="itemPart.part"
-        :class="itemPart.class"
+        v-for="row in rows"
+        :key="row.field.id"
+        v-bind="partAttrs('summary-item')"
       >
-        <dt
-          :part="questionPart.part"
-          :class="questionPart.class"
-        >
-          <QuestionCardRichText :text="field.label" />
+        <dt v-bind="partAttrs('summary-question')">
+          <QuestionCardRichText :text="row.field.label" />
         </dt>
-        <dd
-          :part="answerPart.part"
-          :class="answerPart.class"
-        >
+        <dd v-bind="partAttrs('summary-answer')">
           <QuestionCardAnswerItems
-            v-if="itemsFor(field.id)"
-            :items="itemsFor(field.id)!"
+            v-if="row.items"
+            :items="row.items"
           />
           <span
             v-else
-            :part="emptyPart.part"
-            :class="emptyPart.class"
+            v-bind="partAttrs('answer-empty')"
           >Skipped</span>
         </dd>
       </div>
@@ -106,8 +69,7 @@ defineExpose({
     <div
       ref="statusEl"
       tabindex="-1"
-      :part="statusPart.part"
-      :class="statusPart.class"
+      v-bind="partAttrs('status')"
     >
       <p v-if="state.late">
         Late answer — this was answered after the conversation moved on. The assistant will confirm before
@@ -122,8 +84,8 @@ defineExpose({
       <p v-else-if="state.delivery === 'interrupted'">
         The assistant stopped before answering. Send a message to continue.
       </p>
-      <p v-if="formatTime(state.submitted_at)">
-        Answered {{ formatTime(state.submitted_at) }}
+      <p v-if="answeredAt">
+        Answered {{ answeredAt }}
       </p>
     </div>
   </section>

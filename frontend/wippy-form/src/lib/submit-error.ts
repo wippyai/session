@@ -1,3 +1,6 @@
+import type { FieldError } from './definition'
+import { SUBMIT_FAILED_MESSAGE } from './messages'
+
 export type SubmitErrorCode
   = | 'auth'
     | 'not_found'
@@ -13,9 +16,9 @@ export interface ClassifiedSubmitError {
   message: string
   /** True for a definite server rejection where retrying without a change won't help. */
   retryable: boolean
-  /** True only for a genuinely uncertain outcome (no response reached the client). */
+  /** True only when no response reached the client, so the server may or may not have saved the answer. */
   uncertain: boolean
-  /** True when the canonical form state should be re-fetched (another writer won). */
+  /** True when the canonical form state should be fetched again because another writer won. */
   shouldReload: boolean
 }
 
@@ -26,32 +29,21 @@ export interface SubmitBanner {
 }
 
 /**
- * Realm-stable brand the Host's `ArtifactStateError` carries on every
- * instance (`@wippy-fe/proxy`'s `artifact-state.ts`). `Symbol.for` reads
- * from the global symbol registry keyed by string, so this matches an
- * error thrown by any bundle's own compiled copy of the Host's proxy, not
- * just one that happens to share this file's module graph — the same
- * reason the Host itself exports `isArtifactStateError` instead of relying
- * on `instanceof`.
- *
- * The published `@wippy-fe/proxy` version this component currently builds
- * against does not export `isArtifactStateError` yet, so the brand is
- * checked directly here rather than guessing the error's shape from its
- * fields (`name`, `'status' in err`, …) or accepting a raw Axios error —
- * the Host client never throws one; every failure, including a network
- * error, is wrapped into `ArtifactStateError` before it reaches this
- * component. Once the published types export `isArtifactStateError`, this
- * local check can be replaced with that import.
+ * The brand the Host's `ArtifactStateError` carries on every instance. It is
+ * read from the global symbol registry, so it matches an error thrown by any
+ * bundle's copy of the Host's proxy, which `instanceof` would not. The proxy
+ * version this package builds against does not export `isArtifactStateError`
+ * yet, so the brand is checked here.
  */
 const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
 
-/** Shape of the Host's `ArtifactStateError` (`@wippy-fe/proxy`), once branded. */
+/** The shape of the Host's `ArtifactStateError`. */
 interface HostStateError {
   status?: number
   code?: string
   message?: string
-  errors?: Record<string, { code: string, message: string }[]>
-  formErrors?: { code: string, message: string }[]
+  errors?: Record<string, FieldError[]>
+  formErrors?: FieldError[]
 }
 
 function isHostStateError(err: unknown): err is HostStateError {
@@ -59,11 +51,9 @@ function isHostStateError(err: unknown): err is HostStateError {
 }
 
 /**
- * Normalize a rejection to `{ status, code, message, noResponse }`. The Host
- * client throws `ArtifactStateError` with top-level `status`/`code` and marks
- * a request that got no response with `code: 'network_error'`. `noResponse`
- * is true only when the request was sent and no response arrived, the one
- * outcome where the server may or may not have committed.
+ * `noResponse` is true when the request was sent and no response arrived, the
+ * only outcome where the server may have saved the answer. The Host client marks
+ * it with the code `network_error` and no status.
  */
 function readFailure(err: unknown): { status?: number, code?: string, message?: string, known: boolean, noResponse: boolean } {
   if (isHostStateError(err))
@@ -71,57 +61,47 @@ function readFailure(err: unknown): { status?: number, code?: string, message?: 
   return { known: false, message: err instanceof Error ? err.message : undefined, noResponse: false }
 }
 
-/** Field and form errors from a 422 rejection, if this is one. */
-export function validationErrorsOf(err: unknown): { errors: Record<string, { code: string, message: string }[]>, formErrors: { code: string, message: string }[] } | null {
+/** The field and form errors of a 422 rejection, or `null` for any other error. */
+export function validationErrorsOf(err: unknown): { errors: Record<string, FieldError[]>, formErrors: FieldError[] } | null {
   if (!isHostStateError(err) || err.status !== 422)
     return null
   return { errors: err.errors ?? {}, formErrors: err.formErrors ?? [] }
 }
 
 /**
- * Classifies a submit failure by the state API's POST status and error
- * code (401, 404, 409 with `already_submitted` / `version_conflict` /
- * `request_conflict`, 5xx, no response). 400/403/413/415 and any other
- * status the spec documents but this component has no dedicated copy for
- * fall through to the generic `unknown` case below, using the server's own
- * message when it sent one. `submit()` in `use-form-submit.ts` checks
- * `validationErrorsOf()` first, so a 422 never reaches this function in
- * practice. `uncertain` decides whether a single automatic same-request-id
- * retry is safe (no response reached the client — the server may or may
- * not have committed), and `shouldReload` tells the caller to refetch
- * canonical state after a conflict another writer already won.
+ * Classifies a failed submit by the status and code of the state API's
+ * response. Statuses with no copy of their own (400, 403, 413, 415) are
+ * `unknown` and show the server's message. A 422 is handled by
+ * `validationErrorsOf` before this is called. `uncertain` marks the one case
+ * where a single automatic retry with the same request id is safe, and
+ * `shouldReload` asks the caller to fetch the canonical state again.
  */
 export function classifySubmitError(err: unknown): ClassifiedSubmitError {
   const failure = readFailure(err)
   if (failure.known) {
     const status = failure.status
     if (status === undefined) {
-      // Request left the client but no response arrived (offline, DNS,
-      // CORS, timeout): the server may have received and even committed
-      // it. This is the one case where an automatic same-request-id retry
-      // is safe, because replaying an already-accepted request returns the
-      // original result with `replayed: true`.
+      // The server may have saved the answer, and replaying an accepted
+      // request returns the original result, so one automatic retry is safe.
       if (failure.noResponse)
         return { code: 'network_error', message: 'Network problem. Retrying…', retryable: true, uncertain: true, shouldReload: false }
-      // Failed before a request was sent (e.g. a client-side bug): nothing
-      // reached the server, so the user may try again but no auto-retry.
-      return { code: 'unknown', message: failure.message ?? 'Could not submit this form.', retryable: true, uncertain: false, shouldReload: false }
+      // The request was never sent, so the user may try again but nothing is retried automatically.
+      return { code: 'unknown', message: failure.message ?? SUBMIT_FAILED_MESSAGE, retryable: true, uncertain: false, shouldReload: false }
     }
     if (status === 401)
       return { code: 'auth', message: 'You are signed out. Sign in again, then retry.', retryable: false, uncertain: false, shouldReload: false }
     if (status === 404)
       return { code: 'not_found', message: 'This form is no longer available.', retryable: false, uncertain: false, shouldReload: false }
     if (status === 409) {
-      const conflictCode = failure.code
-      if (conflictCode === 'already_submitted')
+      if (failure.code === 'already_submitted')
         return { code: 'already_submitted', message: 'This form was already answered.', retryable: false, uncertain: false, shouldReload: true }
-      if (conflictCode === 'version_conflict')
+      if (failure.code === 'version_conflict')
         return { code: 'version_conflict', message: 'This form changed. Reloading the latest version.', retryable: false, uncertain: false, shouldReload: true }
       return { code: 'request_conflict', message: 'That answer no longer matches this attempt. Change something and try again.', retryable: false, uncertain: false, shouldReload: false }
     }
     if (status >= 500)
       return { code: 'server_error', message: 'The server could not save this. Try again.', retryable: true, uncertain: false, shouldReload: false }
-    return { code: 'unknown', message: failure.message ?? 'Could not submit this form.', retryable: false, uncertain: false, shouldReload: false }
+    return { code: 'unknown', message: failure.message ?? SUBMIT_FAILED_MESSAGE, retryable: false, uncertain: false, shouldReload: false }
   }
-  return { code: 'unknown', message: failure.message ?? 'Could not submit this form.', retryable: true, uncertain: false, shouldReload: false }
+  return { code: 'unknown', message: failure.message ?? SUBMIT_FAILED_MESSAGE, retryable: true, uncertain: false, shouldReload: false }
 }

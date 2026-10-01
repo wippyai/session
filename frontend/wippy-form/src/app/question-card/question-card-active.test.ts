@@ -449,7 +449,7 @@ describe('QuestionCardActive — several questions', () => {
     expect(wrapper.text()).toContain('Tick at least one answer, or type your own.')
   })
 
-  it('reaching the review step emits update:state("review"); the collapse chevron emits update:collapsed', async () => {
+  it('reaching the review step emits step-change("review"); the collapse chevron emits collapsed-change', async () => {
     const wrapper = mountCard(twoQuestionDef)
     await wrapper.findAll('.w-form__option')[0].trigger('click')
     await wrapper.vm.$nextTick()
@@ -458,12 +458,12 @@ describe('QuestionCardActive — several questions', () => {
     await wrapper.find('[data-focus="send"]').trigger('click')
     await wrapper.vm.$nextTick()
 
-    const stateEvents = wrapper.emitted('update:state') ?? []
+    const stateEvents = wrapper.emitted('step-change') ?? []
     expect(stateEvents.at(-1)).toEqual(['review'])
 
     await wrapper.find('.w-form__collapse').trigger('click')
     await wrapper.vm.$nextTick()
-    const collapsedEvents = wrapper.emitted('update:collapsed') ?? []
+    const collapsedEvents = wrapper.emitted('collapsed-change') ?? []
     expect(collapsedEvents.at(-1)).toEqual([true])
   })
 
