@@ -1,24 +1,12 @@
 import type { FormState } from '../lib/definition'
-import * as WippyProxy from '@wippy-fe/proxy'
-import { mount } from '@vue/test-utils'
-import { defineComponent, ref } from 'vue'
+import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, ref } from 'vue'
+import { formState } from '../test-support/fixtures'
+import { artifactStateMock, listenerFor, onMock, resetProxyMock } from '../test-support/proxy-control'
 import { RELOAD_RETRY_MS, useFormState } from './use-form-state'
 
-vi.mock('@wippy-fe/proxy', () => ({
-  artifactState: vi.fn(),
-  on: vi.fn(() => () => {}),
-}))
-
-function mockArtifactState() {
-  return vi.mocked(WippyProxy.artifactState)
-}
-
-function flushPromises() {
-  return new Promise(resolve => setTimeout(resolve, 0))
-}
-
-/** Mounts `useFormState` in a real component so its `onUnmounted` cleanup is meaningful. */
+/** Mounts `useFormState` in a real component, so its listeners are registered on mount and released on unmount. */
 function mountHarness(artifactId: string | null) {
   const Harness = defineComponent({
     setup() {
@@ -32,33 +20,12 @@ function mountHarness(artifactId: string | null) {
   return mount(Harness)
 }
 
-function state(overrides: Partial<FormState> = {}): FormState {
-  return {
-    form_version: 1,
-    artifact_id: 'artifact-1',
-    session_id: 'session-1',
-    status: 'active',
-    stale: false,
-    late: false,
-    content_version: 1,
-    definition: { title: 'Q', fields: [] },
-    data: null,
-    submitted_at: null,
-    answer_message_id: null,
-    delivery: null,
-    ...overrides,
-  }
-}
-
-beforeEach(() => {
-  mockArtifactState().mockReset()
-  vi.mocked(WippyProxy.on).mockReset().mockReturnValue(() => {})
-})
+beforeEach(resetProxyMock)
 
 describe('useFormState — background reload vs first load', () => {
   it('only sets status to "loading" for the artifact\'s first load, not a later background reload', async () => {
-    const getFn = vi.fn().mockResolvedValue(state())
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const getFn = vi.fn().mockResolvedValue(formState())
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     // First load in flight synchronously after mount.
@@ -77,9 +44,9 @@ describe('useFormState — background reload vs first load', () => {
 
   it('keeps the current state and sets reloadError (not status=error) when a background reload fails', async () => {
     const getFn = vi.fn()
-      .mockResolvedValueOnce(state())
+      .mockResolvedValueOnce(formState())
       .mockRejectedValueOnce(new Error('network down'))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     await flushPromises()
@@ -100,11 +67,11 @@ describe('useFormState — retry after a failed background refresh', () => {
     vi.useFakeTimers()
     try {
       const getFn = vi.fn()
-        .mockResolvedValueOnce(state())
+        .mockResolvedValueOnce(formState())
         .mockRejectedValueOnce(new Error('network down'))
         .mockRejectedValueOnce(new Error('still down'))
-        .mockResolvedValueOnce(state({ status: 'idle' }))
-      mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+        .mockResolvedValueOnce(formState({ status: 'idle' }))
+      artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
       const wrapper = mountHarness('artifact-1')
       await vi.advanceTimersByTimeAsync(0)
@@ -140,8 +107,8 @@ describe('useFormState — reload coalescing', () => {
     const first = new Promise<FormState>((resolve) => { resolveFirst = resolve })
     const getFn = vi.fn()
       .mockReturnValueOnce(first)
-      .mockResolvedValueOnce(state())
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+      .mockResolvedValueOnce(formState())
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     const vm = wrapper.vm as unknown as { reload: () => void }
@@ -150,7 +117,7 @@ describe('useFormState — reload coalescing', () => {
     vm.reload()
     vm.reload()
 
-    resolveFirst?.(state())
+    resolveFirst?.(formState())
     await flushPromises()
     await flushPromises()
 
@@ -161,16 +128,16 @@ describe('useFormState — reload coalescing', () => {
 
 describe('useFormState — visibility restore', () => {
   it('reloads once when the proxy reports the document becoming visible again', async () => {
-    const getFn = vi.fn().mockResolvedValue(state())
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const getFn = vi.fn().mockResolvedValue(formState())
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     mountHarness('artifact-1')
     await flushPromises()
     expect(getFn).toHaveBeenCalledTimes(1)
 
-    const visibilityCall = vi.mocked(WippyProxy.on).mock.calls.find(([topic]) => topic === '@visibility')
-    expect(visibilityCall).toBeDefined()
-    const onVisible = visibilityCall?.[1] as unknown as (visible: boolean) => void
+    const onVisible = listenerFor<(visible: boolean) => void>('@visibility')
+    if (!onVisible)
+      throw new Error('no @visibility listener was registered')
 
     onVisible(false)
     await flushPromises()
@@ -184,16 +151,16 @@ describe('useFormState — visibility restore', () => {
 
 describe('useFormState — Host reconnect', () => {
   it('reloads when the proxy reports @reconnect, so the form does not stay stale through a server restart', async () => {
-    const getFn = vi.fn().mockResolvedValue(state())
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const getFn = vi.fn().mockResolvedValue(formState())
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     mountHarness('artifact-1')
     await flushPromises()
     expect(getFn).toHaveBeenCalledTimes(1)
 
-    const reconnectCall = vi.mocked(WippyProxy.on).mock.calls.find(([topic]) => topic === '@reconnect')
-    expect(reconnectCall).toBeDefined()
-    const onReconnect = reconnectCall?.[1] as unknown as () => void
+    const onReconnect = listenerFor('@reconnect')
+    if (!onReconnect)
+      throw new Error('no @reconnect listener was registered')
 
     onReconnect()
     await flushPromises()
@@ -202,8 +169,8 @@ describe('useFormState — Host reconnect', () => {
 
   it('unsubscribes from @reconnect on unmount', async () => {
     const unsubscribe = vi.fn()
-    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === '@reconnect' ? unsubscribe : () => {}) as never)
-    mockArtifactState().mockReturnValue({ get: vi.fn().mockResolvedValue(state()), submit: vi.fn() })
+    onMock().mockImplementation(((topic: string) => topic === '@reconnect' ? unsubscribe : () => {}) as never)
+    artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(formState()), submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     await flushPromises()
@@ -220,8 +187,8 @@ describe('useFormState — rebind race', () => {
     const pendingA = new Promise<FormState>((resolve) => { resolveA = resolve })
     const getFn = vi.fn()
       .mockReturnValueOnce(pendingA)
-      .mockResolvedValueOnce(state({ artifact_id: 'artifact-2', definition: { title: 'B', fields: [] } }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+      .mockResolvedValueOnce(formState({ artifact_id: 'artifact-2', definition: { title: 'B', fields: [] } }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     const vm = wrapper.vm as unknown as { id: string | null, state: FormState | null }
@@ -233,7 +200,7 @@ describe('useFormState — rebind race', () => {
     await flushPromises()
 
     // artifact-1's stale response finally lands.
-    resolveA?.(state({ artifact_id: 'artifact-1', definition: { title: 'A', fields: [] } }))
+    resolveA?.(formState({ artifact_id: 'artifact-1', definition: { title: 'A', fields: [] } }))
     await flushPromises()
     await flushPromises()
 
@@ -251,8 +218,8 @@ describe('useFormState — refresh() awaits a coalesced load', () => {
     const first = new Promise<FormState>((resolve) => { resolveFirst = resolve })
     const getFn = vi.fn()
       .mockReturnValueOnce(first)
-      .mockResolvedValueOnce(state({ status: 'idle', delivery: 'complete' }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+      .mockResolvedValueOnce(formState({ status: 'idle', delivery: 'complete' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     const vm = wrapper.vm as unknown as { refresh: () => Promise<FormState | null> }
@@ -260,7 +227,7 @@ describe('useFormState — refresh() awaits a coalesced load', () => {
     // refresh() is called (e.g. by the delivery nudge) while the mount's
     // own first load is still pending.
     const refreshPromise = vm.refresh()
-    resolveFirst?.(state({ status: 'idle', delivery: 'pending' }))
+    resolveFirst?.(formState({ status: 'idle', delivery: 'pending' }))
 
     const result = await refreshPromise
 
@@ -276,18 +243,15 @@ describe('useFormState — refresh() awaits a coalesced load', () => {
 describe('useFormState — newer session messages', () => {
   const SESSION_TOPIC = 'session:session-1:message:*'
 
-  function sessionListener() {
-    const calls = vi.mocked(WippyProxy.on).mock.calls.filter(([topic]) => topic === SESSION_TOPIC)
-    return calls.at(-1)?.[1] as unknown as ((message: { data?: { type?: string } }) => void) | undefined
-  }
+  const sessionListener = () => listenerFor<(message: { data?: { type?: string } }) => void>(SESSION_TOPIC)
 
   it('reloads an open form on a new message, ignores chunks, and stops listening once it is stale', async () => {
     const unsubscribe = vi.fn()
-    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === SESSION_TOPIC ? unsubscribe : () => {}) as never)
+    onMock().mockImplementation(((topic: string) => topic === SESSION_TOPIC ? unsubscribe : () => {}) as never)
     const getFn = vi.fn()
-      .mockResolvedValueOnce(state())
-      .mockResolvedValueOnce(state({ stale: true }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+      .mockResolvedValueOnce(formState())
+      .mockResolvedValueOnce(formState({ stale: true }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     await flushPromises()
@@ -306,14 +270,14 @@ describe('useFormState — newer session messages', () => {
   })
 
   it('listens while an answer is not complete, and not for a completed one', async () => {
-    const getFn = vi.fn().mockResolvedValue(state({ status: 'idle', delivery: 'running' }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const getFn = vi.fn().mockResolvedValue(formState({ status: 'idle', delivery: 'running' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
     mountHarness('artifact-1')
     await flushPromises()
     expect(sessionListener()).toBeDefined()
 
-    vi.mocked(WippyProxy.on).mockClear()
-    getFn.mockResolvedValue(state({ status: 'idle', delivery: 'complete' }))
+    onMock().mockClear()
+    getFn.mockResolvedValue(formState({ status: 'idle', delivery: 'complete' }))
     mountHarness('artifact-1')
     await flushPromises()
     expect(sessionListener()).toBeUndefined()
@@ -323,18 +287,15 @@ describe('useFormState — newer session messages', () => {
 describe('useFormState — session status change (e.g. a Stop that settles the turn with no reply)', () => {
   const STATUS_TOPIC = 'session:session-1'
 
-  function statusListener() {
-    const calls = vi.mocked(WippyProxy.on).mock.calls.filter(([topic]) => topic === STATUS_TOPIC)
-    return calls.at(-1)?.[1] as unknown as ((message: unknown) => void) | undefined
-  }
+  const statusListener = () => listenerFor<(message: unknown) => void>(STATUS_TOPIC)
 
   it('reloads on a session-level status event while delivery is interrupted, and stops listening once complete', async () => {
     const unsubscribe = vi.fn()
-    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === STATUS_TOPIC ? unsubscribe : () => {}) as never)
+    onMock().mockImplementation(((topic: string) => topic === STATUS_TOPIC ? unsubscribe : () => {}) as never)
     const getFn = vi.fn()
-      .mockResolvedValueOnce(state({ status: 'idle', delivery: 'interrupted' }))
-      .mockResolvedValueOnce(state({ status: 'idle', delivery: 'complete' }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+      .mockResolvedValueOnce(formState({ status: 'idle', delivery: 'interrupted' }))
+      .mockResolvedValueOnce(formState({ status: 'idle', delivery: 'complete' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     await flushPromises()
@@ -351,21 +312,21 @@ describe('useFormState — session status change (e.g. a Stop that settles the t
   })
 
   it('subscribes to the session-level topic (not just session:<id>:message:*), scoped to this session id', async () => {
-    const getFn = vi.fn().mockResolvedValue(state({ status: 'idle', delivery: 'running', session_id: 'session-42' }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const getFn = vi.fn().mockResolvedValue(formState({ status: 'idle', delivery: 'running', session_id: 'session-42' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
     mountHarness('artifact-1')
     await flushPromises()
 
-    const topics = vi.mocked(WippyProxy.on).mock.calls.map(([topic]) => topic)
+    const topics = onMock().mock.calls.map(([topic]) => topic)
     expect(topics).toContain('session:session-42')
     expect(topics).toContain('session:session-42:message:*')
   })
 
   it('unsubscribes the status listener on unmount', async () => {
     const unsubscribe = vi.fn()
-    vi.mocked(WippyProxy.on).mockImplementation(((topic: string) => topic === STATUS_TOPIC ? unsubscribe : () => {}) as never)
-    const getFn = vi.fn().mockResolvedValue(state({ status: 'idle', delivery: 'running' }))
-    mockArtifactState().mockReturnValue({ get: getFn, submit: vi.fn() })
+    onMock().mockImplementation(((topic: string) => topic === STATUS_TOPIC ? unsubscribe : () => {}) as never)
+    const getFn = vi.fn().mockResolvedValue(formState({ status: 'idle', delivery: 'running' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
 
     const wrapper = mountHarness('artifact-1')
     await flushPromises()

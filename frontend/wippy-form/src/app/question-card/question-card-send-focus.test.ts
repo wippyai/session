@@ -1,77 +1,38 @@
-import type { VueWrapper } from '@vue/test-utils'
-import type { FormDefinition, FormState } from '../../lib/definition'
-import type { ComponentProps } from '../../types'
+import type { FormDefinition } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
-import * as WippyProxy from '@wippy-fe/proxy'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import buttonCss from '@wippy-fe/theme/primevue/button.css?raw'
 import commonCss from '@wippy-fe/theme/primevue/common.css?raw'
-import { EVENT_PROVIDER, PROPS_ERROR_PROVIDER, PROPS_PROVIDER } from '@wippy-fe/webcomponent-vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ref } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
-import { ELEMENT_PROVIDER } from '../../element-context'
-import WippyForm from '../wippy-form.vue'
+import { choiceField, definitionOf, formState } from '../../test-support/fixtures'
+import { hostError } from '../../test-support/host-error'
+import { artifactElement, mountWippyForm } from '../../test-support/mount-form'
+import { artifactStateMock, resetProxyMock } from '../../test-support/proxy-control'
 import QuestionCardQuestion from './question-card-question.vue'
 import QuestionCardReview from './question-card-review.vue'
 
 /**
- * Focus and double-submit behavior of the controls that SEND the question
- * card, through the real submit cycle (`wippy-form.vue` -> `useFormSubmit` ->
- * the mocked Host artifact-state client), with the REAL `<transition>` a
- * browser renders.
+ * Focus and double-submit behavior of the controls that send the question card,
+ * through the real submit cycle (`wippy-form.vue`, `useFormSubmit` and the
+ * mocked Host artifact-state client), with the real `<transition>` a browser
+ * renders.
  *
- * "Send answers" on the review step, and "Send" on a several-answer question,
- * are the controls that just failed when a send is rejected, and they are the
- * control that has focus. While the send is in flight they used to carry the
- * `disabled` attribute, and a focused button that becomes disabled hands
- * focus to <body>: after a rejected send (a 500, or a form-level 422) the
- * reader had nowhere to continue from. They now stay focusable
- * (`aria-disabled`) and ignore activation while the card is blocked.
+ * "Send answers" on the review step and "Send" on a several-answer question are
+ * the controls that just failed when a send is rejected, and they have focus.
+ * These buttons stay focusable while a send is in flight: they are `aria-disabled`
+ * and ignore activation, instead of taking the `disabled` attribute, which
+ * would hand focus to <body>.
  */
-
-vi.mock('@wippy-fe/proxy', () => ({
-  artifactState: vi.fn(),
-  on: vi.fn(() => () => {}),
-}))
-
-/** Realm-stable brand the Host stamps on every `ArtifactStateError` (see `lib/submit-error.ts`). */
-const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
 
 const SERVER_ERROR = 'The server could not save this. Try again.'
 const FORM_ERROR = 'This form changed since you loaded it.'
 
-const reviewDefinition: FormDefinition = {
-  title: 'Release',
-  fields: [
-    { id: 'a', type: 'choice', label: 'Deploy now?', required: true, options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }], multiple: false, allow_other: false },
-    { id: 'b', type: 'choice', label: 'Which packages?', required: true, options: [{ value: 'proxy', label: 'proxy' }, { value: 'theme', label: 'theme' }], multiple: true, allow_other: false },
-  ],
-}
+const singleQuestion = choiceField({ id: 'a', label: 'Deploy now?', required: true, options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }] })
+const packagesQuestion = choiceField({ id: 'b', label: 'Which packages?', required: true, options: [{ value: 'proxy', label: 'proxy' }, { value: 'theme', label: 'theme' }], multiple: true })
 
-const sendDefinition: FormDefinition = {
-  title: 'Pick',
-  fields: [
-    { id: 'b', type: 'choice', label: 'Which packages?', required: true, options: [{ value: 'proxy', label: 'proxy' }, { value: 'theme', label: 'theme' }], multiple: true, allow_other: false },
-  ],
-}
-
-function activeState(definition: FormDefinition): FormState {
-  return {
-    form_version: 1,
-    artifact_id: 'artifact-1',
-    session_id: 'session-1',
-    status: 'active',
-    stale: false,
-    late: false,
-    content_version: 1,
-    definition,
-    data: null,
-    submitted_at: null,
-    answer_message_id: null,
-    delivery: null,
-  }
-}
+const reviewDefinition: FormDefinition = { ...definitionOf(singleQuestion, packagesQuestion), title: 'Release' }
+const sendDefinition: FormDefinition = { ...definitionOf(packagesQuestion), title: 'Pick' }
 
 interface Deferred {
   promise: Promise<never>
@@ -82,10 +43,6 @@ function deferred(): Deferred {
   let reject: (reason: unknown) => void = () => {}
   const promise = new Promise<never>((_resolve, rej) => { reject = rej })
   return { promise, reject }
-}
-
-function hostError(status: number, extra: Record<string, unknown> = {}) {
-  return Object.assign(new Error(`HTTP ${status}`), { name: 'ArtifactStateError', [ARTIFACT_STATE_ERROR_BRAND]: true, status, ...extra })
 }
 
 function sleep(ms: number) {
@@ -124,42 +81,20 @@ function applyFocusFixup(root: Element): () => void {
   return () => observer.disconnect()
 }
 
-const mounted: Array<VueWrapper<unknown>> = []
 const cleanups: Array<() => void> = []
 
 function mountForm(definition: FormDefinition, submit: ReturnType<typeof vi.fn>) {
-  vi.mocked(WippyProxy.artifactState).mockReturnValue({ get: vi.fn().mockResolvedValue(activeState(definition)), submit } as never)
-  const element = document.createElement('div')
-  element.setAttribute('data-wippy-artifact-id', 'artifact-1')
-  const props: ComponentProps = { formVersion: 1, definition, state: 'active' }
-  const wrapper = mount(WippyForm, {
-    attachTo: document.body,
-    global: {
-      plugins: [PrimeVuePlugin],
-      stubs: { transition: false },
-      provide: {
-        [PROPS_PROVIDER as unknown as symbol]: ref(props),
-        [PROPS_ERROR_PROVIDER as unknown as symbol]: ref([]),
-        [EVENT_PROVIDER as unknown as symbol]: vi.fn(),
-        [ELEMENT_PROVIDER as unknown as symbol]: element,
-      },
-    },
-  })
-  mounted.push(wrapper as unknown as VueWrapper<unknown>)
+  artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(formState({ definition })), submit } as never)
+  const wrapper = mountWippyForm({ formVersion: 1, definition, state: 'active' }, artifactElement('artifact-1'), { attachToBody: true, realTransition: true })
   cleanups.push(applyFocusFixup(wrapper.element))
   return wrapper
 }
 
-beforeEach(() => {
-  vi.mocked(WippyProxy.artifactState).mockReset()
-  vi.mocked(WippyProxy.on).mockReset().mockReturnValue(() => {})
-})
+beforeEach(resetProxyMock)
 
 afterEach(() => {
   while (cleanups.length > 0)
     cleanups.pop()?.()
-  while (mounted.length > 0)
-    mounted.pop()?.unmount()
   document.body.replaceChildren()
 })
 
@@ -262,7 +197,7 @@ describe('"Send answers" on the review step: a failed send keeps focus on it', (
     await settle()
     expect(document.activeElement).toBe(wrapper.find('[data-focus="send-all"]').element)
 
-    pending.reject(hostError(422, { errors: {}, formErrors: [{ code: 'version_conflict', message: FORM_ERROR }] }))
+    pending.reject(hostError(422, undefined, { errors: {}, formErrors: [{ code: 'version_conflict', message: FORM_ERROR }] }))
     await settle()
     await sleep(50)
 

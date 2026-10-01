@@ -2,35 +2,12 @@ import type { FormState } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { describe, expect, it } from 'vitest'
+import { choiceField, definitionOf, formState } from '../../test-support/fixtures'
 import QuestionCardSummary from './question-card-summary.vue'
 
-const baseState: FormState = {
-  form_version: 1,
-  artifact_id: 'artifact-1',
-  session_id: 'session-1',
-  status: 'idle',
-  stale: false,
-  late: false,
-  content_version: 2,
-  definition: {
-    title: 'Question',
-    fields: [
-      {
-        id: 'f1',
-        type: 'choice',
-        label: 'Pick one',
-        required: true,
-        options: [{ value: 'a', label: 'Option A' }, { value: 'b', label: 'Option B' }],
-        multiple: false,
-        allow_other: false,
-      },
-    ],
-  },
-  data: { f1: 'a' },
-  submitted_at: '2026-01-01T00:00:00.000Z',
-  answer_message_id: 'msg-1',
-  delivery: 'complete',
-}
+const definition = definitionOf(choiceField({ required: true }))
+
+const baseState = formState({ status: 'idle', definition, content_version: 2, data: { f1: 'a' }, submitted_at: '2026-01-01T00:00:00.000Z', answer_message_id: 'msg-1', delivery: 'complete' })
 
 function mountSummary(overrides: Partial<FormState> = {}) {
   return mount(QuestionCardSummary, { props: { state: { ...baseState, ...overrides } }, attachTo: document.body, global: { plugins: [PrimeVuePlugin] } })
@@ -92,7 +69,7 @@ describe('QuestionCardSummary: status text', () => {
 
 describe('QuestionCardSummary: form description', () => {
   it('shows the form description with backticks as inline code', () => {
-    const wrapper = mountSummary({ definition: { ...baseState.definition, description: 'Answers go straight to `ops`.' } })
+    const wrapper = mountSummary({ definition: { ...definition, description: 'Answers go straight to `ops`.' } })
     const description = wrapper.find('.w-form__form-description')
     expect(description.exists()).toBe(true)
     expect(description.find('code').text()).toBe('ops')

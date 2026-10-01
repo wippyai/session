@@ -1,19 +1,12 @@
 import type { FormAnswers, FormState, SubmitAccepted, SubmitEnvelope, SubmitResult } from '../lib/definition'
-import * as WippyProxy from '@wippy-fe/proxy'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useFormSubmit } from './use-form-submit'
+import { acceptedResponse } from '../test-support/fixtures'
+import { hostError } from '../test-support/host-error'
+import { artifactStateMock, resetProxyMock, setArtifactStateExport } from '../test-support/proxy-control'
+import { RETRY_DELAY_MS, useFormSubmit } from './use-form-submit'
 
-vi.mock('@wippy-fe/proxy', () => ({
-  artifactState: vi.fn(),
-  on: vi.fn(() => () => {}),
-}))
-
-function mockArtifactState() {
-  return vi.mocked(WippyProxy.artifactState)
-}
-
-/** `submit()` never calls `.get`, but the shared ambient type requires it. */
+/** `submit()` never calls `.get`, but the proxy type requires it. */
 function artifactClient(submit: ReturnType<typeof vi.fn>) {
   return { get: vi.fn(), submit } as unknown as {
     get: () => Promise<FormState>
@@ -21,45 +14,15 @@ function artifactClient(submit: ReturnType<typeof vi.fn>) {
   }
 }
 
-/** Realm-stable brand the Host stamps on every `ArtifactStateError` — see `submit-error.ts`. */
-const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
-
-/** Host `ArtifactStateError`-shaped, branded rejection, as classified by submit-error.ts. */
-function hostError(status: number | undefined, code?: string) {
-  const err = new Error('rejected') as Error & { status?: number, code?: string }
-  err.name = 'ArtifactStateError'
-  ;(err as unknown as Record<symbol, boolean>)[ARTIFACT_STATE_ERROR_BRAND] = true
-  err.status = status
-  err.code = code
-  return err
-}
-
-function accepted(overrides: Partial<SubmitAccepted> = {}): SubmitAccepted {
-  return {
-    success: true,
-    artifact_id: 'artifact-1',
-    request_id: 'ignored-server-echo',
-    answer_message_id: 'msg-1',
-    content_version: 2,
-    status: 'idle',
-    late: false,
-    delivery: 'pending',
-    replayed: false,
-    ...overrides,
-  }
-}
-
 const answersA: FormAnswers = { f1: 'a' }
 const answersB: FormAnswers = { f1: 'b' }
 
-beforeEach(() => {
-  mockArtifactState().mockReset()
-})
+beforeEach(resetProxyMock)
 
 describe('useFormSubmit — request id issuance', () => {
   it('reuses the same request_id across attempts when the answers are unchanged', async () => {
     const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -75,7 +38,7 @@ describe('useFormSubmit — request id issuance', () => {
 
   it('issues a new request_id once the answers change', async () => {
     const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -90,9 +53,9 @@ describe('useFormSubmit — request id issuance', () => {
 
   it('resets identity after a successful submit, so a later identical attempt gets a fresh request_id', async () => {
     const submitFn = vi.fn()
-      .mockResolvedValueOnce(accepted())
+      .mockResolvedValueOnce(acceptedResponse())
       .mockRejectedValueOnce(hostError(409, 'request_conflict'))
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -109,12 +72,12 @@ describe('useFormSubmit — request id issuance', () => {
 describe('useFormSubmit — outcomes', () => {
   it('returns fieldErrors/formErrors for a 422 rejection, with no retry', async () => {
     const submitFn = vi.fn().mockRejectedValue(
-      Object.assign(hostError(422), {
+      hostError(422, undefined, {
         errors: { f1: [{ code: 'required', message: 'Required' }] },
         formErrors: [{ code: 'stale', message: 'Stale' }],
       }),
     )
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -131,14 +94,14 @@ describe('useFormSubmit — outcomes', () => {
     try {
       const submitFn = vi.fn()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
-        .mockResolvedValueOnce(accepted())
-      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+        .mockResolvedValueOnce(acceptedResponse())
+      artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
       const artifactId = ref<string | null>('artifact-1')
       const { submit } = useFormSubmit(artifactId)
 
       const outcomePromise = submit(1, 1, answersA)
-      await vi.advanceTimersByTimeAsync(800)
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS)
       const outcome = await outcomePromise
 
       expect(outcome.ok).toBe(true)
@@ -154,7 +117,7 @@ describe('useFormSubmit — outcomes', () => {
 
   it('does not retry a definite failure such as a 500', async () => {
     const submitFn = vi.fn().mockRejectedValue(hostError(500))
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -167,14 +130,14 @@ describe('useFormSubmit — outcomes', () => {
 
   it('returns the documented message and calls nothing when there is no artifact id', async () => {
     const submitFn = vi.fn()
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>(null)
     const { submit } = useFormSubmit(artifactId)
     const outcome = await submit(1, 1, answersA)
 
     expect(outcome).toEqual({ ok: false, message: 'This form cannot be submitted here.' })
-    expect(mockArtifactState()).not.toHaveBeenCalled()
+    expect(artifactStateMock()).not.toHaveBeenCalled()
     expect(submitFn).not.toHaveBeenCalled()
   })
 })
@@ -186,13 +149,13 @@ describe('useFormSubmit — exhausted-retry copy', () => {
       const submitFn = vi.fn()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
-      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+      artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
       const artifactId = ref<string | null>('artifact-1')
       const { submit } = useFormSubmit(artifactId)
 
       const outcomePromise = submit(1, 1, answersA)
-      await vi.advanceTimersByTimeAsync(800)
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS)
       const outcome = await outcomePromise
 
       expect(outcome.ok).toBe(false)
@@ -213,17 +176,17 @@ describe('useFormSubmit — retry outcome mapping', () => {
     try {
       const submitFn = vi.fn()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
-        .mockRejectedValueOnce(Object.assign(hostError(422), {
+        .mockRejectedValueOnce(hostError(422, undefined, {
           errors: { f1: [{ code: 'required', message: 'Required' }] },
           formErrors: [],
         }))
-      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+      artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
       const artifactId = ref<string | null>('artifact-1')
       const { submit } = useFormSubmit(artifactId)
 
       const outcomePromise = submit(1, 1, answersA)
-      await vi.advanceTimersByTimeAsync(800)
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS)
       const outcome = await outcomePromise
 
       expect(outcome.ok).toBe(false)
@@ -241,21 +204,20 @@ describe('useFormSubmit — retry outcome mapping', () => {
       const submitFn = vi.fn()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
         .mockRejectedValueOnce(hostError(409, 'request_conflict'))
-      mockArtifactState().mockReturnValue(artifactClient(submitFn))
+      artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
       const artifactId = ref<string | null>('artifact-1')
       const { submit } = useFormSubmit(artifactId)
 
       const outcomePromise = submit(1, 1, answersA)
-      await vi.advanceTimersByTimeAsync(800)
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS)
       const outcome = await outcomePromise
 
       expect(outcome.ok).toBe(false)
       expect(outcome.code).toBe('request_conflict')
-      // A 409 request_conflict is not something retrying without a change
-      // can fix — offering Retry for it is misleading.
+      // Retrying without a change cannot fix a 409 request_conflict, so Retry is not offered.
       expect(outcome.retryable).toBe(false)
-      expect(outcome.message).not.toBe('Network problem. Your answer may not have been saved. Check your connection, then select Retry.')
+      expect(outcome.message).toBe('That answer no longer matches this attempt. Change something and try again.')
     }
     finally {
       vi.useRealTimers()
@@ -268,7 +230,7 @@ describe('useFormSubmit — rebind safety', () => {
     let resolveSubmit: ((r: SubmitAccepted) => void) | undefined
     const pending = new Promise<SubmitAccepted>((resolve) => { resolveSubmit = resolve })
     const submitFn = vi.fn().mockReturnValue(pending)
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -278,7 +240,7 @@ describe('useFormSubmit — rebind safety', () => {
     // request is still in flight (e.g. a double-buffered w-page swap).
     artifactId.value = 'artifact-2'
     await nextTick()
-    resolveSubmit?.(accepted())
+    resolveSubmit?.(acceptedResponse())
 
     const outcome = await outcomePromise
     expect(outcome.ok).toBe(false)
@@ -288,7 +250,7 @@ describe('useFormSubmit — rebind safety', () => {
 
   it('resets request-id identity once the artifact id changes', async () => {
     const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
-    mockArtifactState().mockReturnValue(artifactClient(submitFn))
+    artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
     const { submit } = useFormSubmit(artifactId)
@@ -305,23 +267,12 @@ describe('useFormSubmit — rebind safety', () => {
 })
 
 describe('useFormSubmit — older Host without the artifactState export', () => {
-  afterEach(() => {
-    // Restore the mocked module shape for every other test in this file.
-    mockArtifactState().mockReset()
-  })
-
   it('returns the documented message and calls nothing when @wippy-fe/proxy has no artifactState export', async () => {
-    const original = (WippyProxy as unknown as Record<string, unknown>).artifactState
-    ;(WippyProxy as unknown as Record<string, unknown>).artifactState = undefined
-    try {
-      const artifactId = ref<string | null>('artifact-1')
-      const { submit } = useFormSubmit(artifactId)
-      const outcome = await submit(1, 1, answersA)
+    setArtifactStateExport(undefined)
+    const artifactId = ref<string | null>('artifact-1')
+    const { submit } = useFormSubmit(artifactId)
+    const outcome = await submit(1, 1, answersA)
 
-      expect(outcome).toEqual({ ok: false, message: 'This form needs a newer Web Host.' })
-    }
-    finally {
-      (WippyProxy as unknown as Record<string, unknown>).artifactState = original
-    }
+    expect(outcome).toEqual({ ok: false, message: 'This form needs a newer Web Host.' })
   })
 })

@@ -1,14 +1,13 @@
-import { mount } from '@vue/test-utils'
 import type { Ref } from 'vue'
-import { defineComponent, ref } from 'vue'
+import type { HostState } from './use-host-reflection'
+import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
+import { defineComponent, ref } from 'vue'
 import { ELEMENT_PROVIDER } from '../element-context'
 import { useHostReflection } from './use-host-reflection'
 
-type CardState = 'active' | 'review' | 'answered'
-
 /** A no-op component that only wires useHostReflection to the given refs. */
-function reflectionHarness(state: Ref<CardState>, collapsed: Ref<boolean>) {
+function reflectionHarness(state: Ref<HostState>, collapsed: Ref<boolean>) {
   return defineComponent({
     setup() {
       useHostReflection(state, collapsed)
@@ -19,7 +18,7 @@ function reflectionHarness(state: Ref<CardState>, collapsed: Ref<boolean>) {
 
 /** Mounts the harness against a real element. */
 function mountReflection(element: HTMLElement) {
-  const state = ref<CardState>('active')
+  const state = ref<HostState>('active')
   const collapsed = ref(false)
   const wrapper = mount(reflectionHarness(state, collapsed), {
     global: { provide: { [ELEMENT_PROVIDER as unknown as symbol]: element } },
@@ -57,7 +56,7 @@ describe('useHostReflection', () => {
   })
 
   it('does nothing (and does not throw) when no ELEMENT_PROVIDER is injected', async () => {
-    const harness = reflectionHarness(ref<CardState>('active'), ref(false))
+    const harness = reflectionHarness(ref<HostState>('active'), ref(false))
     expect(() => mount(harness)).not.toThrow()
   })
 

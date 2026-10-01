@@ -1,30 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { hostError } from '../test-support/host-error'
 import { classifySubmitError, validationErrorsOf } from './submit-error'
-
-/** Realm-stable brand the Host stamps on every `ArtifactStateError` — see `submit-error.ts`. */
-const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
-
-/** Builds a Host `ArtifactStateError`-shaped, branded Error, as `@wippy-fe/proxy` throws it. */
-function hostError(status: number | undefined, code?: string, extra?: {
-  errors?: Record<string, { code: string, message: string }[]>
-  formErrors?: { code: string, message: string }[]
-}) {
-  const err = new Error('host rejected the submission') as Error & {
-    status?: number
-    code?: string
-    errors?: Record<string, { code: string, message: string }[]>
-    formErrors?: { code: string, message: string }[]
-  }
-  err.name = 'ArtifactStateError'
-  ;(err as unknown as Record<symbol, boolean>)[ARTIFACT_STATE_ERROR_BRAND] = true
-  err.status = status
-  err.code = code
-  if (extra?.errors)
-    err.errors = extra.errors
-  if (extra?.formErrors)
-    err.formErrors = extra.formErrors
-  return err
-}
 
 describe('classifySubmitError', () => {
   it('classifies a 401 as auth, not retryable, no reload', () => {

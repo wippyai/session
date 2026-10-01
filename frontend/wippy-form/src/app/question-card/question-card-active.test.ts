@@ -1,7 +1,8 @@
-import type { FormDefinition, FormState } from '../../lib/definition'
-import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
+import type { FormDefinition } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
+import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { describe, expect, it } from 'vitest'
+import { formState } from '../../test-support/fixtures'
 import QuestionCardActive from './question-card-active.vue'
 
 const singleQuestionDef: FormDefinition = {
@@ -25,33 +26,12 @@ const twoQuestionDef: FormDefinition = {
   ],
 }
 
-function makeState(definition: FormDefinition, overrides: Partial<FormState> = {}): FormState {
-  return {
-    form_version: 1,
-    artifact_id: 'artifact-1',
-    session_id: 'session-1',
-    status: 'active',
-    stale: false,
-    late: false,
-    content_version: 1,
-    definition,
-    data: null,
-    submitted_at: null,
-    answer_message_id: null,
-    delivery: null,
-    ...overrides,
-  }
-}
-
-function mountCard(definition: FormDefinition, overrides: Partial<FormState> = {}) {
+/** Mounts the card with the form's props, which `props` can override. `global` adds mounting options. */
+function mountCard(definition: FormDefinition, props: { offline?: boolean, submitting?: boolean } = {}, global: Record<string, unknown> = {}) {
   return mount(QuestionCardActive, {
-    props: {
-      state: makeState(definition, overrides),
-      submitting: false,
-      banner: null,
-    },
+    props: { state: formState({ definition }), submitting: false, banner: null, ...props },
     attachTo: document.body,
-    global: { plugins: [PrimeVuePlugin] },
+    global: { plugins: [PrimeVuePlugin], ...global },
   })
 }
 
@@ -116,25 +96,15 @@ describe('QuestionCardActive — single question, single answer', () => {
   })
 })
 
-describe('QuestionCardActive — offline indicator and blocked answering (P2 tracker line 107c)', () => {
+describe('QuestionCardActive — offline indicator and blocked answering', () => {
   it('shows a visible offline notice and blocks a row click and a number key from answering', async () => {
-    const wrapper = mount(QuestionCardActive, {
-      props: {
-        state: makeState(singleQuestionDef),
-        submitting: false,
-        banner: null,
-        offline: true,
-      },
-      attachTo: document.body,
-      global: { plugins: [PrimeVuePlugin] },
-    })
+    const wrapper = mountCard(singleQuestionDef, { offline: true })
 
     const notice = wrapper.find('[role="status"]')
     expect(notice.exists()).toBe(true)
     expect(notice.text()).toContain('You are offline. Your choices are kept.')
 
-    // Rows silently ignoring clicks (via JS) is not enough — assistive tech
-    // needs the disabled state marked on the control itself.
+    // Assistive technology needs the blocked state on the control itself.
     const row = wrapper.find('[role="radio"]')
     expect(row.attributes('aria-disabled')).toBe('true')
 
@@ -226,7 +196,7 @@ describe('QuestionCardActive — Escape in a note closes it without losing the d
   })
 })
 
-describe('QuestionCardActive — form title and description (the one-question card was missing both)', () => {
+describe('QuestionCardActive — form title and description', () => {
   it('shows the form title on a single-question card, not only a several-question one', () => {
     const wrapper = mountCard(singleQuestionDef)
     const title = wrapper.find('.w-form__title')
@@ -336,9 +306,7 @@ describe('QuestionCardActive — length-error and server-error alerts are linked
     vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
     await wrapper.vm.$nextTick()
 
-    // The options group already points its own aria-describedby at the
-    // question's error Message — the Other textarea must reference that
-    // same id too, not just the group as a whole.
+    // The Other textarea names the same error as the options group.
     const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
     expect(groupErrorId).toBeTruthy()
 
@@ -348,49 +316,25 @@ describe('QuestionCardActive — length-error and server-error alerts are linked
     expect(describedBy).toContain(groupErrorId)
   })
 
-  // PrimeVue's `Message` sets `inheritAttrs: false`. vue-test-utils mounts
-  // with its OWN <transition> stub by default, which renders as a real DOM
-  // element (<transition-stub>) that captures $attrs regardless of the
-  // wrapped component's own inheritAttrs setting — so the test above proves
-  // the STRING ids match, but not that the id actually lands on anything in
-  // a real (non-test-stub) render. This one mounts with the real
-  // <transition> (global.stubs.transition: false, matching an actual
-  // browser) and resolves the id through `document.getElementById` to prove
-  // it names a real element, not a dangling reference the browser would
-  // silently fail to link.
-  it('the error id an Other/radiogroup aria-describedby points at resolves to a real element in an UNSTUBBED render (not just a matching string)', async () => {
-    const wrapper = mount(QuestionCardActive, {
-      props: {
-        state: makeState(singleQuestionDef),
-        submitting: false,
-        banner: null,
-      },
-      attachTo: document.body,
-      global: { plugins: [PrimeVuePlugin], stubs: { transition: false } },
-    })
-    try {
-      const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
-      vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
-      await wrapper.vm.$nextTick()
+  // The test-utils <transition> stub is a real element that captures $attrs, so
+  // the tests above prove the id strings match, not that the id lands on an
+  // element. This one mounts with the real <transition> a browser has and
+  // looks the id up in the tree.
+  it('the error id that aria-describedby points at names a real element when mounted without the transition stub', async () => {
+    const wrapper = mountCard(singleQuestionDef, {}, { stubs: { transition: false } })
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
+    vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
+    await wrapper.vm.$nextTick()
 
-      const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
-      expect(groupErrorId).toBeTruthy()
+    const groupErrorId = wrapper.find('[role="radiogroup"]').attributes('aria-describedby')
+    expect(groupErrorId).toBeTruthy()
 
-      // Scoped to THIS wrapper's own rendered tree, not the global
-      // `document` — this file's other tests mount with `attachTo:
-      // document.body` too and none of them unmount afterward, so stale
-      // elements from earlier tests (whose Vue `useId()` counter can
-      // collide with this one's, since each `mount()` starts a fresh app
-      // instance) can otherwise still be sitting in `document.body` and
-      // `document.getElementById` would find the WRONG, stale one.
-      const target = wrapper.element.querySelector(`#${groupErrorId}`)
-      expect(target).not.toBeNull()
-      expect(target?.getAttribute('role')).toBe('alert')
-      expect(target?.textContent).toContain('That choice is no longer available.')
-    }
-    finally {
-      wrapper.unmount()
-    }
+    // Looked up in this wrapper's own tree, because `useId()` values can repeat
+    // across separately mounted apps.
+    const target = wrapper.element.querySelector(`#${groupErrorId}`)
+    expect(target).not.toBeNull()
+    expect(target?.getAttribute('role')).toBe('alert')
+    expect(target?.textContent).toContain('That choice is no longer available.')
   })
 })
 
@@ -490,30 +434,17 @@ describe('QuestionCardActive — several questions', () => {
 })
 
 describe('QuestionCardActive — checkbox visual state follows the model', () => {
-  // Ticking a row's checkbox with the mouse while that row's
-  // own note is open leaves aria-checked="true" (driven by our own
-  // `selected` prop) but the nested PrimeVue Checkbox's own visual mark
-  // empty (data-p-checked="false") — the row and its Checkbox disagree.
-  // The row already marks the Checkbox purely decorative (tabindex="-1"
-  // aria-hidden="true") and drives every answer through its own click
-  // handler (`onRowClick` -> `activate()`), but the Checkbox is still fully
-  // interactive underneath: PrimeVue wires its native <input>'s own
-  // `change` event to its own internal `d_value`/`writeValue` machinery,
-  // which can update the visual mark independently of the `selected` prop
-  // we pass it. A real mouse click fires both that native `change` AND the
-  // row's bubbled `click` in close succession — browser-timing-dependent
-  // and not reproducible through jsdom's simplified event dispatch — but
-  // firing the native `change` alone (bypassing the row's click handler
-  // entirely) isolates the exact mechanism: PrimeVue's own internal toggle
-  // running independent of the model we own. That is the divergence this
-  // item asks to close.
+  // PrimeVue's Checkbox listens to its own native `change` event and can update
+  // its mark independently of the `selected` prop. A real click fires that event
+  // and the row's `click` together, which jsdom cannot reproduce, so the test
+  // fires `change` alone to show that the mark follows the model.
   it('does not let the checkbox\'s own native change event move its visual mark independently of the selected prop', async () => {
     const wrapper = mountCard(twoQuestionDef)
     // Reach f2 (multi-choice, two options, no Other).
     await wrapper.findAll('.w-form__option')[0].trigger('click')
     await wrapper.vm.$nextTick()
 
-    // Open the first option's note (the repro's starting state).
+    // Open the first option's note.
     await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
     await wrapper.vm.$nextTick()
     const row = wrapper.find('.w-form__option--editing')
@@ -523,19 +454,15 @@ describe('QuestionCardActive — checkbox visual state follows the model', () =>
     expect(wrapper.find('[role="checkbox"]').attributes('aria-checked')).toBe('false')
     expect(wrapper.find('.w-form__option-mark').attributes('data-p-checked')).toBe('false')
 
-    // Fire only the checkbox's native `change` event — the DOM event
-    // PrimeVue's own Checkbox listens to internally — without going
-    // through the row's `click` handler (which owns ticking via
-    // `activate()`). `selected` (and so `chosen`) is untouched.
+    // Fire only the native `change` event, without the row's `click` handler that ticks through `activate()`.
     const checkboxInput = row.find('input[type="checkbox"]')
     const checkboxEl = checkboxInput.element as HTMLInputElement
     checkboxEl.checked = true
     await checkboxInput.trigger('change')
     await wrapper.vm.$nextTick()
 
-    // The row's own aria-checked (still driven directly by `selected`,
-    // which nothing here changed) must agree with the nested Checkbox's own
-    // visual state — it must stay unselected, not flip on its own.
+    // The row's aria-checked follows `selected`, which nothing changed, and the
+    // Checkbox's own mark must agree with it instead of flipping on its own.
     expect(row.attributes('part')).not.toContain('option-selected')
     expect(wrapper.find('[role="checkbox"]').attributes('aria-checked')).toBe('false')
     expect(wrapper.find('.w-form__option-mark').attributes('data-p-checked')).toBe('false')

@@ -1,24 +1,25 @@
-import type { VueWrapper } from '@vue/test-utils'
-import type { FormDefinition, FormState } from '../../lib/definition'
-import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
+import type { FormDefinition } from '../../lib/definition'
+import type { SubmitBanner } from '../../lib/submit-error'
 import { flushPromises, mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it } from 'vitest'
+import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
+import { describe, expect, it } from 'vitest'
 import { ERROR_TEXT_CLASS, WARN_TEXT_CLASS } from '../../lib/error-text'
+import { textElement } from '../../test-support/dom'
+import { formState } from '../../test-support/fixtures'
 import QuestionCardActive from './question-card-active.vue'
 
 /**
- * How the question card announces a submit error, and how the error text is
- * tied to the control that has focus:
+ * How the question card announces a submit error and ties the error text to the
+ * control that has focus:
  *
- *  - each error is announced ONCE (one `role="alert"` element for it, no copy
- *    in a polite status region, no second alert for the same text);
- *  - whichever control holds focus while an error is on screen (an answer
- *    row, the Other box, a note box) names that error in `aria-describedby`,
- *    and says `aria-invalid` where its ARIA role supports it.
+ *  - each error is announced once, by one `role="alert"` element, with no copy
+ *    in a polite status region and no second alert for the same text;
+ *  - the control that has focus while an error is on screen (an answer row, the
+ *    Other box, a note box) names the error in `aria-describedby`, and carries
+ *    `aria-invalid` where its ARIA role supports it.
  *
- * Every mount uses the REAL `<transition>` (not the test-utils stub, which
- * adds a second element carrying the same attributes) so an element count
- * matches what a browser renders.
+ * Every mount uses the real `<transition>`, because the test-utils stub adds a
+ * second element with the same attributes and would change the counts.
  */
 
 const FIELD_ERROR = 'That choice is no longer available.'
@@ -56,39 +57,13 @@ type ServerErrors = Record<string, { code: string, message: string }[]>
 type ErrorList = { code: string, message: string }[]
 interface CardVm { setServerErrors: (fields?: ServerErrors, form?: ErrorList) => void }
 
-function makeState(definition: FormDefinition): FormState {
-  return {
-    form_version: 1,
-    artifact_id: 'artifact-1',
-    session_id: 'session-1',
-    status: 'active',
-    stale: false,
-    late: false,
-    content_version: 1,
-    definition,
-    data: null,
-    submitted_at: null,
-    answer_message_id: null,
-    delivery: null,
-  }
-}
-
-const mounted: VueWrapper[] = []
-
-function mountCard(definition: FormDefinition, banner: { message: string, retryable?: boolean } | null = null) {
-  const wrapper = mount(QuestionCardActive, {
-    props: { state: makeState(definition), submitting: false, banner },
+function mountCard(definition: FormDefinition, banner: SubmitBanner | null = null) {
+  return mount(QuestionCardActive, {
+    props: { state: formState({ definition }), submitting: false, banner },
     attachTo: document.body,
     global: { plugins: [PrimeVuePlugin], stubs: { transition: false } },
   })
-  mounted.push(wrapper as unknown as VueWrapper)
-  return wrapper
 }
-
-afterEach(() => {
-  while (mounted.length > 0)
-    mounted.pop()?.unmount()
-})
 
 /** The text of every element the `aria-describedby` value names, resolved inside `root` the way a browser would. */
 function describedText(root: Element, element: Element | null): string {
@@ -413,14 +388,6 @@ describe('QuestionCardActive: error text takes the theme severity utilities', ()
   // the utilities, because the `Message`'s own text colour is below 4.5:1
   // contrast in at least one theme.
   const errorUtilities = ERROR_TEXT_CLASS.split(' ')
-
-  /** The element that holds `message` as its own text (no child elements), i.e. the text the reader sees. */
-  function textElement(root: Element, message: string): HTMLElement {
-    const found = Array.from(root.querySelectorAll<HTMLElement>('*')).find(el => el.children.length === 0 && el.textContent?.trim() === message)
-    if (!found)
-      throw new Error(`no element holds exactly "${message}"`)
-    return found
-  }
 
   it('draws a field error in them, inside the Message that keeps its parts, class, role and id', async () => {
     const wrapper = mountCard(singleDef)
