@@ -93,6 +93,71 @@ local function define_tests()
         end)
     end)
 
+    -- The step grid starts at min (zero without a min) and runs in both
+    -- directions, and a value below min is refused anyway, so min is always
+    -- on the grid and inside the range: a definition the checker accepts
+    -- can never allow no answer at all. A range narrower than one step allows
+    -- exactly the minimum (or, without a min, the multiples of the step up to
+    -- the max). The sweep keeps that true for every combination.
+    describe("number definitions", function()
+        it("always leave at least one allowed value, however narrow the range is next to the step", function()
+            local mins = { false, -7, 0, 1, 2.5 }
+            local maxes = { false, -3, 0, 4, 100 }
+            local steps = { false, 0.5, 5, 7 }
+            local accepted = 0
+            local empty = {} :: {string}
+            for _, min in ipairs(mins) do
+                for _, max in ipairs(maxes) do
+                    for _, step in ipairs(steps) do
+                        for _, integer in ipairs({ false, true }) do
+                            local raw = { id = "f", type = "number", label = "Q", integer = integer }
+                            if min ~= false then raw.min = min end
+                            if max ~= false then raw.max = max end
+                            if step ~= false then raw.step = step end
+                            local normalized = definition.normalize({ title = "T", fields = { raw } })
+                            if normalized then
+                                accepted = accepted + 1
+                                local field = normalized.fields[1]
+                                local candidate: number
+                                if field.min ~= nil then
+                                    candidate = field.integer and math.ceil(field.min) or field.min
+                                elseif field.max ~= nil then
+                                    candidate = field.step ~= nil and math.floor(field.max / field.step) * field.step
+                                        or (field.integer and math.floor(field.max) or field.max)
+                                else
+                                    candidate = 0
+                                end
+                                local _, err = field_values.check_answer(field, candidate)
+                                if err then
+                                    table.insert(empty, string.format("min=%s max=%s step=%s integer=%s: %s refused as %s",
+                                        tostring(min), tostring(max), tostring(step), tostring(integer),
+                                        tostring(candidate), tostring(err.code)))
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            test.gt(accepted, 100, "the sweep must reach many accepted definitions")
+            test.eq(#empty, 0, table.concat(empty, "\n"))
+        end)
+
+        it("accept a step wider than the range, which allows the minimum alone", function()
+            for _, integer in ipairs({ false, true }) do
+                local normalized, errors = definition.normalize({ title = "T", fields = {
+                    { id = "f", type = "number", label = "Q", integer = integer, min = 1, max = 4, step = 5 } } })
+                test.is_nil(errors, definition.format_errors(errors))
+                local field = (normalized :: any).fields[1]
+                local allowed = {}
+                for value = 1, 4 do
+                    if select(2, field_values.check_answer(field, value)) == nil then table.insert(allowed, value) end
+                end
+                test.eq(#allowed, 1, "integer=" .. tostring(integer))
+                test.eq(allowed[1], 1, "integer=" .. tostring(integer))
+            end
+        end)
+    end)
+
     describe("pattern check", function()
         local function check(pattern: any)
             local ok, code, message = form_pattern.check(pattern)
