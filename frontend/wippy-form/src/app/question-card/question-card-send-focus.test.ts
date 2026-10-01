@@ -4,6 +4,8 @@ import type { ComponentProps } from '../../types'
 import { mount } from '@vue/test-utils'
 import * as WippyProxy from '@wippy-fe/proxy'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
+import buttonCss from '@wippy-fe/theme/primevue/button.css?raw'
+import commonCss from '@wippy-fe/theme/primevue/common.css?raw'
 import { EVENT_PROVIDER, PROPS_ERROR_PROVIDER, PROPS_PROVIDER } from '@wippy-fe/webcomponent-vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
@@ -428,6 +430,43 @@ describe('"Send" on a several-answer question: a failed send keeps focus on it',
 
     pending.reject(hostError(500))
     await settle()
+  })
+})
+
+describe('the send buttons look disabled while the card is blocked: the theme defines the `p-disabled` marker they carry', () => {
+  // `aria-disabled` has no look of its own, so the buttons carry the theme's
+  // `p-disabled` marker instead of the `disabled` attribute. The component's
+  // stylesheet never styles `.p-*` (the compliance gate forbids it), so the
+  // dimming has to come from the theme the Host serves as `primeVueCssUrl`
+  // (`@styles/primevue/tailwind.css`, which imports the theme's `common.css`
+  // first). If the theme stopped defining it, the buttons would look enabled
+  // while inert, and this fails instead.
+  it('common.css dims `.p-disabled` (opacity-60) and makes it inert to the pointer', () => {
+    // Positive control: the file was really read (the stylesheet import is stubbed to '' otherwise).
+    expect(commonCss.length).toBeGreaterThan(0)
+    expect(commonCss).toMatch(/\.p-disabled,\s*\.p-disabled \*\s*\{[^}]*pointer-events-none/)
+    expect(commonCss).toMatch(/\.p-disabled,\s*\.p-component:disabled\s*\{[^}]*opacity-60/)
+  })
+
+  it('the theme\'s button.css does not override the marker on a Button', () => {
+    expect(buttonCss.length).toBeGreaterThan(0)
+    expect(buttonCss).not.toMatch(/p-disabled/)
+  })
+
+  it('a blocked send button carries p-disabled on a PrimeVue Button root, and an enabled one does not', async () => {
+    const controller = useQuestionCard(reviewDefinition, { a: 'yes', b: ['proxy'] }, vi.fn())
+    const wrapper = mount(QuestionCardReview, {
+      props: { definition: reviewDefinition, controller, disabled: true },
+      attachTo: document.body,
+      global: { plugins: [PrimeVuePlugin] },
+    })
+    const blocked = wrapper.find('[data-focus="send-all"]')
+    expect(blocked.classes()).toContain('p-button')
+    expect(blocked.classes()).toContain('p-component')
+    expect(blocked.classes()).toContain('p-disabled')
+
+    await wrapper.setProps({ disabled: false })
+    expect(wrapper.find('[data-focus="send-all"]').classes()).not.toContain('p-disabled')
   })
 })
 
