@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.5](https://github.com/wippyai/session/compare/v0.6.4...v0.6.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* **process:** correlate tool events with persisted message IDs ([#52](https://github.com/wippyai/session/issues/52)) ([34652b8](https://github.com/wippyai/session/commit/34652b814e4566d987cfbb6685e4bf0462350518))
+* **process:** trigger checkpoints on the full context size ([#47](https://github.com/wippyai/session/issues/47)) ([83566b5](https://github.com/wippyai/session/commit/83566b55d66b71dc7be312d67fabccb8abb79367))
+
 ## [0.6.4](https://github.com/wippyai/session/compare/v0.6.3...v0.6.4) (2026-10-01)
 
 
