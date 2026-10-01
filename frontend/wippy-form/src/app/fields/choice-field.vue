@@ -16,9 +16,15 @@ import FieldShell from './field-shell.vue'
  *
  * A group in error marks every radio or checkbox `aria-invalid` (the
  * PrimeVue `invalid` prop), the inputs a screen reader lands on, as the other
- * controls do; the fieldset is described by the error list. A `group` role
- * (several answers) may not carry `aria-invalid`, so the state sits on the
- * inputs and not on the group.
+ * controls do; the fieldset is described by the field description and the
+ * error list, and so is every input (and the Other text box), because a screen
+ * reader that lands on one input reads that input's own description. A `group`
+ * role may not carry `aria-invalid` or `aria-required`, so the state sits on
+ * the inputs and not on the group.
+ *
+ * Roles: the fieldset is the group. A single choice adds a `radiogroup` (with
+ * `aria-required`) around its radios; a multiple choice adds no role, since its
+ * fieldset already is the group and `aria-required` is not allowed on one.
  */
 const props = defineProps<{
   field: ChoiceFormField
@@ -48,6 +54,12 @@ function optionId(index: number): string {
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 const bodyEl = ref<HTMLElement | null>(null)
+
+// A PrimeVue radio or checkbox puts `$attrs` on its wrapper div, so the
+// description and error links go to the real `<input>` through its pass-through.
+function inputPt(describedBy: string | undefined) {
+  return { input: { 'aria-describedby': describedBy } }
+}
 
 const optionsPart = computed(() => partClass('field-options'))
 const optionPart = computed(() => partClass('field-option'))
@@ -159,7 +171,7 @@ defineExpose({
 
 <template>
   <FieldShell
-    v-slot="{ invalid }"
+    v-slot="{ invalid, describedBy }"
     ref="shell"
     :field="field"
     :model-value="modelValue"
@@ -172,8 +184,8 @@ defineExpose({
       ref="bodyEl"
       :part="optionsPart.part"
       :class="optionsPart.class"
-      :role="field.multiple ? 'group' : 'radiogroup'"
-      :aria-required="field.required ? 'true' : undefined"
+      :role="field.multiple ? undefined : 'radiogroup'"
+      :aria-required="!field.multiple && field.required ? 'true' : undefined"
     >
       <template v-if="!field.multiple">
         <div
@@ -189,6 +201,7 @@ defineExpose({
             :value="option.value"
             :disabled="disabled"
             :invalid="invalid"
+            :pt="inputPt(describedBy)"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
           />
@@ -217,6 +230,7 @@ defineExpose({
             :value="OTHER_TOKEN"
             :disabled="disabled"
             :invalid="invalid"
+            :pt="inputPt(describedBy)"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
           />
@@ -239,6 +253,7 @@ defineExpose({
               :id="otherTextId"
               v-model="singleOtherText"
               :disabled="disabled || singleSelected !== OTHER_TOKEN"
+              :aria-describedby="describedBy"
               :invalid="invalid && otherTextInvalid"
               :part="otherInputPart.part"
               :class="otherInputPart.class"
@@ -262,6 +277,7 @@ defineExpose({
             :input-id="optionId(index)"
             :disabled="disabled"
             :invalid="invalid"
+            :pt="inputPt(describedBy)"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
             @update:model-value="(checked) => toggleOption(option.value, !!checked)"
@@ -290,6 +306,7 @@ defineExpose({
             :input-id="otherControlId"
             :disabled="disabled"
             :invalid="invalid"
+            :pt="inputPt(describedBy)"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
             @update:model-value="(checked) => toggleOther(!!checked)"
@@ -313,6 +330,7 @@ defineExpose({
               :id="otherTextId"
               v-model="multiOtherText"
               :disabled="disabled || !multiOtherChecked"
+              :aria-describedby="describedBy"
               :invalid="invalid && otherTextInvalid"
               :part="otherInputPart.part"
               :class="otherInputPart.class"

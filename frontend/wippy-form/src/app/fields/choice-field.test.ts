@@ -110,10 +110,18 @@ describe('ChoiceField — group role and required', () => {
     expect(group.attributes('aria-required')).toBe('true')
   })
 
-  it('uses role="group" for a multiple-choice field', () => {
+  it('does not mark an optional single-choice group as required', () => {
+    const wrapper = mountField({ field: { ...trickyField, required: false } })
+    expect(wrapper.find('[role="radiogroup"]').attributes('aria-required')).toBeUndefined()
+  })
+
+  // The fieldset is already the group, and aria-required is not allowed on a
+  // group role, so a multiple-choice field adds neither.
+  it('adds no role and no aria-required to a multiple-choice field, whose fieldset is the group', () => {
     const wrapper = mountField({ field: { ...trickyField, multiple: true } })
-    expect(wrapper.find('[role="group"]').exists()).toBe(true)
-    expect(wrapper.find('[role="radiogroup"]').exists()).toBe(false)
+    expect(wrapper.find('fieldset').exists()).toBe(true)
+    expect(wrapper.find('[role]').exists()).toBe(false)
+    expect(wrapper.find('[aria-required]').exists()).toBe(false)
   })
 })
 
@@ -174,5 +182,53 @@ describe('ChoiceField — invalid state for assistive technology', () => {
   it('keeps the error linked to the group as before', () => {
     const wrapper = mountField({ errors: REQUIRED })
     expect(wrapper.find('fieldset').attributes('aria-describedby')).toBe(wrapper.find('ul').attributes('id'))
+  })
+})
+
+describe('ChoiceField — description and error linked to the inputs', () => {
+  const described: ChoiceFormField = { ...trickyField, description: 'Pick carefully' }
+  const BLANK: FieldError[] = [{ code: 'blank', message: 'Write your answer in the Other box.' }]
+
+  /** The ids an input is described by. */
+  const describedBy = (input: { attributes: (name: string) => string | undefined }) => (input.attributes('aria-describedby') ?? '').split(' ').filter(Boolean)
+
+  it.each([
+    ['single choice', 'radio', false],
+    ['multiple choice', 'checkbox', true],
+  ] as const)('links the description and the error to every %s input and the Other box, not only to the fieldset', (_name, kind, multiple) => {
+    const wrapper = mountField({ field: { ...described, multiple }, errors: BLANK, modelValue: multiple ? [{ other: '' }] : { other: '' } })
+    const descriptionId = wrapper.find('p').attributes('id')
+    const errorId = wrapper.find('ul').attributes('id')
+    expect(descriptionId).toBeTruthy()
+    expect(errorId).toBeTruthy()
+
+    const inputs = [...wrapper.findAll(`input[type="${kind}"]`), wrapper.find('input[type="text"]')]
+    // Two options, the Other choice and the Other text box.
+    expect(inputs).toHaveLength(4)
+    for (const input of inputs)
+      expect(describedBy(input), input.attributes('id')).toEqual([descriptionId, errorId])
+  })
+
+  it('links only the error when the field has no description, and nothing when there is none', () => {
+    const withError = mountField({ errors: BLANK, modelValue: { other: '' } })
+    for (const input of withError.findAll('input'))
+      expect(describedBy(input)).toEqual([withError.find('ul').attributes('id')])
+
+    const quiet = mountField()
+    for (const input of quiet.findAll('input'))
+      expect(input.attributes('aria-describedby')).toBeUndefined()
+  })
+
+  it('drops the error link from the inputs once the error is gone, and keeps the description', async () => {
+    const wrapper = mountField({ field: described, errors: BLANK, modelValue: { other: '' } })
+    await wrapper.setProps({ errors: [] })
+    const descriptionId = wrapper.find('p').attributes('id')
+    for (const input of wrapper.findAll('input'))
+      expect(describedBy(input)).toEqual([descriptionId])
+  })
+
+  it('links nothing in the read-only view, which has no inputs', () => {
+    const wrapper = mountField({ field: described, readonly: true, disabled: true, modelValue: 'other' })
+    expect(wrapper.find('input').exists()).toBe(false)
   })
 })
