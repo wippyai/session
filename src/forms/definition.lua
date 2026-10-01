@@ -473,6 +473,32 @@ local function option_index(field: any)
     return index
 end
 
+-- The checks the user's own text of an answer (the other answer and a
+-- note) shares: raw size, UTF-8, control characters and length. `names.long`
+-- starts the "too long" message and `names.text` the others. Returns the
+-- text with its outer whitespace dropped, as the form component does before
+-- sending (it can be empty), or nil plus the error.
+local function check_user_text(raw: string, limit: number, names: {long: string, text: string}): (string?, any)
+    -- Reject an absurdly long raw value before any per-byte scan below runs
+    -- on it; a real answer never needs this much raw text.
+    if #raw > limit * RAW_TEXT_MULTIPLIER then
+        return nil, { code = "too_long", message = string.format("%s must be at most %d characters.", names.long, limit) }
+    end
+    local text = trim(raw)
+    local length = char_length(text)
+    if not length then
+        return nil, { code = "invalid_text", message = names.text .. " must be valid UTF-8 text." }
+    end
+    if has_control_characters(text, true) then
+        return nil, { code = "invalid_text", message = names.text
+            .. " must not contain control characters other than tabs and line breaks." }
+    end
+    if length > limit then
+        return nil, { code = "too_long", message = string.format("%s must be at most %d characters.", names.long, limit) }
+    end
+    return text, nil
+end
+
 -- Validates the `{ other = "text" }` object. Returns the normalized object or
 -- nil plus the error.
 local function check_other(field: any, value: table): (any, any)
@@ -484,31 +510,15 @@ local function check_other(field: any, value: table): (any, any)
             return nil, { code = "invalid_type", message = "An other answer is an object with only \"other\"." }
         end
     end
-    local text = value.other
-    if type(text) ~= "string" then
+    local raw = value.other
+    if type(raw) ~= "string" then
         return nil, { code = "invalid_type", message = "The other answer must be text." }
     end
-    -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it; a real answer never needs this much raw text.
-    if #text > definition.LIMITS.OTHER_TEXT * RAW_TEXT_MULTIPLIER then
-        return nil, { code = "too_long", message = string.format(
-            "The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) }
-    end
-    -- Outer whitespace is dropped, as the form component does before sending.
-    text = trim(text)
-    local length = char_length(text :: string)
-    if not length then
-        return nil, { code = "invalid_text", message = "The other answer must be valid UTF-8 text." }
-    end
-    if has_control_characters(text :: string, true) then
-        return nil, { code = "invalid_text", message = "The other answer must not contain control characters other than tabs and line breaks." }
-    end
+    local text, text_err = check_user_text(raw, definition.LIMITS.OTHER_TEXT,
+        { long = "The other answer", text = "The other answer" })
+    if text_err then return nil, text_err end
     if text == "" then
         return nil, { code = "blank", message = "Enter the other answer." }
-    end
-    if length > definition.LIMITS.OTHER_TEXT then
-        return nil, { code = "too_long", message = string.format(
-            "The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) }
     end
     return { other = text }, nil
 end
@@ -526,30 +536,15 @@ local function check_noted(value: table, positions: {[string]: number}): (any, a
     if type(chosen) ~= "string" or not positions[chosen] then
         return nil, { code = "invalid_option", message = "Choose one of the listed options." }
     end
-    local note = value.note
-    if note == nil then return chosen, nil end
-    if type(note) ~= "string" then
+    local raw = value.note
+    if raw == nil then return chosen, nil end
+    if type(raw) ~= "string" then
         return nil, { code = "invalid_type", message = "A note must be text." }
     end
-    -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it; a real note never needs this much raw text.
-    if #note > definition.LIMITS.NOTE_TEXT * RAW_TEXT_MULTIPLIER then
-        return nil, { code = "too_long", message = string.format(
-            "A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) }
-    end
-    note = trim(note)
-    local length = char_length(note :: string)
-    if not length then
-        return nil, { code = "invalid_text", message = "The note must be valid UTF-8 text." }
-    end
-    if has_control_characters(note :: string, true) then
-        return nil, { code = "invalid_text", message = "The note must not contain control characters other than tabs and line breaks." }
-    end
+    local note, note_err = check_user_text(raw, definition.LIMITS.NOTE_TEXT,
+        { long = "A note", text = "The note" })
+    if note_err then return nil, note_err end
     if note == "" then return chosen, nil end
-    if length > definition.LIMITS.NOTE_TEXT then
-        return nil, { code = "too_long", message = string.format(
-            "A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) }
-    end
     return { value = chosen, note = note }, nil
 end
 
