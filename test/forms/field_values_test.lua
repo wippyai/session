@@ -552,7 +552,7 @@ local function define_tests()
             end
 
             local function set_of(characters: string): {[string]: boolean}
-                local set = {}
+                local set: {[string]: boolean} = {}
                 for character in string.gmatch(characters, "%S") do set[character] = true end
                 return set
             end

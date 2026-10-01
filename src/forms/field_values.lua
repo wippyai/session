@@ -299,7 +299,7 @@ local function check_free_text(field: any, value: any): (any, any)
     -- Text is kept exactly as typed (no trim); only a value of nothing but
     -- whitespace counts as no answer.
     local _, length, problem = form_text.read_answer(value, {
-        max = field.max_length, raw_factor = BYTES_PER_CHARACTER, trim = false, multiline = multiline })
+        max = field.max_length :: number, raw_factor = BYTES_PER_CHARACTER, trim = false, multiline = multiline })
     if problem == "blank" then return unanswered(field) end
     if problem == "too_long" then
         return refuse("too_long", string.format("Must be at most %d characters.", field.max_length))
@@ -511,7 +511,7 @@ local function read_whole(errors: {any}, path: string, value: any, low: number, 
             string.format("Must be between %d and %d.", low, high))
         return nil
     end
-    return as_integer(value)
+    return as_integer(value :: number)
 end
 
 -- Reads an optional number bound or step. `code` is the refusal code for a

@@ -5,10 +5,16 @@ local form_checks = require("form_checks")
 -- and field_values.lua share: the error list, plain-text values, booleans and
 -- the keys a field may carry. A rejection is { path, code, message }.
 
+-- An empty list typed as the checks take it. A bare {} literal is typed as a
+-- table with no elements, which the linter then refuses to index.
+local function new_errors(): {any}
+    return {}
+end
+
 local function define_tests()
     describe("form_checks.add_error", function()
         it("appends a rejection with its path, code and message", function()
-            local errors = {}
+            local errors = new_errors()
             form_checks.add_error(errors, "fields[0].label", "required", "A value is required.")
             test.eq(#errors, 1)
             test.eq(errors[1].path, "fields[0].label")
@@ -19,7 +25,7 @@ local function define_tests()
 
     describe("form_checks.check_text", function()
         local function check(value: any, opts: any?): (any, boolean, {any})
-            local errors = {}
+            local errors = new_errors()
             local options = { required = false, max = 5 }
             for key, item in pairs(opts or {}) do options[key] = item end
             local kept, ok = form_checks.check_text(errors, "title", value, options)
@@ -85,7 +91,7 @@ local function define_tests()
 
     describe("form_checks.check_boolean", function()
         it("reads an omitted flag as false, keeps a boolean and refuses anything else", function()
-            local errors = {}
+            local errors = new_errors()
             test.is_false(form_checks.check_boolean(errors, "required", nil))
             test.is_true(form_checks.check_boolean(errors, "required", true))
             test.is_false(form_checks.check_boolean(errors, "required", false))
@@ -100,7 +106,7 @@ local function define_tests()
 
     describe("form_checks.check_unknown_keys", function()
         it("names each unknown key in sorted order, under the path of the object", function()
-            local errors = {}
+            local errors = new_errors()
             form_checks.check_unknown_keys(errors, "fields[1]", { id = 1, zeta = 2, alpha = 3, type = 4 },
                 { id = true, type = true })
             test.eq(#errors, 2)
@@ -111,14 +117,14 @@ local function define_tests()
         end)
 
         it("names a key of the root object by itself", function()
-            local errors = {}
+            local errors = new_errors()
             form_checks.check_unknown_keys(errors, "", { title = 1, extra = 2 }, { title = true })
             test.eq(#errors, 1)
             test.eq(errors[1].path, "extra")
         end)
 
         it("reports nothing when every key is allowed", function()
-            local errors = {}
+            local errors = new_errors()
             form_checks.check_unknown_keys(errors, "", { title = 1 }, { title = true, fields = true })
             test.eq(#errors, 0)
         end)
