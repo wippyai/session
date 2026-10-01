@@ -6,6 +6,12 @@ export default defineConfig({
   plugins: [
     wippyComponentPlugin(),
   ],
+  // An inline PostCSS config stops Vite from searching parent folders, where a
+  // checkout nested in another project finds that project's Tailwind setup.
+  // The element's one rule needs no PostCSS plugin.
+  css: {
+    postcss: {},
+  },
   build: {
     target: 'esnext',
     // The npm build scripts pass `--outDir`, so the output path is not set here.
