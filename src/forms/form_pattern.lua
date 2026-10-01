@@ -40,9 +40,19 @@ form_pattern.MAX_REPEAT = 100
 local UNSUPPORTED = "unsupported_pattern"
 local INVALID = "invalid_pattern"
 
--- A backslash before one of these is that character, in and out of a class.
+-- A backslash before one of these is that character, in and out of a class;
+-- the ask_user schema lists the same characters (a test compares them).
+form_pattern.ESCAPABLE = "^$\\.*+?()[]{}|/"
+-- And this one, in a class only.
+form_pattern.CLASS_ESCAPABLE = "-"
+
 local ESCAPABLE = {}
-for character in string.gmatch("^$\\.*+?()[]{}|/", ".") do ESCAPABLE[character] = true end
+local ESCAPABLE_LIST = {}
+for character in string.gmatch(form_pattern.ESCAPABLE, ".") do
+    ESCAPABLE[character] = true
+    table.insert(ESCAPABLE_LIST, character)
+end
+local ESCAPABLE_TEXT = table.concat(ESCAPABLE_LIST, " ")
 
 -- Aborts the parse with a code and a message; check() catches it.
 local function reject(code: string, message: string)
@@ -84,13 +94,14 @@ local function parse(chars: {string}, points: {integer})
             position = position + 2
             return "class", 0
         end
-        if ESCAPABLE[escaped] or (in_class and escaped == "-") then
+        if ESCAPABLE[escaped] or (in_class and escaped == form_pattern.CLASS_ESCAPABLE) then
             local point = points[position + 1]
             position = position + 2
             return "char", point
         end
         reject(UNSUPPORTED, "The escape \\" .. escaped .. " is not supported. Supported: \\d, \\w and a "
-            .. "backslash before one of ^ $ \\ . * + ? ( ) [ ] { } | /" .. (in_class and " and -." or "."))
+            .. "backslash before one of " .. ESCAPABLE_TEXT
+            .. (in_class and (" and " .. form_pattern.CLASS_ESCAPABLE .. ".") or "."))
         return "char", 0 -- not reached: reject() raises
     end
 

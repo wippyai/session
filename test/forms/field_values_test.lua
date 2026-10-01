@@ -361,6 +361,108 @@ local function define_tests()
                 test.is_true(keys[key], "the schema offers " .. key .. " but no type accepts it")
             end
         end)
+
+        -- What the model is told about a pattern is the contract it writes
+        -- against, so it is tied to what form_pattern accepts and says.
+        describe("the pattern description", function()
+            local function description(): string
+                return tostring(field_schema().properties.pattern.description)
+            end
+
+            local function set_of(characters: string): {[string]: boolean}
+                local set = {}
+                for character in string.gmatch(characters, "%S") do set[character] = true end
+                return set
+            end
+
+            local function same_set(a: {[string]: boolean}, b: {[string]: boolean}, label: string)
+                for character in pairs(a) do test.is_true(b[character], label .. ": extra " .. character) end
+                for character in pairs(b) do test.is_true(a[character], label .. ": missing " .. character) end
+            end
+
+            it("lists exactly the characters a backslash may precede, as the parser does", function()
+                local text = description()
+                local listed, in_class = string.match(text, "one of these characters: (.-) %(inside a class also (.)%)")
+                test.not_nil(listed, "the description names the characters")
+                same_set(set_of(listed :: string), set_of(form_pattern.ESCAPABLE), "description against the parser")
+                test.eq(in_class, form_pattern.CLASS_ESCAPABLE)
+
+                -- The parser's own message for an escape it refuses.
+                local _, code, message = form_pattern.check("a\\q")
+                test.eq(code, "unsupported_pattern")
+                local from_message = string.match(tostring(message), "before one of (.-)%.$")
+                test.not_nil(from_message, "the message names the characters")
+                same_set(set_of(from_message :: string), set_of(form_pattern.ESCAPABLE), "message against the parser")
+                local _, _, class_message = form_pattern.check("[\\q]")
+                test.contains(tostring(class_message), " and " .. form_pattern.CLASS_ESCAPABLE .. ".")
+            end)
+
+            it("lists what the parser accepts: each escape is taken, and no other punctuation is", function()
+                local escapable = set_of(form_pattern.ESCAPABLE)
+                for byte = 33, 126 do
+                    local character = string.char(byte)
+                    local outside = form_pattern.check("a\\" .. character)
+                    local inside = form_pattern.check("[\\" .. character .. "]")
+                    if escapable[character] then
+                        test.is_true(outside, "\\" .. character .. " outside a class")
+                        test.is_true(inside, "\\" .. character .. " inside a class")
+                    elseif character == "d" or character == "w" then
+                        test.is_true(outside, "\\" .. character)
+                    else
+                        test.is_nil(outside, "\\" .. character .. " outside a class")
+                        test.is_true(inside == nil or character == form_pattern.CLASS_ESCAPABLE,
+                            "\\" .. character .. " inside a class")
+                    end
+                end
+            end)
+
+            it("names each construct the parser accepts, with an example the parser takes", function()
+                local text = description()
+                local constructs = {
+                    { "^ and $", "^a$" }, { "[abc]", "[abc]" }, { "[^abc]", "[^abc]" }, { "[a-z]", "[a-z]" },
+                    { "\\d and \\w", "\\d\\w" }, { "( )", "(a)" }, { "(?: )", "(?:a)" }, { "alternation |", "a|b" },
+                    { "* + ?", "a*b+c?" }, { "{n}", "a{3}" }, { "{n,}", "a{3,}" }, { "{n,m}", "a{3,4}" },
+                    { "lazy ?", "a{2,5}?" }, { "[ as \\[", "[\\[]" },
+                }
+                for _, construct in ipairs(constructs) do
+                    test.contains(text, construct[1], "the description names " .. construct[1])
+                    local ok, code = form_pattern.check(construct[2])
+                    test.is_true(ok, construct[2] .. " -> " .. tostring(code))
+                end
+            end)
+
+            it("names each construct the parser refuses, and the refusal is real", function()
+                local text = description()
+                local refused = {
+                    { "lookahead", "(?=a)a" }, { "lookbehind", "(?<=a)b" }, { "backreferences", "(a)\\1" },
+                    { "named groups", "(?P<n>a)" }, { "flags", "(?i)a" }, { "\\s", "\\s" }, { "\\S", "\\S" },
+                    { "\\D", "\\D" }, { "\\W", "\\W" }, { "\\b", "\\b" }, { "\\B", "\\B" }, { "\\p", "\\p{L}" },
+                    { "\\x", "\\x41" }, { "\\n", "\\n" }, { "\\t", "\\t" }, { "POSIX classes", "[[:alpha:]]" },
+                    { "a**", "a**" }, { "(a+)+", "(a+)+" },
+                }
+                for _, construct in ipairs(refused) do
+                    test.contains(text, construct[1], "the description names " .. construct[1])
+                    local ok = form_pattern.check(construct[2])
+                    test.is_nil(ok, construct[2] .. " is refused")
+                end
+            end)
+
+            it("states the bounds the parser enforces", function()
+                local text = description()
+                test.contains(text, string.format("at most %d characters", form_pattern.MAX_LENGTH))
+                test.contains(text, string.format("nested more than %d deep", form_pattern.MAX_DEPTH))
+                test.contains(text, string.format("counts of at most %d", form_pattern.MAX_REPEAT))
+                test.contains(text, "no leading zero")
+                test.is_true(form_pattern.check(string.format("a{%d}", form_pattern.MAX_REPEAT)))
+                test.is_nil(form_pattern.check(string.format("a{%d}", form_pattern.MAX_REPEAT + 1)))
+                test.is_nil(form_pattern.check("a{01}"))
+                local nested = string.rep("(", form_pattern.MAX_DEPTH) .. "a" .. string.rep(")", form_pattern.MAX_DEPTH)
+                test.is_true(form_pattern.check(nested))
+                test.is_nil(form_pattern.check("(" .. nested .. ")"))
+                test.is_true(form_pattern.check(string.rep("a", form_pattern.MAX_LENGTH)))
+                test.is_nil(form_pattern.check(string.rep("a", form_pattern.MAX_LENGTH + 1)))
+            end)
+        end)
     end)
 
     describe("text helpers", function()
