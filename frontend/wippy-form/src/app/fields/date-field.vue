@@ -11,7 +11,9 @@ import FieldShell from './field-shell.vue'
  * The date field: a PrimeVue `DatePicker` in string mode, so its value is the
  * `YYYY-MM-DD` wire text itself, with no `Date` object and no timezone
  * conversion. Typing is allowed; the calendar opens from its button (not on
- * focus), so a keyboard user can just type.
+ * focus), so a keyboard user can just type. On a touch screen (a coarse
+ * pointer) a tap on the box opens it too, because PrimeVue gives the box
+ * `inputmode="none"` and there is no keyboard to type with.
  *
  * What the box shows. A `DatePicker`'s box is uncontrolled: it only follows
  * the last date the picker itself accepted, and every time the box is
@@ -29,7 +31,10 @@ import FieldShell from './field-shell.vue'
  * (`invalid_date`, `below_min`, `above_max`). One exception: when the picker
  * understood the text (`2026-6-5`), the draft is the full date it read
  * (`2026-06-05`), which is what will be saved; the box shows that text once it
- * is left.
+ * is left. When the typed text is itself a whole valid date, it is reported as
+ * typed: the picker reads a year below 100 as a two-digit year (`0050` is
+ * 1950). A year the picker writes without padding (`999-05-15`) is padded to
+ * four digits.
  *
  * The picker also resets the box to its last accepted date when it loses
  * focus, which would lose unparseable text; the typed text is put back after
@@ -99,18 +104,31 @@ function toDate(iso: string | undefined): Date | undefined {
   date.setFullYear(year)
   return date
 }
-const minDate = computed(() => toDate(props.field.min))
-const maxDate = computed(() => toDate(props.field.max))
+
+// The bounds are turned into dates from their text, through a computed of the
+// text itself: a state reload hands over a new field object with the same
+// min and max, and a new `Date` for the same day would make the picker reset an
+// open calendar to the month of the selection. The `Date` changes only when the
+// text does.
+const minText = computed(() => props.field.min)
+const maxText = computed(() => props.field.max)
+const minDate = computed(() => toDate(minText.value))
+const maxDate = computed(() => toDate(maxText.value))
 
 // The picker reports an accepted selection (a calendar pick or typed text it
 // parsed) with `update:modelValue`, then fires `input` in the same tick for
 // typed text.
 let acceptedThisTick = false
 
+// The picker writes the year of a date without padding (`999-05-15`).
+function withFourDigitYear(text: string): string {
+  return text.replace(/^(\d{1,3})(-\d{2}-\d{2})$/, (_match, year: string, rest: string) => `${year.padStart(4, '0')}${rest}`)
+}
+
 function onPicked(value: unknown) {
   acceptedThisTick = true
   queueMicrotask(() => { acceptedThisTick = false })
-  const text = typeof value === 'string' ? value : ''
+  const text = typeof value === 'string' ? withFourDigitYear(value) : ''
   picked.value = text === '' ? null : text
   boxAccepted = true
   boxText.value = text
@@ -120,11 +138,32 @@ function onPicked(value: unknown) {
 function onTyped(event: Event) {
   // What the user typed stays in the box, whether or not the picker understood it.
   boxText.value = (event.target as HTMLInputElement).value
-  // The picker understood this text and already reported the date.
-  if (acceptedThisTick)
+  if (acceptedThisTick) {
+    // The picker understood this text and already reported the date it read.
+    // When the text is itself a whole valid date, that is the date meant: the
+    // picker reads a year below 100 as a two-digit year (`0050` is 1950), so the
+    // text is reported as it stands, and the box keeps it when it is left.
+    if (isValidIsoDate(boxText.value) && boxText.value !== lastReported) {
+      boxAccepted = false
+      report(boxText.value)
+    }
     return
+  }
   boxAccepted = false
   report(boxText.value)
+}
+
+// A tap on a touch screen. PrimeVue gives the box `inputmode="none"` (no
+// keyboard) and this field does not open the calendar on focus, so the tap
+// would do nothing; it opens the calendar, as the calendar button does. A
+// click with a mouse, and focus from the keyboard, are left as they were.
+function onBoxClick(event: MouseEvent) {
+  const box = event.target
+  if (!(box instanceof HTMLInputElement) || props.disabled || props.readonly)
+    return
+  if (box.getAttribute('aria-expanded') === 'true' || !window.matchMedia('(pointer: coarse)').matches)
+    return
+  ;(event.currentTarget as HTMLElement).querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')?.click()
 }
 
 function onBlur(event: { originalEvent: Event, value: string }) {
@@ -147,7 +186,8 @@ const calendarPart = computed(() => partClass('field-calendar'))
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 // The theme class of the container, for the calendar (see above).
-const themeClass = useThemeModeClass(() => shell.value?.$el as Element | undefined)
+// Only while a calendar can open: not for a read-only or disabled field.
+const themeClass = useThemeModeClass(() => shell.value?.$el as Element | undefined, () => !props.readonly && !props.disabled)
 
 // A DatePicker puts `$attrs` on its wrapper span; the description and error
 // links go to its real `<input>` through its inner InputText's pass-through,
@@ -201,6 +241,7 @@ defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })
         size="small"
         fluid
         @update:model-value="onPicked"
+        @click="onBoxClick"
         @input="onTyped"
         @blur="onBlur"
       />

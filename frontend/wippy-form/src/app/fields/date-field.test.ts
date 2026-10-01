@@ -1,8 +1,9 @@
 import type { DateFormField, FieldAnswer, FieldError } from '../../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { flushPromises, mount } from '@vue/test-utils'
+import userEvent from '@testing-library/user-event'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import DateField from './date-field.vue'
 
 /*
@@ -25,11 +26,11 @@ interface Mounted {
 }
 
 /** The field with a parent that feeds every reported value back in, like the form does. */
-function mountField(initial?: string, errors: FieldError[] = []): Mounted {
+function mountField(initial?: string, errors: FieldError[] = [], dateField: DateFormField = field): Mounted {
   let reported: FieldAnswer | undefined = initial
   const wrapper = mount(DateField, {
     props: {
-      field,
+      field: dateField,
       modelValue: initial,
       errors,
       disabled: false,
@@ -209,20 +210,30 @@ describe('date field: typing', () => {
   })
 })
 
+/** The enabled days of the month the calendar shows (not the greyed days of the months around it). */
+function enabledDays(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('.p-datepicker-day'))
+    .filter(el => el.getAttribute('aria-disabled') !== 'true' && !(el.getAttribute('data-p') ?? '').includes('other-month'))
+}
+
+function dayCell(label: string): HTMLElement {
+  const cell = enabledDays().find(el => el.textContent?.trim() === label)
+  if (!cell)
+    throw new Error(`no enabled day cell "${label}"`)
+  return cell
+}
+
+/** The month name in the open calendar's header. */
+function shownMonth(): string | undefined {
+  return document.querySelector('.p-datepicker-select-month')?.textContent?.trim()
+}
+
+async function openCalendar(wrapper: Mounted['wrapper']) {
+  await wrapper.find('button[aria-haspopup="dialog"]').trigger('click')
+  await nextTick()
+}
+
 describe('date field: calendar', () => {
-  /** The enabled days of the month the calendar shows (not the greyed days of the months around it). */
-  function enabledDays(): HTMLElement[] {
-    return Array.from(document.querySelectorAll<HTMLElement>('.p-datepicker-day'))
-      .filter(el => el.getAttribute('aria-disabled') !== 'true' && !(el.getAttribute('data-p') ?? '').includes('other-month'))
-  }
-
-  function dayCell(label: string): HTMLElement {
-    const cell = enabledDays().find(el => el.textContent?.trim() === label)
-    if (!cell)
-      throw new Error(`no enabled day cell "${label}"`)
-    return cell
-  }
-
   it('puts a day picked in the calendar in the draft and the box', async () => {
     const { wrapper, input, draft } = mountField('2026-10-15')
     await wrapper.find('button[aria-haspopup="dialog"]').trigger('click')
@@ -352,5 +363,250 @@ describe('date field: calendar overlay', () => {
     expect(panel.classList.contains('w-form__field-calendar')).toBe(true)
     app.unmount()
     host.remove()
+  })
+})
+
+describe('date field: a tap on a touch screen', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** Makes `(pointer: coarse)` match or not, as on a touch screen or with a mouse. */
+  function usePointer(coarse: boolean) {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+      matches: coarse && query === '(pointer: coarse)',
+      media: query,
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList)
+  }
+
+  const tap = (input: HTMLInputElement) => input.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  const expanded = (input: HTMLInputElement) => input.getAttribute('aria-expanded')
+
+  // PrimeVue gives the box inputmode="none" (no keyboard on a phone) and the
+  // field never opens on focus, so without this a tap on the box did nothing.
+  it('opens the calendar when the box is tapped', async () => {
+    usePointer(true)
+    const { input } = mountField()
+    expect(expanded(input)).toBe('false')
+    tap(input)
+    await flushPromises()
+    expect(expanded(input)).toBe('true')
+    expect(document.querySelector('.p-datepicker-panel')).not.toBeNull()
+  })
+
+  it('leaves the calendar open on a second tap', async () => {
+    usePointer(true)
+    const { input } = mountField()
+    tap(input)
+    await flushPromises()
+    tap(input)
+    await flushPromises()
+    expect(expanded(input)).toBe('true')
+  })
+
+  it('does not open the calendar on a click with a mouse: it opens from its button, so a typist can just type', async () => {
+    usePointer(false)
+    const { input } = mountField()
+    tap(input)
+    await flushPromises()
+    expect(expanded(input)).toBe('false')
+    expect(document.querySelector('.p-datepicker-panel')).toBeNull()
+  })
+
+  it('does not open the calendar on focus, even on a touch screen, so a hardware keyboard can still type', async () => {
+    usePointer(true)
+    const { input } = mountField()
+    input.focus()
+    input.dispatchEvent(new FocusEvent('focus'))
+    await flushPromises()
+    expect(expanded(input)).toBe('false')
+  })
+
+  it('does not open the calendar of a disabled field', async () => {
+    usePointer(true)
+    const { wrapper, input } = mountField()
+    await wrapper.setProps({ disabled: true })
+    tap(input)
+    await flushPromises()
+    expect(expanded(input)).toBe('false')
+  })
+})
+
+describe('date field: a reload of the form', () => {
+  it('leaves the calendar on the month the user navigated to when the field arrives again with the same content', async () => {
+    const { wrapper } = mountField('2026-10-15')
+    await openCalendar(wrapper)
+    expect(shownMonth()).toBe('October')
+    document.querySelector<HTMLElement>('.p-datepicker-next-button')?.click()
+    await flushPromises()
+    expect(shownMonth()).toBe('November')
+
+    // A state reload hands over a new field object; its min and max are the same text.
+    await wrapper.setProps({ field: { ...field } })
+    await flushPromises()
+    expect(shownMonth()).toBe('November')
+  })
+
+  it('still applies a bound that really changed', async () => {
+    const { wrapper } = mountField('2026-10-15')
+    await openCalendar(wrapper)
+    expect(enabledDays().some(el => el.textContent?.trim() === '25')).toBe(true)
+    await wrapper.setProps({ field: { ...field, max: '2026-10-20' } })
+    await flushPromises()
+    expect(enabledDays().some(el => el.textContent?.trim() === '25')).toBe(false)
+    expect(enabledDays().some(el => el.textContent?.trim() === '20')).toBe(true)
+  })
+})
+
+describe('date field: years before 1000', () => {
+  // No min and max: with them PrimeVue would refuse the text instead of rewriting it.
+  const unbounded: DateFormField = { id: 'day', type: 'date', label: 'Delivery date', required: true }
+
+  // PrimeVue reads a year below 100 as a two-digit year (0050 becomes 1950).
+  it.each(['0050-03-04', '0099-12-31'])('reports %s as typed, not as the date the picker reads from it', async (text) => {
+    const { input, draft } = mountField(undefined, [], unbounded)
+    await typeKeys(input, text)
+    expect(draft()).toBe(text)
+    expect(input.value).toBe(text)
+    await blur(input)
+    expect(input.value).toBe(text)
+    expect(draft()).toBe(text)
+  })
+
+  // PrimeVue writes the year without padding (999-05-15).
+  it.each(['0100-02-03', '0999-05-15'])('reports %s with its four-digit year', async (text) => {
+    const { input, draft } = mountField(undefined, [], unbounded)
+    await typeKeys(input, text)
+    expect(draft()).toBe(text)
+    await blur(input)
+    expect(input.value).toBe(text)
+  })
+
+  it('pads the year of a day picked in the calendar', async () => {
+    const { wrapper, input, draft } = mountField('0999-05-15', [], unbounded)
+    await openCalendar(wrapper)
+    dayCell('20').click()
+    await flushPromises()
+    expect(draft()).toBe('0999-05-20')
+    expect(input.value).toBe('0999-05-20')
+  })
+
+  it('leaves a four-digit year as the picker writes it', async () => {
+    const { wrapper, draft } = mountField('2026-10-15', [], unbounded)
+    await openCalendar(wrapper)
+    dayCell('20').click()
+    await flushPromises()
+    expect(draft()).toBe('2026-10-20')
+  })
+})
+
+describe('date field: keyboard and input methods', () => {
+  it('keeps a loosely typed date through Tab and Enter, and opens the calendar on that day', async () => {
+    const user = userEvent.setup()
+    const { input, draft } = mountField()
+    await user.click(input)
+    await user.keyboard('2026-6-5')
+    expect(draft()).toBe('2026-06-05')
+
+    // Tab leaves the box for the calendar button, and the box shows the full date.
+    await user.tab()
+    expect(document.activeElement).not.toBe(input)
+    expect(input.value).toBe('2026-06-05')
+
+    // Enter on the calendar button opens the calendar on the date that was typed.
+    await user.keyboard('{Enter}')
+    await flushPromises()
+    expect(input.getAttribute('aria-expanded')).toBe('true')
+    expect(shownMonth()).toBe('June')
+    expect(document.querySelector('.p-datepicker-day-selected')?.textContent?.trim()).toBe('5')
+    expect(input.value).toBe('2026-06-05')
+    expect(draft()).toBe('2026-06-05')
+  })
+
+  it('keeps the composed text and never rewrites the box while an input method is composing', async () => {
+    const { input, draft } = mountField()
+    input.focus()
+    const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') as PropertyDescriptor & { get: () => string, set: (v: string) => void }
+    // Records every write to the box that changes what it shows while a render runs.
+    let rendering = false
+    const rewrites: string[] = []
+    Object.defineProperty(input, 'value', {
+      configurable: true,
+      get() { return native.get.call(this) },
+      set(next: string) {
+        if (rendering && next !== native.get.call(this))
+          rewrites.push(next)
+        native.set.call(this, next)
+      },
+    })
+
+    input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    for (const text of ['2', '20', '202', '2026']) {
+      input.value = text
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', isComposing: true, data: text }))
+      rendering = true
+      await flushPromises()
+      rendering = false
+      expect(input.value, `while composing "${text}"`).toBe(text)
+    }
+    input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '2026' }))
+    await typeKeys(input, '-06-15')
+
+    expect(rewrites).toEqual([])
+    expect(input.value).toBe('2026-06-15')
+    expect(draft()).toBe('2026-06-15')
+  })
+})
+
+describe('date field: the theme observer', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** Mounts the field inside a themed container and says how often that container is observed and released. */
+  function mountThemed(props: Partial<{ disabled: boolean, readonly: boolean }> = {}) {
+    const container = document.createElement('div')
+    container.setAttribute('data-wippy-theme-root', '')
+    container.className = 'w-theme-dark'
+    document.body.appendChild(container)
+    const observe = vi.spyOn(MutationObserver.prototype, 'observe')
+    const disconnect = vi.spyOn(MutationObserver.prototype, 'disconnect')
+    const wrapper = mount(DateField, {
+      props: { field, modelValue: undefined, errors: [], disabled: false, readonly: false, ...props },
+      global: { plugins: [PrimeVuePlugin] },
+      attachTo: container,
+    })
+    return {
+      wrapper,
+      observed: () => observe.mock.calls.filter(([target]) => target === container).length,
+      released: () => disconnect.mock.calls.length,
+    }
+  }
+
+  it('watches the themed container of an editable field', () => {
+    expect(mountThemed().observed()).toBe(1)
+  })
+
+  it('does not watch it for a read-only field, which has no calendar', () => {
+    expect(mountThemed({ readonly: true, disabled: true }).observed()).toBe(0)
+  })
+
+  it('does not watch it for a disabled field, which cannot open a calendar', () => {
+    expect(mountThemed({ disabled: true }).observed()).toBe(0)
+  })
+
+  it('stops watching while the field is disabled (a submit in flight) and starts again afterwards', async () => {
+    const { wrapper, observed, released } = mountThemed()
+    expect(observed()).toBe(1)
+    await wrapper.setProps({ disabled: true })
+    expect(released()).toBe(1)
+    await wrapper.setProps({ disabled: false })
+    expect(observed()).toBe(2)
   })
 })

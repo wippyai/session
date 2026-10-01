@@ -698,6 +698,11 @@ span.w-form__option-mark {
  * width is enough, so the inline minimum is lifted here; only `!important`
  * can beat an inline style. The class is our own, on the panel through the
  * picker's pass-through (the `field-calendar` part).
+ *
+ * TODO(D36): a stopgap. A theme-level rule for the width of the calendar panel
+ * is planned (the theme plugin owns the overlay layer the panel lives in), and
+ * this local rule goes away with it, in the same release step that deletes
+ * `use-theme-mode-class.ts` when `@wippy-fe/theme` >= 0.0.61 is the dependency.
  */
 .w-form__field-calendar {
   min-width: 0 !important;
