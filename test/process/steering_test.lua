@@ -27,14 +27,6 @@ local function fixture(rows)
         config = { agent_id = agent.id, model = agent.model }, lifecycle_state = {},
         reader = {
             list_all_messages = function() return rows end,
-            list_pending_inputs = function()
-                local result = {}
-                for _, row in ipairs(rows) do
-                    local input = row.metadata and row.metadata.input
-                    if input and input.state == "pending" then result[#result + 1] = row end
-                end
-                return result
-            end,
             messages = function() return query end,
             contexts = function() return { all = function() return {} end } end,
             state = function() return { meta = {}, config = ctx.config } end,

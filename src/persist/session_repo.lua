@@ -34,8 +34,8 @@ local function get_db()
     return tx.connect()
 end
 
--- Decodes a listed session row's JSON fields in place; a missing or
--- malformed value reads as an empty table.
+-- Decodes a session row's JSON fields in place; a missing or malformed value
+-- reads as an empty table.
 local function decode_json_fields(session)
     for _, field in ipairs({ "meta", "config", "public_meta" }) do
         local value = session[field]
@@ -193,41 +193,7 @@ function session_repo.get(session_id, user_id)
         return nil, "Session not found"
     end
 
-    -- Parse JSON fields
-    if session.meta and session.meta ~= "" then
-        local decoded, err = json.decode(session.meta :: string)
-        if not err then
-            session.meta = decoded
-        else
-            session.meta = {}
-        end
-    else
-        session.meta = {}
-    end
-
-    if session.config and session.config ~= "" then
-        local decoded, err = json.decode(session.config :: string)
-        if not err then
-            session.config = decoded
-        else
-            session.config = {}
-        end
-    else
-        session.config = {}
-    end
-
-    if session.public_meta and session.public_meta ~= "" then
-        local decoded, err = json.decode(session.public_meta :: string)
-        if not err then
-            session.public_meta = decoded
-        else
-            session.public_meta = {}
-        end
-    else
-        session.public_meta = {}
-    end
-
-    return session
+    return decode_json_fields(session)
 end
 
 -- List sessions by user ID

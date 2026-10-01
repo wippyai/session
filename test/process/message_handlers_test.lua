@@ -74,7 +74,6 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         config = config,
         reader = {
             messages = function(_self) return empty_query end,
-            list_pending_inputs = function(_self) return {}, nil end,
             contexts = function(_self) return empty_query end,
             state = function(_self) return { title = "t", meta = {}, config = {} } end,
             get_full_context = function(_self) return {}, nil end,

@@ -25,6 +25,16 @@ type MessageList = {
 local message_repo = {}
 local get_db
 
+-- Replaces the JSON text in row.metadata with the table it decodes to. A
+-- missing, empty or malformed value stays as it is.
+local function decode_json_metadata(row)
+    if type(row.metadata) == "string" and row.metadata ~= "" then
+        local decoded, err = json.decode(row.metadata :: string)
+        if not err then row.metadata = decoded end
+    end
+    return row
+end
+
 -- Inserts rows (each { message_id, type, data, metadata }) in one
 -- transaction, dated in array order. Returns true and, as the third value,
 -- each row's stored date keyed by message_id, so callers can announce the
@@ -285,7 +295,6 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
     end)
 end
 
--- Get a message by ID
 -- The message `message_id` with its metadata decoded, or nil without an
 -- error when there is none.
 function message_repo.find(message_id)
@@ -318,17 +327,7 @@ function message_repo.find(message_id)
         return nil, nil
     end
 
-    local message = messages[1]
-
-    -- Parse metadata JSON if it exists
-    if message.metadata and message.metadata ~= "" then
-        local decoded, err = json.decode(message.metadata :: string)
-        if not err then
-            message.metadata = decoded
-        end
-    end
-
-    return message
+    return decode_json_metadata(messages[1])
 end
 
 function message_repo.get(message_id)
@@ -636,15 +635,7 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         table.remove(messages)
     end
 
-    -- Parse metadata JSON if it exists
-    for i, message in ipairs(messages) do
-        if message.metadata and message.metadata ~= "" then
-            local decoded, err = json.decode(message.metadata :: string)
-            if not err then
-                message.metadata = decoded
-            end
-        end
-    end
+    for _, message in ipairs(messages) do decode_json_metadata(message) end
 
     -- Reverse to chronological ASC order when query used DESC
     if not (cursor and direction == "after") then
@@ -716,15 +707,7 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
         return nil, "Failed to list messages after message ID: " .. err
     end
 
-    -- Parse metadata JSON if it exists
-    for i, message in ipairs(messages) do
-        if message.metadata and message.metadata ~= "" then
-            local decoded, err = json.decode(message.metadata :: string)
-            if not err then
-                message.metadata = decoded
-            end
-        end
-    end
+    for _, message in ipairs(messages) do decode_json_metadata(message) end
 
     if bounded then
         local chronological = {}
@@ -780,15 +763,7 @@ function message_repo.list_by_type(session_id, msg_type, limit, offset)
         return nil, "Failed to list messages by type: " .. err
     end
 
-    -- Parse metadata JSON if it exists
-    for i, message in ipairs(messages) do
-        if message.metadata and message.metadata ~= "" then
-            local decoded, err = json.decode(message.metadata :: string)
-            if not err then
-                message.metadata = decoded
-            end
-        end
-    end
+    for _, message in ipairs(messages) do decode_json_metadata(message) end
 
     -- Reverse the order to maintain chronological order in the result
     local reversed = {}
@@ -831,17 +806,7 @@ function message_repo.get_latest(session_id)
         return nil, "No messages found for this session"
     end
 
-    local message = messages[1]
-
-    -- Parse metadata JSON if it exists
-    if message.metadata and message.metadata ~= "" then
-        local decoded, err = json.decode(message.metadata :: string)
-        if not err then
-            message.metadata = decoded
-        end
-    end
-
-    return message
+    return decode_json_metadata(messages[1])
 end
 
 -- Delete a message
@@ -909,11 +874,10 @@ local SUBMITTED_PATTERN = '%"submitted_at":%'
 -- Rows fetched per page by the scans below.
 local SCAN_PAGE = 100
 
+-- A row's metadata as a table: the decoded JSON, or an empty table when it
+-- has none or cannot be decoded.
 local function decode_metadata(row)
-    if type(row.metadata) == "string" and row.metadata ~= "" then
-        local decoded, decode_err = json.decode(row.metadata :: string)
-        if not decode_err then row.metadata = decoded end
-    end
+    decode_json_metadata(row)
     if type(row.metadata) ~= "table" then row.metadata = {} end
     return row
 end
