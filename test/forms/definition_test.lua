@@ -946,6 +946,23 @@ local function define_tests()
             test.contains(errors[1].message, "textarea")
             test.contains(errors[1].message, "checkbox")
         end)
+
+        it("reports only the type for a field of an unknown type, not that a choice lacks options", function()
+            local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
+            test.eq(#errors, 1, definition.format_errors(errors))
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].path, "fields[0].type")
+            -- A choice that is missing its options is still told so, and the
+            -- other mistakes of a field of an unknown type are still reported.
+            test.eq(codes(select(2, definition.normalize(form({ { id = "a", type = "choice", label = "A" } }))))["fields[0].options"],
+                "required")
+            local _, more = definition.normalize(form({ { id = "Bad-Id", type = "rating", label = "" } }))
+            local found = codes(more)
+            test.eq(found["fields[0].type"], "unsupported_type")
+            test.eq(found["fields[0].id"], "invalid_id")
+            test.eq(found["fields[0].label"], "blank")
+            test.is_nil(found["fields[0].options"])
+        end)
     end)
 end
 

@@ -146,9 +146,11 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         seen_ids[id] = true
     end
 
+    local unsupported = false
     if raw.type == nil then
         add_error(errors, path .. ".type", "required", "A field type is required.")
     elseif raw.type ~= "choice" and not standard then
+        unsupported = true
         add_error(errors, path .. ".type", "unsupported_type",
             "Supported types: " .. field_values.TYPE_NAMES .. ".")
     end
@@ -166,6 +168,10 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         if #errors > before then return nil end
         return field
     end
+
+    -- A field of an unknown type is not a choice that forgot its options:
+    -- the type is the one thing to fix, so no choice rule is applied to it.
+    if unsupported then return nil end
 
     local multiple = check_boolean(errors, path .. ".multiple", raw.multiple)
     local allow_other = check_boolean(errors, path .. ".allow_other", raw.allow_other)
