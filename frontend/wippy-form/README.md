@@ -4,15 +4,15 @@ A Wippy `view.component` web component (`<wippy-form>`) that renders one Session
 
 ## What it renders
 
-- **Question card** (V1): when every field in `definition.fields` has `type: "choice"` — the only field type V1 emits — the component renders a Claude-style question card. One question at a time for several-question forms, with per-answer notes, an Other free-text row, a review step, and a read-only answered summary. See the "Question card" section below for the full contract.
-- **Fields form** (V2, kept for mixed/non-`choice` definitions): a plain radio/checkbox form (`ActiveForm.vue` / `IdleForm.vue` / `ChoiceField.vue`), unchanged from before the question card. Not reachable from any V1 definition today (V1 only emits `type: "choice"` fields), but stays fully supported for a future V2 definition that mixes field types.
+- **Question card** (V1, form version 1): when every field in `definition.fields` has `type: "choice"` the component renders a Claude-style question card. One question at a time for several-question forms, with per-answer notes, an Other free-text row, a review step, and a read-only answered summary. See the "Question card" section below for the full contract.
+- **Fields form** (V2, form version 2): any form with at least one standard field (`text`, `textarea`, `number`, `email`, `date`, `checkbox`), alone or mixed with choices, renders as one form of labelled controls with a single Submit button (`ActiveForm` while open, `IdleForm` once answered, both built on `FieldShell`). A choice inside it is a plain radio group or checkbox group, with no per-option notes and no click-to-answer. See "Fields form" below.
 
 ## Props
 
 | Prop (HTML attribute) | Type | Default | Description |
 | --- | --- | --- | --- |
-| `form-version` | `number` | `1` | Form definition schema version. A value other than 1, from this prop or from the loaded state's own `form_version`, disables the interactive form and shows a "needs a newer app" notice instead. |
-| `definition` | `object` | `null` | Immutable form definition: `title`, optional `description`, optional `submit_label`, and `fields` (each `{ id, type: "choice", label, description?, required, options: [{value, label, description?}], multiple, allow_other }`). |
+| `form-version` | `number` | `1` | Form definition schema version. 1 is a choice-only form, 2 is a form with at least one standard field; both render. A higher value, from this prop or from the loaded state's own `form_version`, disables the interactive form and shows a "needs a newer app" notice instead, and so does a field whose `type` this version does not know (a question is never silently dropped). |
+| `definition` | `object` | `null` | Immutable form definition: `title`, optional `description`, optional `submit_label`, and `fields`. A field is `{ id, type, label, description?, required }` plus the keys of its type (see "Fields form" for the V2 types; a `choice` adds `options: [{value, label, description?}]`, `multiple`, `allow_other`). |
 | `state` | `string` | `"active"` | Package-tag lifecycle state mirrored from the artifact: `"active"` (still answerable) or `"idle"` (already answered, shown read-only). Changing this prop triggers a reload of the canonical form state from the Host. |
 
 ## Events
@@ -27,13 +27,23 @@ A Wippy `view.component` web component (`<wippy-form>`) that renders one Session
 
 ## Answer shapes
 
-A field's answer is one of three shapes (or an array of them, for a multi-choice field), matching the Session state API:
+A choice field's answer is one of three shapes (or an array of them, for a multi-choice field), matching the Session state API:
 
 - a plain option value: `"backfill"`
 - a chosen option with a note: `{ "value": "backfill", "note": "Regenerate the lockfile too." }` — a note trimming to blank sends the plain value instead
 - a free-text own answer: `{ "other": "Hold the release." }`
 
-Notes are limited to 1,000 Unicode code points (server code `too_long`); Other text stays at the existing 2,000-code-point limit. See `src/lib/definition.ts` (`FieldAnswer`, `NotedAnswer`, `OtherAnswer`) and `src/lib/answers.ts` (`buildNotedValue`, `NOTE_TEXT_MAX`, `isNoteTextTooLong`, `answerDisplayItems`).
+Notes are limited to 1,000 Unicode code points (server code `too_long`); Other text stays at the existing 2,000-code-point limit. See `src/lib/definition.ts` (`ChoiceAnswer`, `NotedAnswer`, `OtherAnswer`) and `src/lib/answers.ts` (`buildNotedValue`, `NOTE_TEXT_MAX`, `isNoteTextTooLong`, `answerDisplayItems`).
+
+A standard field's answer is one JSON scalar, or the key is omitted when an optional field is left unanswered:
+
+| Type | Answer sent | Notes |
+| --- | --- | --- |
+| `text`, `textarea` | string, exactly as typed | Inner and outer whitespace kept; a whitespace-only value is unanswered; line breaks are LF |
+| `email` | string, trimmed | Case kept |
+| `number` | JSON number | Never a numeric string; a whole value is sent as an integer (`3.0` becomes `3`) |
+| `date` | `"YYYY-MM-DD"` string | No timezone; not trimmed |
+| `checkbox` | `true` or `false` | Always explicit: an optional box left unchecked sends `false` |
 
 ---
 
@@ -175,3 +185,92 @@ The approved prototype is the behavioral and styling-API reference; three things
 
 - The Send / Send answers / composer-send buttons do not read `--wippy-form-accent` — see "The four action buttons" above. An inline-`:style` approach that routed them through the token was tried and reverted: it re-implemented the theme's own primary/disabled button look by hand, which is the same "same semantics ⇒ same looks" violation a `.p-*` CSS override would be, just moved into the component script instead of the stylesheet. These four stay on the theme's own PrimeVue defaults; only the token-driven elements (rows, counter, key badges, focus ring, note-toggle) restyle with `--wippy-form-accent`.
 - Other/note `Textarea` colour (background/border) is likewise the theme's own `.p-textarea` default, not a `--wippy-form-*` token — no `input-bg`/`input-border` tokens exist. The only non-default CSS on these two elements is `flex: 1 1 auto; min-width: 0` (`.w-form__note-input`/`.w-form__other-input` in `src/styles.css`), needed because `@wippy-fe/theme/primevue/inputgroup.css`'s grow-to-fill rule only targets `.p-inputtext`/`.p-inputwrapper`, not a bare `Textarea`'s `.p-textarea` — without it the box sat at its ~150px intrinsic width instead of filling the row.
+
+---
+
+## Fields form
+
+The renderer for a form that has at least one standard field (form version 2). Every field of the definition is one labelled control, in definition order, followed by one Submit button. Built from `src/app/active-form.vue` (open), `src/app/idle-form.vue` (answered), `src/app/fields/*` (the fields) and `src/lib/answers.ts` with `src/lib/scalar-answers.ts` (the client-side rules). It follows the same styling contract as the question card: `--wippy-form-*` tokens, `part` names with `<part>-<state>` state parts and matching `w-form__` classes, host attributes.
+
+A form with only choices never reaches it (that is the question card). A form that mixes choices with standard fields renders its choices here as a radio group (one answer) or a checkbox group (several), without per-option notes.
+
+### Fields
+
+| Type | Control | What it adds | Draft held while editing |
+| --- | --- | --- | --- |
+| `text` | PrimeVue `InputText` | `type="text"`, `placeholder` | The typed text |
+| `email` | `InputText` | `type="email"`, `inputmode="email"`, `autocomplete="email"` | The typed text |
+| `number` | `InputText` | `type="text"`, `inputmode="decimal"`; not `InputNumber` (it clamps to min/max, rounds extra digits and strips the locale's group character) | The typed text, judged by a strict parser: dot decimal, optional minus, no separators or exponent |
+| `textarea` | `Textarea` (auto-resize, three rows) | Enter adds a line and never submits | The typed text with its line breaks |
+| `date` | `DatePicker`, `updateModelType="string"`, `dateFormat="yy-mm-dd"` | A calendar from its button (not on focus); `min`/`max` grey out days; typing allowed | The text in the box |
+| `checkbox` | `Checkbox` (binary) | The label is clickable | An explicit boolean |
+
+A definition `default` prefills the control; clearing an optional prefilled value sends nothing for that field. A checkbox starts unchecked (its only possible default is `false`).
+
+### Client-side checks
+
+A convenience mirror of the server's rules, run on submit so an obvious mistake is named before a round trip. The Session state API stays the authority, and its 422 errors show on the same fields. Codes are the server's; messages never echo the value. `test/forms/fixtures/v2_conformance.json` is run through both implementations (`src/lib/conformance.test.ts` here).
+
+| Type | Checks (code) |
+| --- | --- |
+| all | Required: no non-whitespace content, no number, an unchecked checkbox (`required`) |
+| `text`, `textarea` | Control characters, tab and line feed allowed in a textarea only (`invalid_text`); `min_length` (`too_short`); `max_length`, default 500 for text and 8,000 for a textarea, never above 2,000 and 8,000 (`too_long`), counted in code points; text only: `pattern`, matched against the whole value, skipped when the browser cannot compile it (`pattern_mismatch`) |
+| `email` | ASCII address, one `@`, dot-atom local part up to 64, DNS-label domain with a dot, 254 in all (`invalid_email`) |
+| `number` | Strict text (`invalid_number`); at most 1e12 in absolute value (`invalid_number`); `integer` (`not_integer`); `min`, `max` (`below_min`, `above_max`); `step` from `min`, else from 0, with exact decimal arithmetic and no tolerance (`not_on_step`) |
+| `date` | A real calendar day written `YYYY-MM-DD`, years 0001 to 9999, not trimmed (`invalid_date`); `min`, `max` inclusive (`below_min`, `above_max`) |
+
+### Tokens
+
+All the shared tokens of the question card apply to the root (`--wippy-form-font`, `-font-size`, `-small-size`, `-question-size`, `-question-weight` for the title, `-surface`, `-border`, `-radius`, `-padding`, `-text`, `-text-muted`, `-focus`). Two tokens are new:
+
+| Token | Default (as coded) | Used for |
+| --- | --- | --- |
+| `--wippy-form-field-gap` | 16px compact / 20px comfortable | Space between fields, and between the form's header, fields, errors and button |
+| `--wippy-form-label-weight` | `500` | Field label weight |
+
+The inputs themselves are PrimeVue controls, so their surface, border and focus styling is the theme's (there are no input tokens, and no `.p-*` override).
+
+### Parts and classes
+
+Same convention as the question card: a state adds a part `<part>-<state>` and a class `w-form__<part>--<state>`.
+
+| Part | States | What it is |
+| --- | --- | --- |
+| `card`, `fields` | `answered` (the answered view), `unsupported` (a notice) on `card` | The whole form; the same element carries both parts and the `w-form` class |
+| `fields-title` | | Form title |
+| `form-description` | | The form's own description (shared with the card) |
+| `notice` | | "Asked earlier" and offline lines (shared with the card) |
+| `fields-error` | | Form-level errors from a 422 |
+| `field` | `required`, `invalid`, `readonly`, `disabled`, `group`, `inline` | One field. `group` is a choice (fieldset), `inline` is a checkbox |
+| `field-label` | | The label (or the legend of a choice) |
+| `field-marker` | | The "(required)" text, shown on an editable required field |
+| `field-description` | | The field's own description |
+| `field-control` | | Wrapper around the control |
+| `field-input` | | The PrimeVue control: the input, the textarea, the checkbox, the date picker |
+| `field-error` | | The error list; linked to the control by `aria-describedby` |
+| `field-value` | `empty` | The stored answer in the read-only view ("Skipped" when empty) |
+| `field-note` | | The note on a chosen option in the read-only view |
+| `field-options` | | A choice's group of rows |
+| `field-option` | `other` | One radio or checkbox row |
+| `field-option-input`, `field-option-label`, `field-option-description` | | Pieces of a row |
+| `field-other`, `field-other-input` | | The Other row's label and text box |
+| `status` | | Delivery and answered-time lines in the read-only view (shared with the card) |
+| `send` | | The Submit button (shared with the card) |
+
+### Host attributes
+
+`card-state` is reflected as for the card: `loading`, `active`, `answered`, `unsupported`. A fields form never reports `review` and has no `collapsed`.
+
+### Accessibility and keyboard
+
+- Every control has a label whose `for` points at the real input. The description and the error list are linked by `aria-describedby` on that input (for a checkbox or a date picker, whose wrapper would otherwise take the attribute, through the PrimeVue pass-through). A choice is a `fieldset` with a `legend`, described as a whole. `aria-invalid` and `aria-required` follow the state.
+- The form is `novalidate`: the browser's own bubble never replaces the form's error flow. A failed submit names each field, focuses the first invalid control, and announces "N questions need attention." in one polite status region. Errors carry no `role="alert"` of their own, so nothing is announced twice.
+- Required is text ("(required)"), never colour alone. A read-only answer is plain selectable text.
+- Enter in a single-line field submits the form; Enter in a textarea adds a line; Space toggles a checkbox.
+- Date: type `YYYY-MM-DD`, press the calendar button or ArrowDown to open the calendar, Escape closes it. The calendar opens in the component's own shadow root (the theme's PrimeVue plugin keeps overlays there). Text the picker cannot parse is never dropped: it stays in the box and is named on submit (`invalid_date`, or `below_min` / `above_max` for a well-formed date out of range). On a touch screen PrimeVue sets `inputmode="none"` on the box, so the date is chosen from the calendar.
+
+### Known gaps
+
+- The error text and the "(required)" marker take their colour from the theme's severity utilities (contrast-tuned for light and dark), not from `--wippy-form-danger`.
+- The unchecked checkbox and input edge contrast is the theme's (decision D27, deferred to a theme-level fix); there is no local `.p-*` override.
+- A browser that cannot compile a `pattern` skips that check; the server still enforces it.
