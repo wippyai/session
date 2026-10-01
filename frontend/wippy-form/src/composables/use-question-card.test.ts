@@ -72,6 +72,21 @@ describe('useQuestionCard — single question, single answer', () => {
     expect(onSubmit).toHaveBeenCalledWith({ f1: 'a' })
   })
 
+  it('sendNote() hands focus to the row that owns the note: the editor closes and would take focus with it, and a one-question card moves focus nowhere else', () => {
+    const onSubmit = vi.fn()
+    const c = useQuestionCard(singleDef, null, onSubmit)
+    const q = singleDef.fields[0]
+    c.toggleNote(q, 'b', true)
+    expect(c.focusTarget.value).toBe('note-b')
+    const seq = c.focusSeq.value
+    c.setNote(q, 'b', 'extra context')
+    c.sendNote(q, 'b')
+    expect(onSubmit).toHaveBeenCalledWith({ f1: { value: 'b', note: 'extra context' } })
+    expect(c.ans(q).noteOpen).toBeNull()
+    expect(c.focusTarget.value).toBe('opt-1')
+    expect(c.focusSeq.value).toBeGreaterThan(seq)
+  })
+
   it('activate() past the last row (Other\'s slot) only focuses Other', () => {
     const onSubmit = vi.fn()
     const c = useQuestionCard(singleDef, null, onSubmit)
@@ -228,6 +243,18 @@ describe('useQuestionCard — commits an unsent multi-choice tick on navigating 
     c.go(2)
     expect(c.answered(twoQDef.fields[1])).toBe(false)
     expect(c.answerItemsFor(twoQDef.fields[1])).toBeNull()
+  })
+})
+
+describe('useQuestionCard — a single-answer note send on a several-question card', () => {
+  it('leaves focus to the move to the next question, not the row the note was on', () => {
+    const c = useQuestionCard(twoQDef, null, vi.fn())
+    const q1 = twoQDef.fields[0]
+    c.toggleNote(q1, 'a', true)
+    c.setNote(q1, 'a', 'context')
+    c.sendNote(q1, 'a')
+    expect(c.index.value).toBe(1)
+    expect(c.focusTarget.value).toBe('first')
   })
 })
 

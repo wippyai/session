@@ -322,6 +322,91 @@ describe('QuestionCardActive: the focused control names the error', () => {
   })
 })
 
+describe('QuestionCardActive: focus after a failed send that started in a note', () => {
+  // A single-answer note sends the whole form. The note editor closes on send
+  // and takes focus with it; on a one-question card nothing else moves focus,
+  // so a rejected send left it on <body>. Focus goes back to the row that owns
+  // the note, the same place closing a note by Escape and every 422 field
+  // error already put it.
+  async function sendFromNote(wrapper: ReturnType<typeof mountCard>) {
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await flushPromises()
+    const note = wrapper.find('textarea.w-form__note-input')
+    // Positive control: the editor really holds focus before the send.
+    expect(document.activeElement).toBe(note.element)
+    await note.setValue('leave at the door')
+    await note.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(wrapper.find('textarea.w-form__note-input').exists()).toBe(false)
+  }
+
+  it('lands on the row that owns the note, and the banner describes it', async () => {
+    const wrapper = mountCard(singleDef)
+    await sendFromNote(wrapper)
+    expect(wrapper.emitted('submit')?.[0]).toEqual([{ f1: { value: 'yes', note: 'leave at the door' } }])
+
+    // The parent's submit cycle: in flight, then rejected.
+    await wrapper.setProps({ submitting: true })
+    await flushPromises()
+    await wrapper.setProps({ submitting: false, banner: { message: BANNER_ERROR, retryable: true } })
+    await flushPromises()
+
+    const focused = document.activeElement as HTMLElement
+    expect(focused).not.toBe(document.body)
+    expect(wrapper.element.contains(focused)).toBe(true)
+    expect(focused.getAttribute('role')).toBe('radio')
+    expect(focused.dataset.focus).toBe('opt-0')
+    expect(describedText(wrapper.element, focused)).toContain(BANNER_ERROR)
+  })
+
+  it('stays on that row when the server rejects the form with a form-level error', async () => {
+    const wrapper = mountCard(singleDef)
+    await sendFromNote(wrapper)
+    ;(wrapper.vm as unknown as CardVm).setServerErrors(undefined, [{ code: 'stale', message: FORM_ERROR }])
+    await flushPromises()
+
+    const focused = document.activeElement as HTMLElement
+    expect(wrapper.element.contains(focused)).toBe(true)
+    expect(focused.dataset.focus).toBe('opt-0')
+    expect(describedText(wrapper.element, focused)).toContain(FORM_ERROR)
+  })
+
+  it('stays on that row when the server rejects the answer with a field error, which the row is described by', async () => {
+    const wrapper = mountCard(singleDef)
+    await sendFromNote(wrapper)
+    ;(wrapper.vm as unknown as CardVm).setServerErrors({ f1: [{ code: 'invalid', message: FIELD_ERROR }] })
+    await flushPromises()
+
+    const focused = document.activeElement as HTMLElement
+    expect(wrapper.element.contains(focused)).toBe(true)
+    expect(focused.dataset.focus).toBe('opt-0')
+    expect(describedText(wrapper.element, focused)).toContain(FIELD_ERROR)
+  })
+
+  it('leaves focus to the move to the next question when the card has several', async () => {
+    const twoQuestions: FormDefinition = {
+      title: 'Release',
+      fields: [
+        { ...singleDef.fields[0], id: 'a', allow_other: false },
+        { ...singleDef.fields[0], id: 'b', allow_other: false },
+      ],
+    }
+    const wrapper = mountCard(twoQuestions)
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await flushPromises()
+    const note = wrapper.find('textarea.w-form__note-input')
+    await note.setValue('context')
+    await note.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('2/2')
+    const focused = document.activeElement as HTMLElement
+    expect(wrapper.element.contains(focused)).toBe(true)
+    expect(focused.getAttribute('role')).toBe('radio')
+    expect(focused.dataset.focus).toBe('opt-0')
+  })
+})
+
 describe('QuestionCardActive: ARIA attributes stay on roles that support them', () => {
   // WAI-ARIA 1.2 "Used in roles" (and the roles that inherit from them):
   // aria-required: checkbox, combobox, gridcell, listbox, radiogroup,

@@ -303,6 +303,16 @@ export function useQuestionCard(
     }
     a.chosen = [value]
     a.useOther = false
+    // Sending a single-answer note sends the form, and the note editor closes
+    // here and takes its focus with it. On a one-question card `commit` only
+    // calls onSubmit, so nothing else would move focus and a rejected send
+    // would leave it on <body>. Hand it to the row that owns the note first:
+    // the same row closing the note by toggle or Escape returns to, and the
+    // one a 422 field error focuses (it is the selected row). The row stays
+    // in the DOM, and the error text is linked to it. A several-question
+    // card's `commit` moves on to the next question or the review and makes
+    // its own request after this one, which wins.
+    requestFocus(`opt-${q.options.findIndex(o => o.value === value)}`)
     commit(q)
   }
 

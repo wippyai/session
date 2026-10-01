@@ -146,7 +146,8 @@ Keys only work while focus is inside the card, so typing in the surrounding chat
 - **Each error is announced once**, by its own `role="alert"` message: the question's error (a validation or server field error), the card-wide notice for a form-level server error, and the submit-failure banner. No error text is repeated in the polite live region (which only speaks question changes and "Ticked"/"Note saved"), and a form-level error is drawn once, not again on each question.
 - **The control that has focus names the error.** While an error is on screen, every answer row, the Other box, an open note box and the Send / Send answers buttons (the controls that just failed and usually keep focus) list it in `aria-describedby`, so it is read with the control and not only when it first appears.
 - **`aria-invalid` only where ARIA supports it and the input is at fault.** A several-answer row (`role="checkbox"`) carries it while its question has an error, the Other box while it is too long or its question has an error, and a note box while it is too long; a single-answer question carries it on its `radiogroup`, because `radio` does not support the state. A failed send or a form-level error describes the controls but does not mark them invalid.
-- Verified in `question-card-errors.test.ts`.
+- **A failed send keeps focus on a live control.** Sending a single-answer note closes the note editor, so focus returns to the row that owns the note (where closing a note with Escape and a 422 field error already put it). The error is then read with that row. On a several-question card, moving on to the next question takes focus instead.
+- Verified in `question-card-errors.test.ts` and `use-question-card.test.ts`.
 
 ### Example: a restyle
 
