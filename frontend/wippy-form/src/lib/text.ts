@@ -1,6 +1,6 @@
 /**
  * Text primitives shared by every client-side answer rule. Each one mirrors
- * the server (`src/forms/definition.lua`) so a value judged blank, too long
+ * the server (`src/forms/form_text.lua`) so a value judged blank, too long
  * or unsafe here is judged the same there.
  */
 

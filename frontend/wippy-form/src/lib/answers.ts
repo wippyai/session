@@ -12,7 +12,7 @@ import type {
   SingleFieldAnswer,
 } from './definition'
 import type { FieldHandler, FieldOutcome } from './scalar-answers'
-import { isChoiceField, isNotedAnswer } from './definition'
+import { isChoiceField, isNotedAnswer, isOtherAnswer } from './definition'
 import { REQUIRED_MESSAGE, SCALAR_HANDLERS } from './scalar-answers'
 import { codePointLength, trimAnswerText } from './text'
 
@@ -36,10 +36,6 @@ export const NOTE_TEXT_MAX = 1000
 const BLANK_OTHER_MESSAGE = 'Enter the other answer.'
 const TOO_LONG_MESSAGE = 'Use at most 2,000 characters.'
 
-function isOtherDraft(value: unknown): value is OtherAnswer {
-  return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as OtherAnswer).other === 'string'
-}
-
 /**
  * Draft shape held in the form's local edit state, keyed by field id: the
  * raw value of each control (a choice answer, the typed text of a text-like
@@ -52,11 +48,6 @@ export function isOtherTextTooLong(raw: string): boolean {
   return codePointLength(trimAnswerText(raw)) > OTHER_TEXT_MAX
 }
 
-/** Counts a note's Unicode code points the same way the server does (see `codePointLength`). */
-export function noteTextLength(raw: string): number {
-  return codePointLength(raw)
-}
-
 /** True once the trimmed note exceeds the server's 1,000-code-point limit. */
 export function isNoteTextTooLong(raw: string): boolean {
   return codePointLength(trimAnswerText(raw)) > NOTE_TEXT_MAX
@@ -65,8 +56,8 @@ export function isNoteTextTooLong(raw: string): boolean {
 /**
  * Trims outer whitespace only — never truncates. Truncating silently would
  * submit different text than what the user sees; an over-length "Other"
- * answer must instead be blocked from submission (see
- * `fieldsWithOverlongOtherText`) so the UI can ask the user to shorten it.
+ * answer must instead be blocked from submission (see `evaluateChoice`) so the
+ * UI can ask the user to shorten it.
  */
 function normalizeOtherText(raw: string): string {
   return trimAnswerText(raw)
@@ -118,7 +109,7 @@ function serializeChoiceAnswer(field: ChoiceFormField, draft: FieldAnswer | unde
         const noted = notedByValue.get(v)
         return noted ? buildNotedValue(v, noted.note) : v
       })
-    const otherEntry = items.find(isOtherDraft)
+    const otherEntry = items.find(isOtherAnswer)
     if (otherEntry) {
       const text = normalizeOtherText(otherEntry.other)
       if (text.length > 0)
@@ -129,7 +120,7 @@ function serializeChoiceAnswer(field: ChoiceFormField, draft: FieldAnswer | unde
 
   if (draft === undefined || typeof draft === 'number' || typeof draft === 'boolean' || Array.isArray(draft))
     return undefined
-  if (isOtherDraft(draft)) {
+  if (isOtherAnswer(draft)) {
     const text = normalizeOtherText(draft.other)
     return text.length > 0 ? { other: text } : undefined
   }
@@ -143,8 +134,8 @@ function serializeChoiceAnswer(field: ChoiceFormField, draft: FieldAnswer | unde
 /** The "Other" draft of a field (single or multiple choice), if Other is selected. */
 function otherDraftOf(field: ChoiceFormField, value: FieldAnswer | undefined): OtherAnswer | undefined {
   if (field.multiple)
-    return Array.isArray(value) ? value.find(isOtherDraft) : undefined
-  return isOtherDraft(value) ? value : undefined
+    return Array.isArray(value) ? value.find(isOtherAnswer) : undefined
+  return isOtherAnswer(value) ? value : undefined
 }
 
 /**
@@ -248,51 +239,6 @@ export function draftSignature(definition: FormDefinition, draft: AnswerDraft): 
   }))
 }
 
-/**
- * Field ids whose `required` rule the current draft plainly fails. For a
- * standard field "required" means its own rule: non-whitespace text, a
- * parsed number, a true checkbox.
- */
-export function missingRequiredFields(definition: FormDefinition, draft: AnswerDraft): string[] {
-  return definition.fields
-    .filter(field => evaluateField(field, draft[field.id]).errors.some(e => e.code === 'required'))
-    .map(field => field.id)
-}
-
-/**
- * Field ids where "Other" is selected but its text is blank once trimmed.
- * Serializing would silently drop that answer, so the form asks for the
- * text instead, as the server would ("Enter the other answer.").
- */
-export function fieldsWithBlankOther(definition: FormDefinition, draft: AnswerDraft): string[] {
-  const invalid: string[] = []
-  for (const field of definition.fields) {
-    if (!isChoiceField(field))
-      continue
-    const other = otherDraftOf(field, draft[field.id])
-    if (other && normalizeOtherText(other.other).length === 0)
-      invalid.push(field.id)
-  }
-  return invalid
-}
-
-/**
- * Field ids whose "Other" free-text draft exceeds the 2,000-code-point limit
- * once trimmed — checked ahead of the server's own (authoritative) 422
- * response, the same way `missingRequiredFields` pre-checks `required`.
- */
-export function fieldsWithOverlongOtherText(definition: FormDefinition, draft: AnswerDraft): string[] {
-  const invalid: string[] = []
-  for (const field of definition.fields) {
-    if (!isChoiceField(field))
-      continue
-    const other = otherDraftOf(field, draft[field.id])
-    if (other && isOtherTextTooLong(other.other))
-      invalid.push(field.id)
-  }
-  return invalid
-}
-
 // ── display ──────────────────────────────────────────────────────
 
 /** One answer shown back to the user — the review step, the post-submit summary, or a read-only field. */
@@ -321,7 +267,7 @@ export function answerDisplayItems(field: FormField, answer: FieldAnswer | undef
     if (match)
       items.push({ label: option.label, note: isNotedAnswer(match) ? match.note : undefined })
   }
-  const other = values.find(isOtherDraft)
+  const other = values.find(isOtherAnswer)
   if (other)
     items.push({ label: other.other, own: true })
   return items.length > 0 ? items : null

@@ -221,7 +221,8 @@ export interface SubmitConflict {
   message?: string
 }
 
-function isOtherAnswer(value: unknown): value is OtherAnswer {
+/** True for the `{ other: text }` shape of an own answer (the one guard for it; also read from a loaded or drafted answer). */
+export function isOtherAnswer(value: unknown): value is OtherAnswer {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as OtherAnswer).other === 'string'
 }
 

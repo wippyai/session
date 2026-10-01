@@ -1,7 +1,7 @@
 import type { AnswerDraft } from './answers'
 import type { FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
-import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, fieldsWithBlankOther, fieldsWithOverlongOtherText, isNoteTextTooLong, isOtherTextTooLong, missingRequiredFields, noteTextLength, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
+import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, isNoteTextTooLong, isOtherTextTooLong, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
 import { trimAnswerText } from './text'
 
 const definition: FormDefinition = {
@@ -94,14 +94,6 @@ describe('serializeFieldAnswer — multiple choice', () => {
   })
 })
 
-describe('noteTextLength — Unicode code points, not UTF-16 code units', () => {
-  it('counts an astral emoji as one code point even though it is a UTF-16 surrogate pair', () => {
-    const emoji = '😀' // 2 UTF-16 code units, 1 code point
-    expect(emoji.length).toBe(2)
-    expect(noteTextLength(emoji)).toBe(1)
-  })
-})
-
 describe('trimAnswerText — matches the server\'s trim set exactly', () => {
   // Built from code points rather than literal characters in source, since
   // an ideographic space and a zero-width space are both visually silent
@@ -120,8 +112,8 @@ describe('trimAnswerText — matches the server\'s trim set exactly', () => {
   })
 
   it('so a field whose only content is U+3000 counts as blank Other text, but U+200B does not', () => {
-    expect(fieldsWithBlankOther(definition, { f1: { other: ideographicSpace } })).toEqual(['f1'])
-    expect(fieldsWithBlankOther(definition, { f1: { other: zeroWidthSpace } })).toEqual([])
+    expect(validateAnswers(definition, { f1: { other: ideographicSpace } }).f1?.map(e => e.code)).toEqual(['blank'])
+    expect(validateAnswers(definition, { f1: { other: zeroWidthSpace } })).toEqual({})
   })
 })
 
@@ -139,22 +131,20 @@ describe('isOtherTextTooLong', () => {
   })
 })
 
-describe('fieldsWithOverlongOtherText', () => {
+describe('validateAnswers — an over-long Other text', () => {
+  const codes = (draft: AnswerDraft) => Object.fromEntries(Object.entries(validateAnswers(definition, draft)).map(([id, errors]) => [id, errors.map(e => e.code)]))
+
   it('reports a single-choice field whose trimmed Other text exceeds the limit', () => {
-    const field = definition.fields[0]
-    const draft: AnswerDraft = { [field.id]: { other: `${'😀'.repeat(2001)}` } }
-    expect(fieldsWithOverlongOtherText(definition, draft)).toEqual([field.id])
+    expect(codes({ f1: { other: `${'😀'.repeat(2001)}` } })).toEqual({ f1: ['too_long'] })
   })
 
   it('reports a multiple-choice field whose Other entry exceeds the limit', () => {
-    const field = definition.fields[1]
-    const draft: AnswerDraft = { [field.id]: ['x', { other: `${'😀'.repeat(2001)}` }] }
-    expect(fieldsWithOverlongOtherText(definition, draft)).toEqual([field.id])
+    expect(codes({ f1: 'a', f2: ['x', { other: `${'😀'.repeat(2001)}` }] })).toEqual({ f2: ['too_long'] })
   })
 
   it('does not report a field with no Other answer, or one within the limit', () => {
-    const draft: AnswerDraft = { f1: 'a', f2: ['x', { other: 'short' }] }
-    expect(fieldsWithOverlongOtherText(definition, draft)).toEqual([])
+    expect(codes({ f1: 'a', f2: ['x', { other: 'short' }] })).toEqual({})
+    expect(codes({ f1: { other: '😀'.repeat(2000) } })).toEqual({})
   })
 })
 
@@ -166,25 +156,32 @@ describe('serializeFieldAnswer — no silent truncation', () => {
   })
 })
 
-describe('missingRequiredFields', () => {
+describe('validateAnswers — required choices', () => {
+  const codes = (draft: AnswerDraft) => Object.fromEntries(Object.entries(validateAnswers(definition, draft)).map(([id, errors]) => [id, errors.map(e => e.code)]))
+
   it('reports a required field with no answer', () => {
-    expect(missingRequiredFields(definition, {})).toEqual(['f1'])
+    expect(codes({})).toEqual({ f1: ['required'] })
   })
 
   it('does not report an optional field with no answer', () => {
-    expect(missingRequiredFields(definition, { f1: 'a' })).toEqual([])
+    expect(codes({ f1: 'a' })).toEqual({})
   })
 
   it('does not report a required field once it has a valid answer', () => {
-    expect(missingRequiredFields(definition, { f1: 'a', f2: undefined })).toEqual([])
+    expect(codes({ f1: 'a', f2: undefined })).toEqual({})
   })
 })
 
-describe('fieldsWithBlankOther', () => {
-  it('flags Other selected with blank text, for single and multiple choice, and nothing else', () => {
-    expect(fieldsWithBlankOther(definition, { f1: { other: '   ' }, f2: ['x', { other: '' }] })).toEqual(['f1', 'f2'])
-    expect(fieldsWithBlankOther(definition, { f1: { other: 'Drone' }, f2: ['x'] })).toEqual([])
-    expect(fieldsWithBlankOther(definition, {})).toEqual([])
+describe('validateAnswers — Other selected with blank text', () => {
+  const codes = (draft: AnswerDraft) => Object.fromEntries(Object.entries(validateAnswers(definition, draft)).map(([id, errors]) => [id, errors.map(e => e.code)]))
+
+  it('flags it for single and multiple choice, and nothing else', () => {
+    expect(codes({ f1: { other: '   ' }, f2: ['x', { other: '' }] })).toEqual({ f1: ['blank'], f2: ['blank'] })
+    expect(codes({ f1: { other: 'Drone' }, f2: ['x'] })).toEqual({})
+  })
+
+  it('asks for the text rather than "required" when the Other is the whole answer to a required field', () => {
+    expect(codes({ f1: { other: '' } })).toEqual({ f1: ['blank'] })
   })
 })
 
@@ -199,9 +196,10 @@ describe('buildNotedValue (question-card notes)', () => {
   })
 })
 
-describe('noteTextLength / isNoteTextTooLong (note limit, server 1,000-code-point cap)', () => {
+describe('isNoteTextTooLong (note limit, server 1,000-code-point cap)', () => {
   it('counts code points the same way for notes as for Other text, with emoji as one code point', () => {
-    expect(noteTextLength('😀')).toBe(1)
+    expect(isNoteTextTooLong('😀'.repeat(1000))).toBe(false)
+    expect(isNoteTextTooLong('😀'.repeat(1001))).toBe(true)
   })
 
   it('trims outer whitespace before checking the 1,000-code-point limit', () => {
@@ -372,13 +370,15 @@ describe('validateAnswers — client findings by field id', () => {
   })
 })
 
-describe('missingRequiredFields — V2 fields', () => {
+describe('validateAnswers — required V2 fields', () => {
+  const required = (draft: AnswerDraft) => Object.entries(validateAnswers(v2Definition, draft)).filter(([, errors]) => errors.some(e => e.code === 'required')).map(([id]) => id)
+
   it('counts a whitespace-only required text and an unchecked required checkbox as missing', () => {
-    expect(missingRequiredFields(v2Definition, { name: '  ', mail: 'a@b.co', consent: false })).toEqual(['name', 'consent'])
+    expect(required({ name: '  ', mail: 'a@b.co', consent: false })).toEqual(['name', 'consent'])
   })
 
   it('does not count an invalid but filled field as missing', () => {
-    expect(missingRequiredFields(v2Definition, { name: 'Ada', mail: 'broken', consent: true })).toEqual([])
+    expect(required({ name: 'Ada', mail: 'broken', consent: true })).toEqual([])
   })
 })
 

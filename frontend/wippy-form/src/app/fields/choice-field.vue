@@ -4,7 +4,7 @@ import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import RadioButton from 'primevue/radiobutton'
 import { computed, ref, useId, watch } from 'vue'
-import { answerHasOther, answerOtherText } from '../../lib/definition'
+import { answerHasOther, answerOtherText, isOtherAnswer } from '../../lib/definition'
 import { partClass } from '../../lib/part-class'
 import FieldShell from './field-shell.vue'
 
@@ -82,16 +82,12 @@ const otherTextInvalid = computed(() => props.errors.some(e => e.code === 'blank
 // anywhere; just distinguishes "Other is selected" from a real option value.
 const OTHER_TOKEN = 'choice-field-other-sentinel'
 
-function isOther(v: ChoiceAnswer | undefined): v is OtherAnswer {
-  return !!v && typeof v === 'object' && !Array.isArray(v) && typeof (v as OtherAnswer).other === 'string'
-}
-
 const singleSelected = computed<string>({
   get() {
     const v = answer.value
     if (typeof v === 'string')
       return v
-    if (isOther(v))
+    if (isOtherAnswer(v))
       return OTHER_TOKEN
     return ''
   },
