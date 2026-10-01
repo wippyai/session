@@ -248,8 +248,13 @@ commits the accepted answer and its user message in one transaction, then
 wakes the owning session process; a missed wake-up is recovered from the
 stored row on the next session start.
 
-V1 supports choice fields only: single selection, multiple selection,
-optional/required, notes on a chosen option, and a free-text "Other" answer.
+A form holds choice fields (single or multiple selection, notes on a chosen
+option, a free-text "Other" answer) and standard fields: `text`, `textarea`,
+`email`, `number`, `date` and `checkbox`, each optional or required. A form
+with only choice fields is form version 1; a form with any standard field is
+version 2, and an older `wippy-form` shows a "needs a newer version" notice
+for it. The server checks every answer, including a text field's `pattern`,
+which the browser never evaluates.
 
 ### Answers and steering
 
