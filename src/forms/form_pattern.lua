@@ -1,10 +1,13 @@
 local text = require("text")
 local form_text = require("form_text")
 
--- The pattern an agent may put on a `text` field (V2): a small subset of
--- regular expression syntax that means the same in Go RE2 (the runtime's
--- text.regexp, used here) and in JavaScript with the `u` flag (the form
--- component, which runs the same pattern in the browser).
+-- The pattern an agent may put on a `text` field (V2): a small subset of Go
+-- RE2 syntax, which the runtime's text.regexp evaluates in linear time.
+--
+-- Only the server evaluates a pattern. The form component never runs it: the
+-- pattern is agent-authored, and a browser's backtracking engine can stall on
+-- some patterns the subset allows, such as (a|a)*b. The server checks it when
+-- the answer is submitted, and its 422 pattern_mismatch shows on the field.
 --
 -- A pattern must match the whole answer. It is compiled as ^(?:pattern)$, so
 -- an alternation is matched as a whole and the author needs no anchors.
@@ -18,9 +21,10 @@ local form_text = require("form_text")
 --   escapes \d \w and a backslash before one of  ^ $ \ . * + ? ( ) [ ] { } | /
 --     (and - inside a class); every other escape is outside the subset
 --
--- Left out because RE2 and JavaScript differ on them or because a browser's
--- backtracking engine can stall on them: lookaround, backreferences, named
--- groups, flags, \s \S \D \W \b \B \p \x \A \z and the other letter escapes.
+-- Not in the subset: lookaround and backreferences (RE2 has neither, so they
+-- would not compile), named groups, flags, and \s \S \D \W \b \B \p \x \A \z
+-- and the other letter escapes (RE2 reads these, but the subset stays small
+-- enough for the ask_user tool description to list in full).
 --
 -- Bounds: 200 characters, 3 nested groups, repeat counts up to 100 (written
 -- without a leading zero, because RE2 reads {01} as the text "{01}"), and no

@@ -13,7 +13,10 @@ local form_pattern = require("form_pattern")
 --
 -- Pure functions, no I/O. The rules are written down once more in the form
 -- component (frontend/wippy-form), and both sides are tested against the one
--- fixture file test/forms/fixtures/v2_conformance.json.
+-- fixture file test/forms/fixtures/v2_conformance.json. The one rule the
+-- component does not have is the text pattern: only this side evaluates it
+-- (see form_pattern.lua), and the fixture's pattern cases are not run by the
+-- component.
 --
 -- Answer checks return (value, nil) for an accepted answer (the normalized
 -- value to store), (nil, nil) for a field left unanswered and (nil, err) for
