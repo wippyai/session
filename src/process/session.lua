@@ -488,14 +488,22 @@ local function run(args: SessionArgs)
         })
     end
 
+    -- Init switches publish upstream events, so announce the session first.
+    -- Drain them before accepting input: admission activates the first turn,
+    -- and a later agent switch would turn it into a failed handoff.
+    local initial_ok, initial_ops_err = bus:run_initial_ops()
+    if not initial_ok then
+        error("Failed to apply initial session configuration: " .. tostring(initial_ops_err))
+    end
+
     if args.recovery_notice or recovered_calls > 0 then
         session_upstream:session_error("recovery_incomplete",
             args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
     end
 
     session_upstream:update_session({
-        agent = session_config.agent_id,
-        model = session_config.model,
+        agent = context.config.agent_id,
+        model = context.config.model,
         status = consts.STATUS.IDLE,
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,

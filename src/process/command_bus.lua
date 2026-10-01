@@ -246,6 +246,25 @@ function command_bus:end_turn()
     return true
 end
 
+-- Apply queued startup configuration before ingress can admit a user turn.
+-- Leave ordinary operations (including the init function) for the run loop.
+function command_bus:run_initial_ops()
+    while true do
+        local op = self.ops[1]
+        if not op or op.init ~= true then break end
+        table.remove(self.ops, 1)
+        self.pending_ops = self.pending_ops - 1
+        self.current_op = op
+        local result, err = self:process_operation(op)
+        self.current_op = nil
+        if err or (result and result.error_handled) then
+            return self:fail(err or result.error_message)
+        end
+        self:enqueue_result(result)
+    end
+    return true
+end
+
 function command_bus:run()
     while self.state ~= "closed" do
         local op = table.remove(self.ops, 1)
