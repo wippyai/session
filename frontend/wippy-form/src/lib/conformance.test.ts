@@ -207,10 +207,12 @@ const fixtureFiles = import.meta.glob('../../../../test/forms/fixtures/v2_confor
 const fixture = Object.values(fixtureFiles)[0]
 
 describe('conformance fixture (test/forms/fixtures/v2_conformance.json)', () => {
-  if (fixture === undefined) {
-    it.skip('skipped: test/forms/fixtures/v2_conformance.json does not exist (the Session server tests own it)', () => {})
-    return
-  }
+  // A missing file fails the suite: a skip would let the client and the server
+  // drift apart unnoticed (a moved or renamed fixture, a checkout without
+  // `test/`). The Session server tests own the file.
+  it('exists', () => {
+    expect(fixture, 'test/forms/fixtures/v2_conformance.json is missing, so the client checker is not compared with the server').toBeDefined()
+  })
 
   const cases = Array.isArray(fixture) ? fixture as unknown[] : []
 

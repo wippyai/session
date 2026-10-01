@@ -1,6 +1,7 @@
 import type { ScalarFormField } from './definition'
 import type { FieldHandler } from './scalar-answers'
 import { describe, expect, it, vi } from 'vitest'
+import { serializeAnswers, validateAnswers } from './answers'
 import { isValidEmail, isValidIsoDate, SCALAR_HANDLERS } from './scalar-answers'
 
 type FieldOf<T extends ScalarFormField['type']> = Extract<ScalarFormField, { type: T }>
@@ -85,6 +86,27 @@ describe('text', () => {
     }
     finally {
       construct.mockRestore()
+    }
+  })
+
+  // Spying on the RegExp constructor catches only `new RegExp(pattern)`: a
+  // string handed to `match`, `search` or `split`, or built into a literal by
+  // `eval`, compiles inside the engine and never calls the spied constructor.
+  // A pattern that no engine can compile is the probe for every route: any
+  // evaluation throws a SyntaxError, so a value that comes back accepted, with
+  // no throw, proves the pattern was never compiled.
+  it('accepts a value for a pattern no regular-expression engine can compile, so none is ever asked to', () => {
+    const uncompilable = ['(', '[a-', ')', '*a', '\\', '(?<n>a)(?<n>b)', 'a{2,1}']
+    for (const pattern of uncompilable) {
+      // The positive control: this really is a pattern an engine refuses.
+      expect(() => new RegExp(pattern), pattern).toThrow(SyntaxError)
+      expect(() => evaluate(field('text', { pattern }), 'anything'), pattern).not.toThrow()
+      expect(evaluate(field('text', { pattern }), 'anything'), pattern).toEqual({ answer: 'anything', errors: [] })
+      // The whole checker, not only the text handler.
+      const definition = { title: 'T', fields: [field('text', { pattern })] }
+      expect(() => validateAnswers(definition, { f: 'anything' }), pattern).not.toThrow()
+      expect(validateAnswers(definition, { f: 'anything' }), pattern).toEqual({})
+      expect(serializeAnswers(definition, { f: 'anything' }), pattern).toEqual({ f: 'anything' })
     }
   })
 
