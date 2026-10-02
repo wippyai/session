@@ -758,10 +758,8 @@ local function define_tests()
                 test.contains(builder:get_messages()[2].content[1].text, "Unknown filename")
             end)
 
-            it("maps an ordinary uploaded image file into multimodal model input", function()
-                local data = "ordinary-image-bytes"
-                local original_contract = prompt_builder._contract
-                prompt_builder._contract = {
+            local function unbound_contract()
+                return {
                     get = function()
                         return {
                             implementations = function()
@@ -770,21 +768,22 @@ local function define_tests()
                         }
                     end,
                 }
+            end
+
+            it("lists an ordinary uploaded image as a file without sending its bytes", function()
+                local original_contract = prompt_builder._contract
+                prompt_builder._contract = unbound_contract()
                 local builder, err = prompt_builder.build({ file_message() }, {}, {}, {
                     file_resolver = function(file_uuid)
                         test.eq(file_uuid, "upload-1")
                         return {
-                            size = #data,
+                            size = 20,
                             mime_type = "image/png",
                             metadata = { filename = "attention-target.png" },
                         }
                     end,
-                    visual_resolver = function(request)
-                        test.eq(request.reference.kind, "upload")
-                        test.eq(request.reference.opaque_id, "upload-1")
-                        test.eq(request.media.content_type, "image/png")
-                        test.eq(request.media.content_bytes, #data)
-                        return { data = data, content_type = "image/png" }
+                    visual_resolver = function()
+                        error("ordinary files must not be read for the prompt")
                     end,
                     cache_markers = false,
                 })
@@ -794,16 +793,55 @@ local function define_tests()
                 local built = builder:get_messages()
                 test.eq(#built, 2)
                 test.eq(built[1].role, "user")
+                test.eq(#built[1].content, 1)
                 test.eq(built[1].content[1].text, "Inspect the file")
-                test.eq(built[1].content[2].type, "image")
-                test.eq(built[1].content[2].source.type, "base64")
                 test.eq(built[2].role, "developer")
                 test.contains(built[2].content[1].text, "attention-target.png")
             end)
 
-            it("fails closed when an ordinary uploaded image resolves to different bytes", function()
-                local data = "ordinary-image-bytes"
+            it("keeps the prompt when an ordinary image could not be served", function()
                 local original_contract = prompt_builder._contract
+                prompt_builder._contract = unbound_contract()
+                local builder, err = prompt_builder.build({ file_message() }, {}, {}, {
+                    file_resolver = function()
+                        return { size = 50 * 1024 * 1024, mime_type = "image/webp", metadata = { filename = "huge.webp" } }
+                    end,
+                    cache_markers = false,
+                })
+                prompt_builder._contract = original_contract
+
+                test.is_nil(err)
+                test.contains(assert(builder):get_messages()[2].content[1].text, "huge.webp")
+            end)
+        end)
+
+        describe("file reference authorization", function()
+            local original_contract = prompt_builder._contract
+            after_each(function()
+                prompt_builder._contract = original_contract
+            end)
+
+            local function provider(info)
+                prompt_builder._contract = {
+                    get = function(contract_id)
+                        test.eq(contract_id, "wippy.session:file_provider")
+                        return {
+                            implementations = function()
+                                return { "app:file_provider" }
+                            end,
+                            open = function()
+                                return {
+                                    get_info = function()
+                                        return info
+                                    end,
+                                }
+                            end,
+                        }
+                    end,
+                }
+            end
+
+            it("accepts any file ID when no provider is bound, as upstream did", function()
                 prompt_builder._contract = {
                     get = function()
                         return {
@@ -813,23 +851,35 @@ local function define_tests()
                         }
                     end,
                 }
-                local builder, err = prompt_builder.build({ file_message() }, {}, {}, {
-                    file_resolver = function()
-                        return {
-                            size = #data,
-                            mime_type = "image/png",
-                            metadata = { filename = "attention-target.png" },
-                        }
-                    end,
-                    visual_resolver = function()
-                        return { data = data .. "-changed", content_type = "image/png" }
-                    end,
-                    cache_markers = false,
-                })
-                prompt_builder._contract = original_contract
+                test.is_true(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+            end)
 
-                test.is_nil(builder)
-                test.eq(err, "ATTACHED_IMAGE_RESOLUTION_FAILED")
+            it("accepts a file whose provider declares no owner, session or expiry", function()
+                provider({ size = 3, mime_type = "text/plain" })
+                test.is_true(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+            end)
+
+            it("accepts a file the provider does not know", function()
+                provider(nil)
+                test.is_true(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+            end)
+
+            it("enforces each binding constraint the provider declares", function()
+                provider({ user_id = "actor-1", session_id = "session-1", expires_at = "2099-01-01T00:00:00Z" })
+                test.is_true(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+                provider({ user_id = "actor-2" })
+                test.is_false(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+                provider({ user_id = "actor-1", session_id = "session-2" })
+                test.is_false(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+                provider({ user_id = "actor-1", expires_at = "2020-01-01T00:00:00Z" })
+                test.is_false(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+                provider({ metadata = { session_id = "session-2" } })
+                test.is_false(prompt_builder._authorize_file("upload-1", "actor-1", "session-1"))
+            end)
+
+            it("rejects a reference without a sender", function()
+                provider({ size = 3 })
+                test.is_false(prompt_builder._authorize_file("upload-1", nil, "session-1"))
             end)
         end)
 
@@ -1017,7 +1067,8 @@ local function define_tests()
                 if contract_context then
                     test.eq(contract_context.upload_id, "upload-visual")
                 end
-                test.eq(binding_id, "userspace.uploads:content_provider")
+                -- The default content provider binding, not a named uploads module.
+                test.is_nil(binding_id)
                 test.eq(#requested_bytes, 1)
                 test.eq(requested_bytes[1], #data)
             end)

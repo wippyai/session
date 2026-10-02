@@ -2,7 +2,6 @@ local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
 local fs = require("fs")
-local base64 = require("base64")
 local hash = require("hash")
 local time = require("time")
 local input_metadata = require("input_metadata")
@@ -34,7 +33,6 @@ local prompt_builder = {
 
 local FILE_PROVIDER_CONTRACT = "wippy.session:file_provider"
 local CONTENT_PROVIDER_CONTRACT = "userspace.contract:content_provider"
-local UPLOAD_CONTENT_PROVIDER = "userspace.uploads:content_provider"
 local VISUAL_MAX_BYTES = 5 * 1024 * 1024
 
 local function file_not_expired(value)
@@ -150,7 +148,8 @@ local function authorized_file_info(file_uuid)
     if context_err or not scoped then
         return nil
     end
-    local instance, open_err = scoped:open(UPLOAD_CONTENT_PROVIDER)
+    -- The default binding, so the session depends on no specific uploads module.
+    local instance, open_err = scoped:open()
     if open_err or not instance then
         return nil
     end
@@ -237,21 +236,21 @@ local function resolve_visual_via_contract(request: VisualRequest)
 end
 
 prompt_builder._resolve_file = resolve_file
+-- Upstream accepted any file ID, and the prompt only lists files as text. A
+-- bound file provider can narrow that: a declared owner must be the sender,
+-- and a declared session or expiry must match.
 prompt_builder._authorize_file = function(file_uuid, actor_id, session_id)
     if type(actor_id) ~= "string" or actor_id == "" then
         return false
     end
     local upload = resolve_file_via_contract(file_uuid)
-    if type(upload) ~= "table" or upload.user_id ~= actor_id
-        or not upload_session_matches(upload, session_id)
-        or not upload_not_expired(upload) then
+    if type(upload) ~= "table" then
+        return true
+    end
+    if upload.user_id ~= nil and upload.user_id ~= actor_id then
         return false
     end
-    local info = authorized_file_info(file_uuid)
-    if not info then
-        return false
-    end
-    return true
+    return upload_session_matches(upload, session_id) and upload_not_expired(upload)
 end
 
 function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
@@ -316,41 +315,6 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
 end
 prompt_builder._authorize_visual = authorize_visual_via_contract
 prompt_builder._resolve_visual = resolve_visual_via_contract
-
-local function resolve_message_image(file_uuid, upload, options)
-    if type(upload) ~= "table"
-        or upload.mime_type ~= "image/png" and upload.mime_type ~= "image/webp" then
-        return nil
-    end
-    if type(upload.size) ~= "number" or upload.size < 1 or upload.size > VISUAL_MAX_BYTES then
-        return nil, "ATTACHED_IMAGE_INVALID"
-    end
-    local resolver = options.visual_resolver or prompt_builder._resolve_visual
-    local ok, resolved = pcall(resolver, {
-        reference = {
-            kind = "upload",
-            opaque_id = file_uuid,
-        },
-        media = {
-            content_type = upload.mime_type,
-            content_bytes = upload.size,
-        },
-    })
-    if not ok or type(resolved) ~= "table"
-        or type(resolved.data) ~= "string"
-        or resolved.content_type ~= upload.mime_type
-        or #resolved.data ~= upload.size
-        or #resolved.data > VISUAL_MAX_BYTES then
-        return nil, "ATTACHED_IMAGE_RESOLUTION_FAILED"
-    end
-    local resolved_data = resolved.data :: string
-    local resolved_content_type = resolved.content_type :: string
-    local encoded, encode_err = base64.encode(resolved_data)
-    if encode_err or type(encoded) ~= "string" or encoded == "" then
-        return nil, "ATTACHED_IMAGE_ENCODING_FAILED"
-    end
-    return prompt_builder._prompt.image_base64(resolved_content_type, encoded)
-end
 
 function prompt_builder.build(messages, contexts, session_meta, options)
     if not messages then
@@ -477,14 +441,9 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 local file_info = {}
                 for _, file_uuid in ipairs(metadata.file_uuids) do
                     if type(file_uuid) == "string" then
+                        -- Files are listed, never inlined. Image content reaches the model
+                        -- only through an authorized wippy.attention.visual attachment.
                         local upload = prompt_builder._resolve_file(file_uuid, options)
-                        local image_part, image_err = resolve_message_image(file_uuid, upload, options :: BuildOptions)
-                        if image_err then
-                            return nil, image_err
-                        end
-                        if image_part then
-                            builder:add_message(prompt_builder._prompt.ROLE.USER, { image_part })
-                        end
                         table.insert(file_info, {
                             filename = upload and upload.metadata and upload.metadata.filename or "Unknown filename",
                             size = upload and upload.size or 0,

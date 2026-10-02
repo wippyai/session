@@ -503,7 +503,9 @@ entries:
         Resolve a file/upload identifier to its metadata for prompt rendering. Applications
         that own uploads provide a binding; when none exists, prompt_builder falls back to
         the upload_repo / file_resolver passed via build options. The session depends on no
-        uploads module.
+        uploads module. When a binding returns user_id, session_id or expires_at (top level
+        or in metadata), the session accepts the file only from that user, in that session,
+        before that time; omitted fields are not checked.
     methods:
       - name: get_info
         description: Resolve a file_uuid to its upload metadata.
@@ -513,7 +515,7 @@ entries:
             format: application/schema+json
         output_schemas:
           - definition: |
-              { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" } } } } }
+              { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "user_id": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] } } } } }
             format: application/schema+json
 
   - name: input_metadata
@@ -531,7 +533,6 @@ entries:
       - json
       - contract
       - fs
-      - base64
       - hash
       - time
     imports:
