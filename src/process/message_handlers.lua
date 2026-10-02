@@ -74,8 +74,6 @@ end
 
 function message_handlers.context_transport_capabilities(capabilities_version)
     if capabilities_version ~= nil and capabilities_version ~= 1 then return nil, 'INVALID_CAPABILITIES_VERSION' end
-    local _, err = message_handlers._context_staging.cleanup()
-    if err then return nil, err end
     local result = { context_attachments_transport = { version = 1, staging = true, max_context_bytes = 32768 } }
     if capabilities_version == 1 then result.context_attachments_capabilities = context_attachments.capabilities() end
     return result

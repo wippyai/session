@@ -131,15 +131,10 @@ end
 
 -- Checks a staged context receipt inside the insert transaction. Returns the
 -- receipt JSON to store, or the prior message when this is an exact retry. The
--- caller rolls back in both the retry and the error case.
-local function stage_receipt(tx, session_id, msg_type, request_id, request_hash, context_receipt)
-    if not context_receipt then
-        if msg_type == 'user' then
-            local locked, lock_err = context_staging.lock(tx)
-            if not locked then return nil, nil, lock_err end
-        end
-        return nil
-    end
+-- caller rolls back in both the retry and the error case. Only receipt-bearing
+-- inserts take the global staging lock; plain messages never wait on staging.
+local function stage_receipt(tx, session_id, request_id, request_hash, context_receipt)
+    if not context_receipt then return nil end
     if type(context_receipt) ~= 'table' or type(context_receipt.actor_id) ~= 'string'
         or not context_staging.valid_reference(context_receipt.reference) then
         return nil, nil, 'INVALID_CONTEXT_REFERENCE'
@@ -230,7 +225,7 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, r
 
     local now = time.now():format(time.RFC3339NANO)
 
-    local receipt_json, prior, receipt_err = stage_receipt(tx, session_id, msg_type, request_id, request_hash, context_receipt)
+    local receipt_json, prior, receipt_err = stage_receipt(tx, session_id, request_id, request_hash, context_receipt)
     if prior or receipt_err then
         tx:rollback()
         db:release()
@@ -339,7 +334,7 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
     end
 
     local now = time.now():format(time.RFC3339NANO)
-    local receipt_json, prior, receipt_err = stage_receipt(tx, session_id, msg_type, request_id, request_hash, context_receipt)
+    local receipt_json, prior, receipt_err = stage_receipt(tx, session_id, request_id, request_hash, context_receipt)
     if prior then
         tx:rollback()
         db:release()
