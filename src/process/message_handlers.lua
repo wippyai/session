@@ -221,22 +221,15 @@ function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: 
         return { applied = 0, skipped = 0 }, nil
     end
 
-    local agent = state.active_agent or current_agent(ctx)
-    if not agent then
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-        state.active_revision = nil
-        state.active_variant = nil
-        return { applied = 0, skipped = 0 }, nil
-    end
+    local fallback_agent = state.active_agent == nil and current_agent(ctx) or nil
+    local fallback_ref = agent_ref_from(ctx, fallback_agent)
 
     local transition, err = lifecycle_controller.deactivate(state, {
-        fallback = state.active_agent == nil and {
-            id = state.active_agent_id,
-            model = state.active_model,
-            agent = agent,
-            variant = state.active_variant
+        fallback = fallback_agent and {
+            id = fallback_ref.id,
+            model = fallback_ref.model,
+            agent = fallback_agent,
+            variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
         } or nil,
         payload = function(_phase, _descriptor)
             return {
@@ -264,13 +257,8 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
         if not fallback_agent and state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model then
             fallback_agent = agent
         end
-        if not fallback_agent then
-            state.active_agent_id = nil
-            state.active_model = nil
-            state.active_revision = nil
-            state.active_variant = nil
-        end
     end
+    local fallback_ref = agent_ref_from(ctx, fallback_agent)
     local transition, err = lifecycle_controller.activate(state, {
         id = agent_ref.id,
         model = agent_ref.model,
@@ -278,10 +266,10 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
         variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
     }, {
         fallback = fallback_agent and {
-            id = state.active_agent_id,
-            model = state.active_model,
+            id = fallback_ref.id,
+            model = fallback_ref.model,
             agent = fallback_agent,
-            variant = state.active_variant
+            variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
         } or nil,
         payload = function(phase, _descriptor)
             if phase == lifecycle_runtime.PHASE.DEACTIVATE then

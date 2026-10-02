@@ -822,6 +822,43 @@ local function define_tests()
             test.eq(ctx.lifecycle_state.active_agent, first)
         end)
 
+        it("does not deactivate a new agent as the lost previous agent", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.active_agent = nil
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.not_nil(err)
+            test.eq(#transitions, 1, "wrong agent receives neither lifecycle phase")
+            test.eq(ctx.lifecycle_state.active_agent_id, first.id, "missing old state is not silently cleared")
+
+            local finish: any = (message_handlers :: any).deactivate_current_agent
+            local _, finish_err = finish(ctx, "session_finished")
+            test.not_nil(finish_err)
+            test.eq(#transitions, 1)
+            test.eq(ctx.lifecycle_state.active_agent_id, first.id)
+        end)
+
+        it("keeps active state when a missing previous object cannot be recovered", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx, transitions = lifecycle_context(first)
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.active_agent = nil
+            ctx.agent_ctx.get_current_agent = function() return nil end
+            ctx.agent_ctx.load_agent = function() return nil, "agent unavailable" end
+
+            local finish: any = (message_handlers :: any).deactivate_current_agent
+            local _, err = finish(ctx, "session_finished")
+            test.not_nil(err)
+            test.eq(ctx.lifecycle_state.active_agent_id, first.id)
+            test.eq(#transitions, 1)
+        end)
+
         it("switches lifecycle bindings when the trait overlay changes under the same agent", function()
             local first = lifecycle_agent("agent:one", "binding:first_trait")
             local second = lifecycle_agent("agent:one", "binding:second_trait")
