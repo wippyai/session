@@ -141,7 +141,7 @@ local function fixture(rows)
     return ctx, rows, events, applied
 end
 
-local function tool_boundary_fixture()
+local function tool_boundary_fixture(): (table, {table}, {string}, {string}, table, table)
     local ctx, rows, events, applied = fixture({
         { message_id = "start", type = consts.MSG_TYPE.USER, data = "original task", metadata = {} },
         { message_id = "assistant", type = consts.MSG_TYPE.ASSISTANT, data = "working", metadata = {} },
