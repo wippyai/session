@@ -830,7 +830,7 @@ function message_handlers.handle_message(ctx, op)
         })
         if not canonical then
             ctx.upstream:command_error(op.request_id, consts.ERROR_CODES.INVALID_JSON, tostring(canonical_err))
-            return { completed = true, rejected = true }, canonical_err
+            return { completed = true, rejected = true, error = consts.ERROR_CODES.INVALID_JSON }
         end
         local digest, digest_err = hash.sha256(canonical)
         if digest_err then return nil, digest_err end

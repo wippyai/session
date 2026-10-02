@@ -478,6 +478,38 @@ local function define_tests()
             test.is_nil(second.metadata.input, "the next message starts a new turn instead of steering")
         end)
 
+        it("answers each rejected or failed send exactly once", function()
+            local ctx, bus, saved, received, errors = fixture()
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE, { request_id = "invalid-context",
+                data = { text = "with context", context_attachments = "not-a-list" } }, {})
+            test.eq(#errors, 1)
+            test.eq(errors[1].id, "invalid-context")
+            test.eq(errors[1].code, consts.ERROR_CODES.INVALID_CONTEXT_ATTACHMENTS)
+
+            local deep = {} :: any
+            local cursor = deep
+            for _ = 1, 40 do
+                cursor.next = {}
+                cursor = cursor.next
+            end
+            local rejected, rejected_err = message_handlers.handle_message(ctx,
+                { request_id = "invalid-json", data = { text = deep } })
+            test.is_nil(rejected_err, "a reported rejection must not also fail the operation")
+            test.is_true(rejected.rejected)
+            test.eq(#errors, 2)
+            test.eq(errors[2].code, consts.ERROR_CODES.INVALID_JSON)
+
+            ctx.writer.admit_message = function() return nil, "disk unavailable" end
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { request_id = "storage-failure", data = { text = "not stored" } }, {})
+            test.eq(#errors, 3)
+            test.eq(errors[3].id, "storage-failure")
+            test.eq(errors[3].code, consts.ERROR_CODES.STORAGE_ERROR)
+            test.eq(#saved, 0)
+            test.eq(#received, 0)
+            test.eq(#bus.ops, 0)
+        end)
+
         it("uses a server message id before starting user work", function()
             local ctx, _, saved = fixture()
             local result, err = message_handlers.handle_message(ctx, {
