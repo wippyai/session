@@ -1067,8 +1067,7 @@ local function define_tests()
                 if contract_context then
                     test.eq(contract_context.upload_id, "upload-visual")
                 end
-                -- The default content provider binding, not a named uploads module.
-                test.is_nil(binding_id)
+                test.eq(binding_id, "userspace.uploads:content_provider")
                 test.eq(#requested_bytes, 1)
                 test.eq(requested_bytes[1], #data)
             end)

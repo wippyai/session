@@ -33,6 +33,10 @@ local prompt_builder = {
 
 local FILE_PROVIDER_CONTRACT = "wippy.session:file_provider"
 local CONTENT_PROVIDER_CONTRACT = "userspace.contract:content_provider"
+-- Visual references of kind "upload" are served by the uploads binding. It
+-- declares context_required (upload_id), so the contract has no default
+-- binding to fall back on; the uploads module opens it by name the same way.
+local UPLOAD_CONTENT_PROVIDER = "userspace.uploads:content_provider"
 local VISUAL_MAX_BYTES = 5 * 1024 * 1024
 
 local function file_not_expired(value)
@@ -148,8 +152,7 @@ local function authorized_file_info(file_uuid)
     if context_err or not scoped then
         return nil
     end
-    -- The default binding, so the session depends on no specific uploads module.
-    local instance, open_err = scoped:open()
+    local instance, open_err = scoped:open(UPLOAD_CONTENT_PROVIDER)
     if open_err or not instance then
         return nil
     end
