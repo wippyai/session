@@ -120,7 +120,7 @@ local function effective_context(context)
     context.agent_ctx = { get_current_agent = function()
         return { id = "agent-1", tools = {
             settings = attention_context_tool(), confirm = generic_ui_action_tool(),
-            inspect = { registry_id = "wippy.agent.tools:attention_inspect" },
+            inspect = { registry_id = "wippy.agent.tools:attention_get_tree" },
         } }
     end }
     return context
@@ -152,7 +152,7 @@ local function define_tests()
                 inspection_authorized = true, agent_actions_authorized = false,
                 broker_pid = "broker-1", delivery_handle = "delivery-1", session_id = "session-1", host_instance_id = "host-1",
             } }
-            local tool = { registry_id = "wippy.agent.tools:attention_inspect" }
+            local tool = { registry_id = "wippy.agent.tools:attention_get_tree" }
             local runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, tool, "read-1")
             test.is_nil(err)
             test.eq(runtime.attention_inspection_runtime.delivery_handle, "delivery-1")
@@ -163,6 +163,18 @@ local function define_tests()
             runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, tool, "read-2")
             test.is_nil(runtime)
             test.eq(err, "Attention tool is not enabled for the current effective agent")
+        end)
+        it("gives the legacy attention_inspect tool no read or UI action authority", function()
+            local legacy = { registry_id = "wippy.agent.tools:attention_inspect" }
+            local context = effective_context({})
+            context.agent_ctx.get_current_agent = function() return { id = "agent-1", tools = { legacy = legacy } } end
+            local operation = { agent = { id = "agent-1" }, ui_action_runtime = {
+                inspection_authorized = true, agent_actions_authorized = true,
+                broker_pid = "broker-1", delivery_handle = "delivery-1", session_id = "session-1", host_instance_id = "host-1",
+            } }
+            local runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, legacy, "legacy-1")
+            test.is_nil(runtime)
+            test.contains(tostring(err), "retired")
         end)
     end)
     describe("Attention context tool authorization", function()

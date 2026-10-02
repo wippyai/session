@@ -1351,8 +1351,11 @@ message_handlers._resolve_tool_runtime_context = function(context: AttentionTool
     if not allowed then
         return nil, "Attention tool is not enabled for the current effective agent"
     end
-    if tool_id == "wippy.agent.tools:attention_inspect"
-        or tool_id == "wippy.agent.tools:attention_find_semantic"
+    -- The legacy generic inspect tool must not fall through to UI action authority below.
+    if tool_id == "wippy.agent.tools:attention_inspect" then
+        return nil, "Attention inspect is retired; use the explicit Attention read tools"
+    end
+    if tool_id == "wippy.agent.tools:attention_find_semantic"
         or tool_id == "wippy.agent.tools:attention_find_css"
         or tool_id == "wippy.agent.tools:attention_get_node"
         or tool_id == "wippy.agent.tools:attention_get_tree"

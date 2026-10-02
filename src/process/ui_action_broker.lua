@@ -9,7 +9,6 @@ local MAX_REQUEST_CACHE = 1024
 local RESULT_TOPIC_PREFIX = "session_ui_action_result:"
 
 local TOOL_MODES = {
-    ["wippy.agent.tools:attention_inspect"] = "inspect",
     ["wippy.agent.tools:attention_find_semantic"] = "inspect",
     ["wippy.agent.tools:attention_find_css"] = "inspect",
     ["wippy.agent.tools:attention_get_node"] = "inspect",

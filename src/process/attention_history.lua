@@ -90,7 +90,7 @@ local function observation(message)
     local result = meta.result
     if type(result) ~= 'table' then return nil end
     if result.schema == 'wippy.attention.model.v1' and result.status == 'inspected' then return result end
-    if meta.registry_id == 'wippy.agent.tools:attention_inspect'
+    if meta.registry_id == LEGACY_INSPECT
         and result.schema == 'wippy.ui-action.v1' and type(result.inspection) == 'table' then
         local value = copy(result.inspection)
         value.host = result.host_instance_id

@@ -124,11 +124,19 @@ local function client_result(action, conn_pid, status)
     }
 end
 
+local READ_TOOLS = {
+    tree = "attention_get_tree", find = "attention_find_semantic", geometry = "attention_get_geometry",
+    cursor = "attention_get_cursor", focus = "attention_get_focus", selection = "attention_get_selection",
+    point = "attention_hit_test",
+}
+
 local function inspect_request(broker, runtime, call_id, args)
+    args = args or { operation = "tree" }
+    local tool = READ_TOOLS[args.operation] or "attention_get_tree"
     return broker:request("reader-" .. call_id, {
-        delivery_handle = runtime.delivery_handle, registry_id = "wippy.agent.tools:attention_inspect",
+        delivery_handle = runtime.delivery_handle, registry_id = "wippy.agent.tools:" .. tool,
         call_id = call_id, reply_topic = reply_topic(call_id), session_id = runtime.session_id,
-        host_instance_id = runtime.host_instance_id, args = args or { operation = "tree" },
+        host_instance_id = runtime.host_instance_id, args = args,
     })
 end
 
@@ -160,6 +168,18 @@ local function define_tests()
                 test.eq(broker.pending["s1\0"..action_id].mode,"inspect")
                 test.eq(json.encode(sends[1].payload.query.args), "{}")
             end
+        end)
+        it("does not route the legacy attention_inspect tool", function()
+            local broker, sends = harness()
+            local runtime = broker:bind_turn({user_id="user-1",session_id="s1",session_pid="session-pid-s1",
+                ingress_pid="user-hub-pid",conn_pid="conn-1",host_instance_id="host-1",agent_actions_enabled=true})
+            local accepted, err = broker:request("reader", {delivery_handle=runtime.delivery_handle,
+                registry_id="wippy.agent.tools:attention_inspect",call_id="legacy-1",reply_topic=reply_topic("legacy-1"),
+                session_id=runtime.session_id,host_instance_id=runtime.host_instance_id,args={operation="tree"}})
+            test.is_false(accepted)
+            test.eq(err, "unauthorized tool request")
+            test.eq(#sends, 0)
+            test.is_nil(next(broker.pending))
         end)
         it("serves independent reads without overlays on the authenticated submitting connection", function()
             local broker, sends = harness()
