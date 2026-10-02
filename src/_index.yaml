@@ -15,6 +15,10 @@ entries:
       description: Injects API router configuration into endpoints
       parent: app.deps:dep.wippy.session
     targets:
+      - entry: wippy.session.api:get_capabilities
+        path: .meta.router
+      - entry: wippy.session.api:get_capabilities.endpoint
+        path: .meta.router
       - entry: wippy.session.api:delete_session
         path: .meta.router
       - entry: wippy.session.api:context_staging

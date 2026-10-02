@@ -2,6 +2,42 @@ version: "1.0"
 namespace: wippy.session.api
 
 entries:
+  - name: get_capabilities
+    kind: function.lua
+    meta:
+      comment: Describe the protocol features this Session module supports
+      router: app:api
+    source: file://get_capabilities.lua
+    modules:
+      - http
+      - security
+    imports:
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
+    method: handler
+    pool:
+      size: 2
+
+  - name: get_capabilities.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Session capability descriptor
+      router: app:api
+    method: GET
+    func: get_capabilities
+    path: /sessions/capabilities
+
+  - name: get_capabilities_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://get_capabilities_test.lua
+    imports:
+      test: wippy.test:test
+      get_capabilities: wippy.session.api:get_capabilities
+    method: run
+
   - name: set_attention_context
     kind: function.lua
     meta:
