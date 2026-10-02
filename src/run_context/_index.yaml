@@ -20,6 +20,7 @@ entries:
       consts: wippy.session:consts
       session: wippy.session.persist:reader
       prompt_builder: wippy.session:prompt_builder
+      message_repo: wippy.session.persist:message_repo
 
   # wippy.session.run_context:binding
   - name: binding

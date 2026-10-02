@@ -117,6 +117,8 @@ entries:
         value: app:env_storage
       - name: default_host
         value: app:processes
+      - name: on_session_end_func_id
+        value: app:end_hook_capture
 
   - name: dep.wippy.bootloader
     kind: ns.dependency
@@ -197,6 +199,19 @@ entries:
     groups:
       - test_group
 
+  - name: end_hook_capture
+    kind: function.lua
+    meta:
+      comment: Records the plugin's session end payload for lifecycle tests
+    source: file://process/end_hook_capture.lua
+    modules:
+      - json
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      message_repo: wippy.session.persist:message_repo
+    method: run
+
   # Suites for src/*.lua
   - name: prompt_builder_test
     kind: function.lua
@@ -209,6 +224,7 @@ entries:
     modules:
       - json
     imports:
+      claude_mapper: wippy.llm.claude:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
@@ -266,7 +282,6 @@ entries:
       - json
       - security
       - sql
-      - time
       - uuid
     imports:
       consts: wippy.session:consts
@@ -275,4 +290,35 @@ entries:
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
+    method: run_tests
+
+  - name: steering_first_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Steering first fixture
+    model: gpt-4o
+    prompt: Test only.
+    traits: [wippy.session.traits:steering, wippy.session.traits:input_control]
+
+  - name: control_first_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Control first fixture
+    model: gpt-4o
+    prompt: Test only.
+    traits: [wippy.session.traits:input_control, wippy.session.traits:steering]
+
+  - name: steering_traits_test
+    kind: function.lua
+    meta:
+      name: Session trait compilation
+      type: test
+      suite: session
+    source: file://steering_traits_test.lua
+    imports:
+      agent_context: wippy.agent:context
+      input_policy: wippy.session.process:input_policy
+      test: wippy.test:test
     method: run_tests

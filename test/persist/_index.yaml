@@ -64,6 +64,7 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
+      writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
@@ -111,3 +112,33 @@ entries:
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run
+
+  - name: steering_persistence_test
+    kind: function.lua
+    meta:
+      name: Durable steering inputs
+      type: test
+      suite: session
+    source: file://steering_persistence_test.lua
+    modules: [uuid, security, contract, sql]
+    imports:
+      consts: wippy.session:consts
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run_tests
+
+  - name: writer_lock_test
+    kind: function.lua
+    meta:
+      name: Session writer metadata lock
+      type: test
+      suite: session
+      comment: Stop and pending input application must share one metadata lock
+    source: file://writer_lock_test.lua
+    imports:
+      writer: wippy.session.persist:writer
+      test: wippy.test:test
+    method: run_tests

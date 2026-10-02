@@ -9,6 +9,9 @@ local function mock_ctx(state_config)
         developer_messages = 0,
         switched_agent = nil :: string?,
         switched_model = nil :: string?,
+        resets = 0,
+        persisted_update = nil :: table?,
+        session_errors = 0,
     }
 
     local ctx = {
@@ -18,11 +21,13 @@ local function mock_ctx(state_config)
                 return { config = state_config or {} }
             end,
             reset = function()
+                captured.resets = captured.resets + 1
                 return true
             end,
         },
         writer = {
             update_meta = function(self, meta)
+                captured.persisted_update = meta
                 captured.persisted = meta.config
                 return true
             end,
@@ -39,6 +44,7 @@ local function mock_ctx(state_config)
             update_session = function(self, payload)
                 captured.upstream = payload
             end,
+            session_error = function() captured.session_errors = captured.session_errors + 1 end,
         },
         agent_ctx = {
             current_model = "model:new",
@@ -50,6 +56,10 @@ local function mock_ctx(state_config)
             switch_to_model = function(self, model)
                 captured.switched_model = model
                 return true
+            end,
+            get_current_agent = function()
+                return { id = captured.switched_agent, model = "model:new",
+                    agent_options = { session_input = { while_running = "steer" } } }
             end,
         },
     }
@@ -170,6 +180,82 @@ local function define_tests()
             test.eq((captured.persisted or {}).model, "model:new")
             test.eq((captured.upstream or {}).model, "model:new")
         end)
+
+        it("retains the authoritative session input policy across handoff", function()
+            local ctx, captured = mock_ctx({
+                agent_id = "agent:stale",
+                model = "model:stale",
+            })
+            ctx.config = {
+                agent_id = "agent:old",
+                model = "model:old",
+                input_policy = { while_running = "steer" },
+            }
+            ctx.status = "running"
+            ctx.interaction = { can_send = true, revision = 0 }
+            ctx.turn_state = { active = true, input_policy = { while_running = "steer" } }
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq((captured.persisted or {}).input_policy.while_running, "steer")
+            test.eq(ctx.config.input_policy.while_running, "steer")
+            test.eq(captured.resets, 1)
+            test.is_false((captured.persisted_update or {}).meta.interaction.can_send)
+            test.is_true((ctx.turn_state :: any).handoff)
+            test.is_nil((ctx.turn_state :: any).input_policy)
+        end)
+
+        it("marks the session failed when config persistence and runtime rollback both fail", function()
+            local ctx, captured = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+            ctx.config = { agent_id = "agent:old", model = "model:old" }
+            local switches = 0
+            ctx.agent_ctx.switch_to_agent = function(self, agent_id)
+                switches = switches + 1
+                captured.switched_agent = agent_id
+                if switches > 1 then return false, "rollback unavailable" end
+                return true
+            end
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(result)
+            test.contains(err, "runtime rollback failed")
+            test.eq((ctx :: any).status, "failed")
+            test.eq(captured.session_errors, 1)
+        end)
+
+        it("fails closed when a first agent cannot be rolled back after a write failure", function()
+            local ctx, captured = mock_ctx({})
+            ctx.config = {}
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(result)
+            test.contains(err, "no previous agent")
+            test.eq((ctx :: any).status, "failed")
+            test.eq(captured.session_errors, 1)
+        end)
+
+        it("restores the prior agent and leaves turn state unchanged after persistence failure", function()
+            local ctx, captured = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+            ctx.config = { agent_id = "agent:old", model = "model:old" }
+            ctx.turn_state = { active = true, input_policy = { while_running = "steer" } }
+            ctx.writer.update_meta = function() return nil, "disk failure" end
+
+            local result, err = session_handlers.agent_change(ctx, { agent_id = "agent:new" })
+
+            test.is_nil(result)
+            test.contains(err, "disk failure")
+            test.eq(captured.switched_agent, "agent:old")
+            test.eq(ctx.config.agent_id, "agent:old")
+            test.is_nil((ctx.turn_state :: any).handoff)
+            test.eq(ctx.turn_state.input_policy.while_running, "steer")
+            test.eq(captured.resets, 0)
+        end)
     end)
 
     describe("session checkpoint dispatch", function()
@@ -212,7 +298,8 @@ local function define_tests()
 
             local result, err = session_handlers.check_background_triggers(ctx, {
                 tokens = {
-                    prompt_tokens = 200
+                    prompt_tokens = 200,
+                    context_tokens = 200
                 },
                 message_id = "msg-1",
                 checkpoint_bindings = {
@@ -361,7 +448,7 @@ local function define_tests()
             }
 
             local result, err = session_handlers.check_background_triggers(ctx, {
-                tokens = { prompt_tokens = 200 },
+                tokens = { prompt_tokens = 200, context_tokens = 200 },
                 message_id = "msg-user",
                 checkpoint_anchor_id = "msg-assistant-7",
             })
@@ -374,12 +461,101 @@ local function define_tests()
 
             -- Callers that pass only message_id keep anchoring on it.
             local legacy, legacy_err = session_handlers.check_background_triggers(ctx, {
-                tokens = { prompt_tokens = 200 },
+                tokens = { prompt_tokens = 200, context_tokens = 200 },
                 message_id = "msg-user",
             })
             test.is_nil(legacy_err)
             test.eq(legacy.next_ops[1].checkpoint_id, "msg-user")
             test.eq(legacy.next_ops[1].message_id, "msg-user")
+        end)
+
+        it("triggers on the full context size, not the uncached prompt_tokens alone", function()
+            local ctx = {
+                config = {
+                    token_checkpoint_threshold = 100000,
+                    checkpoint_function_id = "fallback:checkpoint",
+                    title_function_id = nil,
+                },
+                reader = {
+                    state = function() return { title = "", meta = {} } end,
+                    messages = function() return { count = function() return 0 end } end,
+                    get_context = function() return nil end,
+                }
+            }
+
+            -- Claude-style report: caching means prompt_tokens is only the handful of
+            -- uncached tokens, while context_tokens carries the real, full prompt size.
+            local result, err = session_handlers.check_background_triggers(ctx, {
+                tokens = {
+                    prompt_tokens = 20,
+                    cache_read_tokens = 150000,
+                    cache_write_tokens = 20,
+                    context_tokens = 150040,
+                },
+                message_id = "msg-1",
+            })
+
+            test.is_nil(err)
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].type, "create_checkpoint")
+            test.eq(result.next_ops[1].trigger_tokens, 150040)
+        end)
+
+        it("uses normalized context size across cache reports and preserves the threshold boundary", function()
+            local reports = {
+                { tokens = { prompt_tokens = 150001, context_tokens = 150001 }, expected = 150001 },
+                { tokens = { prompt_tokens = 0, cache_write_tokens = 150001,
+                    context_tokens = 150001 }, expected = 150001 },
+                { tokens = { prompt_tokens = 0, cache_read_tokens = 150001,
+                    context_tokens = 150001 }, expected = 150001 },
+                -- The LLM adapter already separates cached input from an inclusive provider count.
+                { tokens = { prompt_tokens = 10000, cache_read_tokens = 80000,
+                    context_tokens = 90000 } },
+                { tokens = { prompt_tokens = 20, cache_read_tokens = 99980,
+                    context_tokens = 100000 } },
+                { tokens = { prompt_tokens = 20, context_tokens = 0 } },
+            }
+            for _, report in ipairs(reports) do
+                local ctx = mock_checkpoint_ctx({ token_checkpoint_threshold = 100000,
+                    checkpoint_function_id = "fallback:checkpoint" })
+                local result, err = session_handlers.check_background_triggers(ctx, {
+                    tokens = report.tokens, message_id = "msg-user",
+                })
+                test.is_nil(err)
+                test.eq(result.checkpoint_triggered == true, report.expected ~= nil)
+                if report.expected then
+                    test.eq(result.next_ops[1].trigger_tokens, report.expected)
+                else
+                    test.is_true(result.skipped)
+                end
+            end
+        end)
+
+        it("does not trigger when the full context size is below the threshold", function()
+            local ctx = {
+                config = {
+                    token_checkpoint_threshold = 100000,
+                    checkpoint_function_id = "fallback:checkpoint",
+                    title_function_id = nil,
+                },
+                reader = {
+                    state = function() return { title = "", meta = {} } end,
+                    messages = function() return { count = function() return 0 end } end,
+                    get_context = function() return nil end,
+                }
+            }
+
+            local result, err = session_handlers.check_background_triggers(ctx, {
+                tokens = {
+                    prompt_tokens = 20,
+                    cache_read_tokens = 500,
+                    context_tokens = 520,
+                },
+                message_id = "msg-1",
+            })
+
+            test.is_nil(err)
+            test.is_true(result.skipped)
         end)
 
         it("refreshes the reader once the new anchor is recorded, so the next prompt starts from it", function()

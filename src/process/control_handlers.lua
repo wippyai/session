@@ -1,6 +1,7 @@
 local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
+local input_policy = require("input_policy")
 
 type ArtifactData = {
     id: string?,
@@ -19,6 +20,26 @@ type ArtifactData = {
 }
 
 local control_handlers = {}
+
+local function clone(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, item in pairs(value) do result[key] = clone(item) end
+    return result
+end
+
+local function fail_runtime(ctx, message)
+    ctx.status = consts.STATUS.FAILED
+    if ctx.turn_state then
+        ctx.turn_state.active = false
+        ctx.turn_state.failed = true
+        ctx.turn_state.input_policy = nil
+    end
+    if ctx.upstream and type(ctx.upstream.session_error) == "function" then
+        pcall(function() ctx.upstream:session_error("SESSION_FAILED", message) end)
+    end
+    return nil, message
+end
 
 function control_handlers.handle_context_command(ctx, op)
     if not op.action then
@@ -110,6 +131,7 @@ function control_handlers.control_artifacts(ctx, op)
 
     for _, artifact_data in ipairs(op.artifacts) do
         if artifact_data.title and (artifact_data.content or artifact_data.page_id) then
+            local stored = false
             local artifact_id, err = uuid.v7()
             if err then
                 return nil, "Failed to generate artifact ID: " .. err
@@ -144,6 +166,11 @@ function control_handlers.control_artifacts(ctx, op)
                         display_type = artifact_data.display_type or consts.ARTIFACT_DISPLAY.STANDALONE
                     }
                 )
+
+                if not success then
+                    return nil, "Failed to create artifact: " .. tostring(create_err)
+                end
+                stored = true
 
                 if success then
                     table.insert(created_artifacts, {
@@ -187,6 +214,11 @@ function control_handlers.control_artifacts(ctx, op)
                     }
                 )
 
+                if not success then
+                    return nil, "Failed to create artifact: " .. tostring(create_err)
+                end
+                stored = true
+
                 if success then
                     table.insert(created_artifacts, {
                         artifact_id = artifact_id,
@@ -215,7 +247,7 @@ function control_handlers.control_artifacts(ctx, op)
                 end
             end
 
-            if #created_artifacts > 0 then
+            if stored then
                 -- ⚠️ DO NOT REVERT unless you know exactly what you are doing. ⚠️
                 -- Chat front-ends render a standalone artifact card from a message
                 -- with type='artifact' + metadata.artifact_id. Without the line
@@ -262,6 +294,9 @@ function control_handlers.control_artifacts(ctx, op)
             }
 
             local success, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
+            if not success then
+                return nil, "Failed to update artifact: " .. tostring(update_err)
+            end
         end
     end
 
@@ -283,8 +318,6 @@ function control_handlers.control_context(ctx, op)
     if not op.context_operations then
         return nil, "No context operations provided"
     end
-
-    local success = true
 
     if op.context_operations.public_meta then
         local session_data = ctx.reader:state()
@@ -323,7 +356,7 @@ function control_handlers.control_context(ctx, op)
         if changed_public_meta then
             local update_success, update_err = ctx.writer:update_meta({ public_meta = current_meta })
             if not update_success then
-                success = false
+                return nil, "Failed to update public meta: " .. tostring(update_err)
             else
                 local result = {}
                 for id, data in pairs(current_meta) do
@@ -344,7 +377,7 @@ function control_handlers.control_context(ctx, op)
             for key, value in pairs(op.context_operations.session.set) do
                 local set_success, set_err = ctx.writer:set_context(key, value)
                 if not set_success then
-                    success = false
+                    return nil, "Failed to set session context: " .. tostring(set_err)
                 end
             end
         end
@@ -353,14 +386,10 @@ function control_handlers.control_context(ctx, op)
             for _, key in ipairs(op.context_operations.session.delete) do
                 local delete_success, delete_err = ctx.writer:delete_context(key)
                 if not delete_success then
-                    success = false
+                    return nil, "Failed to delete session context: " .. tostring(delete_err)
                 end
             end
         end
-    end
-
-    if not success then
-        return nil, "Failed to process some context operations"
     end
 
     ctx.reader:reset()
@@ -373,8 +402,6 @@ function control_handlers.control_memory(ctx, op)
         return nil, "No memory operations provided"
     end
 
-    local success = true
-
     if op.memory_operations.clear then
         local clear_keys = {}
         if type(op.memory_operations.clear) == "string" then
@@ -385,14 +412,14 @@ function control_handlers.control_memory(ctx, op)
 
         local contexts, err = ctx.reader:contexts():all()
         if err then
-            success = false
+            return nil, err
         else
             for _, context in ipairs(contexts) do
                 for _, clear_key in ipairs(clear_keys) do
                     if context.type == clear_key then
                         local delete_success, delete_err = ctx.writer:delete_session_context(context.id)
                         if not delete_success then
-                            success = false
+                            return nil, "Failed to clear memory: " .. tostring(delete_err)
                         end
                     end
                 end
@@ -405,7 +432,7 @@ function control_handlers.control_memory(ctx, op)
             if mem_item.type and mem_item.text then
                 local memory_id, err = ctx.writer:add_session_context(mem_item.type, mem_item.text)
                 if not memory_id then
-                    success = false
+                    return nil, "Failed to add memory: " .. tostring(err)
                 end
             end
         end
@@ -415,13 +442,9 @@ function control_handlers.control_memory(ctx, op)
         for _, mem_id in ipairs(op.memory_operations.delete) do
             local deleted, err = ctx.writer:delete_session_context(mem_id)
             if not deleted then
-                success = false
+                return nil, "Failed to delete memory: " .. tostring(err)
             end
         end
-    end
-
-    if not success then
-        return nil, "Failed to process some memory operations"
     end
 
     return { completed = true }
@@ -433,12 +456,58 @@ function control_handlers.control_config(ctx, op)
     end
 
     local session_data = ctx.reader:state()
-    local current_config = session_data.config or {}
+    local current_config = clone(ctx.config or session_data.config or {})
     local config_changed = false
     local agent_changed = false
     local model_changed = false
     local previous_agent = current_config.agent_id
     local previous_model = current_config.model
+    local previous_traits = current_config.active_traits
+    local previous_tools = current_config.active_tools
+    local runtime_changed = false
+    local traits_applied = false
+    local tools_applied = false
+    local function restore_runtime()
+        if not runtime_changed then return true end
+        if agent_changed then
+            if not previous_agent or previous_agent == "" then
+                return nil, "there is no previous agent to restore"
+            end
+            local restored, restore_err = ctx.agent_ctx:switch_to_agent(previous_agent, { model = previous_model })
+            if not restored then return nil, restore_err or "agent rollback failed" end
+        elseif model_changed and previous_model and ctx.agent_ctx.switch_to_model then
+            local restored, restore_err = ctx.agent_ctx:switch_to_model(previous_model)
+            if not restored then return nil, restore_err or "model rollback failed" end
+        end
+        if (agent_changed or traits_applied) and ctx.agent_ctx.set_active_traits then
+            -- nil means the active agent's own trait set. Passing {} here would
+            -- erase those inherited defaults after a failed durable write.
+            local restored, restore_err = ctx.agent_ctx:set_active_traits(previous_traits)
+            if restored == false then return nil, restore_err or "trait rollback failed" end
+        end
+        if (agent_changed or tools_applied) and ctx.agent_ctx.set_active_tools then
+            -- The agent context uses nil for the same inherited-tool fallback.
+            local restored, restore_err = ctx.agent_ctx:set_active_tools(previous_tools)
+            if restored == false then return nil, restore_err or "tool rollback failed" end
+        end
+        return true
+    end
+
+    local policy_request = op.config_changes.input_policy
+    if policy_request ~= nil then
+        local agent = ctx.current_agent
+        if not agent and ctx.agent_ctx and type(ctx.agent_ctx.get_current_agent) == "function" then
+            agent = ctx.agent_ctx:get_current_agent()
+        end
+        local resolved, policy_err
+        if type(ctx.request_input_policy) == "function" then
+            resolved, policy_err = ctx.request_input_policy(policy_request, agent)
+        else
+            resolved, policy_err = input_policy.apply_request(ctx, policy_request, agent)
+        end
+        if not resolved then return nil, policy_err end
+        current_config = clone(ctx.config or {})
+    end
 
     if op.config_changes.agent then
         current_config.agent_id = op.config_changes.agent
@@ -460,8 +529,6 @@ function control_handlers.control_config(ctx, op)
     -- Perform agent/model switches before applying overlays: switch_to_agent resets the
     -- in-memory overlays, so a declarative overlay must land on the new agent afterwards.
     if agent_changed or model_changed then
-        ctx.reader:reset()
-
         if agent_changed and not model_changed then
             -- Agent changed but no explicit model - use new agent's default model
             local switch_success, switch_err = ctx.agent_ctx:switch_to_agent(current_config.agent_id)
@@ -470,12 +537,7 @@ function control_handlers.control_config(ctx, op)
                 -- Get the new agent's default model and update config
                 local new_model = ctx.agent_ctx.current_model
                 current_config.model = new_model
-                ctx.config.model = new_model
-
-                ctx.upstream:update_session({
-                    agent = current_config.agent_id,
-                    model = new_model
-                })
+                runtime_changed = true
             else
                 return nil, "Failed to switch to agent: " .. (switch_err or "unknown error")
             end
@@ -489,10 +551,7 @@ function control_handlers.control_config(ctx, op)
                 return nil, "Failed to switch to agent with model: " .. (switch_err or "unknown error")
             end
 
-            ctx.upstream:update_session({
-                agent = current_config.agent_id,
-                model = current_config.model
-            })
+            runtime_changed = true
         elseif model_changed then
             -- Only model changed
             local switch_success, switch_err = ctx.agent_ctx:switch_to_model(current_config.model)
@@ -501,32 +560,95 @@ function control_handlers.control_config(ctx, op)
                 return nil, "Failed to switch model: " .. (switch_err or "unknown error")
             end
 
-            ctx.upstream:update_session({ model = current_config.model })
+            runtime_changed = true
         end
     end
 
-    -- Declarative active trait/tool overlays, applied after any agent switch so they land
-    -- on the new agent, and persisted to session config so they survive a restart. They
-    -- replace the agent's own set; an empty list clears, nil leaves unchanged.
     if op.config_changes.traits ~= nil then
-        ctx.agent_ctx:set_active_traits(op.config_changes.traits)
-        current_config.active_traits = op.config_changes.traits
+        current_config.active_traits = clone(op.config_changes.traits)
         config_changed = true
     end
     if op.config_changes.tools ~= nil then
-        ctx.agent_ctx:set_active_tools(op.config_changes.tools)
-        current_config.active_tools = op.config_changes.tools
+        current_config.active_tools = clone(op.config_changes.tools)
         config_changed = true
     end
 
+    -- Resolve the public interaction from the same live agent configuration
+    -- that will be committed. These setters are reversible validation work.
+    if op.config_changes.traits ~= nil then
+        traits_applied = true
+        runtime_changed = true
+        local applied, apply_err = ctx.agent_ctx:set_active_traits(op.config_changes.traits)
+        if applied == false then
+            local restored, restore_err = restore_runtime()
+            if not restored then
+                return fail_runtime(ctx, "Failed to apply session traits: " .. tostring(apply_err)
+                    .. "; runtime rollback failed: " .. tostring(restore_err))
+            end
+            return nil, "Failed to apply session traits: " .. tostring(apply_err or "unknown error")
+        end
+    end
+    if op.config_changes.tools ~= nil then
+        tools_applied = true
+        runtime_changed = true
+        local applied, apply_err = ctx.agent_ctx:set_active_tools(op.config_changes.tools)
+        if applied == false then
+            local restored, restore_err = restore_runtime()
+            if not restored then
+                return fail_runtime(ctx, "Failed to apply session tools: " .. tostring(apply_err)
+                    .. "; runtime rollback failed: " .. tostring(restore_err))
+            end
+            return nil, "Failed to apply session tools: " .. tostring(apply_err or "unknown error")
+        end
+    end
+
     if config_changed then
-        local success, err = ctx.writer:update_meta({ config = current_config })
+        local next_agent = ctx.current_agent
+        if ctx.agent_ctx and type(ctx.agent_ctx.get_current_agent) == "function" then
+            next_agent = ctx.agent_ctx:get_current_agent() or next_agent
+        end
+        local candidate_state = clone(ctx.turn_state)
+        if agent_changed and candidate_state then
+            candidate_state.input_policy = nil
+            if candidate_state.active then
+                candidate_state.handoff = true
+                candidate_state.failed = true
+            end
+        end
+        local candidate = {
+            config = current_config,
+            turn_state = candidate_state,
+            status = ctx.status,
+            stop_requested = ctx.stop_requested,
+            current_agent = next_agent,
+            input_policy_revision = ctx.input_policy_revision,
+            interaction = ctx.interaction,
+        }
+        local interaction = input_policy.snapshot(ctx, candidate, next_agent)
+        local success, err = ctx.writer:update_meta({
+            config = current_config,
+            status = ctx.status,
+            meta = { interaction = interaction },
+        })
         if not success then
-            return nil, "Failed to update session config: " .. err
+            local restored, restore_err = restore_runtime()
+            if not restored then
+                return fail_runtime(ctx, "Failed to update session config: " .. tostring(err)
+                    .. "; runtime rollback failed: " .. tostring(restore_err))
+            end
+            return nil, "Failed to update session config: " .. tostring(err)
         end
 
-        for k, v in pairs(current_config) do
-            ctx.config[k] = v
+        ctx.config = current_config
+        ctx.turn_state = candidate_state
+        ctx.current_agent = next_agent
+        ctx.reader:reset()
+        input_policy.accept_committed(ctx, interaction)
+        if agent_changed or model_changed then
+            ctx.upstream:update_session({
+                agent = agent_changed and current_config.agent_id or nil,
+                model = current_config.model
+            })
         end
 
         -- Add system message if agent or model changed

@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.6.5](https://github.com/wippyai/session/compare/v0.6.4...v0.6.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* **process:** correlate tool events with persisted message IDs ([#52](https://github.com/wippyai/session/issues/52)) ([34652b8](https://github.com/wippyai/session/commit/34652b814e4566d987cfbb6685e4bf0462350518))
+* **process:** trigger checkpoints on the full context size ([#47](https://github.com/wippyai/session/issues/47)) ([83566b5](https://github.com/wippyai/session/commit/83566b55d66b71dc7be312d67fabccb8abb79367))
+
+## [0.6.4](https://github.com/wippyai/session/compare/v0.6.3...v0.6.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* apply the initial agent and model before the first turn ([#50](https://github.com/wippyai/session/issues/50)) ([da1eaca](https://github.com/wippyai/session/commit/da1eacad68c22f3c43978df616c1a4aecc45f347))
+
+## [0.6.3](https://github.com/wippyai/session/compare/v0.6.2...v0.6.3) (2026-09-29)
+
+
+### Features
+
+* **EE2-2448:** add session-owned steering policy ([#48](https://github.com/wippyai/session/issues/48)) ([bd7fffd](https://github.com/wippyai/session/commit/bd7fffd45705f1184a2434fa863e89f408b055b7))
+
+## [0.6.2](https://github.com/wippyai/session/compare/v0.6.1...v0.6.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* announce SESSION_OPENED before the first upstream event ([#44](https://github.com/wippyai/session/issues/44)) ([15e9da3](https://github.com/wippyai/session/commit/15e9da3264e7ebe15c1fe4ae00e2367bdc33f403))
+* **process:** send message_received after the message is persisted ([#45](https://github.com/wippyai/session/issues/45)) ([4fded17](https://github.com/wippyai/session/commit/4fded17e60373a13a5d9fefc6f05cca7133f4f9c))
+
+## [0.6.1](https://github.com/wippyai/session/compare/v0.6.0...v0.6.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **process:** keep user input out of an in-flight agent turn and make stop escalate ([#38](https://github.com/wippyai/session/issues/38)) ([e45d2cd](https://github.com/wippyai/session/commit/e45d2cd67cce1fba9fb7f8cd845cd386e6891e35))
+
+## [0.6.0](https://github.com/wippyai/session/compare/v0.5.0...v0.6.0) (2026-09-26)
+
+
+### Features
+
+* **prompt:** cache the conversation history with a rolling history_tail marker ([#39](https://github.com/wippyai/session/issues/39)) ([7ef1613](https://github.com/wippyai/session/commit/7ef1613b4bb60f362daa61cc11d23ce7a6b9a568))
+
 ## [0.5.0](https://github.com/wippyai/session/compare/v0.4.1...v0.5.0) (2026-09-23)
 
 

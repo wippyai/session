@@ -1,11 +1,15 @@
 local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
+local input_metadata = require("input_metadata")
+local input_policy = require("input_policy")
 local prompt_builder = require("prompt_builder")
 local tool_caller = require("tool_caller")
 local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
 local lifecycle_controller = require("lifecycle_controller")
+local tools = require("tools")
+local control_handlers = require("control_handlers")
 
 type SessionContext = {
     session_id: string,
@@ -18,6 +22,14 @@ type SessionContext = {
     queue_empty_callback: any?,
     lifecycle_state: table?,
     turn_state: table?,
+    stop_requested: boolean?,
+    status: string?,
+    current_agent: any?,
+    request_input_policy: any?,
+    turn_generation: number?,
+    interaction: any?,
+    stop_commit_channel: any?,
+    input_apply_batch: any?,
 }
 
 type ToolWrapperHostRef = {
@@ -36,8 +48,10 @@ type ToolWrapperExecutionContext = {
     run_context: table?,
 }
 
-local message_handlers = {}
-message_handlers._lifecycle_runtime = nil
+local message_handlers = {
+    _prompt_builder = nil :: any,
+    _lifecycle_runtime = nil :: any,
+}
 
 local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
 local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
@@ -112,6 +126,21 @@ local function agent_ref_from(ctx: SessionContext, agent: any?): ToolWrapperAgen
         id = string_or_nil(agent and agent.id or (ctx.config and ctx.config.agent_id)),
         model = string_or_nil(agent and agent.model or (ctx.config and ctx.config.model))
     }
+end
+
+local function persist_token_usage(ctx: any, tokens: any)
+    if type(tokens) ~= "table" then return true end
+    local session_data = ctx.reader:state()
+    local current_meta = session_data.meta or {}
+    if type(current_meta.tokens) ~= "table" then current_meta.tokens = {} end
+    for token_key, token_value in pairs(tokens) do
+        if type(token_value) == "number" then
+            current_meta.tokens[token_key] = (current_meta.tokens[token_key] or 0) + token_value
+        end
+    end
+    local _, err = ctx.writer:update_meta({ meta = { tokens = current_meta.tokens } })
+    if err then return nil, err end
+    return true
 end
 
 local function run_context_ref(ctx: SessionContext, agent_ref: ToolWrapperAgentRef, host: table): table
@@ -346,8 +375,142 @@ local function turn_state(ctx: SessionContext): table
 end
 
 local function begin_turn(ctx: SessionContext, message_id: any): table
-    ctx.turn_state = { message_id = message_id, steps = 0, repeated_calls = 0 }
-    return ctx.turn_state :: table
+    local state = turn_state(ctx)
+    state.message_id = message_id
+    state.steps = 0
+    state.repeated_calls = 0
+    state.last_round = nil
+    state.last_round_tools = nil
+    state.active = true
+    return state
+end
+
+local function is_turn_blocked(ctx: any): boolean
+    local state = ctx.turn_state
+    return ctx.stop_requested == true
+        or (ctx.coordinator and ctx.coordinator:stop_requested())
+        or (state and (state.failed or state.handoff)) or false
+end
+local function all_messages(ctx)
+    if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
+    return ctx.reader:messages():all()
+end
+
+local function prepare_pending_inputs(ctx, new_user_id)
+    local messages, read_err = all_messages(ctx)
+    if not messages then return nil, read_err or "Failed to read pending inputs" end
+    local pending, anchor_id = {}, nil
+    for _, message in ipairs(messages) do
+        local metadata = type(message.metadata) == "table" and message.metadata or nil
+        local input = metadata and metadata.input
+        if input ~= nil then
+            if not input_metadata.validate(message) then
+                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
+            end
+            if input.state == "pending" then pending[#pending + 1] = message end
+        elseif message.message_id ~= new_user_id then
+            anchor_id = message.message_id
+        end
+    end
+    table.sort(pending, function(a, b)
+        if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
+        return tostring(a.message_id) < tostring(b.message_id)
+    end)
+    local updates = {}
+    for _, message in ipairs(pending) do
+        updates[#updates + 1] = {
+            message_id = message.message_id,
+            metadata = { input = { state = "applied", after_message_id = anchor_id } },
+        }
+    end
+    return updates
+end
+
+local function persist_pending_inputs(ctx, updates, expected_revision)
+    if #updates == 0 then return 0 end
+    if type(ctx.writer.apply_inputs) ~= "function" then
+        return nil, "Session writer does not support atomic input application"
+    end
+    local ok, err = ctx.writer:apply_inputs(updates, expected_revision)
+    if not ok then return nil, err end
+    return #updates
+end
+
+local function publish_applied_inputs(ctx, updates)
+    for _, update in ipairs(updates) do
+        ctx.upstream:send_message_update(update.message_id, consts.UPSTREAM_TYPES.UPDATE, {
+            message_id = update.message_id, input = update.metadata.input,
+        })
+    end
+    return #updates
+end
+
+local function commit_pending_inputs(ctx, updates)
+    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
+    local count, err = persist_pending_inputs(ctx, updates, expected_revision)
+    if not count then return nil, err end
+    publish_applied_inputs(ctx, updates)
+    return count
+end
+
+function message_handlers.apply_pending_inputs(ctx, new_user_id)
+    local updates, err = prepare_pending_inputs(ctx, new_user_id)
+    if not updates then return nil, err end
+    return commit_pending_inputs(ctx, updates)
+end
+
+-- Called only by the session inbox after its command bus becomes empty.
+function message_handlers.finish_turn(ctx)
+    local state = ctx.turn_state
+    if state and state.active and not is_turn_blocked(ctx) then
+        local pending, err = ctx.reader:list_pending_inputs()
+        if not pending then return nil, err or "Failed to read pending input" end
+        if #pending > 0 then
+            return { completed = false, next_ops = { {
+                type = consts.OP_TYPE.AGENT_STEP, message_id = state.message_id,
+                request_id = state.request_id, from_user = false,
+            } } }
+        end
+    end
+    local candidate_state = nil
+    if state then
+        candidate_state = {}
+        for key, value in pairs(state) do candidate_state[key] = value end
+        candidate_state.active = false
+        candidate_state.input_policy = nil
+        -- A failed runtime must remain failed at the queue-empty boundary. The
+        -- previous code cleared this marker and persisted idle, allowing a
+        -- failed control operation to look recoverable without an explicit
+        -- recovery path.
+        local failed = ctx.status == consts.STATUS.FAILED
+        candidate_state.failed = failed and true or nil
+        candidate_state.handoff = nil
+        candidate_state.stopped = nil
+    end
+    local target_status
+    if ctx.status == consts.STATUS.FAILED then
+        target_status = consts.STATUS.FAILED
+    else
+        target_status = ctx.status ~= "finishing" and consts.STATUS.IDLE or ctx.status
+    end
+    local candidate = {
+        config = ctx.config,
+        turn_state = candidate_state,
+        status = target_status,
+        stop_requested = ctx.stop_requested,
+        current_agent = current_agent(ctx),
+        input_policy_revision = ctx.input_policy_revision,
+        interaction = ctx.interaction,
+    }
+    local interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+    local ok, err = ctx.writer:update_meta({ status = target_status, meta = { interaction = interaction } })
+    if not ok then
+        return nil, err or "Failed to persist turn completion"
+    end
+    ctx.turn_state = candidate_state
+    ctx.status = target_status
+    input_policy.accept_committed(ctx, interaction)
+    return { completed = true, next_ops = {} }
 end
 
 -- Deterministic rendering of a tool call's arguments, so two rounds compare equal regardless
@@ -408,6 +571,8 @@ function message_handlers.note_tool_round(ctx: SessionContext, results: any): nu
 end
 
 local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table, reason: string, detail: string): table
+    state.failed = true
+    input_policy.clear_turn(ctx)
     local notice = "Turn stopped: " .. detail
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, notice, {
         system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
@@ -446,31 +611,93 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
-function message_handlers.handle_message(ctx, op)
-    local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, op.data.text or "", {
-        file_uuids = op.data.file_uuids
+-- Persists one input message and announces a user message as received once it is stored.
+function message_handlers.write_input(ctx, item)
+    local data = type(item.data) == "table" and item.data or {}
+    local msg_type = data.type
+    if msg_type ~= consts.MSG_TYPE.DEVELOPER and msg_type ~= consts.MSG_TYPE.SYSTEM then
+        msg_type = consts.MSG_TYPE.USER
+    end
+    local message_id, err = ctx.writer:add_message(msg_type, data.text or "", {
+        message_id = item.message_id, file_uuids = data.file_uuids
     })
-    if err then
-        return nil, err
+    if err then return nil, err end
+    if msg_type == consts.MSG_TYPE.USER and ctx.upstream then
+        ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
+    end
+    return message_id, msg_type
+end
+
+function message_handlers.handle_message(ctx, op)
+    local data = type(op.data) == "table" and op.data or {}
+    if data.type == consts.MSG_TYPE.DEVELOPER or data.type == consts.MSG_TYPE.SYSTEM then
+        local message_id, write_err = message_handlers.write_input(ctx, op)
+        if not message_id then return nil, write_err end
+        return { message_id = message_id, completed = true }
+    end
+    local active = ctx.turn_state and ctx.turn_state.active == true or false
+    local interaction = input_policy.resolve(ctx, current_agent(ctx))
+    if not interaction.can_send then
+        if op.request_id then ctx.upstream:command_error(op.request_id, "INPUT_BLOCKED",
+            "Session is not accepting messages right now") end
+        return { completed = true }
     end
 
-    ctx.upstream:message_received(message_id, op.data.text or "", op.data.file_uuids)
-
-    return {
-        message_id = message_id,
-        next_ops = {
-            {
-                type = consts.OP_TYPE.AGENT_STEP,
-                message_id = message_id,
-                request_id = op.request_id,
-                from_user = true
-            }
+    local input = active and { state = "pending" } or nil
+    local metadata = { file_uuids = data.file_uuids }
+    if input then metadata.input = input end
+    local message_id, err
+    local committed_interaction
+    if active then
+        message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, data.text or "", metadata)
+    else
+        if type(ctx.writer.admit_message) ~= "function" then
+            return nil, "Session writer does not support atomic admission"
+        end
+        local next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        local candidate = {
+            config = ctx.config,
+            turn_state = next_turn,
+            status = consts.STATUS.RUNNING,
+            stop_requested = false,
+            current_agent = current_agent(ctx),
+            input_policy_revision = ctx.input_policy_revision,
+            interaction = ctx.interaction,
         }
+        local next_interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+        message_id, err = ctx.writer:admit_message(consts.MSG_TYPE.USER, data.text or "", metadata, {
+            status = consts.STATUS.RUNNING,
+            meta = { interaction = next_interaction },
+        })
+        if message_id then
+            next_turn.message_id = message_id
+            ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
+            ctx.turn_state = next_turn
+            ctx.stop_requested = false
+            ctx.status = consts.STATUS.RUNNING
+            committed_interaction = next_interaction
+        end
+    end
+    if not message_id then
+        return nil, err or "Failed to persist input"
+    end
+
+    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id)
+    if committed_interaction then input_policy.accept_committed(ctx, committed_interaction) end
+    return {
+        message_id = message_id, completed = active,
+        next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
+            request_id = op.request_id, from_user = true } },
     }
 end
 
 function message_handlers.agent_step(ctx, op)
-    local builder, err = prompt_builder.from_session(ctx.reader)
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
+    if not input_updates then return nil, input_err end
+    local builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, {
+        input_overrides = input_updates,
+    })
     if not builder then
         return nil, "Failed to build prompt: " .. err
     end
@@ -488,7 +715,12 @@ function message_handlers.agent_step(ctx, op)
 
     -- Loop guards (see above). Every step of the turn is counted, including the one that
     -- answers the user's message, which also starts a fresh count.
-    local state = op.from_user and begin_turn(ctx, op.message_id) or turn_state(ctx)
+    ctx.current_agent = agent
+    local state = ctx.turn_state
+    if not state or state.active == false or (op.from_user and state.message_id ~= op.message_id) then
+        state = begin_turn(ctx, op.message_id)
+    end
+    if op.from_user then state.request_id = op.request_id end
     state.steps = state.steps + 1
     local max_steps, max_repeats = loop_limits(ctx, agent)
     if max_steps > 0 and state.steps > max_steps then
@@ -508,7 +740,7 @@ function message_handlers.agent_step(ctx, op)
 
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
-        session_context = {}
+        return nil, "Failed to load session context: " .. tostring(ctx_err)
     end
     session_context = with_agent_run_context(ctx, session_context, agent_ref_from(ctx, agent))
 
@@ -537,6 +769,22 @@ function message_handlers.agent_step(ctx, op)
     end
     append_lifecycle_messages(builder, before_result)
 
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    ctx.input_apply_batch = input_updates
+    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
+    local _, input_apply_err = persist_pending_inputs(ctx, input_updates, expected_revision)
+    local stop_gate = ctx.stop_commit_channel
+    if stop_gate then
+        stop_gate:receive()
+        if ctx.stop_commit_channel == stop_gate then ctx.stop_commit_channel = nil end
+    end
+    ctx.input_apply_batch = nil
+    if input_apply_err then
+        if ctx.stop_requested then return { completed = true, next_ops = {} } end
+        return nil, input_apply_err
+    end
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    publish_applied_inputs(ctx, input_updates)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
@@ -569,24 +817,9 @@ function message_handlers.agent_step(ctx, op)
         return nil, after_err
     end
 
-    if result.tokens and type(result.tokens) == "table" then
-        local session_data = ctx.reader:state()
-        local current_meta = session_data.meta or {}
-
-        if not current_meta.tokens or type(current_meta.tokens) ~= "table" then
-            current_meta.tokens = {}
-        end
-
-        for token_key, token_value in pairs(result.tokens) do
-            if type(token_value) == "number" then
-                current_meta.tokens[token_key] = (current_meta.tokens[token_key] or 0) + token_value
-            end
-        end
-
-        ctx.writer:update_meta({ meta = current_meta })
-    end
-
     if result.truncated then
+        local _, token_err = persist_token_usage(ctx, result.tokens)
+        if token_err then return nil, token_err end
         if result.result and result.result ~= "" then
             local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
@@ -606,6 +839,9 @@ function message_handlers.agent_step(ctx, op)
         end
 
         ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, (output :: any).TRUNCATION_MSG, {})
+        if is_turn_blocked(ctx) then
+            return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
+        end
 
         return {
             message_id = op.message_id,
@@ -637,6 +873,61 @@ function message_handlers.agent_step(ctx, op)
         end
     end
 
+    local prepared_caller = nil
+    local validated_tools = nil
+    local validate_err = nil
+    if #unified_tool_calls > 0 then
+        prepared_caller = tool_caller.new()
+        local agent_ref = agent_ref_from(ctx, agent)
+        local host: ToolWrapperHostRef = {
+            kind = "session",
+            session_id = ctx.session_id
+        }
+        local wrapper_context: ToolWrapperExecutionContext = {
+            host = host,
+            agent = agent_ref,
+            run_context = {
+                contract = RUN_CONTEXT_CONTRACT,
+                binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
+                host = host,
+                agent = agent_ref
+            }
+        }
+        prepared_caller:set_tool_wrappers(agent.tool_wrappers or {})
+        prepared_caller:set_wrapper_context(wrapper_context)
+        validated_tools, validate_err = prepared_caller:validate(unified_tool_calls)
+        if validate_err then
+            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, validate_err)
+            return nil, validate_err
+        end
+        unified_tool_calls = prepared_caller.last_tool_calls or unified_tool_calls
+    end
+
+    local seen_call_ids = {}
+    for _, call in ipairs(unified_tool_calls) do
+        if type(call.id) ~= "string" or not string.find(call.id, "%S") then
+            local id_err = "Tool call ID must be a non-empty string"
+            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, id_err)
+            return nil, id_err
+        end
+        if seen_call_ids[call.id] then
+            local duplicate_err = "Duplicate tool call ID: " .. tostring(call.id)
+            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, duplicate_err)
+            return nil, duplicate_err
+        end
+        seen_call_ids[call.id] = true
+    end
+    for call_id in pairs(validated_tools or {}) do
+        if not seen_call_ids[call_id] then
+            local id_err = "Validated tool call ID is missing from wrapper output: " .. tostring(call_id)
+            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, id_err)
+            return nil, id_err
+        end
+    end
+
+    local _, token_err = persist_token_usage(ctx, result.tokens)
+    if token_err then return nil, token_err end
+
     local assistant_message_id: any = nil
 
     if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall then
@@ -661,12 +952,44 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result or "", metadata)
+        local intents = {}
+        for _, call in ipairs(unified_tool_calls) do
+            local call_type = consts.MSG_TYPE.FUNCTION
+            if ctx.config.delegation_func_id
+                and call.registry_id == ctx.config.delegation_func_id then
+                call_type = consts.MSG_TYPE.DELEGATION
+            elseif type(call.registry_id) == "string" then
+                local validated = validated_tools and validated_tools[call.id]
+                local schema = tools.get_tool_schema(call.registry_id :: string)
+                if (call.meta and call.meta.private)
+                    or (validated and validated.meta and validated.meta.private)
+                    or (schema and schema.meta and schema.meta.private) then
+                    call_type = consts.MSG_TYPE.PRIVATE_FUNCTION
+                end
+            end
+            table.insert(intents, {
+                id = call.id, name = call.name, arguments = call.arguments,
+                registry_id = call.registry_id, provider_metadata = call.provider_metadata,
+                type = call_type
+            })
+        end
+        local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
         end
         assistant_message_id = stored_id
+        result.call_message_ids = call_message_ids
+
+        if is_turn_blocked(ctx) then
+            for _, call in ipairs(unified_tool_calls) do
+                local _, cancel_err = ctx.writer:update_message_meta((call_message_ids :: table)[call.id], {
+                    status = consts.FUNC_STATUS.CANCELLED,
+                    result = "Session stopped before the call executed"
+                })
+                if cancel_err then return nil, cancel_err end
+            end
+        end
 
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
@@ -676,6 +999,10 @@ function message_handlers.agent_step(ctx, op)
         end
     else
         ctx.upstream:invalidate_message(response_id)
+    end
+
+    if is_turn_blocked(ctx) then
+        return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
     if result.memory_prompt then
@@ -690,14 +1017,19 @@ function message_handlers.agent_step(ctx, op)
     local user_facing_ops = {}
     local background_ops = {}
 
-    if #unified_tool_calls > 0 then
+    if #unified_tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(user_facing_ops, {
             type = consts.OP_TYPE.PROCESS_TOOLS,
             tool_calls = unified_tool_calls,
+            call_message_ids = result.call_message_ids,
             tool_wrappers = agent.tool_wrappers or {},
+            caller = prepared_caller,
+            validated_tools = validated_tools,
+            validation_error = validate_err,
             agent = {
                 id = agent.id,
-                model = agent.model
+                model = agent.model,
+                agent_options = agent.agent_options,
             },
             message_id = op.message_id,
             response_id = response_id,
@@ -749,7 +1081,27 @@ function message_handlers.process_tools(ctx, op)
         return { completed = true }
     end
 
-    local caller = tool_caller.new()
+    if op.cancel_only or is_turn_blocked(ctx) then
+        for _, call in ipairs(op.tool_calls) do
+            local _, err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
+                status = consts.FUNC_STATUS.CANCELLED,
+                result = "Session stopped before the call executed"
+            })
+            if err then return nil, err end
+        end
+        return { completed = true, next_ops = {} }
+    end
+
+    local caller = op.caller
+    if not caller then
+        for _, call in ipairs(op.tool_calls) do
+            local _, err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
+                status = consts.FUNC_STATUS.ERROR, result = "Prepared tool caller missing"
+            })
+            if err then return nil, err end
+        end
+        return { completed = true }
+    end
     caller:set_strategy(tool_caller.STRATEGY.PARALLEL)
 
     local op_agent = op.agent
@@ -762,66 +1114,30 @@ function message_handlers.process_tools(ctx, op)
     } :: ToolWrapperAgentRef
     local active_agent = (op_agent or fallback_agent) :: ToolWrapperAgentRef
 
-    local wrapper_context: ToolWrapperExecutionContext = {
-        host = {
-            kind = "session",
-            session_id = ctx.session_id
-        },
-        agent = active_agent,
-        run_context = {
-            contract = RUN_CONTEXT_CONTRACT,
-            binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
-            host = {
-                kind = "session",
-                session_id = ctx.session_id
-            },
-            agent = active_agent
-        }
-    }
-
-    if type(caller.set_tool_wrappers) == "function" then
-        caller:set_tool_wrappers(op.tool_wrappers or {})
-    end
-    if type(caller.set_wrapper_context) == "function" then
-        caller:set_wrapper_context(wrapper_context)
-    end
-
-    local validated_tools, validate_err = caller:validate(op.tool_calls)
-    if validate_err and not validated_tools then
-        return nil, "Tool validation failed: " .. validate_err
-    end
-
-    for call_id, tool_call in pairs(validated_tools) do
-        if tool_call.valid then
-            local message_type = consts.MSG_TYPE.FUNCTION
-            local send_upstream = true
-
-            if tool_call.registry_id == ctx.config.delegation_func_id then
-                message_type = consts.MSG_TYPE.DELEGATION
-                send_upstream = false
-            elseif tool_call.meta and tool_call.meta.private then
-                message_type = consts.MSG_TYPE.PRIVATE_FUNCTION
-                send_upstream = false
-            end
-
-            local message_id, err = ctx.writer:add_message(message_type, json.encode(tool_call.args), {
-                call_id = call_id,
-                function_name = tool_call.name,
-                registry_id = tool_call.registry_id,
-                status = consts.FUNC_STATUS.PENDING,
-                provider_metadata = tool_call.provider_metadata
+    local validated_tools, validate_err = op.validated_tools, op.validation_error
+    if validate_err and (not validated_tools or next(validated_tools) == nil) then
+        for _, call in ipairs(op.tool_calls) do
+            local _, update_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
+                status = consts.FUNC_STATUS.ERROR, result = "Tool validation failed: " .. validate_err
             })
-
-            if not err then
-                tool_call.message_id = message_id
-
-                if send_upstream then
-                    ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
-                        function_name = tool_call.name
-                    })
-                end
-            end
+            if update_err then return nil, update_err end
         end
+        return { completed = true, next_ops = {} }
+    end
+
+    for call_id, tool_call in pairs(validated_tools or {}) do
+        if not op.call_message_ids[call_id] then
+            return nil, "Tool call intent was not stored with the assistant response: " .. call_id
+        end
+        tool_call.message_id = op.call_message_ids[call_id]
+        if tool_call.valid and (not ctx.config.delegation_func_id
+            or tool_call.registry_id ~= ctx.config.delegation_func_id)
+            and not (tool_call.meta and tool_call.meta.private) then
+            ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
+                message_id = op.call_message_ids[call_id],
+                function_name = tool_call.name
+            })
+            end
     end
 
     local session_context, err = ctx.reader:get_full_context()
@@ -830,99 +1146,156 @@ function message_handlers.process_tools(ctx, op)
     end
     session_context = with_agent_run_context(ctx, session_context, active_agent)
 
-    local results = caller:execute(session_context, validated_tools)
+    local executed, results, execute_err = pcall(function()
+        return caller:execute(session_context, validated_tools)
+    end)
+    if not executed then
+        execute_err = tostring(results)
+        results = nil
+    end
+    local reported_results = type(results) == "table" and results or {}
+    results = {}
+    for call_id, result_data in pairs(reported_results) do
+        if op.call_message_ids[call_id] and type(result_data) == "table"
+            and type(result_data.tool_call) == "table" then
+            result_data.tool_call.message_id = op.call_message_ids[call_id]
+            results[call_id] = result_data
+        end
+    end
 
     local next_ops = {}
-    local control_ops = {}
-
-    for call_id, result_data in pairs(results) do
-        local message_id = result_data.tool_call.message_id
-        local is_delegation = result_data.tool_call.registry_id == ctx.config.delegation_func_id
-        local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
-
-        if result_data.error then
-            ctx.writer:update_message_meta(message_id, {
-                result = tostring(result_data.error),
+    local function fail_remaining(start_index, reason)
+        local failure = tostring(reason)
+        for index = start_index, #op.tool_calls do
+            local call = op.tool_calls[index]
+            local _, mark_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
                 status = consts.FUNC_STATUS.ERROR,
-                function_name = result_data.tool_call.name,
-                call_id = call_id,
-                registry_id = result_data.tool_call.registry_id
+                result = failure
             })
+            if mark_err then failure = failure .. "; settlement failed: " .. tostring(mark_err) end
+        end
+        return nil, failure
+    end
 
-            if not is_delegation and not is_private then
-                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
-                    call_id = call_id,
-                    function_name = result_data.tool_call.name,
-                    error = "Function execution failed"
-                })
-            end
+    for index, call in ipairs(op.tool_calls) do
+        local call_id = call.id
+        local result_data = results[call_id]
+        if not result_data then
+            local _, skipped_err = ctx.writer:update_message_meta(op.call_message_ids[call_id], {
+                status = consts.FUNC_STATUS.ERROR,
+                result = execute_err and tostring(execute_err) or "Call outcome unknown"
+            })
+            if skipped_err then return fail_remaining(index, skipped_err) end
         else
-            local tool_result = result_data.result
+            local message_id = result_data.tool_call.message_id
+            local is_delegation = ctx.config.delegation_func_id
+                and result_data.tool_call.registry_id == ctx.config.delegation_func_id
+            local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
 
-            if not is_delegation and tool_result and type(tool_result) == "table" and tool_result._control then
-                ctx.writer:update_message_meta(message_id, {
-                    control_operations = tool_result._control
-                })
+            local policy_result = result_data.result
+            if not result_data.error and not is_delegation and type(policy_result) == "table"
+                and type(policy_result._control) == "table" then
+                local control = policy_result._control
+                local request = nil
+                if type(control.config) == "table" then request = control.config.input_policy end
+                if request ~= nil then
+                    local resolved, policy_err
+                    if type(ctx.request_input_policy) == "function" then
+                        resolved, policy_err = ctx.request_input_policy(request, op.agent or current_agent(ctx))
+                    else
+                        resolved, policy_err = input_policy.apply_request(ctx, request, op.agent or current_agent(ctx))
+                    end
+                    if not resolved then
+                        result_data.error = policy_err or "Input policy change failed"
+                    else
+                        control.config.input_policy = nil
+                        if next(control.config) == nil then control.config = nil end
+                        policy_result.interaction = resolved
+                    end
+                end
             end
 
-            if not is_delegation and tool_result and type(tool_result) == "table" and tool_result._control then
-                local control = tool_result._control
-
-                if control.artifacts and #control.artifacts > 0 then
-                    table.insert(control_ops, {
-                        type = consts.OP_TYPE.CONTROL_ARTIFACTS,
-                        artifacts = control.artifacts
-                    })
-                end
-
-                if control.context then
-                    table.insert(control_ops, {
-                        type = consts.OP_TYPE.CONTROL_CONTEXT,
-                        context_operations = control.context
-                    })
-                end
-
-                if control.memory then
-                    table.insert(control_ops, {
-                        type = consts.OP_TYPE.CONTROL_MEMORY,
-                        memory_operations = control.memory
-                    })
-                end
-
-                if control.config then
-                    table.insert(control_ops, {
-                        type = consts.OP_TYPE.CONTROL_CONFIG,
-                        config_changes = control.config
-                    })
-                end
-
-                tool_result._control = nil
-            end
-
-            ctx.writer:update_message_meta(message_id, {
-                result = tool_result,
-                status = consts.FUNC_STATUS.SUCCESS,
-                function_name = result_data.tool_call.name,
-                call_id = call_id,
-                registry_id = result_data.tool_call.registry_id
-            })
-
-            if not is_delegation and not is_private then
-                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
+            if result_data.error then
+                local _, update_err = ctx.writer:update_message_meta(message_id, {
+                    result = tostring(result_data.error),
+                    status = consts.FUNC_STATUS.ERROR,
+                    function_name = result_data.tool_call.name,
                     call_id = call_id,
-                    function_name = result_data.tool_call.name
+                    registry_id = result_data.tool_call.registry_id
                 })
+                if update_err then return fail_remaining(index, update_err) end
+
+                if not is_delegation and not is_private then
+                    ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+                        message_id = message_id,
+                        call_id = call_id,
+                        function_name = result_data.tool_call.name,
+                        error = "Function execution failed"
+                    })
+                end
+            else
+                local tool_result = result_data.result
+
+                local control = not is_delegation and type(tool_result) == "table"
+                    and tool_result._control or nil
+                if control then
+                    local _, control_err = ctx.writer:update_message_meta(message_id, {
+                        control_operations = control
+                    })
+                    if control_err then return fail_remaining(index, control_err) end
+                    tool_result._control = nil
+                end
+
+                local _, update_err = ctx.writer:update_message_meta(message_id, {
+                    result = tool_result,
+                    status = consts.FUNC_STATUS.SUCCESS,
+                    function_name = result_data.tool_call.name,
+                    call_id = call_id,
+                    registry_id = result_data.tool_call.registry_id
+                })
+                if update_err then return fail_remaining(index, update_err) end
+
+                if control then
+                    local effects = {}
+                    if control.artifacts and #control.artifacts > 0 then
+                        table.insert(effects, { control_handlers.control_artifacts,
+                            { artifacts = control.artifacts } })
+                    end
+                    if control.context then
+                        table.insert(effects, { control_handlers.control_context,
+                            { context_operations = control.context } })
+                    end
+                    if control.memory then
+                        table.insert(effects, { control_handlers.control_memory,
+                            { memory_operations = control.memory } })
+                    end
+                    if control.config then
+                        table.insert(effects, { control_handlers.control_config,
+                            { config_changes = control.config } })
+                    end
+                    for _, effect in ipairs(effects) do
+                        local ran, applied, effect_err = pcall(effect[1], ctx, effect[2])
+                        if not ran or effect_err or not applied then
+                            local reason = ran and (effect_err or "Control effect failed") or applied
+                            return fail_remaining(index, reason)
+                        end
+                    end
+                end
+
+                if not is_delegation and not is_private then
+                    ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
+                        message_id = message_id,
+                        call_id = call_id,
+                        function_name = result_data.tool_call.name
+                    })
+                end
             end
         end
     end
 
     message_handlers.note_tool_round(ctx, results)
 
-    for _, control_op in ipairs(control_ops) do
-        table.insert(next_ops, control_op)
-    end
-
-    if #op.tool_calls > 0 then
+    if #op.tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,
@@ -937,6 +1310,7 @@ function message_handlers.process_tools(ctx, op)
 end
 
 function message_handlers.agent_continue(ctx, op)
+    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     return message_handlers.agent_step(ctx, {
         message_id = op.message_id,
         request_id = op.request_id,

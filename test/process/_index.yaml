@@ -17,6 +17,76 @@ entries:
       test: wippy.test:test
     method: run_tests
 
+  - name: command_bus_startup_test
+    kind: function.lua
+    meta:
+      name: Command bus startup configuration
+      type: test
+      suite: session
+    source: file://command_bus_startup_test.lua
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      command_bus: wippy.session.process:command_bus
+    method: run_tests
+
+  - name: initial_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Initial agent fixture
+    model: gpt-4o
+    prompt: Test only.
+
+  - name: session_creation_test
+    kind: function.lua
+    meta:
+      name: Session creation operation order
+      type: test
+      suite: session
+    source: file://session_creation_test.lua
+    modules: [security, uuid]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      command_bus: wippy.session.process:command_bus
+      agent_context: wippy.agent:context
+      message_handlers: wippy.session.process:message_handlers
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      writer: wippy.session.persist:writer
+    method: run_tests
+
+  - name: stop_control_test
+    kind: function.lua
+    meta:
+      name: Stop persistence boundary
+      type: test
+      suite: session
+    source: file://stop_control_test.lua
+    imports:
+      session: wippy.session.process:session
+      test: wippy.test:test
+    method: run_tests
+
+  - name: session_test
+    kind: function.lua
+    meta:
+      name: Session ingress routing
+      type: test
+      suite: session
+    source: file://session_test.lua
+    imports:
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      message_handlers: wippy.session.process:message_handlers
+      command_bus: wippy.session.process:command_bus
+      control_handlers: wippy.session.process:control_handlers
+      test: wippy.test:test
+    method: run_tests
   - name: control_handlers_test
     kind: function.lua
     meta:
@@ -26,6 +96,8 @@ entries:
       comment: Unit tests for control_config trait/tool overlay routing
     source: file://control_handlers_test.lua
     imports:
+      command_bus: wippy.session.process:command_bus
+      consts: wippy.session:consts
       control_handlers: wippy.session.process:control_handlers
       test: wippy.test:test
     method: run_tests
@@ -33,12 +105,13 @@ entries:
   - name: plugin_test
     kind: function.lua
     meta:
-      name: Session end lifecycle hook
+      name: Plugin routing and recovery
       type: test
       suite: session
-      comment: Unit tests for the on_session_end lifecycle hook firing
+      comment: Tests session routing, exit recovery, and end hooks
     source: file://plugin_test.lua
     modules:
+      - security
       - time
       - json
       - uuid
@@ -47,10 +120,15 @@ entries:
     imports:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
       plugin: wippy.session.process:plugin
+      session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo
       start_tokens: wippy.session:start_tokens
       test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+      writer: wippy.session.persist:writer
     method: run_tests
 
   - name: session_handlers_test
@@ -69,16 +147,19 @@ entries:
   - name: message_handlers_test
     kind: function.lua
     meta:
-      name: Checkpoint trigger in a tool loop
+      name: Message handling and tool rounds
       type: test
       suite: session
-      comment: The token-threshold checkpoint check must be scheduled on continuation steps of a tool loop, not only on the step that answers the user
+      comment: Tests tool persistence, stops, and checkpoints
     source: file://message_handlers_test.lua
     imports:
+      command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
+      control_handlers: wippy.session.process:control_handlers
       message_handlers: wippy.session.process:message_handlers
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
+      tool_caller: wippy.agent.tools:caller
     method: run_tests
 
   - name: command_bus_test
@@ -89,7 +170,59 @@ entries:
       suite: session
       comment: finish() and intercept() must stop a self-perpetuating chain of operations once the in-flight one completes
     source: file://command_bus_test.lua
+    modules:
+      - time
+      - uuid
+      - security
     imports:
       command_bus: wippy.session.process:command_bus
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      message_handlers: wippy.session.process:message_handlers
+      message_repo: wippy.session.persist:message_repo
+      reader: wippy.session.persist:reader
+      session: wippy.session.process:session
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+      writer: wippy.session.persist:writer
+      test: wippy.test:test
+    method: run_tests
+
+  - name: upstream_test
+    kind: function.lua
+    meta:
+      name: Session response protocol
+      type: test
+      suite: session
+    source: file://upstream_test.lua
+    imports:
+      upstream: wippy.session.process:upstream
+      test: wippy.test:test
+    method: run_tests
+
+  - name: input_policy_test
+    kind: function.lua
+    meta:
+      name: Session input policy
+      type: test
+      suite: session
+    source: file://input_policy_test.lua
+    imports:
+      input_policy: wippy.session.process:input_policy
+      test: wippy.test:test
+    method: run_tests
+
+  - name: steering_test
+    kind: function.lua
+    meta:
+      name: Session steering lifecycle
+      type: test
+      suite: session
+    source: file://steering_test.lua
+    imports:
+      consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
+      message_handlers: wippy.session.process:message_handlers
+      prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
     method: run_tests
