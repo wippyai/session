@@ -670,6 +670,62 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
+local function error_text(err: any): string
+    if type(err) == "table" and type(err.message) == "string" then
+        return err.message
+    end
+    return tostring(err)
+end
+
+-- Ends only the current turn after an agent, provider, or configuration failure; the
+-- session stays open and accepts the next message. Use it only before add_response:
+-- after that the turn has stored tool intents, and failures must stay fatal so the
+-- command bus settles them.
+-- opts.after_step: BEFORE_STEP ran and AFTER_STEP has not, so close the step as failed.
+-- opts.tokens: usage reported by a step that did run.
+local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: string,
+    code: string, err: any, opts: table?): (table?, string?)
+    local detail = error_text(err)
+    if opts and opts.tokens then
+        local _, token_err = persist_token_usage(ctx, opts.tokens)
+        if token_err then return nil, token_err end
+    end
+
+    turn_state(ctx).failed = true
+    input_policy.clear_turn(ctx)
+    ctx.upstream:message_error(response_id, code, detail)
+
+    if opts and opts.after_step then
+        apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+            reason = REASON.HOST_FAILED,
+            refs = {
+                message_id = op.message_id,
+                response_id = response_id,
+                request_id = op.request_id
+            },
+            outcome = {
+                state = OUTCOME.FAILED,
+                reason = REASON.HOST_FAILED
+            }
+        })
+    end
+
+    ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: " .. detail, {
+        system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
+        error_code = code,
+        source_id = op.message_id,
+        response_id = response_id
+    })
+
+    return {
+        message_id = op.message_id,
+        response_id = response_id,
+        completed = true,
+        failed = detail,
+        next_ops = {}
+    }
+end
+
 -- Persists one input message and announces a user message as received once it is stored.
 function message_handlers.write_input(ctx, item)
     local data = type(item.data) == "table" and item.data or {}
@@ -876,8 +932,15 @@ function message_handlers.handle_message(ctx, op)
     }
 end
 
+-- Agent, provider, and configuration failures end the turn through fail_turn and keep
+-- the session open. Storage and consistency failures return nil, err, which the
+-- command bus treats as fatal.
 function message_handlers.agent_step(ctx, op)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    local response_id, id_err = uuid.v7()
+    if id_err then
+        return nil, "Failed to generate response ID: " .. tostring(id_err)
+    end
     if op.from_user and type(ctx.activate_attention_turn) == "function" then
         op.ui_action_runtime = ctx.activate_attention_turn(op)
     end
@@ -891,18 +954,20 @@ function message_handlers.agent_step(ctx, op)
         builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
     end
     if not builder then
-        return nil, "Failed to build prompt: " .. err
+        return nil, "Failed to build prompt: " .. tostring(err)
     end
 
     if not ctx.config.agent_id or ctx.config.agent_id == "" then
-        return nil, "No agent configured for this session"
+        return fail_turn(ctx, op, nil, response_id, consts.ERROR_CODES.AGENT_ERROR,
+            "No agent configured for this session")
     end
 
     local agent, agent_err = ctx.agent_ctx:load_agent(ctx.config.agent_id, {
         model = ctx.config.model
     })
     if not agent then
-        return nil, "Failed to load agent: " .. (agent_err or "unknown error")
+        return fail_turn(ctx, op, nil, response_id, consts.ERROR_CODES.AGENT_ERROR,
+            "Failed to load agent: " .. error_text(agent_err or "unknown error"))
     end
 
     -- Loop guards (see above). Every step of the turn is counted, including the one that
@@ -927,11 +992,6 @@ function message_handlers.agent_step(ctx, op)
             tostring(state.last_round_tools), state.repeated_calls, max_repeats))
     end
 
-    local response_id, err = uuid.v7()
-    if err then
-        return nil, "Failed to generate response ID: " .. err
-    end
-
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         return nil, "Failed to load session context: " .. tostring(ctx_err)
@@ -943,7 +1003,7 @@ function message_handlers.agent_step(ctx, op)
         request_id = op.request_id
     })
     if activate_err then
-        return nil, activate_err
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_err)
     end
     append_lifecycle_messages(builder, activate_result)
 
@@ -959,7 +1019,7 @@ function message_handlers.agent_step(ctx, op)
         }
     })
     if before_err then
-        return nil, before_err
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_err)
     end
     append_lifecycle_messages(builder, before_result)
 
@@ -994,9 +1054,12 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local result, exec_err = agent:step(builder, runtime_options)
-    if exec_err then
-        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, exec_err)
-        return nil, exec_err
+    if exec_err or type(result) ~= "table" then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+            exec_err or "Agent step returned no result", {
+                after_step = true,
+                tokens = type(result) == "table" and result.tokens or nil
+            })
     end
 
     local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
@@ -1009,8 +1072,8 @@ function message_handlers.agent_step(ctx, op)
         outcome = outcome_from_agent_result(result)
     })
     if after_err then
-        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
-        return nil, after_err
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err,
+            { tokens = result.tokens })
     end
 
     if result.truncated then
@@ -1094,8 +1157,8 @@ function message_handlers.agent_step(ctx, op)
         prepared_caller:set_wrapper_context(wrapper_context)
         validated_tools, validate_err = prepared_caller:validate(unified_tool_calls)
         if validate_err then
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, validate_err)
-            return nil, validate_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, validate_err,
+                { tokens = result.tokens })
         end
         unified_tool_calls = prepared_caller.last_tool_calls or unified_tool_calls
     end
@@ -1103,22 +1166,20 @@ function message_handlers.agent_step(ctx, op)
     local seen_call_ids = {}
     for _, call in ipairs(unified_tool_calls) do
         if type(call.id) ~= "string" or not string.find(call.id, "%S") then
-            local id_err = "Tool call ID must be a non-empty string"
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, id_err)
-            return nil, id_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Tool call ID must be a non-empty string", { tokens = result.tokens })
         end
         if seen_call_ids[call.id] then
-            local duplicate_err = "Duplicate tool call ID: " .. tostring(call.id)
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, duplicate_err)
-            return nil, duplicate_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Duplicate tool call ID: " .. tostring(call.id), { tokens = result.tokens })
         end
         seen_call_ids[call.id] = true
     end
     for call_id in pairs(validated_tools or {}) do
         if not seen_call_ids[call_id] then
-            local id_err = "Validated tool call ID is missing from wrapper output: " .. tostring(call_id)
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, id_err)
-            return nil, id_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Validated tool call ID is missing from wrapper output: " .. tostring(call_id),
+                { tokens = result.tokens })
         end
     end
 
@@ -1149,6 +1210,8 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
+        -- fail_turn must not be used from add_response on: the stored tool intents are
+        -- settled only by the fatal path.
         local intents = {}
         for _, call in ipairs(unified_tool_calls) do
             local call_type = consts.MSG_TYPE.FUNCTION

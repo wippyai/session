@@ -305,17 +305,36 @@ local function define_tests()
             test.eq(ctx.rejection, "INPUT_BLOCKED")
         end)
 
-        it("keeps pending input on agent, context, prompt, and lifecycle failures", function()
+        it("ends only the turn on agent load and lifecycle failures and keeps input pending", function()
             local ctx, rows = fixture({ pending("p") })
+            local reported = {} :: {any}
+            ctx.upstream.message_error = function(_, id, code) reported[#reported + 1] = { id = id, code = code } end
             ctx.load_error = "missing agent"
             local result, err = handlers.agent_step(ctx, { message_id = "turn" })
-            test.is_nil(result)
-            test.not_nil(err)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.contains(result.failed, "missing agent")
+            test.eq(#reported, 1)
+            test.eq(reported[1].id, result.response_id)
             ctx.load_error = nil
-            ctx.context_error = "context unavailable"
+            ctx.turn_state = nil
+            local original_lifecycle = handlers._lifecycle_runtime
+            ctx.current_agent.bindings = { lifecycle = { "binding" } }
+            handlers._lifecycle_runtime = { apply = function() return nil, "lifecycle unavailable" end }
             result, err = handlers.agent_step(ctx, { message_id = "turn" })
+            handlers._lifecycle_runtime = original_lifecycle
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(result.failed, "lifecycle unavailable")
+            test.eq(#reported, 2)
+            test.eq(rows[1].metadata.input.state, "pending")
+        end)
+
+        it("keeps context and prompt failures fatal with input pending", function()
+            local ctx, rows = fixture({ pending("p") })
+            ctx.context_error = "context unavailable"
+            local result, err = handlers.agent_step(ctx, { message_id = "turn" })
             test.is_nil(result)
-            test.not_nil(err)
             test.contains(err, "context unavailable")
             ctx.context_error = nil
             local original_builder = handlers._prompt_builder
@@ -324,26 +343,24 @@ local function define_tests()
             handlers._prompt_builder = original_builder
             test.is_nil(result)
             test.contains(err, "prompt unavailable")
-            local original_lifecycle = handlers._lifecycle_runtime
-            ctx.current_agent.bindings = { lifecycle = { "binding" } }
-            handlers._lifecycle_runtime = { apply = function() return nil, "lifecycle unavailable" end }
-            result, err = handlers.agent_step(ctx, { message_id = "turn" })
-            handlers._lifecycle_runtime = original_lifecycle
-            test.is_nil(result)
-            test.contains(err, "lifecycle unavailable")
             test.eq(rows[1].metadata.input.state, "pending")
         end)
 
-        it("keeps input applied after a provider failure", function()
+        it("keeps input applied after a provider failure and returns to idle", function()
             local ctx, rows = fixture({ pending("p") })
             ctx.status = "running"
             ctx.turn_state = { active = true, message_id = "turn", steps = 0, repeated_calls = 0 }
             ctx.provider_error = "provider failed"
             local result, err = handlers.agent_step(ctx, { message_id = "turn" })
-            test.is_nil(result)
-            test.not_nil(err)
-            test.eq(err, "provider failed")
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(result.failed, "provider failed")
             test.eq(rows[1].metadata.input.state, "applied")
+            local finished, finish_err = handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            test.eq(ctx.status, "idle")
+            test.is_true(ctx.last_meta.meta.interaction.can_send)
         end)
 
         it("restores the full pending batch when Stop commits during apply", function()

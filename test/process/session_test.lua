@@ -402,6 +402,82 @@ local function define_tests()
             test.eq((errors :: any)[1].message, "Failed to reference artifact")
         end)
 
+        it("keeps the bus running after a provider failure and admits the next message", function()
+            local ctx, bus, saved, received, errors = fixture()
+            local steps = 0
+            local message_errors = {} :: {any}
+            local boundaries = {} :: {any}
+            local agent: any = { id = "agent:test", model = "model:test", agent_options = {} }
+            agent.step = function()
+                steps = steps + 1
+                if steps == 1 then return nil, "provider unavailable" end
+                return { result = "answer", tool_calls = {} }
+            end
+            ctx.user_id = "user-1"
+            ctx.config.agent_id = agent.id
+            ctx.config.model = agent.model
+            ctx.lifecycle_state = {}
+            ctx.agent_ctx = {
+                load_agent = function() return agent end,
+                get_current_agent = function() return agent end,
+            }
+            ctx.prepare_attention_prompt = function() return { get_messages = function() return {} end } end
+            ctx.reader = {
+                list_all_messages = function() return saved end,
+                list_pending_inputs = function() return {} end,
+                get_full_context = function() return {} end,
+                get_context = function() return nil end,
+                state = function() return { meta = {} } end,
+            }
+            ctx.writer.add_response = function(self, content, metadata)
+                return self:add_message(consts.MSG_TYPE.ASSISTANT, content, metadata), {}, nil
+            end
+            ctx.upstream.message_error = function(_self, id, code, message)
+                table.insert(message_errors, { id = id, code = code, message = message })
+            end
+            ctx.upstream.response_beginning = function() end
+            ctx.upstream.invalidate_message = function() end
+            ctx.upstream.session_error = function() end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, message_handlers.agent_step)
+            ctx.queue_empty_callback = function()
+                local finished, finish_err = message_handlers.finish_turn(ctx)
+                if not finished then return nil, finish_err end
+                table.insert(boundaries, { bus_state = bus.state, status = ctx.status,
+                    can_send = ctx.interaction and ctx.interaction.can_send })
+                if #boundaries == 1 then
+                    local routed, route_err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                        { data = { text = "second" }, request_id = "request-2" }, {})
+                    if not routed then return nil, route_err end
+                else
+                    command_bus.stop(bus)
+                end
+                return true
+            end
+
+            session.route_input(ctx, bus, consts.TOPICS.MESSAGE,
+                { data = { text = "first" }, request_id = "request-1" }, {})
+            local ok, err = bus:run()
+
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps, 2)
+            test.eq(#message_errors, 1)
+            test.eq(message_errors[1].code, consts.ERROR_CODES.AGENT_ERROR)
+            test.eq(message_errors[1].message, "provider unavailable")
+            test.eq(#errors, 0)
+            test.eq(boundaries[1].bus_state, "idle")
+            test.eq(boundaries[1].status, consts.STATUS.IDLE)
+            test.is_true(boundaries[1].can_send)
+            test.eq(#received, 2)
+            local second = nil :: any
+            for _, row in ipairs(saved) do
+                if row.content == "second" then second = row end
+            end
+            test.not_nil(second)
+            test.eq(second.message_id, received[2].id)
+            test.is_nil(second.metadata.input, "the next message starts a new turn instead of steering")
+        end)
+
         it("uses a server message id before starting user work", function()
             local ctx, _, saved = fixture()
             local result, err = message_handlers.handle_message(ctx, {
