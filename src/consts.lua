@@ -308,6 +308,7 @@ local consts = {
     DEFAULTS = {
         MAX_TURN_ITERATIONS = 1000,
         MAX_REPEATED_TOOL_CALLS = 50,
+        MAX_REPEATED_TOOL_FAILURES = 3,
         CHECKPOINT_FUNCTION_ID = "wippy.session.funcs:checkpoint",
         TITLE_FUNCTION_ID = "wippy.session.funcs:title",
         GC_INTERVAL = "300s",

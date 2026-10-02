@@ -703,6 +703,236 @@ local function define_tests()
         end)
     end)
 
+    describe("repeated failing tool rounds", function()
+        local function failed_round(args: any?, error_text: string?, call_id: string?): any
+            local result = round(nil, args)
+            result["call-1"].error = error_text or "automation not found"
+            if call_id then result[call_id] = result["call-1"]; result["call-1"] = nil end
+            return result
+        end
+
+        it("allows two corrections then stops at three identical failing rounds with the real error", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            for index = 1, 3 do
+                message_handlers.note_tool_round(ctx, failed_round({ id = "missing" }, nil, "fresh-" .. index))
+                local result = continue_step(ctx)
+                if index < 3 then
+                    test.is_nil(result.stopped)
+                    test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+                else
+                    test.eq(result.stopped, "repeated_tool_failures")
+                    test.is_true(result.completed)
+                    test.eq(#result.next_ops, 0)
+                end
+            end
+            test.eq(#captured.session_errors, 1)
+            test.eq(captured.session_errors[1].code, "turn_limit_reached")
+            test.contains(captured.session_errors[1].message, "automation not found")
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.SYSTEM)[1].metadata.repeated_failed_calls, 3)
+        end)
+
+        it("settles errors before the UI event and feeds them to the next two model requests", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local snapshots = function()
+                local rows = {}
+                for _, row in ipairs(captured.stored) do
+                    rows[#rows + 1] = { message_id = row.id, type = row.type, data = row.content,
+                        metadata = row.metadata, date = "2026-01-01T00:00:00Z" }
+                end
+                return rows
+            end
+            local query = { from_checkpoint = function(self) return self end, all = snapshots,
+                count = function() return #captured.stored end }
+            ctx.reader.messages = function() return query end
+            local model_calls, error_events = 0, 0
+            local original_step = agent.step
+            agent.step = function(self, builder, options)
+                model_calls = model_calls + 1
+                if model_calls > 1 then
+                    local seen = false
+                    for _, message in ipairs(builder:get_messages()) do
+                        if message.role == "function_result" then
+                            for _, content in ipairs(message.content or {}) do
+                                if content.text == "automation not found" then seen = true end
+                            end
+                        end
+                    end
+                    test.is_true(seen, "the next model prompt contains the persisted error")
+                end
+                return original_step(self, builder, options)
+            end
+            ctx.upstream.send_message_update = function(_, _, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+                    error_events = error_events + 1
+                    test.eq(payload.error, "automation not found")
+                    for _, row in ipairs(captured.stored) do
+                        if row.id == payload.message_id then
+                            test.eq(row.metadata.result, payload.error)
+                            test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                        end
+                    end
+                end
+            end
+            local next_step = user_step(ctx)
+            for index = 1, 3 do
+                local op = find_op(next_step.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+                test.not_nil(op)
+                op.caller = { set_strategy = function() end, execute = function()
+                    local results = {}
+                    for id, tool in pairs(op.validated_tools) do
+                        results[id] = { error = "automation not found", tool_call = tool }
+                    end
+                    return results
+                end }
+                local settled, err = message_handlers.process_tools(ctx, op)
+                test.is_nil(err)
+                test.eq(settled.next_ops[1].type, consts.OP_TYPE.AGENT_CONTINUE)
+                next_step = message_handlers.agent_continue(ctx, settled.next_ops[1])
+                if index < 3 then test.is_nil(next_step.stopped) end
+            end
+            test.eq(next_step.stopped, "repeated_tool_failures")
+            test.eq(model_calls, 3, "no fourth model request after the third failure")
+            test.eq(error_events, 3)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 3)
+        end)
+
+        it("compares only failing calls, independent of ids, error text and argument key order", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            for index = 1, 3 do
+                local args = index == 2 and { y = 1, x = 2 } or { x = 2, y = 1 }
+                local results = failed_round(args, "error " .. index, "new-" .. index)
+                results.success = { result = index, tool_call = { name = "other", args = { index = index } } }
+                message_handlers.note_tool_round(ctx, results)
+            end
+            test.eq(continue_step(ctx).stopped, "repeated_tool_failures")
+        end)
+
+        it("normalizes JSON arguments and distinguishes strings containing fingerprint delimiters", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            message_handlers.note_tool_round(ctx, failed_round('{"x":2,"y":1}'))
+            message_handlers.note_tool_round(ctx, failed_round({ y = 1, x = 2 }))
+            message_handlers.note_tool_round(ctx, failed_round('{"y":1,"x":2}'))
+            test.eq(continue_step(ctx).stopped, "repeated_tool_failures")
+
+            ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            message_handlers.note_tool_round(ctx, failed_round({ x = "a,y=string:b" }))
+            message_handlers.note_tool_round(ctx, failed_round({ x = "a", y = "b" }))
+            message_handlers.note_tool_round(ctx, failed_round({ x = "a,y=string:b" }))
+            test.is_nil(continue_step(ctx).stopped)
+        end)
+
+        it("counts settled failures when the caller throws or omits its results", function()
+            for _, throws in ipairs({ true, false }) do
+                local ctx, captured = mock_ctx(fake_agent(nil))
+                user_step(ctx)
+                for index = 1, 3 do
+                    local id = "fresh-" .. index
+                    local stored_id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
+                        status = consts.FUNC_STATUS.PENDING })
+                    local op = { message_id = "msg-user", tool_calls = { { id = id, name = "read",
+                        registry_id = "app:read", arguments = "{}" } }, call_message_ids = { [id] = stored_id },
+                        validated_tools = { [id] = { name = "read", registry_id = "app:read", args = {}, valid = true } },
+                        caller = { set_strategy = function() end, execute = function()
+                            if throws then error("tool runner failed") end
+                            return {}
+                        end } }
+                    local settled, err = message_handlers.process_tools(ctx, op)
+                    test.is_nil(err)
+                    test.eq(captured.stored[#captured.stored].metadata.status, consts.FUNC_STATUS.ERROR)
+                    local continued = message_handlers.agent_continue(ctx, settled.next_ops[1])
+                    if index < 3 then test.is_nil(continued.stopped)
+                    else test.eq(continued.stopped, "repeated_tool_failures") end
+                end
+                test.contains(captured.session_errors[1].message, throws and "tool runner failed" or "Call outcome unknown")
+            end
+        end)
+
+        it("resets the failure streak after success or changed failing arguments", function()
+            for _, reset in ipairs({ round("ok", { id = "missing" }), failed_round({ id = "corrected" }) }) do
+                local ctx = mock_ctx(fake_agent(nil))
+                user_step(ctx)
+                message_handlers.note_tool_round(ctx, failed_round({ id = "missing" }))
+                message_handlers.note_tool_round(ctx, failed_round({ id = "missing" }))
+                message_handlers.note_tool_round(ctx, reset)
+                message_handlers.note_tool_round(ctx, failed_round({ id = "missing" }))
+                message_handlers.note_tool_round(ctx, failed_round({ id = "missing" }))
+                test.is_nil(continue_step(ctx).stopped)
+                message_handlers.note_tool_round(ctx, failed_round({ id = "missing" }))
+                test.eq(continue_step(ctx).stopped, "repeated_tool_failures")
+            end
+        end)
+
+        it("keeps the fifty-round guard and the failure threshold independent", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            for _ = 1, 49 do message_handlers.note_tool_round(ctx, round("ok")) end
+            test.is_nil(continue_step(ctx).stopped)
+            message_handlers.note_tool_round(ctx, round("ok"))
+            test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
+
+            local agent = fake_agent(nil)
+            agent.agent_options = { loop = { max_repeated_failures = 4 } }
+            ctx = mock_ctx(agent, { max_repeated_tool_calls = 0 })
+            user_step(ctx)
+            for _ = 1, 3 do message_handlers.note_tool_round(ctx, failed_round()) end
+            test.is_nil(continue_step(ctx).stopped)
+            message_handlers.note_tool_round(ctx, failed_round())
+            test.eq(continue_step(ctx).stopped, "repeated_tool_failures")
+        end)
+
+        it("allows disabling only the failure guard and retains the existing guard", function()
+            local agent = fake_agent(nil)
+            agent.agent_options = { loop = { max_repeated_failures = 0 } }
+            local ctx = mock_ctx(agent, { max_repeated_tool_calls = 4 })
+            user_step(ctx)
+            for _ = 1, 3 do message_handlers.note_tool_round(ctx, failed_round()) end
+            test.is_nil(continue_step(ctx).stopped)
+            message_handlers.note_tool_round(ctx, failed_round())
+            test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
+        end)
+
+        it("resets failure tracking on the next user-started turn", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            for _ = 1, 3 do message_handlers.note_tool_round(ctx, failed_round()) end
+            test.eq(continue_step(ctx).stopped, "repeated_tool_failures")
+            message_handlers.finish_turn(ctx)
+            test.is_nil(user_step(ctx).stopped)
+            message_handlers.note_tool_round(ctx, failed_round())
+            test.is_nil(continue_step(ctx).stopped)
+        end)
+
+        it("honors Stop before emitting a failure-limit notice", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            for _ = 1, 3 do message_handlers.note_tool_round(ctx, failed_round()) end
+            ctx.stop_requested = true
+            local result = continue_step(ctx)
+            test.is_true(result.completed)
+            test.eq(#result.next_ops, 0)
+            test.eq(#captured.session_errors, 0)
+        end)
+
+        it("does not disclose private or delegation error text in the stop notice", function()
+            for _, hidden in ipairs({ { meta = { private = true } }, { registry_id = "app:delegate" } }) do
+                local ctx, captured = mock_ctx(fake_agent(nil), { delegation_func_id = "app:delegate" })
+                user_step(ctx)
+                local results = failed_round(nil, "hidden tool detail")
+                results["call-1"].tool_call.meta = hidden.meta
+                results["call-1"].tool_call.registry_id = hidden.registry_id
+                for _ = 1, 3 do message_handlers.note_tool_round(ctx, results) end
+                test.eq(continue_step(ctx).stopped, "repeated_tool_failures")
+                local match = string.find(captured.session_errors[1].message, "hidden tool detail", 1, true)
+                test.is_nil(match)
+            end
+        end)
+    end)
+
     describe("failed queue boundary", function()
         it("persists failed status instead of returning a failed turn to idle", function()
             local ctx = mock_ctx(fake_agent(1000))
@@ -880,7 +1110,7 @@ local function define_tests()
                 test.eq(event.payload.function_name, "one")
             end
             test.eq(events[2].payload.call_id, "function")
-            test.eq(events[2].payload.error, "Function execution failed")
+            test.eq(events[2].payload.error, "tool failed")
             for _, row in ipairs(captured.stored) do
                 test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
             end

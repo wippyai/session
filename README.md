@@ -60,6 +60,36 @@ history pagination.
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
+## Repeated tool failures
+
+Tool errors are saved unchanged and public tool error events carry the actual
+error text. The next model step sees the saved error and may correct its call.
+By default, three consecutive rounds with the same failing calls stop the turn
+before another model request, using the existing `turn_limit_reached` event.
+Its notice includes the latest public tool errors. Private and delegation error
+details remain in history and are not exposed by the notice.
+
+The failure fingerprint includes each failing call's name, registry id and
+arguments, independent of argument key order. It excludes call ids, error text
+and successful sibling calls. A round with no failures or a different set of
+failing calls resets the streak. A new user-started turn resets it too. Stop
+takes precedence, and steering still pending at the limit remains pending for
+the next user-started turn.
+
+One optional agent field changes this threshold:
+
+```yaml
+agent_options:
+  loop:
+    max_repeated_failures: 3
+```
+
+`0` disables only this failure guard; absent or negative values use the default
+of `3`. The existing iteration limit and identical-call guard (default `50`,
+which counts successes and failures) retain their behavior and settings. If
+both repeat guards are reached together, the failure notice takes precedence.
+The iteration limit retains precedence over both.
+
 ## Checkpoints and prompt caching
 
 When a checkpoint function or binding is configured, the session compares each

@@ -319,7 +319,7 @@ local function non_negative(value: any): number?
     return n
 end
 
-local function loop_limits(ctx: SessionContext, agent: any): (number, number)
+local function loop_limits(ctx: SessionContext, agent: any): (number, number, number)
     local options = nil
     if agent and type(agent.agent_options) == "table" then
         options = agent.agent_options.loop
@@ -335,7 +335,10 @@ local function loop_limits(ctx: SessionContext, agent: any): (number, number)
         or non_negative(ctx.config and ctx.config.max_repeated_tool_calls)
         or consts.DEFAULTS.MAX_REPEATED_TOOL_CALLS
 
-    return max_steps, max_repeats
+    local max_failures = non_negative(options.max_repeated_failures)
+        or consts.DEFAULTS.MAX_REPEATED_TOOL_FAILURES
+
+    return max_steps, max_repeats, max_failures
 end
 
 local function turn_state(ctx: SessionContext): table
@@ -352,6 +355,9 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.repeated_calls = 0
     state.last_round = nil
     state.last_round_tools = nil
+    state.repeated_failed_calls = 0
+    state.last_failed_round = nil
+    state.last_failed_detail = nil
     state.active = true
     return state
 end
@@ -486,8 +492,11 @@ end
 
 -- Deterministic rendering of a tool call's arguments, so two rounds compare equal regardless
 -- of table iteration order.
-local function canonical(value: any): string
+local function canonical(value: any, quoted: boolean?): string
     if type(value) ~= "table" then
+        if quoted and type(value) == "string" then
+            return "string:" .. string.format("%q", value)
+        end
         return type(value) .. ":" .. tostring(value)
     end
     local keys = {}
@@ -499,23 +508,51 @@ local function canonical(value: any): string
     end)
     local parts = {}
     for _, key in ipairs(keys) do
-        parts[#parts + 1] = tostring(key) .. "=" .. canonical(value[key])
+        parts[#parts + 1] = (quoted and canonical(key, true) or tostring(key)) .. "=" .. canonical(value[key], quoted)
     end
     return "{" .. table.concat(parts, ",") .. "}"
 end
 
--- Records one executed tool round (the tool_caller results map; only each entry's tool_call
--- is read) against the current turn and returns how many times in a row a round with these
--- exact tools and arguments has now occurred.
+-- The existing guard counts all calls, regardless of result. The separate failure
+-- streak fingerprints only calls with canonical errors: successful siblings, call
+-- ids and changing error text must not hide an identical failing call.
 function message_handlers.note_tool_round(ctx: SessionContext, results: any): number
     local state = turn_state(ctx)
     local parts = {}
     local tools = {}
+    local failures = {}
+    local details = {}
     for _, entry in pairs(results or {}) do
         local call = (type(entry) == "table" and entry.tool_call) or {}
         parts[#parts + 1] = tostring(call.name) .. "(" .. canonical(call.args) .. ")"
         tools[tostring(call.name)] = true
+        if type(entry) == "table" and entry.error then
+            local args = call.args
+            if type(args) == "string" then
+                local decoded, decode_err = json.decode(args)
+                if not decode_err then args = decoded end
+            end
+            failures[#failures + 1] = canonical({ name = call.name, registry_id = call.registry_id, args = args }, true)
+            local private = call.meta and call.meta.private
+            local delegated = ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id
+            if not private and not delegated then
+                details[#details + 1] = tostring(call.name) .. ": " .. tostring(entry.error)
+            end
+        end
     end
+    table.sort(failures)
+    local failed_fingerprint = #failures > 0 and table.concat(failures, "|") or nil
+    if failed_fingerprint then
+        state.repeated_failed_calls = failed_fingerprint == state.last_failed_round
+            and (tonumber(state.repeated_failed_calls) or 0) + 1 or 1
+        table.sort(details)
+        state.last_failed_detail = #details > 0 and table.concat(details, "; ")
+            or "A private or delegated tool failed."
+    else
+        state.repeated_failed_calls = 0
+        state.last_failed_detail = nil
+    end
+    state.last_failed_round = failed_fingerprint
     local count: number = tonumber(state.repeated_calls) or 0
     if #parts == 0 then
         return count
@@ -550,6 +587,7 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
         reason = reason,
         steps = state.steps - 1,
         repeated_calls = state.repeated_calls,
+        repeated_failed_calls = state.repeated_failed_calls,
         source_id = op.message_id
     })
     ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER,
@@ -625,7 +663,7 @@ function message_handlers.handle_message(ctx, op)
         if type(ctx.writer.admit_message) ~= "function" then
             return nil, "Session writer does not support atomic admission"
         end
-        local next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        local next_turn = { active = true, steps = 0, repeated_calls = 0, repeated_failed_calls = 0 }
         local candidate = {
             config = ctx.config,
             turn_state = next_turn,
@@ -693,10 +731,15 @@ function message_handlers.agent_step(ctx, op)
     end
     if op.from_user then state.request_id = op.request_id end
     state.steps = state.steps + 1
-    local max_steps, max_repeats = loop_limits(ctx, agent)
+    local max_steps, max_repeats, max_failures = loop_limits(ctx, agent)
     if max_steps > 0 and state.steps > max_steps then
         return stop_turn(ctx, op, agent, state, "max_iterations", string.format(
             "%d agent steps without a final answer (limit %d).", state.steps - 1, max_steps))
+    end
+    if max_failures > 0 and (tonumber(state.repeated_failed_calls) or 0) >= max_failures then
+        return stop_turn(ctx, op, agent, state, "repeated_tool_failures", string.format(
+            "the same failing tool calls repeated %d times in a row with identical arguments (limit %d). %s",
+            state.repeated_failed_calls, max_failures, tostring(state.last_failed_detail)))
     end
     if max_repeats > 0 and state.repeated_calls >= max_repeats then
         return stop_turn(ctx, op, agent, state, "repeated_tool_calls", string.format(
@@ -1152,11 +1195,21 @@ function message_handlers.process_tools(ctx, op)
         local call_id = call.id
         local result_data = results[call_id]
         if not result_data then
+            local failure = execute_err and tostring(execute_err) or "Call outcome unknown"
             local _, skipped_err = ctx.writer:update_message_meta(op.call_message_ids[call_id], {
                 status = consts.FUNC_STATUS.ERROR,
-                result = execute_err and tostring(execute_err) or "Call outcome unknown"
+                result = failure
             })
             if skipped_err then return fail_remaining(index, skipped_err) end
+            -- The call is settled as an error even if the caller omitted its
+            -- result or threw. Include it in failure tracking as well.
+            results[call_id] = {
+                error = failure,
+                tool_call = (validated_tools or {})[call_id] or {
+                    name = call.name, registry_id = call.registry_id, args = call.arguments,
+                    meta = { private = call.type == consts.MSG_TYPE.PRIVATE_FUNCTION },
+                },
+            }
         else
             local message_id = result_data.tool_call.message_id
             local is_delegation = ctx.config.delegation_func_id
@@ -1201,7 +1254,7 @@ function message_handlers.process_tools(ctx, op)
                         message_id = message_id,
                         call_id = call_id,
                         function_name = result_data.tool_call.name,
-                        error = "Function execution failed"
+                        error = tostring(result_data.error)
                     })
                 end
             else

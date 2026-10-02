@@ -142,6 +142,47 @@ end
 
 local function define_tests()
     describe("steering lifecycle", function()
+        it("keeps pending steering after a failure limit and applies it on the next user turn", function()
+            local ctx, rows, _, applied = fixture()
+            local admitted = handlers.handle_message(ctx, { data = { text = "start" }, request_id = "start" })
+            ctx.turn_state.steps = 3
+            ctx.turn_state.input_policy = { while_running = "steer" }
+            local steer = handlers.handle_message(ctx, { data = { text = "correct the target" }, request_id = "steer" })
+            test.is_true(steer.completed)
+            local steering = rows[#rows]
+            test.eq(steering.metadata.input.state, "pending")
+            for index = 1, 3 do
+                local tool = { name = "read", registry_id = "app:read", args = { id = "missing" } }
+                handlers.note_tool_round(ctx, { ["new-" .. index] = { error = "automation not found", tool_call = tool } })
+            end
+            local error_text = nil
+            ctx.upstream.session_error = function(_, _, text) error_text = text end
+            local stopped, err = handlers.agent_continue(ctx, { message_id = admitted.message_id })
+            test.is_nil(err)
+            test.eq(stopped.stopped, "repeated_tool_failures")
+            test.contains(error_text, "automation not found")
+            test.eq(#applied, 0)
+            test.eq(steering.metadata.input.state, "pending")
+            test.is_nil(ctx.turn_state.input_policy)
+            handlers.finish_turn(ctx)
+            test.eq(ctx.status, "idle")
+            local next_turn = handlers.handle_message(ctx, { data = { text = "continue" }, request_id = "resume" })
+            local resumed, resume_err = handlers.agent_step(ctx, next_turn.next_ops[1])
+            test.is_nil(resume_err)
+            test.is_true(resumed.completed)
+            test.eq(steering.metadata.input.state, "applied")
+            test.eq(#applied, 1)
+            test.eq(applied[1], steering.message_id)
+            test.eq(ctx.turn_state.repeated_failed_calls, 0)
+            local found = false
+            for _, message in ipairs(ctx.prompt) do
+                for _, content in ipairs(message.content or {}) do
+                    if string.find(content.text or "", "correct the target", 1, true) then found = true end
+                end
+            end
+            test.is_true(found)
+        end)
+
         it("commits idle admission before receipt and request acknowledgement", function()
             local ctx, rows, events = fixture()
             local result, err = handlers.handle_message(ctx, { data = { text = "start" }, request_id = "request-1" })
