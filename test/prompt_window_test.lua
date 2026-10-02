@@ -233,6 +233,41 @@ local function define_tests()
                 )
             )
         end)
+
+        it("foundation: the next prompt includes a newly saved failure after a long history", function()
+            local call_id = "canonical-failure-call"
+            local failure_id = uuid.v7()
+            local failure_text = "FOUNDATION_ACTUAL_TOOL_ERROR: permission denied, do not repeat unchanged"
+            create_message(uuid.v7(), consts.MSG_TYPE.ASSISTANT, "checking access", {})
+            create_message(failure_id, consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = call_id,
+                function_name = "Platform",
+                status = consts.FUNC_STATUS.PENDING,
+            })
+            local updated, update_err = message_repo.update_metadata(failure_id, {
+                status = consts.FUNC_STATUS.ERROR,
+                result = failure_text,
+            })
+            test.is_nil(update_err)
+            test.not_nil(updated)
+            local result, err = open_binding():get_prompt({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "since_checkpoint" },
+                format = "messages",
+            })
+            test.is_nil(err)
+            local matching_results, matching_calls = 0, 0
+            for _, message in ipairs(result.messages) do
+                if message.role == "function_call" and message.function_call.id == call_id then
+                    matching_calls = matching_calls + 1
+                elseif message.role == "function_result" and message.function_call_id == call_id then
+                    matching_results = matching_results + 1
+                    test.eq(message.content[1].text, failure_text)
+                end
+            end
+            test.eq(matching_calls, 1)
+            test.eq(matching_results, 1)
+        end)
     end)
 end
 

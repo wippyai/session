@@ -3,6 +3,7 @@ local json = require("json")
 local time = require("time")
 local consts = require("consts")
 local input_metadata = require("input_metadata")
+local message_order = require("message_order")
 
 type Message = {
     message_id: string,
@@ -331,7 +332,7 @@ function message_repo.list_all_by_session(session_id)
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
-        :order_by("date ASC, message_id ASC")
+        :order_by(message_order.date(db:type()) .. " ASC, message_id ASC")
     local executor = query:run_with(db)
     local messages, query_err = executor:query()
     db:release()
@@ -554,13 +555,13 @@ function message_repo.update_metadata(message_id, metadata)
 end
 
 local function anchor_date(db, session_id, message_id)
-    local rows, err = sql.builder.select("date")
+    local rows, err = sql.builder.select(message_order.date(db:type()) .. " AS sort_date")
         :from("messages")
         :where("session_id = ? AND message_id = ?", session_id, message_id)
         :limit(1):run_with(db):query()
     if err then return nil, err end
     if #rows == 0 then return nil, "Message anchor not found: " .. tostring(message_id) end
-    return rows[1].date
+    return rows[1].sort_date
 end
 
 -- List messages by session ID with cursor-based pagination
@@ -577,6 +578,8 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
     if err then
         return nil, err
     end
+
+    local date_key = message_order.date(db:type())
 
     -- Default limit if not provided
     limit = limit or 500
@@ -595,16 +598,16 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         if anchor_err then db:release(); return nil, anchor_err end
         if direction == "after" then
             -- Get messages after the cursor (newer messages)
-            query = query:where("(date > ? OR (date = ? AND message_id > ?))", date, date, cursor)
-            query = query:order_by("date ASC, message_id ASC")
+            query = query:where("(" .. date_key .. " > ? OR (" .. date_key .. " = ? AND message_id > ?))", date, date, cursor)
+            query = query:order_by(date_key .. " ASC, message_id ASC")
         else
             -- Default to "before" (older messages)
-            query = query:where("(date < ? OR (date = ? AND message_id < ?))", date, date, cursor)
-            query = query:order_by("date DESC, message_id DESC")
+            query = query:where("(" .. date_key .. " < ? OR (" .. date_key .. " = ? AND message_id < ?))", date, date, cursor)
+            query = query:order_by(date_key .. " DESC, message_id DESC")
         end
     else
         -- No cursor, get latest messages
-        query = query:order_by("date DESC, message_id DESC")
+        query = query:order_by(date_key .. " DESC, message_id DESC")
     end
 
     -- Add limit
@@ -679,13 +682,14 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
 
     local date, anchor_err = anchor_date(db, session_id, after_message_id)
     if anchor_err then db:release(); return nil, anchor_err end
+    local date_key = message_order.date(db:type())
 
     -- Build the SELECT query
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
-            sql.builder.expr("(date > ? OR (date = ? AND message_id >= ?))",
+            sql.builder.expr("(" .. date_key .. " > ? OR (" .. date_key .. " = ? AND message_id >= ?))",
                 date, date, after_message_id)
         }))
 
@@ -693,9 +697,9 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
     if limit ~= nil and limit > 0 then
         -- Newest rows first; flipped back to chronological order below.
         bounded = true
-        query = query:order_by("date DESC, message_id DESC"):limit(limit)
+        query = query:order_by(date_key .. " DESC, message_id DESC"):limit(limit)
     else
-        query = query:order_by("date ASC, message_id ASC")
+        query = query:order_by(date_key .. " ASC, message_id ASC")
     end
 
     -- Execute the query
@@ -752,7 +756,7 @@ function message_repo.list_by_type(session_id, msg_type, limit, offset)
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("type = ?", msg_type)
         }))
-        :order_by("date DESC, message_id DESC")
+        :order_by(message_order.date(db:type()) .. " DESC, message_id DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then
@@ -806,7 +810,7 @@ function message_repo.get_latest(session_id)
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
-        :order_by("date DESC, message_id DESC")
+        :order_by(message_order.date(db:type()) .. " DESC, message_id DESC")
         :limit(1)
 
     -- Execute the query
