@@ -864,7 +864,7 @@ function ui_action_broker:request(waiter_pid, request)
                     or prior.registry_id ~= request.registry_id
                     or prior.delivery_handle ~= request.delivery_handle
                     or prior.fingerprint ~= fingerprint then
-                    return false, "unauthorized tool request"
+                    return self:_reject_unbound_request(waiter_pid, request, "unauthorized tool request")
                 end
                 local sent, send_err = self.deps.send(waiter_pid, request.reply_topic, prior.result)
                 if sent == false or sent == nil and send_err ~= nil then
@@ -878,7 +878,7 @@ function ui_action_broker:request(waiter_pid, request)
                 or prior.registry_id ~= request.registry_id
                 or prior.delivery_handle ~= request.delivery_handle
                 or prior.fingerprint ~= fingerprint then
-                return false, "unauthorized tool request"
+                return self:_reject_unbound_request(waiter_pid, request, "unauthorized tool request")
             end
             local sent, send_err = self.deps.send(waiter_pid, request.reply_topic, prior.result)
             if sent == false or sent == nil and send_err ~= nil then
@@ -890,14 +890,23 @@ function ui_action_broker:request(waiter_pid, request)
                 or prior.registry_id ~= request.registry_id
                 or prior.user_id ~= binding.user_id
                 or prior.fingerprint ~= fingerprint then
-                return false, "UI action request correlation mismatch"
+                local reason = "UI action request correlation mismatch"
+                if prior.waiter_pid == waiter_pid then
+                    -- One reply topic per call ID: finishing the prior answers this waiter
+                    -- once and releases the session's interactive slot.
+                    local finished, finish_err = self:_finish(prior, self:_make_result(prior, "unavailable", reason))
+                    if finished == false and finish_err ~= nil then return false, finish_err end
+                    return false, reason
+                end
+                return self:_reject_unbound_request(waiter_pid, request, reason)
             end
             if prior.waiter_pid ~= waiter_pid then
-                self:_unmonitor(prior.waiter_pid)
                 local monitored, monitor_err = self:_monitor(waiter_pid)
                 if not monitored then
+                    self:_reject_unbound_request(waiter_pid, request, "tool process monitor failed")
                     return false, monitor_err or "tool process monitor failed"
                 end
+                self:_unmonitor(prior.waiter_pid)
                 prior.waiter_pid = waiter_pid
             end
             return true, prior.action_id
@@ -910,7 +919,7 @@ function ui_action_broker:request(waiter_pid, request)
     end
 
     if self.request_count >= MAX_REQUEST_CACHE then
-        return false, "UI action request capacity reached"
+        return self:_reject_unbound_request(waiter_pid, request, "UI action request capacity reached")
     end
 
     if args_err then
