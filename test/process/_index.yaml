@@ -219,6 +219,8 @@ entries:
       type: test
       suite: session
     source: file://attention_history_test.lua
+    modules:
+      - time
     imports:
       attention_history: wippy.session.process:attention_history
       test: wippy.test:test

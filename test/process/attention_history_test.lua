@@ -1,10 +1,13 @@
 local test = require('test')
+local time = require('time')
 local history = require('attention_history')
 
 local function define_tests()
     describe('Attention observation lifetime', function()
         local now = 1789732800 -- 2026-09-18T12:00:00Z
-        local server_date = '2026-09-18T12:00:00.000000000Z'
+        -- Row dates as Session writes them: server-local time with its offset.
+        local function row_date(at) return time.unix(at, 0):format(time.RFC3339NANO) end
+        local server_date = row_date(now)
         local function user(id, attachments)
             return { message_id = id, type = 'user', date = server_date, data = 'Keep user text', metadata = {
                 file_uuids = { 'ordinary-file' }, context_attachments = attachments,
@@ -146,10 +149,20 @@ local function define_tests()
             ahead.metadata.result.measured_at = '2026-09-18T13:00:00Z'
             local _, updates = history.prepare({ user('first'), behind, ahead }, now + 1)
             test.eq(#updates, 0, 'a Host clock an hour off does not expire a fresh read')
-            ahead.date = '2026-09-18T11:59:30Z'
+            ahead.date = row_date(now - 30)
             _, updates = history.prepare({ user('first'), behind, ahead }, now)
             test.eq(#updates, 1, 'a row older than the lifetime expires although the Host clock is ahead')
             test.eq(updates[1].message_id, 'ahead')
+            test.eq(updates[1].stale, 'Attention observation expired.')
+        end)
+        it('reads a Postgres row date, the server wall clock with a Z suffix, as server-local time', function()
+            local function postgres_date(at) return time.unix(at, 0):format('2006-01-02T15:04:05') .. 'Z' end
+            local fresh, old = observation('fresh'), observation('old', 1, '{"name":"Cancel"}')
+            fresh.date = postgres_date(now - 1)
+            old.date = postgres_date(now - 31)
+            local _, updates = history.prepare({ user('first'), fresh, old }, now)
+            test.eq(#updates, 1)
+            test.eq(updates[1].message_id, 'old')
             test.eq(updates[1].stale, 'Attention observation expired.')
         end)
         it('times context attachments from the server row date and honors a shorter declared lifetime', function()
@@ -167,7 +180,7 @@ local function define_tests()
             projected = history.prepare({ row }, now + 30)
             test.eq(#projected[1].metadata.context_attachments, 0)
             local old = user('old', { skewed })
-            old.date = '2026-09-18T11:59:30Z'
+            old.date = row_date(now - 30)
             projected = history.prepare({ old }, now)
             test.eq(#projected[1].metadata.context_attachments, 0,
                 'a row older than the lifetime drops context although the client clock is ahead')
