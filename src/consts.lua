@@ -38,6 +38,7 @@ local consts = {
     -- Context Keys
     CONTEXT_KEYS = {
         CURRENT_CHECKPOINT_ID = "current_checkpoint_id",
+        CHECKPOINT_REQUESTED = "checkpoint_requested",
         FULL_CONTEXT = "full_context"
     },
 

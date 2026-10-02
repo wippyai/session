@@ -44,10 +44,50 @@ function message_repo.create_batch(session_id, rows)
     if update_result.rows_affected == 0 then
         tx:rollback(); db:release(); return nil, "Session not found"
     end
+    for _, row in ipairs(rows) do
+        if row.type == consts.MSG_TYPE.ASSISTANT and row.metadata and row.metadata.behavior_control_state == "pending" then
+            local sessions, read_err = sql.builder.select("meta"):from("sessions")
+                :where("session_id = ?", session_id):run_with(tx):query()
+            if read_err then tx:rollback(); db:release(); return nil, read_err end
+            local meta, decode_err = json.decode(sessions[1].meta or "{}")
+            if decode_err then tx:rollback(); db:release(); return nil, decode_err end
+            meta.behavior_controls_pending = true
+            local encoded, encode_err = json.encode(meta)
+            if encode_err then tx:rollback(); db:release(); return nil, encode_err end
+            local _, write_err = sql.builder.update("sessions"):set("meta", encoded)
+                :where("session_id = ?", session_id):run_with(tx):exec()
+            if write_err then tx:rollback(); db:release(); return nil, write_err end
+            break
+        end
+    end
     local _, commit_err = tx:commit()
     if commit_err then tx:rollback(); db:release(); return nil, commit_err end
     db:release()
     return true
+end
+
+-- The session metadata flag gates this query; apps without behavior proposals
+-- do not scan history at startup or on ordinary turns.
+function message_repo.list_behavior_rounds(session_id)
+    local db, err = get_db()
+    if not db then return nil, err end
+    local rows, read_err = sql.builder.select("message_id", "metadata"):from("messages")
+        :where("session_id = ?", session_id):where("type = ?", consts.MSG_TYPE.ASSISTANT)
+        :where("metadata LIKE ?", '%"behavior_control_state":"pending"%')
+        :order_by("date ASC, message_id ASC"):run_with(db):query()
+    db:release()
+    if read_err then return nil, read_err end
+    local pending = {}
+    for _, row in ipairs(rows or {}) do
+        local metadata, decode_err = json.decode(row.metadata)
+        if decode_err then return nil, decode_err end
+        if type(metadata) ~= "table" then return nil, "Invalid behavior round metadata" end
+        if metadata.behavior_control_state == "pending" then
+            row.metadata = metadata
+            pending[#pending + 1] = row
+        end
+    end
+    return pending
 end
 
 function message_repo.recover_pending(session_id, anchor_id)

@@ -108,6 +108,13 @@ local function mock_checkpoint_ctx(config)
             end,
         },
         writer = {
+            commit_checkpoint = function(_, op, summary, metadata)
+                captured.message_meta = metadata
+                captured.context_key = "current_checkpoint_id"
+                captured.context_value = op.checkpoint_id
+                captured.summary = summary
+                return true
+            end,
             update_message_meta = function(_, _message_id, meta)
                 captured.message_meta = meta
                 return true
@@ -259,6 +266,57 @@ local function define_tests()
     end)
 
     describe("session checkpoint dispatch", function()
+        it("schedules a persisted compact request without a token threshold", function()
+            local ctx = mock_checkpoint_ctx({ checkpoint_function_id = "host:checkpoint" })
+            ctx.reader.get_context = function(_, key) return key == "checkpoint_requested" and true or nil end
+            local result = session_handlers.check_background_triggers(ctx, {
+                message_id = "settled-assistant", tokens = {}, requested_only = true,
+            })
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].reason, "compaction_requested")
+            test.eq(result.next_ops[1].checkpoint_id, "settled-assistant")
+            test.is_true(result.next_ops[1].clear_request)
+        end)
+
+        it("does not consume compact requests when checkpointing is disabled or unavailable", function()
+            for _, config in ipairs({ {}, { checkpoint = { enabled = false, function_id = "host:checkpoint" } } }) do
+                local ctx = mock_checkpoint_ctx(config)
+                ctx.reader.get_context = function() return true end
+                local result = session_handlers.check_background_triggers(ctx, {
+                    message_id = "settled-assistant", requested_only = true,
+                })
+                test.is_true(result.skipped)
+            end
+        end)
+
+        it("keeps a compact request until summary persistence succeeds", function()
+            local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "host:checkpoint" })
+            session_handlers._funcs = { new = function()
+                return { with_context = function(self) return self end,
+                    call = function() return { summary = "compacted" } end }
+            end }
+            local cleared = false
+            ctx.writer.commit_checkpoint = function() return nil, "disk full" end
+            local op = { checkpoint_id = "settled", message_id = "settled",
+                reason = "compaction_requested", clear_request = true }
+            local result, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(result)
+            test.eq(err, "disk full")
+            test.is_false(cleared)
+            ctx.writer.commit_checkpoint = function(_, checkpoint_op, summary, metadata)
+                test.is_true(checkpoint_op.clear_request)
+                test.eq(summary, "compacted")
+                captured.message_meta = metadata
+                cleared = true
+                return true
+            end
+            result, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.is_true(cleared)
+            test.eq(captured.message_meta.checkpoint_reason, "compaction_requested")
+        end)
+
         before_each(function()
             session_handlers._checkpoint_runtime = nil
             session_handlers._funcs = nil

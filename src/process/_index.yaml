@@ -52,6 +52,7 @@ entries:
     imports:
       consts: wippy.session:consts
       input_policy: wippy.session.process:input_policy
+      behavior_controls: wippy.agent:behavior_controls
 
   # wippy.session.process:message_handlers
   - name: message_handlers

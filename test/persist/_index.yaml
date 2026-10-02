@@ -3,6 +3,28 @@ namespace: app.persist
 
 # Suites for src/persist/.
 entries:
+  - name: checkpoint_repo_test
+    kind: function.lua
+    meta:
+      name: Atomic checkpoint persistence
+      type: test
+      suite: session
+    source: file://checkpoint_repo_test.lua
+    modules: [uuid, json, security]
+    imports:
+      test: wippy.test:test
+      checkpoint_repo: wippy.session.persist:checkpoint_repo
+      writer: wippy.session.persist:writer
+      reader: wippy.session.persist:reader
+      message_handlers: wippy.session.process:message_handlers
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      session_contexts_repo: wippy.session.persist:session_contexts_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
   - name: artifact_repo_test
     kind: function.lua
     meta:

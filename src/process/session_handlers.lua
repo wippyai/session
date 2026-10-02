@@ -200,7 +200,8 @@ function session_handlers.check_background_triggers(ctx, op)
     local tokens = op.tokens
     local message_id = op.message_id
 
-    if not tokens or not message_id then
+    local compact_requested = ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true
+    if (not tokens and not compact_requested) or not message_id then
         return { skipped = true }
     end
 
@@ -215,11 +216,11 @@ function session_handlers.check_background_triggers(ctx, op)
     local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
     -- context_tokens is the full prompt size (uncached input plus cache reads
     -- and writes); prompt_tokens alone counts only the uncached input.
-    local context_tokens = tokens.context_tokens
-    if checkpoint_options.enabled ~= false and checkpoint_available and context_tokens
-        and token_threshold and token_threshold > 0 then
-
-        if context_tokens > token_threshold then
+    local context_tokens = tokens and tokens.context_tokens
+    local threshold_exceeded = not op.requested_only and context_tokens and token_threshold
+        and token_threshold > 0 and context_tokens > token_threshold
+    if checkpoint_options.enabled ~= false and checkpoint_available then
+        if compact_requested or threshold_exceeded then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
@@ -228,6 +229,8 @@ function session_handlers.check_background_triggers(ctx, op)
                 checkpoint_id = anchor_id,
                 message_id = anchor_id,
                 trigger_tokens = context_tokens,
+                reason = compact_requested and "compaction_requested" or "token_threshold_exceeded",
+                clear_request = compact_requested,
                 agent = op.agent,
                 agent_options = op.agent_options,
                 checkpoint_options = checkpoint_options,
@@ -236,7 +239,7 @@ function session_handlers.check_background_triggers(ctx, op)
         end
     end
 
-    if ctx.config.title_function_id and not checkpoint_needed then
+    if ctx.config.title_function_id and not checkpoint_needed and not op.requested_only then
         local has_title = session_data.title and session_data.title ~= ""
 
         if not has_title then
@@ -306,6 +309,8 @@ function session_handlers.create_checkpoint(ctx, op)
     local checkpoint_options = type(op.checkpoint_options) == "table" and op.checkpoint_options
         or resolve_checkpoint_options(ctx, op)
     local checkpoint_function_id = op.checkpoint_function_id or checkpoint_options.function_id
+    if checkpoint_options.enabled == false then return { skipped = true } end
+    local reason = op.reason or "token_threshold_exceeded"
 
     if not op.checkpoint_id then
         return nil, "Checkpoint ID required"
@@ -334,7 +339,7 @@ function session_handlers.create_checkpoint(ctx, op)
         }, {
             host = host,
             agent = agent,
-            reason = "token_threshold_exceeded",
+            reason = reason,
             selector = {
                 mode = "since_checkpoint"
             },
@@ -387,7 +392,7 @@ function session_handlers.create_checkpoint(ctx, op)
 
     local checkpoint_metadata = {
         checkpoint_summary = result.summary,
-        checkpoint_reason = "token_threshold_exceeded",
+        checkpoint_reason = reason,
         checkpoint_id = op.checkpoint_id,
         trigger_tokens = op.trigger_tokens or 0,
         checkpoint_generated_at = time.now():format(time.RFC3339),
@@ -396,44 +401,9 @@ function session_handlers.create_checkpoint(ctx, op)
         checkpoint_binding_metadata = checkpoint_binding_metadata
     }
 
-    local success, err = ctx.writer:update_message_meta(op.message_id, checkpoint_metadata)
-    if not success then
-        return nil, err
-    end
-
-    local session_data = ctx.reader:state()
-    local current_meta = session_data.meta or {}
-
-    if not current_meta.checkpoints or type(current_meta.checkpoints) ~= "table" then
-        current_meta.checkpoints = {}
-    end
-
-    table.insert(current_meta.checkpoints, {
-        checkpoint_id = op.checkpoint_id,
-        message_id = op.message_id,
-        created_at = time.now():format(time.RFC3339),
-        trigger_tokens = op.trigger_tokens or 0,
-        checkpoint_tokens = result.tokens or {}
-    })
-
-    local meta_success, meta_err = ctx.writer:update_meta({ meta = { checkpoints = current_meta.checkpoints } })
-    if not meta_success then
-        return nil, "Failed to update checkpoint meta: " .. (meta_err or "unknown error")
-    end
-
-    local success1, err1 = ctx.writer:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, op.checkpoint_id)
-    if not success1 then
-        return nil, err1
-    end
-
+    local committed, commit_err = ctx.writer:commit_checkpoint(op, result.summary, checkpoint_metadata)
+    if not committed then return nil, commit_err end
     ctx.reader:reset()
-
-    ctx.writer:delete_session_contexts_by_type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY)
-
-    local summary_id, ctx_err = ctx.writer:add_session_context(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY, result.summary)
-    if ctx_err then
-        return nil, ctx_err
-    end
 
     local next_ops = {}
     if ctx.config.title_function_id then

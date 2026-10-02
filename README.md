@@ -94,6 +94,31 @@ expire or miss, and cached reads still have a cost. Checkpointing shortens the
 active prompt after a successful summary; neither mechanism is a hard spending
 limit or a preflight guarantee against one oversized tool result.
 
+## Durable behavior controls
+
+Opt-in trait behaviors can propose the shared declarative `_control` subset:
+agent/model/trait/tool targets, session/public metadata, and `memory.compact`.
+The response and its pending proposal marker are saved atomically. Tool and
+delegation outcomes settle before a proposal takes effect. Recovery replays
+persisted proposals without rerunning tools or taking another model step;
+explicitly cancelled tool rounds do not apply their proposals.
+
+Replay is at-least-once: a crash between a declarative effect and its completion
+marker can repeat it. External providers and lifecycle hooks must use stable
+refs and idempotent writes, not rely on a final `deactivate` callback.
+
+`memory.compact = true` persists a request that bypasses the token threshold,
+not an explicit disable or a missing provider. False is not cancellation.
+When a proposal also changes configuration, requested compaction captures the
+committed agent/provider, not the old response's settings. An agent handoff
+ends the old turn; accepted steering and compact requests remain persisted for
+the next user turn, without automatically dispatching the replacement agent.
+Summary replacement, history anchor, audit metadata and request consumption
+commit in one transaction; failed writes retain the previous usable history.
+This does not install a long-term memory provider or a loop policy. Sessions
+without opted-in behaviors do not scan history for proposals or start new
+automatic model continuations.
+
 ## Artifacts
 
 An artifact is generated content that outlives the message that produced it. A

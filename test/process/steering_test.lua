@@ -2,6 +2,7 @@ local test = require("test")
 local consts = require("consts")
 local handlers = require("message_handlers")
 local prompt_builder = require("prompt_builder")
+local session_handlers = require("session_handlers")
 
 local function pending(id, date)
     return { message_id = id, date = date or "2026-01-01T00:00:00Z", type = consts.MSG_TYPE.USER,
@@ -140,6 +141,70 @@ local function fixture(rows)
     return ctx, rows, events, applied
 end
 
+local function tool_boundary_fixture()
+    local ctx, rows, events, applied = fixture({
+        { message_id = "start", type = consts.MSG_TYPE.USER, data = "original task", metadata = {} },
+        { message_id = "assistant", type = consts.MSG_TYPE.ASSISTANT, data = "working", metadata = {} },
+    })
+    local calls, ids, validated = {}, {}, {}
+    for index = 1, 2 do
+        local id = "call-" .. tostring(index)
+        local message_id = "tool-" .. tostring(index)
+        calls[index] = { id = id, name = "lookup", arguments = "{}", registry_id = "app:lookup" }
+        ids[id] = message_id
+        validated[id] = { valid = true, name = "lookup", args = {}, registry_id = "app:lookup", meta = {} }
+        rows[#rows + 1] = { message_id = message_id, type = consts.MSG_TYPE.FUNCTION, data = "{}",
+            metadata = { call_id = id, function_name = "lookup", status = consts.FUNC_STATUS.PENDING } }
+    end
+    ctx.status = "running"
+    ctx.turn_state = { active = true, message_id = "start", steps = 1, repeated_calls = 0 }
+    local context = {}
+    ctx.reader.get_context = function(_, key) return context[key] end
+    ctx.reader.get_full_context = function() return context end
+    ctx.writer.set_context = function(_, key, value)
+        test.eq(rows[3].metadata.status, consts.FUNC_STATUS.SUCCESS)
+        test.eq(rows[4].metadata.status, consts.FUNC_STATUS.SUCCESS)
+        context[key] = value
+        events[#events + 1] = "control"
+        return true
+    end
+    ctx.agent_ctx.get_current_agent = function() return ctx.current_agent end
+    ctx.agent_ctx.switch_to_model = function(_, model)
+        test.eq(rows[3].metadata.status, consts.FUNC_STATUS.SUCCESS)
+        test.eq(rows[4].metadata.status, consts.FUNC_STATUS.SUCCESS)
+        ctx.current_agent.model = model
+        return true
+    end
+    local op = {
+        message_id = "start", checkpoint_anchor_id = "assistant",
+        tool_calls = calls, call_message_ids = ids, validated_tools = validated,
+        agent = { id = ctx.current_agent.id, model = ctx.current_agent.model, agent_options = {} },
+        behavior_round = true,
+        behavior_controls = {{
+            config = { model = "model:next" },
+            context = { session = { set = { project = "steered" } } },
+            memory = { compact = true },
+        }},
+        caller = {
+            set_strategy = function() end,
+            execute = function()
+                local admitted, err = handlers.handle_message(ctx, {
+                    data = { text = "use the new plan" }, request_id = "steer-between-tools",
+                })
+                test.is_nil(err)
+                test.is_true(admitted.completed, "mid-tool input must not dispatch another turn")
+                test.eq(rows[#rows].metadata.input.state, "pending")
+                if ctx.stop_between_tools then ctx.stop_requested = true end
+                return {
+                    ["call-1"] = { result = "first outcome", tool_call = validated["call-1"] },
+                    ["call-2"] = { result = "second outcome", tool_call = validated["call-2"] },
+                }
+            end,
+        },
+    }
+    return ctx, rows, events, applied, op, context
+end
+
 local function define_tests()
     describe("steering lifecycle", function()
         it("commits idle admission before receipt and request acknowledgement", function()
@@ -204,6 +269,105 @@ local function define_tests()
             test.is_nil(rows[1].metadata.input.after_message_id)
             local acknowledgement = test.not_nil(ctx.ack, "pending input receipt is captured")
             test.eq(acknowledgement.request_id, "request-2")
+        end)
+
+        it("settles both tools before controls, compaction and exactly one steered model continuation", function()
+            local ctx, rows, events, applied, op, context = tool_boundary_fixture()
+            local result, err = handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.eq(#result.next_ops, 2)
+            local check, continuation = result.next_ops[1], result.next_ops[2]
+            test.eq(check.type, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
+            test.eq(continuation.type, consts.OP_TYPE.AGENT_CONTINUE)
+            test.eq(check.agent.model, "model:next", "requested compaction uses the committed configuration")
+            test.is_true(context[consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED])
+            test.eq(rows[5].metadata.input.state, "pending", "compaction scheduling cannot consume steering")
+            test.eq(rows[2].metadata.behavior_control_state, "applied")
+
+            ctx.config.checkpoint = { function_id = "app:checkpoint" }
+            local triggered, trigger_err = session_handlers.check_background_triggers(ctx, check)
+            test.is_nil(trigger_err)
+            test.eq(triggered.next_ops[1].agent.model, "model:next")
+            local continued, continue_err = handlers.agent_continue(ctx, continuation)
+            test.is_nil(continue_err)
+            test.not_nil(continued)
+            test.eq(#applied, 1)
+            test.eq(rows[5].metadata.input.state, "applied")
+            local results, steering, model_calls = {}, 0, 0
+            for index, message in ipairs(ctx.prompt) do
+                if message.function_call_id then results[message.function_call_id] = index end
+                if message.role == "user" and message.content[1].text == "use the new plan" then
+                    steering = steering + 1
+                    test.not_nil(results["call-1"])
+                    test.not_nil(results["call-2"])
+                    test.lt(results["call-1"], index)
+                    test.lt(results["call-2"], index)
+                end
+            end
+            for _, event in ipairs(events) do if event == "model" then model_calls = model_calls + 1 end end
+            test.eq(steering, 1)
+            test.eq(model_calls, 1)
+            local finished, finish_err = handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.eq(#finished.next_ops, 0, "no duplicate dispatch after consuming steering")
+        end)
+
+        it("keeps mid-tool steering pending and cancels behavior proposals when Stop wins", function()
+            local ctx, rows, events, _, op, context = tool_boundary_fixture()
+            ctx.stop_between_tools = true
+            local result, err = handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.eq(#result.next_ops, 0)
+            test.eq(rows[3].metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq(rows[4].metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.eq(rows[5].metadata.input.state, "pending")
+            test.eq(rows[2].metadata.behavior_control_state, "cancelled")
+            test.is_nil(context.project)
+            test.is_nil(context[consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED])
+            test.eq(ctx.config.model, "model:test")
+            for _, event in ipairs(events) do test.is_false(event == "model" or event == "control") end
+        end)
+
+        it("preserves accepted steering and compact across agent handoff until the next user turn", function()
+            local ctx, rows, _, _, op, context = tool_boundary_fixture()
+            op.behavior_controls[1].config = { agent = "agent:next" }
+            ctx.agent_ctx.switch_to_agent = function(_, id)
+                test.eq(rows[3].metadata.status, consts.FUNC_STATUS.SUCCESS)
+                test.eq(rows[4].metadata.status, consts.FUNC_STATUS.SUCCESS)
+                ctx.current_agent.id = id
+                ctx.agent_ctx.current_model = "model:test"
+                return true
+            end
+            local processed, err = handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.eq(#processed.next_ops, 0, "handoff must not continue the old agent turn")
+            test.eq(rows[5].metadata.input.state, "pending")
+            test.is_true(context[consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED])
+            local finished, finish_err = handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.eq(#finished.next_ops, 0)
+            test.eq(ctx.status, "idle")
+            local admitted, admit_err = handlers.handle_message(ctx, {
+                data = { text = "resume" }, request_id = "next-turn",
+            })
+            test.is_nil(admit_err)
+            local stepped, step_err = handlers.agent_step(ctx, admitted.next_ops[1])
+            test.is_nil(step_err)
+            test.not_nil(stepped)
+            test.eq(ctx.config.agent_id, "agent:next")
+            test.eq(rows[5].metadata.input.state, "applied")
+            local occurrences = 0
+            for _, message in ipairs(ctx.prompt) do
+                if message.role == "user" then
+                    -- The canonical prompt library coalesces adjacent user text.
+                    for _, part in ipairs(message.content or {}) do
+                        if type(part.text) == "string" then
+                            for _ in string.gmatch(part.text, "use the new plan") do occurrences = occurrences + 1 end
+                        end
+                    end
+                end
+            end
+            test.eq(occurrences, 1)
         end)
 
         it("orders one applied batch by date then server message ID", function()

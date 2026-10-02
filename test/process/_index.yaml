@@ -224,5 +224,6 @@ entries:
       input_policy: wippy.session.process:input_policy
       message_handlers: wippy.session.process:message_handlers
       prompt_builder: wippy.session:prompt_builder
+      session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
     method: run_tests

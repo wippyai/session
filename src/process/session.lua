@@ -501,6 +501,12 @@ local function run(args: SessionArgs)
             args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
     end
 
+    if not args.create then
+        session_reader:reset()
+        local policies_ok, policies_err = message_handlers.recover_behavior_controls(context)
+        if not policies_ok then error("Failed to recover behavior policies: " .. tostring(policies_err)) end
+    end
+
     session_upstream:update_session({
         agent = context.config.agent_id,
         model = context.config.model,

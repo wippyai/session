@@ -350,6 +350,201 @@ local function define_tests()
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 2)
         end)
     end)
+    describe("behavior control settlement", function()
+        after_each(function() message_handlers._lifecycle_runtime = nil end)
+
+        it("replays stored policies after settled outcomes without executing tools or taking another model step", function()
+            local ctx = mock_ctx(fake_agent())
+            local pending = true
+            local round = { message_id = "round", metadata = {
+                behavior_control_state = "pending", behavior_call_message_ids = { call = "tool-message" },
+                behavior_controls = {{ context = { session = { set = { project = "persisted" } } } }},
+            } }
+            local status = consts.FUNC_STATUS.PENDING
+            local writes, attempts = 0, 0
+            ctx.reader.state = function() return { meta = { behavior_controls_pending = pending } } end
+            ctx.reader.list_behavior_rounds = function()
+                return round.metadata.behavior_control_state == "pending" and { round } or {}
+            end
+            ctx.reader.get_behavior_call = function() return { metadata = { status = status } } end
+            ctx.writer.set_context = function(_, key, value)
+                test.eq(key, "project")
+                test.eq(value, "persisted")
+                writes = writes + 1
+                return true
+            end
+            ctx.writer.update_message_meta = function(_, _, metadata)
+                attempts = attempts + 1
+                if attempts == 1 then return nil, "completion write interrupted" end
+                round.metadata.behavior_control_state = metadata.behavior_control_state
+                return true
+            end
+            ctx.writer.update_meta = function() pending = false; return true end
+            local recovered, err = message_handlers.recover_behavior_controls(ctx)
+            test.is_nil(recovered)
+            test.contains(tostring(err), "unsettled")
+            test.eq(writes, 0)
+            status = consts.FUNC_STATUS.ERROR
+            recovered, err = message_handlers.recover_behavior_controls(ctx)
+            test.is_nil(recovered)
+            test.eq(err, "completion write interrupted")
+            test.is_true(pending)
+            recovered, err = message_handlers.recover_behavior_controls(ctx)
+            test.is_nil(err)
+            test.is_true(recovered)
+            test.eq(writes, 2, "an interrupted completion marker permits idempotent replay")
+            test.eq(round.metadata.behavior_control_state, "applied")
+            test.is_false(pending)
+            message_handlers.recover_behavior_controls(ctx)
+            test.eq(writes, 2, "completed controls are not replayed again")
+        end)
+
+        it("does not replay proposals for an explicitly cancelled tool round", function()
+            local ctx = mock_ctx(fake_agent())
+            ctx.reader.state = function() return { meta = { behavior_controls_pending = true } } end
+            ctx.reader.list_behavior_rounds = function()
+                return {{ message_id = "round", metadata = {
+                    behavior_call_message_ids = { call = "cancelled-call" },
+                    behavior_controls = {{ context = { session = { set = { must_not_run = true } } } }},
+                } }}
+            end
+            ctx.reader.get_behavior_call = function() return { metadata = { status = consts.FUNC_STATUS.CANCELLED } } end
+            ctx.writer.set_context = function() error("cancelled policy applied") end
+            local state
+            ctx.writer.update_message_meta = function(_, _, metadata) state = metadata.behavior_control_state; return true end
+            local recovered, err = message_handlers.recover_behavior_controls(ctx)
+            test.is_nil(err)
+            test.is_true(recovered)
+            test.eq(state, "cancelled")
+        end)
+
+        it("refuses recovery when a persisted call has no recognized settlement status", function()
+            for _, metadata in ipairs({ {}, { status = "running" }, { status = "unknown" } }) do
+                local ctx = mock_ctx(fake_agent())
+                ctx.reader.state = function() return { meta = { behavior_controls_pending = true } } end
+                ctx.reader.list_behavior_rounds = function()
+                    return {{ message_id = "round", metadata = {
+                        behavior_call_message_ids = { call = "tool-message" },
+                        behavior_controls = {{ context = { session = { set = { must_not_run = true } } } }},
+                    } }}
+                end
+                ctx.reader.get_behavior_call = function() return { metadata = metadata } end
+                ctx.writer.set_context = function() error("unsettled policy applied") end
+                ctx.writer.update_message_meta = function() error("unsettled policy completed") end
+                local recovered, err = message_handlers.recover_behavior_controls(ctx)
+                test.is_nil(recovered)
+                test.contains(tostring(err), "unsettled")
+            end
+        end)
+
+        it("applies policy context only after every tool outcome is recorded", function()
+            local agent = fake_agent()
+            agent.bindings = { lifecycle = {} }
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "after_step" then
+                        return { controls = {{ context = { session = { set = { policy_seen = true } } } }} }
+                    end
+                    return {}
+                end,
+            }
+            local ctx, captured = mock_ctx(agent)
+            local context_writes = 0
+            ctx.writer.set_context = function(_self, key, value)
+                local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
+                test.eq(#calls, 1)
+                test.eq(calls[1].metadata.status, consts.FUNC_STATUS.ERROR)
+                test.eq(key, "policy_seen")
+                test.is_true(value)
+                context_writes = context_writes + 1
+                return true
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.eq(context_writes, 0)
+            local op = find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+            op.caller = {
+                set_strategy = function() end,
+                execute = function()
+                    return { ["call-1"] = { error = "expected failure", tool_call = {
+                        name = "pack_document", registry_id = "app:pack_document", meta = {},
+                    } } }
+                end,
+            }
+            local processed, process_err = message_handlers.process_tools(ctx, op)
+            test.is_nil(process_err)
+            test.not_nil(processed)
+            test.eq(context_writes, 1)
+        end)
+
+        it("records a text answer before controls and does not schedule another model step", function()
+            local agent = fake_agent()
+            agent.bindings = { lifecycle = {} }
+            agent.step = function() return { result = "done" } end
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "after_step" then
+                        return { controls = {{ context = { session = { set = { policy_seen = true } } } }} }
+                    end
+                    return {}
+                end,
+            }
+            local ctx, captured = mock_ctx(agent)
+            local writes = 0
+            ctx.writer.set_context = function()
+                test.eq(#captured.assistant_ids, 1)
+                writes = writes + 1
+                return true
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.eq(writes, 1)
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.AGENT_CONTINUE)))
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+        end)
+
+        it("captures the post-control provider for compaction after a final text answer", function()
+            local agent = fake_agent()
+            agent.bindings = { lifecycle = {} }
+            agent.agent_options.checkpoint = { enabled = false }
+            agent.step = function() return { result = "done" } end
+            local next_agent = fake_agent()
+            next_agent.model = "model:next"
+            next_agent.agent_options.checkpoint = { function_id = "app:next_checkpoint" }
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "after_step" then
+                        return { controls = {{ config = { model = "model:next" }, memory = { compact = true } }} }
+                    end
+                    return {}
+                end,
+            }
+            local ctx, captured = mock_ctx(agent)
+            local active, requested = agent, false
+            ctx.agent_ctx.get_current_agent = function() return active end
+            ctx.agent_ctx.switch_to_model = function() active = next_agent; return true end
+            ctx.writer.set_context = function(_, key)
+                test.eq(#captured.assistant_ids, 1)
+                test.eq(key, consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED)
+                requested = true
+                return true
+            end
+            ctx.reader.get_context = function(_, key)
+                return key == consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED and requested or nil
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_nil((find_op(result.next_ops, consts.OP_TYPE.AGENT_CONTINUE)))
+            local check = find_op(result.next_ops, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
+            test.not_nil(check)
+            test.eq(check.agent.model, "model:next")
+            test.eq(check.agent_options.checkpoint.function_id, "app:next_checkpoint")
+            local triggered, trigger_err = session_handlers.check_background_triggers(ctx, check)
+            test.is_nil(trigger_err)
+            test.is_true(triggered.checkpoint_triggered)
+        end)
+    end)
+
     describe("checkpoint trigger inside a tool loop", function()
         it("queues the background trigger check on the first step of a user turn, anchored on the user's message", function()
             local ctx = mock_ctx(fake_agent(PROMPT_TOKENS_OVER_THRESHOLD))
