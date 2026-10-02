@@ -166,6 +166,44 @@ local function define_tests()
             test.not_nil(session.attention_context.updated_at)
         end)
 
+        it("should report no change time for a session that predates the Attention columns", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Migrated session", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local db = assert(sql.get(consts.get_db_resource()))
+            assert(db:execute("UPDATE sessions SET attention_updated_at = '' WHERE session_id = $1", { session_id }))
+            db:release()
+
+            local session, err = session_repo.get(session_id)
+            test.is_nil(err)
+            test.is_false(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 0)
+            test.is_nil(session.attention_context.updated_at)
+            session_repo.delete(session_id)
+        end)
+
+        it("should not change another user's Attention state", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Owned session", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local state, err = session_repo.update_attention_context(session_id, true, 0, "user", "someone-else")
+            test.is_nil(state)
+            test.eq(err, "SESSION_NOT_FOUND")
+            local unchanged = session_repo.get(session_id)
+            test.is_false(unchanged.attention_context.enabled)
+            test.eq(unchanged.attention_context.revision, 0)
+
+            state, err = session_repo.update_attention_context(session_id, true, 0, "user", test_data.user_id)
+            test.is_nil(err)
+            test.is_true(state.enabled)
+            session_repo.delete(session_id)
+        end)
+
         it("should create and read back an enabled Attention state", function()
             local session_id = uuid.v7()
             local session, err = session_repo.create(

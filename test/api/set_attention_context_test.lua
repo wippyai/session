@@ -52,7 +52,12 @@ local function define_tests()
                 end,
             }
             api._session_repo = {
-                update_attention_context = function(session_id, enabled, expected_revision, updated_by)
+                get = function(session_id, user_id)
+                    result.owner_lookup = { session_id = session_id, user_id = user_id }
+                    if options.owner_err then return nil, options.owner_err end
+                    return { session_id = session_id, user_id = user_id }
+                end,
+                update_attention_context = function(session_id, enabled, expected_revision, updated_by, owner_id)
                     result.updates = result.updates + 1
                     result.persisted = true
                     result.update = {
@@ -60,6 +65,7 @@ local function define_tests()
                         enabled = enabled,
                         expected_revision = expected_revision,
                         updated_by = updated_by,
+                        owner_id = owner_id,
                     }
                     if options.update_err then
                         return nil, options.update_err, options.current
@@ -112,6 +118,24 @@ local function define_tests()
             test.eq(result.updates, 0)
         end)
 
+        it('hides a session owned by another user and changes nothing', function()
+            local result = install({ actor_id = 'actor-other', owner_err = 'Session not found', session_pid = 'session-pid' })
+            api.handler()
+            test.eq(result.status, 404)
+            test.eq(result.body.error.code, 'SESSION_NOT_FOUND')
+            test.eq(result.owner_lookup.user_id, 'actor-other')
+            test.eq(result.updates, 0)
+            test.eq(result.sends, 0)
+        end)
+
+        it('reports storage failure during the ownership check as unavailable', function()
+            local result = install({ owner_err = 'Failed to get session: database locked' })
+            api.handler()
+            test.eq(result.status, 503)
+            test.eq(result.body.error.code, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE')
+            test.eq(result.updates, 0)
+        end)
+
         it('rejects enablement when Attention version 4 is unavailable', function()
             local result = install({ capable = false })
             api.handler()
@@ -131,6 +155,7 @@ local function define_tests()
             test.eq(result.updates, 1)
             test.eq(result.update.enabled, false)
             test.eq(result.update.expected_revision, 3)
+            test.eq(result.update.owner_id, 'actor-http')
             test.eq(result.sends, 1)
             test.eq(result.topic, 'attention-updated')
             test.is_false(result.payload.attention_context.enabled)

@@ -104,6 +104,12 @@ entries:
       comment: File-backed SQLite, recreated on every run by `make test`. A plain in-memory DB gives each pooled connection its own empty database, so the schema can vanish under parallel test connections.
     file: ./.wippy/test.db
 
+  - name: migration_probe_db
+    kind: db.sql.sqlite
+    meta:
+      comment: Disposable database for migration tests; each test recreates the tables it needs.
+    file: ./.wippy/migration-probe.db
+
   - name: env_storage
     kind: env.storage.file
     meta:

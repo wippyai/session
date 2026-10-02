@@ -38,6 +38,16 @@ local function handler()
     if not api._security.can('write', 'session:' .. session_id) then
         return respond(res, 403, 'SESSION_FORBIDDEN', 'Session access is not allowed')
     end
+    -- The permission grant covers session resources in general; only the owner
+    -- may change this session's state. Other users get the same 404 as a
+    -- missing session.
+    local owned, owner_err = api._session_repo.get(session_id, actor:id())
+    if not owned then
+        if owner_err == 'Session not found' then
+            return respond(res, 404, 'SESSION_NOT_FOUND', 'Session not found')
+        end
+        return respond(res, 503, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE', 'Attention context storage is unavailable')
+    end
 
     local body, body_err = req:body_json()
     if body_err or type(body) ~= 'table' then
@@ -61,7 +71,7 @@ local function handler()
     end
 
     local state, update_err, current = api._session_repo.update_attention_context(
-        session_id, body.enabled, body.expected_revision, actor:id()
+        session_id, body.enabled, body.expected_revision, actor:id(), actor:id()
     )
     if not state then
         if update_err == 'ATTENTION_CONTEXT_REVISION_CONFLICT' then

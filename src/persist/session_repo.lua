@@ -35,7 +35,8 @@ local function attention_context(enabled, revision, updated_at, updated_by)
         schema = 'wippy.attention.session.v1',
         enabled = enabled == true or enabled == 1 or enabled == '1' or enabled == 'true',
         revision = tonumber(revision) or 0,
-        updated_at = updated_at,
+        -- Sessions that predate the column store '' and have no change time.
+        updated_at = updated_at ~= '' and updated_at or nil,
         updated_by = updated_by or 'system',
     }
 end
@@ -340,7 +341,9 @@ function session_repo.list_by_user(user_id, limit, offset)
     return sessions
 end
 
-function session_repo.update_attention_context(session_id, enabled, expected_revision, updated_by)
+-- owner_id, when given, limits the change to that user's session; another
+-- user's session reads as SESSION_NOT_FOUND.
+function session_repo.update_attention_context(session_id, enabled, expected_revision, updated_by, owner_id)
     if not session_id or session_id == '' then
         return nil, 'INVALID_SESSION_ID'
     end
@@ -353,6 +356,9 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     if type(updated_by) ~= 'string' or updated_by == '' then
         return nil, 'INVALID_ATTENTION_CONTEXT_UPDATED_BY'
     end
+    if owner_id ~= nil and (type(owner_id) ~= 'string' or owner_id == '') then
+        return nil, 'INVALID_ATTENTION_CONTEXT_OWNER'
+    end
 
     local db, err = get_db()
     if err then return nil, err end
@@ -362,9 +368,11 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
         return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
     end
 
-    local current_rows, read_err = sql.builder.select(
+    local current_query = sql.builder.select(
         'attention_enabled', 'attention_revision', 'attention_updated_at', 'attention_updated_by'
-    ):from('sessions'):where('session_id = ?', session_id):limit(1):run_with(tx):query()
+    ):from('sessions'):where('session_id = ?', session_id)
+    if owner_id then current_query = current_query:where('user_id = ?', owner_id) end
+    local current_rows, read_err = current_query:limit(1):run_with(tx):query()
     if read_err then
         tx:rollback()
         db:release()
@@ -393,12 +401,14 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
 
     local now = time.now():format(time.RFC3339)
     local next_revision = current_revision + 1
-    local result, update_err = sql.builder.update('sessions'):set_map({
+    local update = sql.builder.update('sessions'):set_map({
         attention_enabled = enabled,
         attention_revision = next_revision,
         attention_updated_at = now,
         attention_updated_by = updated_by,
-    }):where('session_id = ?', session_id):where('attention_revision = ?', current_revision):run_with(tx):exec()
+    }):where('session_id = ?', session_id):where('attention_revision = ?', current_revision)
+    if owner_id then update = update:where('user_id = ?', owner_id) end
+    local result, update_err = update:run_with(tx):exec()
     if update_err or not result or result.rows_affected ~= 1 then
         tx:rollback()
         db:release()

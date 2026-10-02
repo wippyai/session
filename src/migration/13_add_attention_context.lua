@@ -8,8 +8,11 @@ return require('migration').define(function()
                 _, err = db:execute([[ALTER TABLE sessions
                     ADD COLUMN attention_revision BIGINT NOT NULL DEFAULT 0]])
                 if err then error(err) end
+                -- SQLite refuses a non-constant default when the table already has
+                -- rows. Existing sessions get '' (never changed); new sessions are
+                -- stamped by session_repo.create.
                 _, err = db:execute([[ALTER TABLE sessions
-                    ADD COLUMN attention_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP]])
+                    ADD COLUMN attention_updated_at TEXT NOT NULL DEFAULT '']])
                 if err then error(err) end
                 _, err = db:execute([[ALTER TABLE sessions
                     ADD COLUMN attention_updated_by TEXT NOT NULL DEFAULT 'system']])

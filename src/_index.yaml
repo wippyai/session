@@ -19,6 +19,10 @@ entries:
         path: .meta.router
       - entry: wippy.session.api:get_capabilities.endpoint
         path: .meta.router
+      - entry: wippy.session.api:set_attention_context
+        path: .meta.router
+      - entry: wippy.session.api:set_attention_context.endpoint
+        path: .meta.router
       - entry: wippy.session.api:delete_session
         path: .meta.router
       - entry: wippy.session.api:context_staging
