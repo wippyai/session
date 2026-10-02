@@ -5,5 +5,6 @@ entries:
   - name: upload_repo
     kind: library.lua
     meta:
+      scope: dev
       comment: Stub upload repository for testing
     source: file://upload_repo.lua

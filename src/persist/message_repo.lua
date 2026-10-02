@@ -23,7 +23,6 @@ type MessageList = {
 
 local message_repo = {}
 local context_staging = require('context_staging_repo')
-local dispatches = require('dispatch_repo')
 
 local function same_receipt(stored, incoming)
     if type(stored) ~= 'table' or type(incoming) ~= 'table'
@@ -181,13 +180,6 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, r
         return nil, "Failed to create message: " .. err
     end
 
-    local dispatch
-    if msg_type == 'user' then
-        local dispatch_err
-        dispatch, dispatch_err = dispatches.enqueue_in_transaction(tx, message_id, session_id, request_id)
-        if not dispatch then tx:rollback(); db:release(); return nil, dispatch_err end
-    end
-
     -- Build the UPDATE query for session's last message date
     local update_query = sql.builder.update("sessions")
         :set("last_message_date", now)
@@ -228,7 +220,6 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, r
         request_id = request_id,
         request_hash = request_hash,
         duplicate = false,
-        dispatch = dispatch,
     }
 end
 

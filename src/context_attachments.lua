@@ -1070,4 +1070,12 @@ end
 -- direct alias so validation and model projection cannot drift independently.
 context_attachments.render = renderer.render
 
+-- Private inspection uses the same structural and observation field contracts.
+context_attachments.attention_fields = {
+    path = is_path,
+    selection = is_selection,
+    event = is_observed_event,
+    timestamp = is_timestamp,
+}
+
 return context_attachments

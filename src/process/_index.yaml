@@ -2,19 +2,45 @@ version: "1.0"
 namespace: wippy.session.process
 
 entries:
-  - name: dispatch_action_intents
+  - name: attention_history_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://attention_history_test.lua
+    imports:
+      attention_history: wippy.session.process:attention_history
+      test: wippy.test:test
+    method: run
+
+  - name: attention_action_intents_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://attention_action_intents_test.lua
+    imports:
+      attention_action_intents: wippy.session.process:attention_action_intents
+      test: wippy.test:test
+    method: run
+
+  - name: attention_history
     kind: library.lua
-    source: file://dispatch_action_intents.lua
+    source: file://attention_history.lua
+    modules: [json, time]
+    imports:
+      attention_read: wippy.agent.tools:attention_read
+      prompt_builder: wippy.session:prompt_builder
+
+  - name: attention_action_intents
+    kind: library.lua
+    source: file://attention_action_intents.lua
     modules: [uuid, time]
 
-  - name: dispatch_runtime
+  - name: attention_turn_runtime
     kind: library.lua
-    source: file://dispatch_runtime.lua
-    modules: [json, uuid, time]
-    imports:
-      dispatch_repo: wippy.session.persist:dispatch_repo
-      dispatch_writer: wippy.session.persist:dispatch_writer
-      consts: wippy.session:consts
+    source: file://attention_turn_runtime.lua
+    modules: [uuid, time]
 
   - name: attention_control_runtime
     kind: library.lua
@@ -28,17 +54,6 @@ entries:
     source: file://attention_control_runtime_test.lua
     imports:
       attention_control_runtime: wippy.session.process:attention_control_runtime
-      test: wippy.test:test
-    method: run
-
-  - name: dispatch_action_intents_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-    source: file://dispatch_action_intents_test.lua
-    imports:
-      dispatch_action_intents: wippy.session.process:dispatch_action_intents
       test: wippy.test:test
     method: run
 
@@ -67,7 +82,6 @@ entries:
     modules: [time, logger]
     imports:
       context_staging_repo: wippy.session.persist:context_staging_repo
-      dispatch_repo: wippy.session.persist:dispatch_repo
     method: run
 
   - name: context_cleanup_runtime
@@ -76,7 +90,6 @@ entries:
     modules: [time, logger]
     imports:
       context_staging_repo: wippy.session.persist:context_staging_repo
-      dispatch_repo: wippy.session.persist:dispatch_repo
 
   - name: context_cleanup.service
     kind: process.service
@@ -107,7 +120,6 @@ entries:
       description: Handles communication between session process and upstream systems
     source: file://upstream.lua
     imports:
-      dispatch_repo: wippy.session.persist:dispatch_repo
       consts: wippy.session:consts
 
   # wippy.session.process:session_handlers
@@ -183,7 +195,6 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
-      dispatch_repo: wippy.session.persist:dispatch_repo
       tool_caller: wippy.agent.tools:caller
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
@@ -213,6 +224,8 @@ entries:
     source: file://ui_action_broker.lua
     modules:
       - hash
+    imports:
+      context_attachments: wippy.session:context_attachments
 
   - name: ui_action_broker_test
     kind: function.lua
@@ -223,6 +236,7 @@ entries:
     source: file://ui_action_broker_test.lua
     modules:
       - hash
+      - json
     imports:
       ui_action_broker: wippy.session.process:ui_action_broker
       test: wippy.test:test
@@ -242,8 +256,8 @@ entries:
       - uuid
       - hash
     imports:
-      dispatch_runtime: wippy.session.process:dispatch_runtime
-      dispatch_repo: wippy.session.persist:dispatch_repo
+      attention_turn_runtime: wippy.session.process:attention_turn_runtime
+      attention_history: wippy.session.process:attention_history
       consts: wippy.session:consts
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
@@ -277,12 +291,12 @@ entries:
       - logger
       - funcs
     imports:
+      message_repo: wippy.session.persist:message_repo
       consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       start_tokens: wippy.session:start_tokens
-      dispatch_repo: wippy.session.persist:dispatch_repo
-      dispatch_action_intents: wippy.session.process:dispatch_action_intents
+      attention_action_intents: wippy.session.process:attention_action_intents
       ui_action_broker: wippy.session.process:ui_action_broker
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder

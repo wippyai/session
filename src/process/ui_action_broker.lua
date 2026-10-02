@@ -1,3 +1,4 @@
+local context_attachments = require("context_attachments")
 local ui_action_broker = {}
 ui_action_broker.__index = ui_action_broker
 
@@ -8,6 +9,16 @@ local MAX_REQUEST_CACHE = 1024
 local RESULT_TOPIC_PREFIX = "session_ui_action_result:"
 
 local TOOL_MODES = {
+    ["wippy.agent.tools:attention_inspect"] = "inspect",
+    ["wippy.agent.tools:attention_find_semantic"] = "inspect",
+    ["wippy.agent.tools:attention_find_css"] = "inspect",
+    ["wippy.agent.tools:attention_get_node"] = "inspect",
+    ["wippy.agent.tools:attention_get_tree"] = "inspect",
+    ["wippy.agent.tools:attention_get_geometry"] = "inspect",
+    ["wippy.agent.tools:attention_get_cursor"] = "inspect",
+    ["wippy.agent.tools:attention_get_focus"] = "inspect",
+    ["wippy.agent.tools:attention_get_selection"] = "inspect",
+    ["wippy.agent.tools:attention_hit_test"] = "inspect",
     ["wippy.agent.tools:ui_action_highlight"] = "highlight",
     ["wippy.agent.tools:ui_action_confirm"] = "confirm",
     ["wippy.agent.tools:ui_action_capture_visual"] = "capture_visual",
@@ -15,6 +26,7 @@ local TOOL_MODES = {
 }
 
 local RESULT_STATUSES = {
+    inspected = true,
     selected = true,
     confirmed = true,
     prepared = true,
@@ -115,16 +127,14 @@ local function sanitize_target(target)
 end
 
 local function same_target(left, right)
+    -- The bound Host refreshes geometry for the same canonical node at action time.
+    -- Snapshot identity and ancestry remain immutable capabilities.
     return left.snapshot_id == right.snapshot_id
         and left.target_id == right.target_id
         and left.host_instance_id == right.host_instance_id
         and left.mount_id == right.mount_id
         and left.generation == right.generation
         and left.path_digest == right.path_digest
-        and left.rect.x == right.rect.x
-        and left.rect.y == right.rect.y
-        and left.rect.width == right.rect.width
-        and left.rect.height == right.rect.height
         and left.label == right.label
 end
 
@@ -133,6 +143,136 @@ local function target_in(target, targets)
         if same_target(target, candidate) then
             return true
         end
+    end
+    return false
+end
+
+local function integer(value, minimum, maximum)
+    return finite(value) and value % 1 == 0 and value >= minimum and value <= (maximum or 9007199254740991)
+end
+
+local function array(value, maximum, validate)
+    if type(value) ~= "table" or #value > maximum then return false end
+    local count = 0
+    for key, member in pairs(value) do
+        count = count + 1
+        if not integer(key, 1, #value) or not validate(member) then return false end
+    end
+    return count == #value
+end
+
+local function node_ref(value, host)
+    return type(value) == "table"
+        and only_keys(value, { node_id = true, host_instance_id = true, mount_id = true, generation = true })
+        and nonempty(value.node_id, 160) and value.host_instance_id == host
+        and nonempty(value.mount_id, 160) and integer(value.generation, 1)
+end
+
+local function fields(value, allowed, maximum)
+    if type(value) ~= "table" or not only_keys(value, allowed) then return false end
+    for _, member in pairs(value) do
+        if type(member) ~= "string" or #member > maximum then return false end
+    end
+    return true
+end
+
+local function summary(value)
+    if type(value) ~= "table" or not only_keys(value, { role = true, name = true, text = true, value = true, state = true }) then return false end
+    for key, member in pairs(value) do
+        if key ~= "state" and (type(member) ~= "string" or #member > 1024) then return false end
+    end
+    if value.state ~= nil then
+        if type(value.state) ~= "table" then return false end
+        local count = 0
+        for key, member in pairs(value.state) do
+            count = count + 1
+            if count > 16 or not nonempty(key, 64)
+                or not (type(member) == "boolean" or finite(member) or type(member) == "string" and #member <= 256) then return false end
+        end
+    end
+    return true
+end
+
+local function coordinate_space(value)
+    return value == "host-viewport" or type(value) == "table"
+        and only_keys(value, { mount_id = true, generation = true })
+        and nonempty(value.mount_id, 160) and integer(value.generation, 1)
+end
+
+local function geometry(value)
+    return type(value) == "table"
+        and only_keys(value, { rect = true, clip = true, visible = true, offscreen = true, quality = true, coordinate_space = true })
+        and (value.rect == nil or valid_rect(value.rect)) and (value.clip == nil or valid_rect(value.clip))
+        and type(value.visible) == "boolean" and type(value.offscreen) == "boolean"
+        and (value.quality == "exact" or value.quality == "approximate" or value.quality == "unavailable")
+        and (value.quality ~= "unavailable" or value.rect == nil and value.clip == nil)
+        and coordinate_space(value.coordinate_space)
+end
+
+local function inspection_node(value, host)
+    local kinds = { host = true, panel = true, artifact = true, page = true, iframe = true,
+        ["web-fragment"] = true, ["web-component"] = true, ["shadow-root"] = true, element = true,
+        document = true, semantic = true, placeholder = true }
+    local states = { mounted = true, hidden = true, unmounted = true, unavailable = true }
+    if type(value) ~= "table" or not only_keys(value, { ref = true, parent = true, kind = true, path = true,
+        summary = true, resource = true, layout = true, geometry = true, state = true })
+        or not node_ref(value.ref, host) or value.parent ~= nil and not node_ref(value.parent, host)
+        or not kinds[value.kind] or not states[value.state]
+        or not context_attachments.attention_fields.path(value.path) or not summary(value.summary) then return false end
+    if value.resource ~= nil and not fields(value.resource, {
+        resource_id = true, package_id = true, package_version = true, tag_name = true, title = true,
+    }, 1024) then return false end
+    local layout = value.layout
+    if layout ~= nil then
+        if type(layout) ~= "table" or not only_keys(layout, {
+            instance_id = true, panel_id = true, role = true, title = true, breakpoint = true,
+            active = true, collapsed = true, drawer = true, floating = true, modal = true,
+        }) or not nonempty(layout.instance_id, 160) or not nonempty(layout.panel_id, 160) then return false end
+        for _, key in ipairs({ "role", "title", "breakpoint" }) do
+            if layout[key] ~= nil and not nonempty(layout[key], 256) then return false end
+        end
+        for _, key in ipairs({ "active", "collapsed", "drawer", "floating", "modal" }) do
+            if type(layout[key]) ~= "boolean" then return false end
+        end
+    end
+    return value.geometry == nil or geometry(value.geometry)
+end
+
+local function focus(value)
+    return type(value) == "table" and only_keys(value, {
+        event_id = true, sequence = true, focused_at = true, realm_time_ms = true, candidate_id = true, path = true, summary = true,
+    }) and nonempty(value.event_id, 128) and integer(value.sequence, 0)
+        and context_attachments.attention_fields.timestamp(value.focused_at)
+        and finite(value.realm_time_ms) and value.realm_time_ms >= 0
+        and (value.candidate_id == nil or nonempty(value.candidate_id, 160))
+        and context_attachments.attention_fields.path(value.path) and summary(value.summary)
+end
+
+local function inspection_data(value, host, operation)
+    if value == nil then return true end
+    if type(value) ~= "table" then return false end
+    local nodes = function(item) return inspection_node(item, host) end
+    if operation == "tree" or operation == "find" then
+        return only_keys(value, operation == "tree" and { root = true, nodes = true } or { nodes = true })
+            and (value.root == nil or node_ref(value.root, host)) and array(value.nodes, 256, nodes)
+    elseif operation == "cursor" or operation == "point" then
+        return only_keys(value, operation == "cursor" and { event = true, nodes = true } or { point = true, nodes = true })
+            and array(value.nodes, 256, nodes)
+            and (operation ~= "cursor" or value.event == nil or context_attachments.attention_fields.event(value.event))
+            and (operation ~= "point" or type(value.point) == "table" and only_keys(value.point, { x = true, y = true })
+                and finite(value.point.x) and finite(value.point.y))
+    elseif operation == "focus" then
+        return only_keys(value, { focus = true, node = true })
+            and (value.focus == nil or focus(value.focus)) and (value.node == nil or nodes(value.node))
+    elseif operation == "selection" then
+        return only_keys(value, { selection = true, anchor = true, focus = true })
+            and (value.selection == nil or context_attachments.attention_fields.selection(value.selection))
+            and (value.anchor == nil or node_ref(value.anchor, host)) and (value.focus == nil or node_ref(value.focus, host))
+    elseif operation == "geometry" then
+        if not only_keys(value, { node = true, rect = true, clip = true, visible = true, offscreen = true, quality = true, coordinate_space = true })
+            or not node_ref(value.node, host) then return false end
+        return geometry({ rect = value.rect, clip = value.clip, visible = value.visible, offscreen = value.offscreen,
+            quality = value.quality, coordinate_space = value.coordinate_space })
     end
     return false
 end
@@ -172,6 +312,21 @@ local function canonical(value)
     end
     parts[#parts + 1] = "]"
     return table.concat(parts)
+end
+
+local function bounded(value, budget, depth)
+    if depth > 48 or budget.nodes <= 0 or budget.bytes <= 0 then return false end
+    budget.nodes = budget.nodes - 1
+    local kind = type(value)
+    budget.bytes = budget.bytes - (kind == "string" and #value + 8 or 24)
+    if kind == "number" then return finite(value) and budget.bytes >= 0 end
+    if kind == "table" then
+        for key, item in pairs(value) do
+            if not bounded(key, budget, depth + 1) or not bounded(item, budget, depth + 1) then return false end
+        end
+        return budget.bytes >= 0
+    end
+    return (kind == "nil" or kind == "string" or kind == "boolean") and budget.bytes >= 0
 end
 
 local function request_fingerprint(registry_id, args)
@@ -227,6 +382,30 @@ local function sanitize_capture(capture)
 end
 
 local function validate_args(mode, args, host_instance_id)
+    if mode == "inspect" then
+        local operations = { cursor = true, focus = true, selection = true, point = true, tree = true, find = true, geometry = true }
+        if not bounded(args, { nodes = 2048, bytes = 16384 }, 0)
+            or type(args) ~= "table" or not only_keys(args, { operation = true, scope = true, args = true })
+            or not operations[args.operation] or type(args.args or {}) ~= "table" or type(args.scope or {}) ~= "table" then
+            return nil, "invalid inspection query"
+        end
+        local scope = args.scope or {}
+        if not only_keys(scope, { fromRoot = true, node = true }) or scope.fromRoot ~= nil and scope.fromRoot ~= true then
+            return nil, "invalid inspection scope"
+        end
+        local node = scope.node
+        if node ~= nil and (type(node) ~= "table" or not only_keys(node, { node_id = true, host_instance_id = true, mount_id = true, generation = true })
+            or not node_ref(node, host_instance_id)) then
+            return nil, "invalid inspection node"
+        end
+        -- Preserve object shape through JSON even when an observation has no args.
+        -- Empty array tables are not valid public inspection argument objects.
+        local query_args = table.create(0, 1)
+        for key, value in pairs(args.args or {}) do query_args[key] = value end
+        local allowed = { x = true, y = true, coordinate_space = true, radius_css_px = true, step_css_px = true, query = true, limit = true, depth = true, continuation = true, node = true }
+        if not only_keys(query_args, allowed) or #canonical(args) > 16384 then return nil, "inspection request exceeds limits" end
+        return { query = { operation = args.operation, scope = { fromRoot = true, node = node }, args = query_args }, targets = {} }, nil
+    end
     if type(args) ~= "table" then
         return nil, "arguments must be an object"
     end
@@ -294,6 +473,8 @@ local function validate_result(result)
             selected_target = true,
             prepared_file = true,
             reason = true,
+            inspection = true,
+            targets = true,
         })
         or result.schema ~= SCHEMA
         or result.message_type ~= "result"
@@ -311,6 +492,33 @@ local function validate_result(result)
     end
     if result.selected_target ~= nil and not valid_target(result.selected_target) then
         return nil, "selected target is invalid"
+    end
+    if result.status == "inspected" then
+        local inspection = result.inspection
+        local outcomes = { ok = true, empty = true, cleared = true, unknown = true, partial = true, unavailable = true, stale = true, cancelled = true }
+        if not bounded(inspection, { nodes = 32768, bytes = 262144 }, 0)
+            or type(inspection) ~= "table" or not only_keys(inspection, {
+            request_id = true, host_instance_id = true, measured_at = true, revisions = true,
+            outcome = true, data = true, omissions = true, continuation = true,
+        }) or inspection.host_instance_id ~= result.host_instance_id or not nonempty(inspection.request_id, 256)
+            or not outcomes[inspection.outcome] or #canonical(inspection) > 98304
+            or type(inspection.revisions) ~= "table" or type(inspection.omissions) ~= "table" then
+            return nil, "invalid inspection result"
+        end
+        if not context_attachments.attention_fields.timestamp(inspection.measured_at)
+            or not only_keys(inspection.revisions, { tree = true, observation = true, geometry = true })
+            or not integer(inspection.revisions.tree, 0) or not integer(inspection.revisions.observation, 0)
+            or not integer(inspection.revisions.geometry, 0)
+            or inspection.continuation ~= nil and not nonempty(inspection.continuation, 160)
+            or not array(inspection.omissions, 256, function(item)
+                return type(item) == "table" and only_keys(item, { node = true, reason = true })
+                    and nonempty(item.reason, 64) and (item.node == nil or node_ref(item.node, result.host_instance_id))
+            end) then return nil, "invalid inspection metadata" end
+        if not array(result.targets, 32, function(item)
+            return valid_target(item) and item.host_instance_id == result.host_instance_id
+        end) then return nil, "invalid inspection targets" end
+    elseif result.inspection ~= nil or result.targets ~= nil then
+        return nil, "inspection data is not allowed for terminal status"
     end
     local prepared_file = result.prepared_file
     local prepared_file_valid = type(prepared_file) == "table"
@@ -355,6 +563,8 @@ local function validate_result(result)
         host_instance_id = result.host_instance_id,
         completed_at = result.completed_at,
         status = result.status,
+        inspection = result.inspection,
+        targets = result.targets,
         selected_target = result.selected_target and sanitize_target(result.selected_target) or nil,
         prepared_file = prepared_file_valid and {
             uuid = prepared_file.uuid,
@@ -443,10 +653,11 @@ function ui_action_broker:_make_result(action, status, reason)
 end
 
 function ui_action_broker:_finish(action, result)
-    if self.pending[action.session_id] ~= action then
+    local pending_key = action.pending_key or action.session_id
+    if self.pending[pending_key] ~= action then
         return false
     end
-    self.pending[action.session_id] = nil
+    self.pending[pending_key] = nil
     local completed = {
         expires_at = math.max(action.expires_at, self.deps.now() + self.ttl_seconds),
         ingress_pid = action.ingress_pid,
@@ -571,10 +782,6 @@ function ui_action_broker:bind_turn(fields)
 
     self:cancel_session(fields.session_id, "unavailable", "turn route replaced")
 
-    if not fields.agent_actions_enabled then
-        return nil, "ui actions are unavailable for this turn"
-    end
-
     local now = self.deps.now()
     local binding = {
         delivery_handle = self.deps.new_id(),
@@ -585,6 +792,7 @@ function ui_action_broker:bind_turn(fields)
         conn_pid = fields.conn_pid,
         host_instance_id = fields.host_instance_id,
         turn_request_id = fields.request_id,
+        agent_actions_authorized = fields.agent_actions_enabled,
         expires_at = now + self.ttl_seconds,
     }
     local monitored, monitor_err = self:_monitor(fields.conn_pid)
@@ -596,7 +804,8 @@ function ui_action_broker:bind_turn(fields)
         delivery_handle = binding.delivery_handle,
         session_id = binding.session_id,
         host_instance_id = binding.host_instance_id,
-        agent_actions_authorized = true,
+        inspection_authorized = true,
+        agent_actions_authorized = binding.agent_actions_authorized,
     }, nil
 end
 
@@ -624,6 +833,9 @@ function ui_action_broker:request(waiter_pid, request)
     if request.session_id ~= binding.session_id or request.host_instance_id ~= binding.host_instance_id then
         return self:_reject_unbound_request(waiter_pid, request, "unauthorized tool request")
     end
+    if mode ~= "inspect" and not binding.agent_actions_authorized then
+        return self:_reject_unbound_request(waiter_pid, request, "interactive actions are not authorized for this turn")
+    end
 
     local args, args_err = validate_args(mode, request.args, binding.host_instance_id)
     local fingerprint = args
@@ -633,7 +845,7 @@ function ui_action_broker:request(waiter_pid, request)
     local prior = self.requests[cache_key]
     if prior then
         if prior.expires_at <= self.deps.now() then
-            if prior.action_id and self.pending[request.session_id] == prior then
+            if prior.action_id and self.pending[prior.pending_key or request.session_id] == prior then
                 self:_finish(prior, self:_make_result(prior, "expired", "UI action expired"))
                 prior = self.requests[cache_key]
             end
@@ -722,12 +934,19 @@ function ui_action_broker:request(waiter_pid, request)
         registry_id = request.registry_id,
         fingerprint = fingerprint,
         mode = mode,
+        inspection_operation = args.query and args.query.operation,
         targets = args.targets,
         capture = args.capture,
-        expires_at = math.min(binding.expires_at, now + self.ttl_seconds),
+        expires_at = math.min(binding.expires_at, now + (mode == "inspect" and 2 or self.ttl_seconds)),
     }
+    action.pending_key = mode == "inspect" and (binding.session_id .. "\0" .. action.action_id) or binding.session_id
 
-    if self.pending[binding.session_id] then
+    local read_count, total_count = 0, 0
+    for _, pending in pairs(self.pending) do
+        total_count = total_count + 1
+        if pending.session_id == binding.session_id and pending.mode == "inspect" then read_count = read_count + 1 end
+    end
+    if (mode ~= "inspect" and self.pending[binding.session_id]) or (mode == "inspect" and (read_count >= 16 or total_count >= 128)) then
         self:_reject_request(
             waiter_pid,
             binding,
@@ -754,8 +973,9 @@ function ui_action_broker:request(waiter_pid, request)
         created_at = self.deps.format_time(now),
         expires_at = self.deps.format_time(action.expires_at),
         mode = mode,
+        query = args.query,
         prompt = args.prompt,
-        targets = args.targets,
+        targets = mode ~= "inspect" and args.targets or nil,
         allow_pointer = args.allow_pointer,
         allow_keyboard = args.allow_keyboard,
         capture_region = args.capture_region,
@@ -766,7 +986,7 @@ function ui_action_broker:request(waiter_pid, request)
         self:_reject_request(waiter_pid, binding, request, "unavailable", "Host UI action delivery failed", fingerprint)
         return false, send_err or "Host UI action delivery failed"
     end
-    self.pending[binding.session_id] = action
+    self.pending[action.pending_key] = action
     self.requests[cache_key] = action
     self.request_count = self.request_count + 1
     return true, action.action_id
@@ -793,7 +1013,7 @@ function ui_action_broker:result(sender_pid, conn_pid, session_id, result)
         end
     end
 
-    local action = self.pending[session_id]
+    local action = self.pending[session_id .. "\0" .. checked.in_reply_to_action_id] or self.pending[session_id]
     if not action then
         return false, "no pending UI action"
     end
@@ -814,6 +1034,17 @@ function ui_action_broker:result(sender_pid, conn_pid, session_id, result)
     end
     if checked.selected_target and #action.targets > 0 and not target_in(checked.selected_target, action.targets) then
         return false, "selected target was not offered"
+    end
+    if (checked.status == "inspected") ~= (action.mode == "inspect" and checked.inspection ~= nil) then
+        return false, "inspection result mode mismatch"
+    end
+    if action.mode == "inspect" then
+        local statuses = { inspected = true, unavailable = true, expired = true, stale = true, error = true,
+            cancelled = true, disconnected = true, ["permission-denied"] = true }
+        if not statuses[checked.status] then return false, "inspection result status is invalid" end
+        if checked.inspection and not inspection_data(checked.inspection.data, action.host_instance_id, action.inspection_operation) then
+            return false, "invalid inspection data"
+        end
     end
     if action.mode == "capture_visual" and checked.status == "prepared" then
         local validator = self.deps.validate_prepared_file
@@ -862,8 +1093,11 @@ function ui_action_broker:cancel(waiter_pid, request)
 end
 
 function ui_action_broker:cancel_session(session_id, status, reason)
-    local action = self.pending[session_id]
-    if action then
+    local actions = {}
+    for _, action in pairs(self.pending) do
+        if action.session_id == session_id then actions[#actions + 1] = action end
+    end
+    for _, action in ipairs(actions) do
         self:_finish(action, self:_make_result(action, status or "unavailable", reason))
     end
     self:_remove_binding(session_id)

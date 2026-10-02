@@ -32,11 +32,13 @@ type SessionContext = {
     queue_empty_callback: any?,
     lifecycle_state: table?,
     set_attention_context: any?,
+    activate_attention_turn: any?,
+    prepare_attention_prompt: any?,
 }
 
-local dispatch_runtime = require('dispatch_runtime')
+local attention_turn_runtime = require('attention_turn_runtime')
+local attention_history = require('attention_history')
 local context_attachments = require('context_attachments')
-local dispatch_repo = require('dispatch_repo')
 local time = require('time')
 local uuid = require('uuid')
 local hash = require('hash')
@@ -136,8 +138,9 @@ local function run(args: SessionArgs)
         attention_control:invalidate()
     end
 
-    local dispatch_manager: any = dispatch_runtime.new(context)
-    context.dispatch_manager = dispatch_manager
+    local attention_turn: any = attention_turn_runtime.new(context)
+    context.activate_attention_turn = function(op) return attention_turn:activate(op) end
+    context.prepare_attention_prompt = function() return attention_history.build(context) end
     local bus = command_bus.new(context)
 
     local function intercept_handler(ctx, op)
@@ -195,14 +198,8 @@ local function run(args: SessionArgs)
         end
     end
 
-    local opened, dispatch_open_err = dispatch_manager:open()
-    if not opened and dispatch_open_err ~= 'DISPATCH_OWNER_BUSY' then error(dispatch_open_err) end
-    local dispatch_snapshot = dispatch_manager:snapshot()
-    if not dispatch_snapshot then error('DISPATCH_STATUS_UNAVAILABLE') end
     -- Send initial session data to client
     session_upstream:update_session({
-        dispatch_protocol = dispatch_snapshot.dispatch_protocol,
-        dispatch_snapshot = dispatch_snapshot.dispatch_snapshot,
         agent = session_config.agent_id,
         model = session_config.model,
         status = consts.STATUS.IDLE,
@@ -252,7 +249,6 @@ local function run(args: SessionArgs)
 
     process.registry.register("session." .. args.session_id)
 
-    dispatch_manager:wake(bus)
     local session_state = {
         stopping = false,
         finishing = false,
@@ -270,14 +266,11 @@ local function run(args: SessionArgs)
 
     local inbox = process.inbox()
     local events = process.events()
-    local dispatch_heartbeat = time.ticker(tostring(dispatch_repo.settings().heartbeat) .. 's')
-    local dispatch_heartbeat_channel = dispatch_heartbeat:channel()
 
     while not session_state.stopping do
         local result = channel.select({
             inbox:case_receive(),
             events:case_receive(),
-            dispatch_heartbeat_channel:case_receive(),
             bus_done:case_receive()
         })
 
@@ -285,18 +278,13 @@ local function run(args: SessionArgs)
             break
         end
 
-        if result.channel == dispatch_heartbeat_channel then
-            local healthy = dispatch_manager:heartbeat()
-            if healthy then dispatch_manager:wake(bus) end
-        elseif result.channel == inbox then
+        if result.channel == inbox then
             local msg = result.value
             local topic = msg:topic()
             local payload = msg:payload()
 
-            if topic == 'session_dispatch_activated' then
-                dispatch_manager:activated(msg:from(), payload:data())
-            elseif string.sub(topic, 1, #dispatch_runtime.STREAM_TOPIC) == dispatch_runtime.STREAM_TOPIC then
-                dispatch_manager:relay(topic, payload:data())
+            if topic == 'session_attention_activated' then
+                attention_turn:activated(msg:from(), payload:data())
             elseif topic == ATTENTION_CONTROL_REQUEST_TOPIC then
                 local request = payload:data() or {}
                 if type(request.request_id) == 'string' and request.request_id ~= '' then
@@ -354,11 +342,7 @@ local function run(args: SessionArgs)
                     session_upstream.conn_pid = payload_data.conn_pid
                 end
 
-                if payload_data.command == 'dispatch_status' then
-                    local snapshot, status_err = dispatch_manager:snapshot(payload_data.dispatch_ids)
-                    if snapshot then session_upstream:command_success(payload_data.request_id, snapshot)
-                    else session_upstream:command_error(payload_data.request_id, status_err, 'Dispatch status unavailable') end
-                elseif payload_data.command == 'context_transport_capabilities' then
+                if payload_data.command == 'context_transport_capabilities' then
                     local capabilities, capability_err = message_handlers.context_transport_capabilities(payload_data.capabilities_version)
                     if capabilities then
                         session_upstream:command_success(payload_data.request_id, capabilities)
@@ -394,7 +378,6 @@ local function run(args: SessionArgs)
                             'Attention context update rejected')
                     end
                 elseif payload_data.command == consts.COMMANDS.STOP then
-                    dispatch_manager:cancel()
                     bus:intercept(intercept_handler)
                 elseif payload_data.command == consts.COMMANDS.AGENT then
                     if payload_data.name then
@@ -443,7 +426,6 @@ local function run(args: SessionArgs)
             elseif topic == consts.TOPICS.CONTINUE then
                 logger:debug("continue signal received", { session_id = args.session_id })
             elseif topic == consts.TOPICS.STOP then
-                dispatch_manager:cancel()
                 bus:intercept(intercept_handler)
             end
         elseif result.channel == events then
@@ -470,9 +452,7 @@ local function run(args: SessionArgs)
     if not session_state.bus_done_received then
         bus_done:receive()
     end
-    dispatch_heartbeat:stop()
     attention_control:invalidate()
-    dispatch_manager:close()
 
     local _, lifecycle_err = message_handlers.deactivate_current_agent(context, "session_finished", {
         state = "completed",

@@ -6,6 +6,7 @@ local context_repo = require("context_repo")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
+local json = require("json")
 local wait_for_boot = require("wait_for_boot")
 
 local function define_tests()
@@ -103,6 +104,38 @@ local function define_tests()
             test.eq(session.config.max_tokens, 1000)
             test.not_nil(session.start_date)
             test.not_nil(session.last_message_date)
+        end)
+
+        it("matches the documented Attention session-state output", function()
+            -- ATTENTION:SESSION-STATE-EXAMPLE:BEGIN
+            local expected = json.decode([[{"schema":"wippy.attention.session.v1","enabled":true,"revision":4,"updated_at":"2026-09-15T12:00:00.000Z","updated_by":"user"}]])
+            -- ATTENTION:SESSION-STATE-EXAMPLE:END
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Documented Attention state", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local db_resource = consts.get_db_resource()
+            local db, db_err = sql.get(db_resource)
+            test.is_nil(db_err)
+            local updated, update_err = db:execute(
+                "UPDATE sessions SET attention_enabled = $1, attention_revision = $2, attention_updated_at = $3, attention_updated_by = $4 WHERE session_id = $5",
+                {1, expected.revision, expected.updated_at, expected.updated_by, session_id})
+            db:release()
+            test.is_nil(update_err)
+            test.not_nil(updated)
+            local current, read_err = session_repo.get(session_id)
+            local removed, remove_err = session_repo.delete(session_id)
+            test.is_nil(remove_err)
+            test.not_nil(removed)
+            test.is_nil(read_err)
+            test.not_nil(current)
+            local fields = 0
+            for key, value in pairs(current.attention_context) do
+                fields = fields + 1
+                test.eq(value, expected[key])
+            end
+            test.eq(fields, 5)
         end)
 
         it("should get a session by ID", function()

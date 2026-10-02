@@ -64,8 +64,6 @@ entries:
     targets:
       - entry: wippy.session.process:context_cleanup_db_policy
         path: .policy.resources
-      - entry: wippy.session.migration:12_add_message_dispatch
-        path: .meta.target_db
       - entry: wippy.session.migration:13_add_attention_context
         path: .meta.target_db
       - entry: wippy.session.env:database_resource

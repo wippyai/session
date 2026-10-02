@@ -1,5 +1,6 @@
 local test = require("test")
 local ui_action_broker = require("ui_action_broker")
+local json = require("json")
 
 local function reply_topic(call_id)
     return "session_ui_action_result:" .. hash.sha256(call_id)
@@ -123,8 +124,200 @@ local function client_result(action, conn_pid, status)
     }
 end
 
+local function inspect_request(broker, runtime, call_id, args)
+    return broker:request("reader-" .. call_id, {
+        delivery_handle = runtime.delivery_handle, registry_id = "wippy.agent.tools:attention_inspect",
+        call_id = call_id, reply_topic = reply_topic(call_id), session_id = runtime.session_id,
+        host_instance_id = runtime.host_instance_id, args = args or { operation = "tree" },
+    })
+end
+
+local function inspected_result(action)
+    return {
+        schema = "wippy.ui-action.v1", message_type = "result", result_id = "result-" .. action.action_id,
+        in_reply_to_action_id = action.action_id, request_id = action.request_id,
+        session_id = action.session_id, host_instance_id = action.host_instance_id,
+        completed_at = "2026-09-23T00:00:00Z", status = "inspected", targets = {},
+        inspection = {
+            request_id = "query-1", host_instance_id = action.host_instance_id, measured_at = "2026-09-23T00:00:00Z",
+            outcome = "empty", revisions = { tree = 1, geometry = 1, observation = 0 }, omissions = {}, data = { nodes = {} },
+        },
+    }
+end
+
 local function define_tests()
     describe("Attention UI action broker", function()
+        it("routes exact specialized inspection IDs without overlay authority", function()
+            for _, name in ipairs({"attention_find_semantic", "attention_find_css", "attention_get_node", "attention_get_tree",
+                "attention_get_geometry", "attention_get_cursor", "attention_get_focus", "attention_get_selection", "attention_hit_test"}) do
+                local broker, sends = harness()
+                local runtime = broker:bind_turn({user_id="user-1",session_id="s1",session_pid="session-pid-s1",
+                    ingress_pid="user-hub-pid",conn_pid="conn-1",host_instance_id="host-1",agent_actions_enabled=false})
+                local accepted, action_id = broker:request("reader",{delivery_handle=runtime.delivery_handle,
+                    registry_id="wippy.agent.tools:"..name,call_id="read-1",reply_topic=reply_topic("read-1"),
+                    session_id=runtime.session_id,host_instance_id=runtime.host_instance_id,args={operation="focus"}})
+                test.is_true(accepted)
+                test.eq(broker.pending["s1\0"..action_id].mode,"inspect")
+                test.eq(json.encode(sends[1].payload.query.args), "{}")
+            end
+        end)
+        it("serves independent reads without overlays on the authenticated submitting connection", function()
+            local broker, sends = harness()
+            local runtime = broker:bind_turn({ user_id = "user-1", session_id = "s1", session_pid = "session-pid-s1",
+                ingress_pid = "user-hub-pid", conn_pid = "conn-1", host_instance_id = "host-1", agent_actions_enabled = false })
+            local accepted, action_id = inspect_request(broker, runtime, "read-1")
+            test.is_true(accepted)
+            local action = broker.pending["s1\0" .. action_id]
+            test.eq(action.expires_at, 1002)
+            test.eq(sends[1].pid, "conn-1")
+            test.eq(sends[1].payload.query.operation, "tree")
+            test.is_true(sends[1].payload.query.scope.fromRoot)
+            test.is_nil(sends[1].payload.targets)
+            test.is_nil(sends[1].payload.delivery_handle)
+            local result = inspected_result(action)
+            test.is_false(broker:result("user-hub-pid", "conn-2", "s1", result))
+            test.is_true(broker:result("user-hub-pid", "conn-1", "s1", result))
+            test.eq(sends[2].pid, "reader-read-1")
+            test.eq(sends[2].payload.inspection.request_id, "query-1")
+            test.is_true(broker:result("user-hub-pid", "conn-1", "s1", result))
+            test.eq(#sends, 2)
+            test.is_true(inspect_request(broker, runtime, "read-1"))
+            test.eq(#sends, 3)
+            test.eq(sends[3].payload.result_id, result.result_id)
+        end)
+
+        it("keeps reads on the submitting tab and retires its grant when another tab submits a turn", function()
+            local broker, sends = harness()
+            local first = bind(broker, "s1", "conn-1", "host-1")
+            local accepted, first_id = inspect_request(broker, first, "read-first")
+            test.is_true(accepted)
+            local first_action = broker.pending["s1\0" .. first_id]
+            test.eq(sends[1].pid, "conn-1")
+
+            local second = bind(broker, "s1", "conn-2", "host-2")
+            test.eq(#sends, 2)
+            test.eq(sends[2].pid, "reader-read-first")
+            test.eq(sends[2].payload.status, "unavailable")
+            test.is_nil(broker.pending["s1\0" .. first_id])
+            local handled, classification = broker:result("user-hub-pid", "conn-1", "s1", inspected_result(first_action))
+            test.is_true(handled)
+            test.eq(classification, "duplicate")
+            test.eq(broker.completed[first_id].result.status, "unavailable")
+            test.eq(#sends, 2)
+
+            test.is_false(inspect_request(broker, first, "stale-grant"))
+            test.eq(sends[3].pid, "reader-stale-grant")
+            test.eq(sends[3].payload.status, "unavailable")
+            local next_accepted, second_id = inspect_request(broker, second, "read-second")
+            test.is_true(next_accepted)
+            local second_action = broker.pending["s1\0" .. second_id]
+            test.eq(sends[4].pid, "conn-2")
+            test.eq(sends[4].payload.host_instance_id, "host-2")
+
+            broker:handle_disconnect("conn-1")
+            test.not_nil(broker.pending["s1\0" .. second_id])
+            test.eq(#sends, 4)
+            local result = inspected_result(second_action)
+            test.is_false(broker:result("user-hub-pid", "conn-1", "s1", result))
+            test.is_true(broker:result("user-hub-pid", "conn-2", "s1", result))
+            test.eq(#sends, 5)
+            test.eq(sends[5].pid, "reader-read-second")
+            test.is_true(broker:result("user-hub-pid", "conn-2", "s1", result))
+            test.eq(#sends, 5)
+        end)
+
+        it("cancels an inspection once when its worker exits and never accepts the late Host result", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            local accepted, action_id = inspect_request(broker, runtime, "worker-exit")
+            test.is_true(accepted)
+            local action = broker.pending["s1\0" .. action_id]
+            broker:handle_exit("reader-worker-exit")
+            test.eq(#sends, 2)
+            test.eq(sends[2].payload.status, "cancelled")
+            test.is_nil(broker.pending["s1\0" .. action_id])
+            broker:handle_exit("reader-worker-exit")
+            local handled, classification = broker:result("user-hub-pid", "conn-1", "s1", inspected_result(action))
+            test.is_true(handled)
+            test.eq(classification, "duplicate")
+            test.eq(broker.completed[action_id].result.status, "cancelled")
+            test.eq(#sends, 2)
+            test.is_true(inspect_request(broker, runtime, "worker-exit"))
+            test.eq(#sends, 3)
+            test.eq(sends[3].payload.result_id, sends[2].payload.result_id)
+            test.eq(sends[3].payload.status, "cancelled")
+        end)
+
+        it("allows sixteen concurrent reads beside one interactive action and cancels each once", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            test.is_true(request(broker, runtime, "writer", "action-1", target("host-1", "one")))
+            for index = 1, 16 do test.is_true(inspect_request(broker, runtime, "read-" .. index)) end
+            test.is_false(inspect_request(broker, runtime, "read-overflow"))
+            test.eq(#sends, 18)
+            broker:cancel_session("s1", "disconnected", "connection closed")
+            test.eq(#sends, 35)
+            test.is_nil(next(broker.pending))
+            for index = 19, 35 do test.eq(sends[index].payload.status, "disconnected") end
+            broker:cancel_session("s1", "disconnected")
+            test.eq(#sends, 35)
+        end)
+
+        it("expires reads after two seconds while preserving an interactive action", function()
+            local broker, sends, _, _, set_now = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            test.is_true(request(broker, runtime, "writer", "action-1", target("host-1", "one")))
+            local _, action_id = inspect_request(broker, runtime, "read-1")
+            set_now(1002)
+            broker:expire()
+            test.not_nil(broker.pending.s1)
+            test.is_nil(broker.pending["s1\0" .. action_id])
+            test.eq(sends[3].payload.status, "expired")
+            broker:expire()
+            test.eq(#sends, 3)
+        end)
+
+        it("rejects nested private fields and interactive statuses in inspection results", function()
+            local broker = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            local _, action_id = inspect_request(broker, runtime, "read-1")
+            local action = broker.pending["s1\0" .. action_id]
+            local result = inspected_result(action)
+            local node = { ref = { node_id = "n1", host_instance_id = "host-1", mount_id = "m1", generation = 1 },
+                kind = "semantic", state = "mounted", summary = { name = "Target" },
+                path = { { kind = "host", mount_id = "m1", generation = 1 } } }
+            result.inspection.data.nodes = { node }
+            node.resource = { resource_id = "r1", authorization = "forbidden" }
+            test.is_false(broker:result("user-hub-pid", "conn-1", "s1", result))
+            node.resource = { resource_id = "r1" }
+            node.summary.state = { value = { token = "forbidden" } }
+            test.is_false(broker:result("user-hub-pid", "conn-1", "s1", result))
+            node.summary.state = nil
+            result.status = "confirmed"
+            result.inspection = nil
+            result.targets = nil
+            result.selected_target = target("host-1", "one")
+            test.is_false(broker:result("user-hub-pid", "conn-1", "s1", result))
+            result = inspected_result(action)
+            result.inspection.data.nodes = { node }
+            test.is_true(broker:result("user-hub-pid", "conn-1", "s1", result))
+        end)
+
+        it("rejects cyclic oversized and foreign-Host inspection arguments before delivery", function()
+            local broker, sends = harness()
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            local cyclic = { operation = "tree" }
+            cyclic.args = cyclic
+            test.is_false(inspect_request(broker, runtime, "cycle", cyclic))
+            test.is_false(inspect_request(broker, runtime, "large", { operation = "find", args = { query = { text = string.rep("a", 16384) } } }))
+            test.is_false(inspect_request(broker, runtime, "foreign", { operation = "tree", scope = {
+                node = { node_id = "n1", host_instance_id = "other", mount_id = "m1", generation = 1 },
+            } }))
+            test.eq(#sends, 3)
+            for _, sent in ipairs(sends) do test.eq(sent.payload.status, "unavailable") end
+            test.is_nil(next(broker.pending))
+        end)
+
         it("targets each authenticated connection directly without a user-hub frame", function()
             local broker, sends = harness()
             local first = bind(broker, "s1", "conn-1", "host-1")
@@ -159,18 +352,34 @@ local function define_tests()
             test.not_nil(broker.pending.s1)
         end)
 
-        it("rejects selected targets with altered geometry or labels", function()
+        it("accepts refreshed geometry only for the same offered identity and label", function()
             local broker, sends = harness()
             local runtime = bind(broker, "s1", "conn-1", "host-1")
             request(broker, runtime, "session-pid-s1", "call-1", target("host-1", "one"))
             local action: any = broker.pending.s1
             local conn_pid, session_id, result = client_result(action, "conn-1")
 
+            for _, field in ipairs({ "snapshot_id", "target_id", "mount_id", "generation", "path_digest" }) do
+                result.selected_target = target("host-1", "one")
+                if field == "generation" then
+                    result.selected_target[field] = result.selected_target[field] + 1
+                elseif field == "path_digest" then
+                    result.selected_target[field] = "sha256:" .. string.rep("b", 64)
+                else
+                    result.selected_target[field] = "different-identity"
+                end
+                result.selected_target.rect.x = result.selected_target.rect.x + 24
+                local accepted, err = broker:result("user-hub-pid", conn_pid, session_id, result)
+                test.is_false(accepted)
+                test.eq(err, "selected target was not offered")
+                test.not_nil(broker.pending.s1)
+            end
+
             result.selected_target = target("host-1", "one")
-            result.selected_target.rect.x = result.selected_target.rect.x + 1
+            result.selected_target.rect.width = -1
             local accepted, err = broker:result("user-hub-pid", conn_pid, session_id, result)
             test.is_false(accepted)
-            test.eq(err, "selected target was not offered")
+            test.eq(err, "selected target is invalid")
             test.not_nil(broker.pending.s1)
 
             result.selected_target = target("host-1", "one")
@@ -181,9 +390,16 @@ local function define_tests()
             test.not_nil(broker.pending.s1)
 
             result.selected_target = target("host-1", "one")
+            result.selected_target.rect = { x = 25, y = 5, width = 60, height = 80 }
+            test.is_false(broker:result("spoofed-hub-pid", conn_pid, session_id, result))
+            test.is_false(broker:result("user-hub-pid", "other-connection", session_id, result))
             test.is_true(broker:result("user-hub-pid", conn_pid, session_id, result))
             test.eq(#sends, 2)
             test.eq(sends[2].payload.selected_target.label, "Target one")
+            test.eq(sends[2].payload.selected_target.rect.x, 25)
+            test.eq(sends[2].payload.selected_target.rect.y, 5)
+            test.eq(sends[2].payload.selected_target.rect.width, 60)
+            test.eq(sends[2].payload.selected_target.rect.height, 80)
         end)
 
         it("routes a capability-bound request to its tool worker and rejects mismatched scope", function()
@@ -642,7 +858,7 @@ local function define_tests()
             test.eq(sends[3].payload.status, "disconnected")
         end)
 
-        it("invalidates a prior route when the next turn disables agent actions", function()
+        it("replaces the prior route with a read-only binding when overlays are disabled", function()
             local broker = harness()
             local runtime = bind(broker, "s1", "conn-1", "host-1")
             local disabled, err = broker:bind_turn({
@@ -655,10 +871,13 @@ local function define_tests()
                 agent_actions_enabled = false,
             })
 
-            test.is_nil(disabled)
-            test.not_nil(err)
-            test.is_nil(broker.bindings.s1)
+            test.not_nil(disabled)
+            test.is_nil(err)
+            test.is_true(disabled.inspection_authorized)
+            test.is_false(disabled.agent_actions_authorized)
+            test.eq(broker.bindings.s1.delivery_handle, disabled.delivery_handle)
             test.is_false(request(broker, runtime, "waiter-1", "call-1", target("host-1", "one")))
+            test.is_false(request(broker, disabled, "waiter-2", "call-2", target("host-1", "one")))
         end)
 
         it("keeps the prior route when the next turn has malformed identity fields", function()

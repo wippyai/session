@@ -8,12 +8,6 @@ type UpstreamPayload = {
 local session_upstream = {}
 session_upstream.__index = session_upstream
 
-function session_upstream:with_dispatch(root, guard)
-    local scoped = setmetatable({}, { __index = self })
-    scoped._dispatch_root, scoped._dispatch_guard = root, guard
-    return scoped
-end
-
 function session_upstream.new(session_id, conn_pid, parent_pid)
     local self = setmetatable({}, session_upstream)
     self.session_id = session_id
@@ -142,14 +136,6 @@ end
 
 -- Send message to appropriate recipients
 function session_upstream:_send_message(topic, message)
-    if self._dispatch_root then
-        if not self._dispatch_guard() or self._dispatch_root.failure then return nil, 'DISPATCH_FENCE_LOST' end
-        local tagged = {}
-        for key, value in pairs(message) do tagged[key] = value end
-        tagged.dispatch = require('dispatch_repo').descriptor(self._dispatch_root.row)
-        tagged.root_message_id = self._dispatch_root.row.message_id
-        message = tagged
-    end
     -- Send to parent process (which can relay to all connections)
     if self.parent_pid then
         return process.send(self.parent_pid :: string, topic, message)

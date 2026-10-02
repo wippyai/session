@@ -2,21 +2,6 @@ version: "1.0"
 namespace: wippy.session.persist
 
 entries:
-  - name: dispatch_writer
-    kind: library.lua
-    source: file://dispatch_writer.lua
-    modules: [sql, json, time]
-    imports:
-      dispatch_repo: wippy.session.persist:dispatch_repo
-
-  - name: dispatch_repo
-    kind: library.lua
-    source: file://dispatch_repo.lua
-    modules: [sql, json, uuid, hash, time, env, security]
-    imports:
-      consts: wippy.session:consts
-      context_staging_repo: wippy.session.persist:context_staging_repo
-
   - name: context_staging_repo
     kind: library.lua
     source: file://context_staging_repo.lua
@@ -141,7 +126,6 @@ entries:
     imports:
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
-      dispatch_repo: wippy.session.persist:dispatch_repo
 
   # wippy.session.persist:message_repo_test
   - name: message_repo_test
@@ -224,6 +208,7 @@ entries:
     source: file://session_repo_test.lua
     modules:
       - sql
+      - json
       - uuid
       - time
       - security

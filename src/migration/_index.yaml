@@ -8,21 +8,9 @@ entries:
       type: migration
       tags: [sessions]
       description: Add normalized per-session Attention context state
-      depends_on: [ns:wippy.migration, wippy.session.migration:12_add_message_dispatch]
+      depends_on: [ns:wippy.migration, wippy.session.migration:11_add_context_staging]
       timestamp: '2026-09-15T00:00:00Z'
     source: file://13_add_attention_context.lua
-    imports:
-      migration: wippy.migration:migration
-    method: migrate
-
-  - name: 12_add_message_dispatch
-    kind: function.lua
-    meta:
-      type: migration
-      tags: [sessions]
-      depends_on: [ns:wippy.migration, wippy.session.migration:11_add_context_staging]
-      timestamp: '2026-09-07T01:00:00Z'
-    source: file://12_add_message_dispatch.lua
     imports:
       migration: wippy.migration:migration
     method: migrate

@@ -21,8 +21,6 @@ end
 function cleanup.run()
     local events = process.events()
     while true do
-        local _, dispatch_err = require('dispatch_repo').classify_expired()
-        if dispatch_err then logger:warn('Dispatch classification unavailable; retry scheduled') end
         local _, err = cleanup.sweep()
         -- Bootloader migrations may not be ready at service startup. Retry without exposing DB errors.
         if err then logger:warn('Context staging cleanup unavailable; retry scheduled') end

@@ -3,6 +3,7 @@ setlocal
 
 set "ROOT=%~dp0"
 set "TARGET=%~1"
+if not defined TARGET set "TARGET=%MAKE_TARGET%"
 if not defined TARGET set "TARGET=test"
 
 if /I "%TARGET%"=="clean" goto clean

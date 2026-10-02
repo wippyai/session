@@ -24,11 +24,6 @@ type ActiveSession = {
     terminate_reason: string?,
 }
 
-type ActiveDispatch = {
-    dispatch_id: string,
-    generation: number,
-}
-
 -- Invoke the configured on_session_end hook (non-blocking).
 -- Returns true when a hook was scheduled, false when no hook is configured.
 -- The spawn and call dependencies are injectable for testing.
@@ -60,7 +55,6 @@ local function run(args)
         user_hub_pid = args.user_hub_pid,
         base_config = base_config,
         active_sessions = {} :: {[string]: ActiveSession},
-        active_dispatches = {} :: {[string]: ActiveDispatch},
         session_count = 0,
         shutting_down = false,
         shutdown_deadline = nil,
@@ -469,14 +463,12 @@ local function run(args)
         end
     end
 
-    local action_intents: any = require('dispatch_action_intents').new(broker, process.pid())
+    local action_intents: any = require('attention_action_intents').new(broker, process.pid())
 
     local function handle_message_or_command(payload_data, topic_type)
-        -- Ingress records private intent only. A claimed dispatch activates routing once.
+        -- Keep pending Host identity private until the accepted message starts its agent step.
         local broker = {
             bind_turn = function(_, intent)
-                local exists, err = require('dispatch_repo').request_exists(intent.session_id, intent.request_id)
-                if exists or err then return nil end
                 return action_intents:stage(intent)
             end,
             cancel_session = function() return true end,
@@ -484,10 +476,6 @@ local function run(args)
 
         local function resolve_ui_action_runtime(message_data, resolved_session_id, resolved_session_info)
             local runtime_context = type(message_data.runtime_context) == "table" and message_data.runtime_context or nil
-            local intent_nonce = runtime_context and runtime_context.ui_action_intent_nonce
-            if type(intent_nonce) == "string" and intent_nonce ~= "" and #intent_nonce <= 160 then
-                return { deferred_action_nonce = intent_nonce }
-            end
             local attention = runtime_context and runtime_context.attention
             if type(attention) ~= "table" then
                 broker:cancel_session(resolved_session_id, "unavailable", "agent actions unavailable for this turn")
@@ -519,7 +507,7 @@ local function run(args)
                 and type(payload_data.request_id) == "string" and payload_data.request_id ~= ""
                 and type(message_request_id) == "string" and message_request_id ~= "" and #message_request_id <= 128
                 and type(host_instance_id) == "string" and host_instance_id ~= "" and #host_instance_id <= 160
-                and cmd_data.agent_actions_enabled == true
+                and type(cmd_data.agent_actions_enabled) == "boolean"
             local runtime = valid and broker:bind_turn({
                 user_id = state.user_id,
                 session_id = resolved_session_id,
@@ -527,7 +515,7 @@ local function run(args)
                 ingress_pid = state.user_hub_pid,
                 conn_pid = payload_data.conn_pid,
                 host_instance_id = host_instance_id,
-                agent_actions_enabled = true,
+                agent_actions_enabled = cmd_data.agent_actions_enabled,
                 request_id = message_request_id,
             }) or nil
             local response = {
@@ -706,52 +694,15 @@ local function run(args)
 
             logger:debug("received topic", { topic = topic })
 
-            if topic == 'session_dispatch_activate' then
+            if topic == 'session_attention_activate' then
                 local request = payload:data()
                 local active = type(request) == 'table' and state.active_sessions[request.session_id]
                 if active and active.pid == msg:from() then
-                    local row = require('dispatch_repo').get(request.session_id, request.message_id)
-                    local action_runtime = action_intents:activate(msg:from(), row, request)
-                    if row and row.state == 'started'
-                        and row.session_id == request.session_id
-                        and row.message_id == request.message_id
-                        and row.dispatch_id == request.dispatch_id
-                        and row.generation == request.generation then
-                        state.active_dispatches[request.session_id] = {
-                            dispatch_id = row.dispatch_id,
-                            generation = row.generation,
-                        }
-                    end
-                    process.send(msg:from(), 'session_dispatch_activated', {
-                        nonce = request.nonce, dispatch_id = request.dispatch_id, runtime = action_runtime,
+                    local accepted = require('message_repo').get_by_request_id(request.session_id, request.request_id)
+                    local runtime = action_intents:activate(msg:from(), accepted, request)
+                    process.send(msg:from(), 'session_attention_activated', {
+                        nonce = request.nonce, request_id = request.request_id, runtime = runtime,
                     })
-                end
-            elseif topic == 'session_dispatch_finished' then
-                local request = payload:data()
-                if type(request) == 'table' then
-                    local session_id = request.session_id
-                    if type(session_id) == 'string' then
-                        local active = state.active_sessions[session_id]
-                        if active and active.pid == msg:from() then
-                            local row = require('dispatch_repo').get(session_id, request.message_id)
-                            local tracked = state.active_dispatches[session_id]
-                            local generation_matches = tracked
-                                and row
-                                and row.generation == tracked.generation
-                                and (request.generation == nil or request.generation == tracked.generation)
-                            if row and row.session_id == session_id
-                                and row.dispatch_id == request.dispatch_id
-                                and generation_matches
-                                and action_intents:finish(row) then
-                                if tracked.dispatch_id == row.dispatch_id then
-                                    state.active_dispatches[session_id] = nil
-                                    if state.shutting_down then
-                                        graceful_terminate_session(session_id, active, "shutdown")
-                                    end
-                                end
-                            end
-                        end
-                    end
                 end
             elseif topic == consts.PLUGIN_TOPICS.OPEN then
                 local payload_data = payload:data()
@@ -770,9 +721,7 @@ local function run(args)
                     state.shutdown_deadline = time.now():add(consts.TIMEOUTS.SHUTDOWN_GRACE)
                     for session_id, session_info in pairs(state.active_sessions) do
                         broker:cancel_session(session_id, "disconnected", "client transport disconnected")
-                        if not state.active_dispatches[session_id] then
-                            graceful_terminate_session(session_id, session_info, "shutdown")
-                        end
+                        graceful_terminate_session(session_id, session_info, "shutdown")
                     end
                 end
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
@@ -814,8 +763,15 @@ local function run(args)
                     })
                 end
             elseif string.sub(topic, 1, string.len(consts.TOPIC_PREFIXES.SESSION)) == consts.TOPIC_PREFIXES.SESSION then
+                local data = payload:data()
+                for session_id, active in pairs(state.active_sessions) do
+                    if active.pid == msg:from() and topic == "session:" .. session_id
+                        and type(data) == "table" and data.status and data.status ~= consts.STATUS.RUNNING then
+                        action_intents:finish(session_id)
+                    end
+                end
                 if state.user_hub_pid then
-                    process.send(state.user_hub_pid :: string, topic, payload:data())
+                    process.send(state.user_hub_pid :: string, topic, data)
                 end
             end
         elseif result.channel == events then
@@ -825,7 +781,6 @@ local function run(args)
                 for session_id, session_info in pairs(state.active_sessions) do
                     if session_info.pid == event.from then
                         action_intents:forget(session_id)
-                        state.active_dispatches[session_id] = nil
                         local err = "terminated"
                         if event.result and event.result.error then
                             err = tostring(event.result.error)

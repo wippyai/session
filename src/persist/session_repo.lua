@@ -548,10 +548,6 @@ function session_repo.delete(session_id)
     if stage_lock_err then tx:rollback(); db:release(); return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
     local _, stage_delete_err = sql.builder.delete('context_stages'):where('session_id = ?', session_id):run_with(tx):exec()
     if stage_delete_err then tx:rollback(); db:release(); return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
-    for _, table_name in ipairs({ 'message_dispatches', 'session_dispatch_owners' }) do
-        local _, dispatch_delete_err = sql.builder.delete(table_name):where('session_id = ?', session_id):run_with(tx):exec()
-        if dispatch_delete_err then tx:rollback(); db:release(); return nil, 'DISPATCH_STORAGE_UNAVAILABLE' end
-    end
 
     -- Delete artifacts first
     local artifacts_delete_query = sql.builder.delete("artifacts")

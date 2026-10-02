@@ -31,34 +31,32 @@ function intents:stage(intent)
     return { deferred_action_nonce = nonce }
 end
 
-function intents:activate(sender, row, request)
-    if not row or row.state ~= 'started' or row.dispatch_id ~= request.dispatch_id
-        or row.message_id ~= request.message_id or row.generation ~= request.generation then return nil, 'invalid_dispatch' end
-    local prior = self.activated[row.session_id]
-    if prior and prior.dispatch_id == row.dispatch_id then return prior.runtime end
+function intents:activate(sender, accepted, request)
+    if type(accepted) ~= 'table' or accepted.type ~= 'user'
+        or accepted.session_id ~= request.session_id or accepted.message_id ~= request.message_id
+        or accepted.request_id ~= request.request_id then return nil, 'invalid_message' end
+    local prior = self.activated[accepted.session_id]
+    if prior and prior.message_id == accepted.message_id then return prior.runtime end
     local record = request.intent_nonce and self.pending[request.intent_nonce]
     local bound
     if record then
         self.pending[record.nonce], self.by_request[record.key] = nil, nil
         self.count = self.count - 1
         local intent = record.value
-        if record.expires_at > self.now() and intent.session_pid == sender and intent.session_id == row.session_id
-            and intent.request_id == row.request_id and intent.user_id == row.actor_id then
+        if record.expires_at > self.now() and intent.session_pid == sender
+            and intent.session_id == accepted.session_id and intent.request_id == accepted.request_id then
             bound = self.broker:bind_turn(intent)
             if bound then bound.broker_pid = self.broker_pid end
         end
     end
-    if not bound then self.broker:cancel_session(row.session_id, 'unavailable', 'Agent actions unavailable for activated turn') end
-    self.activated[row.session_id] = { dispatch_id = row.dispatch_id, runtime = bound }
+    if not bound then self.broker:cancel_session(accepted.session_id, 'unavailable', 'Agent actions unavailable for this turn') end
+    self.activated[accepted.session_id] = { message_id = accepted.message_id, runtime = bound }
     return bound
 end
 
-function intents:finish(row)
-    if not row or (row.state ~= 'completed' and row.state ~= 'interrupted' and row.state ~= 'cancelled') then return false end
-    local active = self.activated[row.session_id]
-    if not active or active.dispatch_id ~= row.dispatch_id then return false end
-    self.activated[row.session_id] = nil
-    self.broker:cancel_session(row.session_id, 'cancelled', 'Dispatch finished')
+function intents:finish(session_id)
+    self.activated[session_id] = nil
+    self.broker:cancel_session(session_id, 'cancelled', 'Agent turn finished')
     return true
 end
 

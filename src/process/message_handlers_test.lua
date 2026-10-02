@@ -109,8 +109,73 @@ local function generic_ui_action_tool()
     return { registry_id = "wippy.agent.tools:ui_action_confirm" }
 end
 
+local function effective_context(context)
+    context.config = context.config or { agent_id = "agent-1" }
+    context.agent_ctx = { get_current_agent = function()
+        return { id = "agent-1", tools = {
+            settings = attention_context_tool(), confirm = generic_ui_action_tool(),
+            inspect = { registry_id = "wippy.agent.tools:attention_inspect" },
+        } }
+    end }
+    return context
+end
+
 local function define_tests()
+    describe("Independent Attention inspection authority", function()
+        it("grants every explicit read only when its exact ID is effective", function()
+            for _, name in ipairs({"attention_find_semantic", "attention_find_css", "attention_get_node", "attention_get_tree",
+                "attention_get_geometry", "attention_get_cursor", "attention_get_focus", "attention_get_selection", "attention_hit_test"}) do
+                local tool = {registry_id="wippy.agent.tools:" .. name}
+                local context = effective_context({})
+                context.agent_ctx.get_current_agent = function() return {id="agent-1", tools={read=tool}} end
+                local operation = {agent={id="agent-1"}, ui_action_runtime={inspection_authorized=true,
+                    broker_pid="broker",delivery_handle="delivery",session_id="s1",host_instance_id="host"}}
+                local runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, tool, "call")
+                test.is_nil(err)
+                test.eq(runtime.attention_inspection_runtime.delivery_handle,"delivery")
+                test.is_nil(runtime.ui_action_runtime)
+                context.agent_ctx.get_current_agent = function() return {id="agent-1",tools={}} end
+                runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, tool, "next")
+                test.is_nil(runtime)
+                test.not_nil(err)
+            end
+        end)
+        it("grants only read routing with overlays disabled and checks current tools again", function()
+            local context = effective_context({})
+            local operation = { agent = { id = "agent-1" }, ui_action_runtime = {
+                inspection_authorized = true, agent_actions_authorized = false,
+                broker_pid = "broker-1", delivery_handle = "delivery-1", session_id = "session-1", host_instance_id = "host-1",
+            } }
+            local tool = { registry_id = "wippy.agent.tools:attention_inspect" }
+            local runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, tool, "read-1")
+            test.is_nil(err)
+            test.eq(runtime.attention_inspection_runtime.delivery_handle, "delivery-1")
+            test.eq(runtime.attention_inspection_runtime.host_instance_id, "host-1")
+            test.is_nil(runtime.ui_action_runtime)
+            test.is_nil(runtime.attention_inspection_runtime.inspection_authorized)
+            context.agent_ctx.get_current_agent = function() return { id = "agent-1", tools = {} } end
+            runtime, err = message_handlers._resolve_tool_runtime_context(context, operation, tool, "read-2")
+            test.is_nil(runtime)
+            test.eq(err, "Attention tool is not enabled for the current effective agent")
+        end)
+    end)
     describe("Attention context tool authorization", function()
+        it("rejects a private tool absent from the effective agent and mismatched agent identity", function()
+            for _, active in ipairs({
+                { id = "agent-1", tools = {} },
+                { id = "different-agent", tools = { settings = attention_context_tool() } },
+            }) do
+                local ctx = effective_context({})
+                ctx.agent_ctx.get_current_agent = function() return active end
+                local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+                    agent = { id = "agent-1" },
+                    ui_action_runtime = { inspection_authorized = true, agent_actions_authorized = true },
+                }, attention_context_tool(), "call-1")
+                test.is_nil(runtime)
+                test.not_nil(err)
+            end
+        end)
+
         it("rejects a setting tool without current-turn Host authority before calling the handler", function()
             local handler_calls = 0
             local ctx = {
@@ -121,12 +186,12 @@ local function define_tests()
                     handler_calls = handler_calls + 1
                 end,
             }
-            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context(ctx), {
                 agent = { id = "agent-1" },
             }, attention_context_tool())
 
             test.is_nil(runtime)
-            test.eq(err, "Attention context control unavailable: agent actions were not enabled for this turn")
+            test.eq(err, "Attention context control unavailable: this turn has no authenticated Host binding")
             test.eq(handler_calls, 0)
         end)
 
@@ -137,13 +202,13 @@ local function define_tests()
                 config = { agent_id = "agent-1" },
                 set_attention_context = function() end,
             }
-            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context(ctx), {
                 agent = { id = "agent-1" },
                 ui_action_runtime = {},
             }, attention_context_tool())
 
             test.is_nil(runtime)
-            test.eq(err, "Attention context control unavailable: agent actions were not enabled for this turn")
+            test.eq(err, "Attention context control unavailable: this turn has no authenticated Host binding")
         end)
 
         it("rejects a setting tool when the runtime authority marker is false", function()
@@ -153,16 +218,16 @@ local function define_tests()
                 config = { agent_id = "agent-1" },
                 set_attention_context = function() end,
             }
-            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context(ctx), {
                 agent = { id = "agent-1" },
-                ui_action_runtime = { agent_actions_authorized = false },
+                ui_action_runtime = { inspection_authorized = false },
             }, attention_context_tool())
 
             test.is_nil(runtime)
-            test.eq(err, "Attention context control unavailable: agent actions were not enabled for this turn")
+            test.eq(err, "Attention context control unavailable: this turn has no authenticated Host binding")
         end)
 
-        it("returns Session control authority when the current turn enables agent actions", function()
+        it("returns Session control authority with an authenticated read binding and overlays disabled", function()
             local issued_agent = nil
             local issued_call = nil
             local ctx = {
@@ -176,9 +241,9 @@ local function define_tests()
                     return "grant-1"
                 end,
             }
-            local runtime, err = message_handlers._resolve_tool_runtime_context(ctx, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context(ctx), {
                 agent = { id = "agent-1" },
-                ui_action_runtime = { broker_pid = "broker-1", agent_actions_authorized = true },
+                ui_action_runtime = { broker_pid = "broker-1", inspection_authorized = true, agent_actions_authorized = false },
             }, attention_context_tool(), "call-1")
 
             test.is_nil(err)
@@ -193,7 +258,7 @@ local function define_tests()
         end)
 
         it("rejects a generic UI action when the runtime object has no trusted authority marker", function()
-            local runtime, err = message_handlers._resolve_tool_runtime_context({}, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context({}), {
                 ui_action_runtime = { delivery_handle = "delivery-1" },
             }, generic_ui_action_tool())
 
@@ -202,7 +267,7 @@ local function define_tests()
         end)
 
         it("rejects a generic UI action when the runtime authority marker is false", function()
-            local runtime, err = message_handlers._resolve_tool_runtime_context({}, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context({}), {
                 ui_action_runtime = { agent_actions_authorized = false },
             }, generic_ui_action_tool())
 
@@ -211,7 +276,7 @@ local function define_tests()
         end)
 
         it("copies generic UI action routing without exposing the authority marker", function()
-            local runtime, err = message_handlers._resolve_tool_runtime_context({}, {
+            local runtime, err = message_handlers._resolve_tool_runtime_context(effective_context({}), {
                 ui_action_runtime = {
                     broker_pid = "broker-1",
                     delivery_handle = "delivery-1",
@@ -285,7 +350,10 @@ local function define_tests()
             test.is_true(result.duplicate)
             test.eq(result.message_id, prior.message_id)
             test.is_nil(result.next_ops)
-            for _, call in ipairs(calls) do test.is_true(call.type ~= 'write' and call.type ~= 'received') end
+            test.eq(#calls, 1)
+            test.eq(calls[1].type, 'received')
+            test.eq(calls[1].message_id, prior.message_id)
+            test.eq(calls[1].request_id, 'request-1')
             result = message_handlers.handle_message(ctx, { request_id = 'request-1', data = { text = 'Changed text', context_attachments = array } })
             test.is_true(result.rejected)
             local changed = { attachment() }
@@ -341,7 +409,8 @@ local function define_tests()
             test.eq(result.message_id, 'server-original-id')
             test.is_nil(result.next_ops)
             test.eq(#calls, 1)
-            test.eq(calls[1].details.message_id, 'server-original-id')
+            test.eq(calls[1].type, 'received')
+            test.eq(calls[1].message_id, 'server-original-id')
         end)
         it('rejects a corrupt committed receipt instead of acknowledging missing context', function()
             local ctx, calls, ref = referenced({ attachment() })
@@ -390,16 +459,17 @@ local function define_tests()
             test.eq(result.message_id, "persisted-message-1")
             local write_call = calls[1] :: any
             local received_call = calls[2] :: any
-            local success_call = calls[3] :: any
             test.eq(write_call.type, "write")
             test.eq(write_call.request_id, "request-1")
             test.is_true(string.find(write_call.request_hash, "sha256:", 1, true) == 1)
             test.eq(write_call.metadata.context_attachments[1].attachment_id, "attachment-1")
             test.eq(received_call.type, "received")
             test.eq(received_call.request_id, "request-1")
-            test.eq(success_call.type, "success")
-            test.eq(success_call.details.message_id, "persisted-message-1")
-            test.eq(success_call.details.attachments[1].content_hash, attachment().content_hash)
+            test.eq(received_call.message_id, "persisted-message-1")
+            test.eq(received_call.attachments[1].content_hash, attachment().content_hash)
+            test.eq(received_call.text, write_call.text)
+            test.eq(received_call.file_uuids[1], "file-1")
+            test.eq(#calls, 2)
         end)
 
         it("rejects an unauthorized ordinary file atomically and accepts the next message", function()
@@ -528,7 +598,7 @@ local function define_tests()
             test.eq(#calls, 2)
         end)
 
-        it("replays duplicate acceptance without a second upstream message or agent step", function()
+        it("replays one receipt for a duplicate without another agent step", function()
             local ctx, calls = context(nil, true)
             local result, err = message_handlers.handle_message(ctx, {
                 request_id = "request-retry",
@@ -541,8 +611,8 @@ local function define_tests()
             test.is_nil(result.next_ops)
             test.eq(#calls, 2)
             test.eq(calls[1].type, "write")
-            test.eq(calls[2].type, "success")
-            test.eq(calls[2].details.message_id, "persisted-message-1")
+            test.eq(calls[2].type, "received")
+            test.eq(calls[2].message_id, "persisted-message-1")
         end)
 
         it("rejects conflicting reuse of a durable request ID", function()

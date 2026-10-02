@@ -19,7 +19,18 @@ type SessionContext = {
     agent_ctx: any,
     queue_empty_callback: any?,
     lifecycle_state: table?,
+    activate_attention_turn: any?,
+    prepare_attention_prompt: any?,
     set_attention_context: any?,
+}
+
+type AttentionToolContext = {
+    session_id: string?,
+    controller_pid: string?,
+    config: {[string]: any}?,
+    agent_ctx: any?,
+    set_attention_context: any?,
+    issue_attention_control: any?,
 }
 
 type ToolWrapperHostRef = {
@@ -229,7 +240,7 @@ local function append_lifecycle_messages(builder: any, result: table?)
     end
 end
 
-local function current_agent(ctx: SessionContext): any?
+local function current_agent(ctx: AttentionToolContext): any?
     if ctx.agent_ctx and type(ctx.agent_ctx.get_current_agent) == "function" then
         local agent = ctx.agent_ctx:get_current_agent()
         if agent then
@@ -291,13 +302,23 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
     end
 
     if state.active_agent_id then
-        local _, deactivate_err = message_handlers.deactivate_current_agent(ctx, REASON.AGENT_SWITCH, {
-            state = OUTCOME.CONTINUES,
-            reason = REASON.AGENT_SWITCH
-        })
-        if deactivate_err then
-            return nil, deactivate_err
+        local previous_agent = state.active_agent or current_agent(ctx)
+        if previous_agent then
+            local _, deactivate_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, previous_agent, {
+                reason = REASON.AGENT_SWITCH,
+                outcome = {
+                    state = OUTCOME.CONTINUES,
+                    reason = REASON.AGENT_SWITCH
+                }
+            })
+            if deactivate_err then
+                return nil, deactivate_err
+            end
         end
+
+        state.active_agent_id = nil
+        state.active_model = nil
+        state.active_agent = nil
     end
 
     local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.ACTIVATE, agent, {
@@ -480,30 +501,8 @@ function message_handlers.handle_message(ctx, op)
         return nil, err
     end
 
-    local dispatch
-    if ctx.dispatch_manager then
-        local dispatch_err
-        dispatch, dispatch_err = require('dispatch_repo').get(ctx.session_id, message_id)
-        if not dispatch then return nil, dispatch_err or 'DISPATCH_UNAVAILABLE' end
-        ctx.dispatch_manager:accepted(dispatch, op.ui_action_runtime, duplicate)
-    end
-    local attachment_refs = {}
-    if op.request_id then
-        for _, attachment in ipairs(attachments or {}) do
-            table.insert(attachment_refs, {
-                attachment_id = attachment.attachment_id,
-                kind = attachment.kind,
-                version = attachment.version,
-                content_hash = attachment.content_hash
-            })
-        end
-    end
+    ctx.upstream:message_received(message_id, op.data.text or "", op.data.file_uuids, attachments, op.request_id)
     if duplicate then
-        ctx.upstream:command_success(op.request_id, {
-            message_id = message_id,
-            attachments = attachment_refs,
-            dispatch = dispatch and require('dispatch_repo').descriptor(dispatch) or nil
-        })
         return {
             completed = true,
             duplicate = true,
@@ -511,16 +510,6 @@ function message_handlers.handle_message(ctx, op)
         }
     end
 
-    ctx.upstream:message_received(message_id, op.data.text or "", op.data.file_uuids, attachments, op.request_id)
-    if op.request_id then
-        ctx.upstream:command_success(op.request_id, {
-            message_id = message_id,
-            attachments = attachment_refs,
-            dispatch = dispatch and require('dispatch_repo').descriptor(dispatch) or nil
-        })
-    end
-
-    if ctx.dispatch_manager then return { completed = true, message_id = message_id } end
     return {
         message_id = message_id,
         next_ops = {
@@ -536,7 +525,15 @@ function message_handlers.handle_message(ctx, op)
 end
 
 function message_handlers.agent_step(ctx, op)
-    local builder, err = prompt_builder.from_session(ctx.reader)
+    if op.from_user and type(ctx.activate_attention_turn) == "function" then
+        op.ui_action_runtime = ctx.activate_attention_turn(op)
+    end
+    local builder, err
+    if type(ctx.prepare_attention_prompt) == "function" then
+        builder, err = ctx.prepare_attention_prompt()
+    else
+        builder, err = prompt_builder.from_session(ctx.reader)
+    end
     if not builder then
         return nil, "Failed to build prompt: " .. err
     end
@@ -553,10 +550,6 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local response_id, err = uuid.v7()
-    if ctx.dispatch_root then
-        response_id = ctx.operation_key == 'root' and ctx.dispatch_root.row.response_id
-            or require('dispatch_repo').output_id(ctx.dispatch_root.row.dispatch_id, ctx.operation_key, 'response')
-    end
     if err then
         return nil, "Failed to generate response ID: " .. err
     end
@@ -796,10 +789,43 @@ function message_handlers.agent_step(ctx, op)
     }
 end
 
-message_handlers._resolve_tool_runtime_context = function(context, operation, tool_call, call_id)
+message_handlers._resolve_tool_runtime_context = function(context: AttentionToolContext, operation: any, tool_call: any, call_id: string?): (table?, string?)
+    local active = current_agent(context)
+    local expected_agent = type(operation.agent) == "table" and operation.agent.id
+        or context.config and context.config.agent_id
+    local tool_id = tostring(tool_call.registry_id)
+    if not active or active.id ~= expected_agent then
+        return nil, "Attention authority requires the current effective agent"
+    end
+    local allowed = false
+    for _, tool in pairs(active.tools or {}) do
+        if tostring(tool.registry_id) == tool_id then allowed = true; break end
+    end
+    if not allowed then
+        return nil, "Attention tool is not enabled for the current effective agent"
+    end
+    if tool_id == "wippy.agent.tools:attention_inspect"
+        or tool_id == "wippy.agent.tools:attention_find_semantic"
+        or tool_id == "wippy.agent.tools:attention_find_css"
+        or tool_id == "wippy.agent.tools:attention_get_node"
+        or tool_id == "wippy.agent.tools:attention_get_tree"
+        or tool_id == "wippy.agent.tools:attention_get_geometry"
+        or tool_id == "wippy.agent.tools:attention_get_cursor"
+        or tool_id == "wippy.agent.tools:attention_get_focus"
+        or tool_id == "wippy.agent.tools:attention_get_selection"
+        or tool_id == "wippy.agent.tools:attention_hit_test" then
+        local runtime = operation.ui_action_runtime
+        if not runtime or runtime.inspection_authorized ~= true then
+            return nil, "Attention inspection unavailable: this turn has no authenticated Host binding"
+        end
+        return { attention_inspection_runtime = {
+            broker_pid = runtime.broker_pid, delivery_handle = runtime.delivery_handle,
+            session_id = runtime.session_id, host_instance_id = runtime.host_instance_id,
+        } }, nil
+    end
     if tostring(tool_call.registry_id) == "wippy.agent.tools:attention_context_set" then
-        if not operation.ui_action_runtime or operation.ui_action_runtime.agent_actions_authorized ~= true then
-            return nil, "Attention context control unavailable: agent actions were not enabled for this turn"
+        if not operation.ui_action_runtime or operation.ui_action_runtime.inspection_authorized ~= true then
+            return nil, "Attention context control unavailable: this turn has no authenticated Host binding"
         end
         if type(context.set_attention_context) ~= "function" then
             return nil, "Attention context control unavailable for this Session"
