@@ -4,13 +4,14 @@ local history = require('attention_history')
 local function define_tests()
     describe('Attention observation lifetime', function()
         local now = 1789732800 -- 2026-09-18T12:00:00Z
+        local server_date = '2026-09-18T12:00:00.000000000Z'
         local function user(id, attachments)
-            return { message_id = id, type = 'user', data = 'Keep user text', metadata = {
+            return { message_id = id, type = 'user', date = server_date, data = 'Keep user text', metadata = {
                 file_uuids = { 'ordinary-file' }, context_attachments = attachments,
             } }
         end
         local function observation(id, revision, args)
-            return { message_id = id, type = 'private_function', data = args or '{"name":"Save"}', metadata = {
+            return { message_id = id, type = 'private_function', date = server_date, data = args or '{"name":"Save"}', metadata = {
                 registry_id = 'wippy.agent.tools:attention_find_semantic', function_name = 'attention_find_semantic',
                 call_id = 'call-' .. id, status = 'success', provider_metadata = { retained = true },
                 result = { schema = 'wippy.attention.model.v1', status = 'inspected', outcome = 'ok',
@@ -126,7 +127,8 @@ local function define_tests()
         end)
         it('takes the kind of a stored legacy attention_inspect read from its operation', function()
             local function legacy(id, operation)
-                return { message_id = id, type = 'private_function', data = '{"operation":"' .. operation .. '"}', metadata = {
+                return { message_id = id, type = 'private_function', date = server_date,
+                    data = '{"operation":"' .. operation .. '"}', metadata = {
                     registry_id = 'wippy.agent.tools:attention_inspect', status = 'success',
                     result = { schema = 'wippy.ui-action.v1', host_instance_id = 'host', inspection = {
                         outcome = 'ok', measured_at = '2026-09-18T12:00:00Z', revisions = { tree = 1, geometry = 1 },
@@ -137,6 +139,38 @@ local function define_tests()
             local _, updates = history.prepare({ user('first'), legacy('geometry', 'geometry'), legacy('focus', 'focus'), find }, now + 1)
             test.eq(#updates, 1)
             test.eq(updates[1].message_id, 'geometry')
+        end)
+        it('times reads from the server row date whatever the Host clock reports', function()
+            local behind, ahead = observation('behind'), observation('ahead', 1, '{"name":"Cancel"}')
+            behind.metadata.result.measured_at = '2026-09-18T11:00:00Z'
+            ahead.metadata.result.measured_at = '2026-09-18T13:00:00Z'
+            local _, updates = history.prepare({ user('first'), behind, ahead }, now + 1)
+            test.eq(#updates, 0, 'a Host clock an hour off does not expire a fresh read')
+            ahead.date = '2026-09-18T11:59:30Z'
+            _, updates = history.prepare({ user('first'), behind, ahead }, now)
+            test.eq(#updates, 1, 'a row older than the lifetime expires although the Host clock is ahead')
+            test.eq(updates[1].message_id, 'ahead')
+            test.eq(updates[1].stale, 'Attention observation expired.')
+        end)
+        it('times context attachments from the server row date and honors a shorter declared lifetime', function()
+            local skewed = { kind = 'wippy.attention', version = 4, attachment_id = 'skewed',
+                created_at = '2026-09-18T13:00:00Z', expires_at = '2026-09-18T13:05:00Z' }
+            local short = { kind = 'wippy.attention', version = 4, attachment_id = 'short',
+                created_at = '2026-09-18T11:00:00Z', expires_at = '2026-09-18T11:00:10Z' }
+            local row = user('first', { skewed, short })
+            local projected = history.prepare({ row }, now + 9)
+            test.eq(#projected[1].metadata.context_attachments, 2,
+                'a client clock an hour off does not expire context on a fresh row')
+            projected = history.prepare({ row }, now + 10)
+            test.eq(#projected[1].metadata.context_attachments, 1)
+            test.eq(projected[1].metadata.context_attachments[1].attachment_id, 'skewed')
+            projected = history.prepare({ row }, now + 30)
+            test.eq(#projected[1].metadata.context_attachments, 0)
+            local old = user('old', { skewed })
+            old.date = '2026-09-18T11:59:30Z'
+            projected = history.prepare({ old }, now)
+            test.eq(#projected[1].metadata.context_attachments, 0,
+                'a row older than the lifetime drops context although the client clock is ahead')
         end)
     end)
 end

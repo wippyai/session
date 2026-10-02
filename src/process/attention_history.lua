@@ -59,18 +59,28 @@ local function copy(value)
 end
 
 local function timestamp(value)
+    if type(value) == 'number' then return value end
     if type(value) ~= 'string' then return nil end
-    local parsed, err = time.parse(time.RFC3339, value)
-    if err or not parsed then return nil end
-    return parsed:unix()
+    for _, layout in ipairs({ time.RFC3339NANO, time.RFC3339 }) do
+        local ok, parsed, err = pcall(time.parse, layout, value)
+        if ok and not err and parsed then return parsed:unix() end
+    end
+    return nil
 end
 
-local function expired(created, expires, now)
-    local start = timestamp(created)
-    local finish = timestamp(expires)
-    if start == nil then return true end
-    if start + M.TTL_SECONDS <= now then return true end
-    return finish ~= nil and finish <= now
+-- Lifetimes start at the server's row date. Client and Host clocks are never
+-- compared with server time, so clock skew cannot expire or extend context.
+local function expired(row_date, lifetime, now)
+    local start = timestamp(row_date)
+    return start == nil or start + lifetime <= now
+end
+
+-- A shorter lifetime declared by the client still applies, measured as a duration
+-- on the client's own clock.
+local function attachment_lifetime(attachment)
+    local created, expires = timestamp(attachment.created_at), timestamp(attachment.expires_at)
+    if created and expires then return math.min(M.TTL_SECONDS, expires - created) end
+    return M.TTL_SECONDS
 end
 
 local function observation(message)
@@ -117,7 +127,7 @@ function M.prepare(messages, now)
             value.query_key = key
             value.kind = read_kind(message.metadata.registry_id, args)
             observations[index] = value
-            if index > latest_user and not expired(value.measured_at, nil, now) then
+            if index > latest_user and not expired(message.date, M.TTL_SECONDS, now) then
                 latest_query[key] = index
                 if type(value.host) == 'string' and type(value.revisions) == 'table' then
                     local latest = latest_revision[value.host] or {}
@@ -135,7 +145,7 @@ function M.prepare(messages, now)
         local value, reason = observations[index], nil
         if value and (meta.stale == nil or meta.stale == false) then
             if index < latest_user then reason = 'Attention observation belongs to an earlier user turn.'
-            elseif expired(value.measured_at, nil, now) then reason = 'Attention observation expired.'
+            elseif expired(message.date, M.TTL_SECONDS, now) then reason = 'Attention observation expired.'
             elseif index < latest_action then reason = 'A browser interaction ended the validity of this observation.'
             elseif latest_query[value.query_key] and latest_query[value.query_key] ~= index then reason = 'A newer Attention observation replaced this query.'
             elseif type(value.host) == 'string' and revision_changed(value, latest_revision[value.host]) then
@@ -152,7 +162,7 @@ function M.prepare(messages, now)
             local kept, removed = {}, false
             for _, attachment in ipairs(meta.context_attachments) do
                 if supported_attachment(attachment) and (index < latest_user or fresh_read or latest_action > index
-                    or expired(attachment.created_at, attachment.expires_at, now)) then removed = true
+                    or expired(message.date, attachment_lifetime(attachment), now)) then removed = true
                 else kept[#kept + 1] = attachment end
             end
             if removed then
