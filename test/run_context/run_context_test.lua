@@ -23,13 +23,13 @@ local test_data = {
     assistant_message_id = uuid.v7(),
 }
 
-local function open_binding()
+local function open_binding(actor_id, scope_name)
     local def, def_err = contract.get(CONTRACT_ID)
     test.is_nil(def_err, "contract.get: " .. tostring(def_err))
     test.not_nil(def)
 
-    local actor = security.new_actor(TEST_ACTOR_ID, { source = "run_context_test" })
-    local scope, scope_err = security.named_scope("app.run_context:test_group")
+    local actor = security.new_actor(actor_id or TEST_ACTOR_ID, { source = "run_context_test" })
+    local scope, scope_err = security.named_scope(scope_name or "app.run_context:test_group")
     test.is_nil(scope_err, "security.named_scope: " .. tostring(scope_err))
     test.not_nil(scope)
 
@@ -163,6 +163,31 @@ local function define_tests()
             test.eq(result.agent.id, "agent:test")
             test.eq(result.context.topic, "run-context")
             test.is_true(result.context.nested.enabled)
+        end)
+
+        test.it("does not grant session ownership from payload identity refs", function()
+            local instance = open_binding("other-user@wippy.local")
+            local args = {
+                host = { kind = "session", session_id = test_data.session_id },
+                agent = { id = "agent:test" },
+                context = { user_id = TEST_ACTOR_ID },
+            }
+            for _, method in ipairs({ "get_context", "get_history", "get_prompt" }) do
+                local result, err = instance[method](instance, args)
+                test.is_nil(result)
+                test.contains(tostring(err), "Session not found")
+            end
+        end)
+
+        test.it("keeps session-read policy enforcement through contract dispatch", function()
+            local instance = open_binding(TEST_ACTOR_ID, "app.run_context:denied_group")
+            for _, method in ipairs({ "get_context", "get_history", "get_prompt" }) do
+                local result, err = instance[method](instance, {
+                    host = { kind = "session", session_id = test_data.session_id },
+                })
+                test.is_nil(result)
+                test.contains(tostring(err), "Permission denied for session access")
+            end
         end)
 
         test.it("reads a bounded history slice through the child binding function", function()

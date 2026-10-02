@@ -68,6 +68,21 @@ model response's normalized `tokens.context_tokens` with
 the checkpoint before the next tool round and model step. The existing strict
 `>` threshold is unchanged; reaching the threshold exactly does not trigger it.
 
+Checkpoint options resolve in this order: trait defaults, explicit agent
+`agent_options.checkpoint`, then persisted session config. The existing
+`token_checkpoint_threshold` and `checkpoint_function_id` session fields override
+agent values; an optional `config.checkpoint` map overlays those fields last.
+That map is read from persisted host configuration, not accepted implicitly by
+the start token or `_control.config`. `enabled = false` disables scheduling;
+the existing zero/nonpositive session threshold remains disabled. Maps merge
+recursively and lists replace, including an explicit empty list.
+
+The scheduler captures detached effective options for each queued checkpoint,
+so later config changes cannot alter that operation. A trait checkpoint binding
+is attempted before the configured function fallback; both receive effective
+`options`. A strict binding failure prevents fallback and checkpoint-state
+writes. Without behaviors, the existing function path remains available.
+
 This is the current prompt size, not cumulative usage across the turn. Cached
 input still occupies context even when `prompt_tokens` reports only a small
 uncached suffix. The LLM module normalizes provider accounting; the session does

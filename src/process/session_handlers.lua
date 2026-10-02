@@ -84,19 +84,24 @@ local function has_checkpoint_bindings(bindings: any): boolean
     return #bindings > 0
 end
 
-local function resolve_checkpoint_config(ctx, op): (string?, number?)
-    local checkpoint_options = checkpoint_options_from_agent(op)
-    local function_id = checkpoint_options.function_id or ctx.config.checkpoint_function_id
+local function resolve_checkpoint_options(ctx, op): table
+    local config = ctx.config or {}
+    local options = checkpoint_runtime.resolve_options(checkpoint_options_from_agent(op), {
+        token_threshold = config.token_checkpoint_threshold,
+        function_id = config.checkpoint_function_id,
+    })
+    return checkpoint_runtime.resolve_options(options, config.checkpoint) or {}
+end
+
+local function resolve_checkpoint_config(ctx, op): (string?, number?, table)
+    local checkpoint_options = resolve_checkpoint_options(ctx, op)
+    local function_id = checkpoint_options.function_id
     if type(function_id) ~= "string" or function_id == "" then
         function_id = nil
     end
     local threshold = tonumber(checkpoint_options.token_threshold)
 
-    if not threshold then
-        threshold = tonumber(ctx.config.token_checkpoint_threshold)
-    end
-
-    return function_id, threshold
+    return function_id, threshold, checkpoint_options
 end
 
 function session_handlers.execute_function(ctx, op)
@@ -206,12 +211,13 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local session_data = ctx.reader:state()
 
-    local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
+    local checkpoint_function_id, token_threshold, checkpoint_options = resolve_checkpoint_config(ctx, op)
     local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
     -- context_tokens is the full prompt size (uncached input plus cache reads
     -- and writes); prompt_tokens alone counts only the uncached input.
     local context_tokens = tokens.context_tokens
-    if checkpoint_available and context_tokens and token_threshold and token_threshold > 0 then
+    if checkpoint_options.enabled ~= false and checkpoint_available and context_tokens
+        and token_threshold and token_threshold > 0 then
 
         if context_tokens > token_threshold then
             checkpoint_needed = true
@@ -224,6 +230,7 @@ function session_handlers.check_background_triggers(ctx, op)
                 trigger_tokens = context_tokens,
                 agent = op.agent,
                 agent_options = op.agent_options,
+                checkpoint_options = checkpoint_options,
                 run_context_binding = op.run_context_binding
             })
         end
@@ -296,7 +303,9 @@ function session_handlers.generate_title(ctx, op)
 end
 
 function session_handlers.create_checkpoint(ctx, op)
-    local checkpoint_function_id = op.checkpoint_function_id or ctx.config.checkpoint_function_id
+    local checkpoint_options = type(op.checkpoint_options) == "table" and op.checkpoint_options
+        or resolve_checkpoint_options(ctx, op)
+    local checkpoint_function_id = op.checkpoint_function_id or checkpoint_options.function_id
 
     if not op.checkpoint_id then
         return nil, "Checkpoint ID required"
@@ -310,7 +319,6 @@ function session_handlers.create_checkpoint(ctx, op)
     local result = nil
     local checkpoint_source = "function"
     local checkpoint_binding_metadata = nil
-    local checkpoint_options = checkpoint_options_from_agent(op)
 
     if has_checkpoint_bindings(op.checkpoint_bindings) then
         local host = {
