@@ -158,6 +158,7 @@ local consts = {
         RECEIVED = "received",
         RESPONSE_STARTED = "response_started",
         INVALIDATE = "invalidate",
+        COMMAND_RESPONSE = "command_response",
         CONTENT = "content",
         FUNCTION_CALL = "function_call",
         FUNCTION_SUCCESS = "function_success",
