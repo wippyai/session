@@ -228,13 +228,6 @@ entries:
       - entry: wippy.session.env:ui_action_ttl_seconds
         path: ".storage"
 
-      - entry: wippy.session.env:dispatch_heartbeat_seconds
-        path: .storage
-      - entry: wippy.session.env:dispatch_owner_lease_seconds
-        path: .storage
-      - entry: wippy.session.env:dispatch_queue_page
-        path: .storage
-
   # wippy.session:consts
   - name: consts
     kind: library.lua

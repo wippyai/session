@@ -2,27 +2,6 @@ version: "1.0"
 namespace: wippy.session.env
 
 entries:
-  - name: dispatch_heartbeat_seconds
-    kind: env.variable
-    meta:
-      private: true
-    variable: SESSION_DISPATCH_HEARTBEAT_SECONDS
-    default: '5'
-
-  - name: dispatch_owner_lease_seconds
-    kind: env.variable
-    meta:
-      private: true
-    variable: SESSION_DISPATCH_OWNER_LEASE_SECONDS
-    default: '30'
-
-  - name: dispatch_queue_page
-    kind: env.variable
-    meta:
-      private: true
-    variable: SESSION_DISPATCH_QUEUE_PAGE
-    default: '32'
-
   # wippy.session.env:checkpoint_function_id
   - name: checkpoint_function_id
     kind: env.variable

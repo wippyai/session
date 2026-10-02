@@ -141,7 +141,6 @@ local function run(args)
         active_sessions = {} :: {[string]: ActiveSession},
         session_count = 0,
         shutting_down = false,
-        shutdown_deadline = nil,
     }
 
     process.set_options({ trap_links = true })
@@ -317,21 +316,6 @@ local function run(args)
             end
             graceful_terminate_session(oldest_id, state.active_sessions[oldest_id], "limit_exceeded")
             active_count = active_count - 1
-        end
-    end
-
-    local function finish_deferred_shutdown()
-        if not state.shutting_down or not state.shutdown_deadline then
-            return
-        end
-        if time.now():sub(state.shutdown_deadline):seconds() < 0 then
-            return
-        end
-
-        state.shutting_down = false
-        state.shutdown_deadline = nil
-        for session_id, session_info in pairs(state.active_sessions) do
-            graceful_terminate_session(session_id, session_info, "shutdown")
         end
     end
 
@@ -889,19 +873,16 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.COMMAND then
                 handle_message_or_command(payload:data(), consts.HANDLER_TYPES.COMMAND)
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN then
-                if not state.shutting_down then
-                    logger:info("received shutdown signal - deferring session termination", { user_id = state.user_id })
-                    state.shutting_down = true
-                    state.shutdown_deadline = time.now():add(consts.TIMEOUTS.SHUTDOWN_GRACE)
-                    for session_id, session_info in pairs(state.active_sessions) do
-                        broker:cancel_session(session_id, "disconnected", "client transport disconnected")
-                        graceful_terminate_session(session_id, session_info, "shutdown")
-                    end
+                logger:info("received shutdown signal - notifying sessions to finish", { user_id = state.user_id })
+                state.shutting_down = true
+
+                for session_id, session_info in pairs(state.active_sessions) do
+                    broker:cancel_session(session_id, "disconnected", "client transport disconnected")
+                    graceful_terminate_session(session_id, session_info, "shutdown")
                 end
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
                     state.shutting_down = false
-                    state.shutdown_deadline = nil
                     logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
                 end
             elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_REQUEST then
@@ -1126,7 +1107,6 @@ local function run(args)
             check_inactive_sessions()
         elseif result.channel == ui_action_ticker:channel() then
             broker:expire()
-            finish_deferred_shutdown()
         end
     end
 
