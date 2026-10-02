@@ -10,6 +10,47 @@ local ACTIONS = {
     ['wippy.agent.tools:ui_action_select'] = true,
     ['wippy.agent.tools:ui_action_capture_visual'] = true,
 }
+local LEGACY_INSPECT = 'wippy.agent.tools:attention_inspect'
+local READ_KINDS = {
+    ['wippy.agent.tools:attention_find_semantic'] = 'find',
+    ['wippy.agent.tools:attention_find_css'] = 'find',
+    ['wippy.agent.tools:attention_get_node'] = 'find',
+    ['wippy.agent.tools:attention_get_tree'] = 'tree',
+    ['wippy.agent.tools:attention_get_geometry'] = 'geometry',
+    ['wippy.agent.tools:attention_hit_test'] = 'point',
+    ['wippy.agent.tools:attention_get_cursor'] = 'cursor',
+    ['wippy.agent.tools:attention_get_focus'] = 'focus',
+    ['wippy.agent.tools:attention_get_selection'] = 'selection',
+}
+-- The revisions whose change withdraws an earlier read of each kind. Cursor, focus,
+-- and selection reads have none: only a newer read of the same query replaces them.
+local REVISION_RULES = {
+    find = { 'tree' }, tree = { 'tree' }, geometry = { 'geometry' }, point = { 'tree', 'geometry' },
+    cursor = {}, focus = {}, selection = {},
+}
+local ALL_REVISIONS = { 'tree', 'observation', 'geometry' }
+
+local function is_read(registry_id)
+    return READ_KINDS[registry_id] ~= nil or registry_id == LEGACY_INSPECT
+end
+
+-- A legacy attention_inspect row names its kind in args.operation.
+local function read_kind(registry_id, args)
+    if registry_id == LEGACY_INSPECT then
+        local operation = type(args) == 'table' and args.operation or nil
+        return REVISION_RULES[operation] and operation or nil
+    end
+    return READ_KINDS[registry_id]
+end
+
+local function revision_changed(value, latest)
+    if type(value.revisions) ~= 'table' or type(latest) ~= 'table' then return false end
+    for _, field in ipairs(REVISION_RULES[value.kind] or ALL_REVISIONS) do
+        local own, newest = value.revisions[field], latest[field]
+        if own ~= nil and newest ~= nil and read.canonical(own) ~= read.canonical(newest) then return true end
+    end
+    return false
+end
 
 local function copy(value)
     local out = {}
@@ -35,7 +76,7 @@ end
 local function observation(message)
     local meta = message.metadata or {}
     if message.type ~= 'function' and message.type ~= 'private_function' then return nil end
-    if not read.is_read(meta.registry_id) or meta.status ~= 'success' then return nil end
+    if not is_read(meta.registry_id) or meta.status ~= 'success' then return nil end
     local result = meta.result
     if type(result) ~= 'table' then return nil end
     if result.schema == 'wippy.attention.model.v1' and result.status == 'inspected' then return result end
@@ -74,11 +115,14 @@ function M.prepare(messages, now)
             local key = message.metadata.registry_id .. ':' .. read.canonical(args or {})
             value = copy(value)
             value.query_key = key
+            value.kind = read_kind(message.metadata.registry_id, args)
             observations[index] = value
             if index > latest_user and not expired(value.measured_at, nil, now) then
                 latest_query[key] = index
                 if type(value.host) == 'string' and type(value.revisions) == 'table' then
-                    latest_revision[value.host] = read.canonical(value.revisions)
+                    local latest = latest_revision[value.host] or {}
+                    for field, revision in pairs(value.revisions) do latest[field] = revision end
+                    latest_revision[value.host] = latest
                 end
                 if value.outcome == 'ok' or value.outcome == 'partial' or value.outcome == 'empty' then fresh_read = true end
             end
@@ -94,8 +138,7 @@ function M.prepare(messages, now)
             elseif expired(value.measured_at, nil, now) then reason = 'Attention observation expired.'
             elseif index < latest_action then reason = 'A browser interaction ended the validity of this observation.'
             elseif latest_query[value.query_key] and latest_query[value.query_key] ~= index then reason = 'A newer Attention observation replaced this query.'
-            elseif type(value.host) == 'string' and latest_revision[value.host] ~= nil
-                and type(value.revisions) == 'table' and read.canonical(value.revisions) ~= latest_revision[value.host] then
+            elseif type(value.host) == 'string' and revision_changed(value, latest_revision[value.host]) then
                 reason = 'The observed interface revision changed.'
             end
         end

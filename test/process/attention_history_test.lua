@@ -84,18 +84,59 @@ local function define_tests()
             test.eq(projected[2], unknown)
             test.eq(projected[3], withdrawn)
         end)
-        it('withdraws observations after browser interactions or any reported revision change', function()
+        it('keeps a find read across observation and geometry changes but withdraws it after browser interactions', function()
             local first, changed = observation('first'), observation('changed', 1, '{"name":"Cancel"}')
-            changed.metadata.result.revisions = { tree = 1, geometry = 2 }
+            first.metadata.result.revisions = { tree = 1, observation = 1, geometry = 1 }
+            changed.metadata.result.revisions = { tree = 1, observation = 2, geometry = 2 }
             local _, updates = history.prepare({ user('first'), first, changed }, now + 1)
-            test.eq(#updates, 1)
-            test.eq(updates[1].message_id, 'first')
+            test.eq(#updates, 0)
             local action = { type = 'private_function', message_id = 'action', metadata = {
                 registry_id = 'wippy.agent.tools:ui_action_highlight', status = 'success', result = { status = 'confirmed' },
             } }
             _, updates = history.prepare({ user('first'), first, action }, now + 1)
             test.eq(#updates, 1)
             test.eq(updates[1].message_id, 'first')
+        end)
+        local function read_of(id, tool, revisions, args)
+            local row = observation(id, nil, args or '{}')
+            row.metadata.registry_id = 'wippy.agent.tools:' .. tool
+            row.metadata.function_name = tool
+            row.metadata.result.revisions = revisions
+            return row
+        end
+        it('withdraws geometry and point reads when geometry changes', function()
+            local geometry = read_of('geometry', 'attention_get_geometry', { tree = 1, observation = 1, geometry = 1 })
+            local point = read_of('point', 'attention_hit_test', { tree = 1, observation = 1, geometry = 1 })
+            local find = read_of('find', 'attention_find_semantic', { tree = 1, observation = 2, geometry = 2 })
+            local _, updates = history.prepare({ user('first'), geometry, point, find }, now + 1)
+            test.eq(#updates, 2)
+            test.eq(updates[1].message_id, 'geometry')
+            test.eq(updates[2].message_id, 'point')
+        end)
+        it('never withdraws cursor, focus, or selection reads by revision', function()
+            local cursor = read_of('cursor', 'attention_get_cursor', { tree = 1, observation = 1, geometry = 1 })
+            local focus = read_of('focus', 'attention_get_focus', { tree = 1, observation = 1, geometry = 1 })
+            local find = read_of('find', 'attention_find_semantic', { tree = 2, observation = 2, geometry = 2 })
+            local _, updates = history.prepare({ user('first'), cursor, focus, find }, now + 1)
+            test.eq(#updates, 0)
+            local newer = read_of('newer-cursor', 'attention_get_cursor', { tree = 2, observation = 2, geometry = 2 })
+            _, updates = history.prepare({ user('first'), cursor, focus, find, newer }, now + 1)
+            test.eq(#updates, 1)
+            test.eq(updates[1].message_id, 'cursor')
+        end)
+        it('takes the kind of a stored legacy attention_inspect read from its operation', function()
+            local function legacy(id, operation)
+                return { message_id = id, type = 'private_function', data = '{"operation":"' .. operation .. '"}', metadata = {
+                    registry_id = 'wippy.agent.tools:attention_inspect', status = 'success',
+                    result = { schema = 'wippy.ui-action.v1', host_instance_id = 'host', inspection = {
+                        outcome = 'ok', measured_at = '2026-09-18T12:00:00Z', revisions = { tree = 1, geometry = 1 },
+                    } },
+                } }
+            end
+            local find = read_of('find', 'attention_find_semantic', { tree = 1, geometry = 2 })
+            local _, updates = history.prepare({ user('first'), legacy('geometry', 'geometry'), legacy('focus', 'focus'), find }, now + 1)
+            test.eq(#updates, 1)
+            test.eq(updates[1].message_id, 'geometry')
         end)
     end)
 end
