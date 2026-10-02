@@ -7,6 +7,7 @@ local prompt_builder = require("prompt_builder")
 local tool_caller = require("tool_caller")
 local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
+local lifecycle_controller = require("lifecycle_controller")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
 
@@ -220,68 +221,84 @@ function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: 
         return { applied = 0, skipped = 0 }, nil
     end
 
-    local agent = state.active_agent or current_agent(ctx)
-    if not agent then
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-        return { applied = 0, skipped = 0 }, nil
-    end
+    local fallback_agent = state.active_agent == nil and current_agent(ctx) or nil
+    local fallback_ref = agent_ref_from(ctx, fallback_agent)
 
-    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, agent, {
-        reason = reason or REASON.SESSION_FINISHED,
-        outcome = outcome or {
-            state = OUTCOME.COMPLETED,
-            reason = reason or REASON.SESSION_FINISHED
-        }
+    local transition, err = lifecycle_controller.deactivate(state, {
+        fallback = fallback_agent and {
+            id = fallback_ref.id,
+            model = fallback_ref.model,
+            agent = fallback_agent,
+            variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+        } or nil,
+        payload = function(_phase, _descriptor)
+            return {
+                reason = reason or REASON.SESSION_FINISHED,
+                outcome = outcome or {
+                    state = OUTCOME.COMPLETED,
+                    reason = reason or REASON.SESSION_FINISHED
+                }
+            }
+        end,
+        dispatch = function(active_agent, phase, payload)
+            return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
+        end
     })
-
-    if not err then
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-    end
-
-    return result, err
+    return transition.deactivation or { applied = 0, skipped = 0 }, err
 end
 
 local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: table?): (table?, string?)
     ctx.lifecycle_state = ctx.lifecycle_state or {}
     local state = ctx.lifecycle_state
     local agent_ref = agent_ref_from(ctx, agent)
-    local same_agent = state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model
-
-    if same_agent then
-        state.active_agent = agent
-        return { applied = 0, skipped = 0 }, nil
-    end
-
-    if state.active_agent_id then
-        local _, deactivate_err = message_handlers.deactivate_current_agent(ctx, REASON.AGENT_SWITCH, {
-            state = OUTCOME.CONTINUES,
-            reason = REASON.AGENT_SWITCH
-        })
-        if deactivate_err then
-            return nil, deactivate_err
+    local fallback_agent = nil
+    if state.active_agent_id and not state.active_agent then
+        fallback_agent = current_agent(ctx)
+        if not fallback_agent and state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model then
+            fallback_agent = agent
         end
     end
-
-    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.ACTIVATE, agent, {
-        reason = "agent_loaded",
-        refs = refs,
-        outcome = {
-            state = OUTCOME.CONTINUES,
-            reason = "agent_loaded"
-        }
+    local fallback_ref = agent_ref_from(ctx, fallback_agent)
+    local transition, err = lifecycle_controller.activate(state, {
+        id = agent_ref.id,
+        model = agent_ref.model,
+        agent = agent,
+        variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+    }, {
+        fallback = fallback_agent and {
+            id = fallback_ref.id,
+            model = fallback_ref.model,
+            agent = fallback_agent,
+            variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+        } or nil,
+        payload = function(phase, _descriptor)
+            if phase == lifecycle_runtime.PHASE.DEACTIVATE then
+                return {
+                    reason = REASON.AGENT_SWITCH,
+                    outcome = {
+                        state = OUTCOME.CONTINUES,
+                        reason = REASON.AGENT_SWITCH
+                    }
+                }
+            end
+            return {
+                reason = "agent_loaded",
+                refs = refs,
+                outcome = {
+                    state = OUTCOME.CONTINUES,
+                    reason = "agent_loaded"
+                }
+            }
+        end,
+        dispatch = function(active_agent, phase, payload)
+            return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
+        end
     })
     if err then
-        return result, err
+        return (transition.activation :: table?), err
     end
 
-    state.active_agent_id = agent_ref.id
-    state.active_model = agent_ref.model
-    state.active_agent = agent
-    return result, nil
+    return transition.activation or { applied = 0, skipped = 0 }, nil
 end
 
 local function outcome_from_agent_result(result: any): table
@@ -664,6 +681,8 @@ end
 
 function message_handlers.agent_step(ctx, op)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    local recovered, recovery_err = message_handlers.recover_behavior_controls(ctx)
+    if not recovered then return nil, recovery_err end
     local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
     local builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, {
@@ -774,7 +793,7 @@ function message_handlers.agent_step(ctx, op)
         return nil, exec_err
     end
 
-    local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+    local after_result, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
         reason = "agent_step",
         refs = {
             message_id = op.message_id,
@@ -827,6 +846,19 @@ function message_handlers.agent_step(ctx, op)
                 }
             }
         }
+    end
+
+    local behavior_controls = {}
+    for _, phase_result in ipairs({ before_result or {}, after_result or {} }) do
+        for _, control in ipairs(phase_result.controls or {}) do behavior_controls[#behavior_controls + 1] = control end
+    end
+    local behavior_round = #behavior_controls > 0
+    for _, wrapper in ipairs(agent.tool_wrappers or {}) do
+        if wrapper.source == "behavior" then
+            for _, phase in ipairs(wrapper.phases or {}) do
+                if phase == "after_execute" then behavior_round = true end
+            end
+        end
     end
 
     local unified_tool_calls = {}
@@ -901,7 +933,7 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
-    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall then
+    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall or behavior_round then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
         local metadata = {
@@ -921,6 +953,10 @@ function message_handlers.agent_step(ctx, op)
             for k, v in pairs(result.metadata) do
                 metadata[k] = v
             end
+        end
+        if behavior_round then
+            metadata.behavior_controls = behavior_controls
+            metadata.behavior_control_state = "pending"
         end
 
         local intents = {}
@@ -951,6 +987,7 @@ function message_handlers.agent_step(ctx, op)
         end
         assistant_message_id = stored_id
         result.call_message_ids = call_message_ids
+        if behavior_round then ctx.reader:reset() end
 
         if is_turn_blocked(ctx) then
             for _, call in ipairs(unified_tool_calls) do
@@ -973,6 +1010,10 @@ function message_handlers.agent_step(ctx, op)
     end
 
     if is_turn_blocked(ctx) then
+        if behavior_round and assistant_message_id then
+            local marked, mark_err = ctx.writer:update_message_meta(assistant_message_id, { behavior_control_state = "cancelled" })
+            if not marked then return nil, mark_err end
+        end
         return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
@@ -982,6 +1023,16 @@ function message_handlers.agent_step(ctx, op)
             memory_metadata.memory_ids = result.memory_prompt.metadata.memory_ids
         end
         ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, result.memory_prompt.content, memory_metadata)
+    end
+
+    if #unified_tool_calls == 0 and behavior_round then
+        local applied, control_err = control_handlers.apply_behavior_controls(ctx, behavior_controls)
+        if not applied then return nil, control_err end
+        local marked, mark_err = ctx.writer:update_message_meta(assistant_message_id, { behavior_control_state = "applied" })
+        if not marked then return nil, mark_err end
+        local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+        if not cleared then return nil, clear_err end
+        ctx.reader:reset()
     end
 
     -- Separate user-facing operations from background operations
@@ -997,6 +1048,11 @@ function message_handlers.agent_step(ctx, op)
             caller = prepared_caller,
             validated_tools = validated_tools,
             validation_error = validate_err,
+            behavior_controls = behavior_controls,
+            behavior_round = behavior_round,
+            checkpoint_anchor_id = assistant_message_id,
+            checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+            tokens = result.tokens,
             agent = {
                 id = agent.id,
                 model = agent.model,
@@ -1009,7 +1065,16 @@ function message_handlers.agent_step(ctx, op)
         })
     end
 
-    if result.tokens then
+    if result.tokens or (#unified_tool_calls == 0 and
+        ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true) then
+        local checkpoint_agent = agent
+        if ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
+            -- Declarative controls have committed by this boundary. Compaction
+            -- must use that target, just as it would after recovery, rather than
+            -- the agent/provider that produced the now-settled response.
+            checkpoint_agent = current_agent(ctx)
+            if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
+        end
         local checkpoint_anchor_id = op.message_id
         if not op.from_user and assistant_message_id then
             checkpoint_anchor_id = assistant_message_id
@@ -1018,11 +1083,11 @@ function message_handlers.agent_step(ctx, op)
         table.insert(background_ops, {
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
             tokens = result.tokens,
-            agent_options = agent.agent_options or {},
-            checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+            agent_options = checkpoint_agent.agent_options or {},
+            checkpoint_bindings = checkpoint_agent.bindings and checkpoint_agent.bindings.checkpoint,
             agent = {
-                id = agent.id,
-                model = agent.model
+                id = checkpoint_agent.id,
+                model = checkpoint_agent.model
             },
             run_context_binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
             message_id = op.message_id,
@@ -1148,6 +1213,16 @@ function message_handlers.process_tools(ctx, op)
         return nil, failure
     end
 
+    local controls = {}
+    for _, control in ipairs(op.behavior_controls or {}) do controls[#controls + 1] = control end
+    if type(caller.get_wrapper_controls) == "function" then
+        for _, control in ipairs(caller:get_wrapper_controls()) do controls[#controls + 1] = control end
+    end
+    if op.behavior_round then
+        local stored, store_err = ctx.writer:update_message_meta(op.checkpoint_anchor_id, { behavior_controls = controls })
+        if not stored then return fail_remaining(1, store_err) end
+    end
+
     for index, call in ipairs(op.tool_calls) do
         local call_id = call.id
         local result_data = results[call_id]
@@ -1266,7 +1341,41 @@ function message_handlers.process_tools(ctx, op)
 
     message_handlers.note_tool_round(ctx, results)
 
+    local policies_cancelled = is_turn_blocked(ctx)
+    if not policies_cancelled then
+        if #controls > 0 then
+            local applied, control_err = control_handlers.apply_behavior_controls(ctx, controls)
+            if not applied then return nil, control_err end
+        end
+    end
+    if op.behavior_round then
+        local marked, mark_err = ctx.writer:update_message_meta(op.checkpoint_anchor_id, {
+            behavior_control_state = policies_cancelled and "cancelled" or "applied",
+        })
+        if not marked then return nil, mark_err end
+        local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+        if not cleared then return nil, clear_err end
+        ctx.reader:reset()
+    end
+
     if #op.tool_calls > 0 and not is_turn_blocked(ctx) then
+        -- Requested compaction waits for the complete tool/result round. The
+        -- existing token-threshold background scheduling remains unchanged.
+        if ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
+            local checkpoint_agent = current_agent(ctx)
+            if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
+            table.insert(next_ops, {
+                type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
+                requested_only = true,
+                message_id = op.checkpoint_anchor_id or op.message_id,
+                checkpoint_anchor_id = op.checkpoint_anchor_id,
+                checkpoint_bindings = checkpoint_agent and checkpoint_agent.bindings
+                    and checkpoint_agent.bindings.checkpoint,
+                agent_options = checkpoint_agent and checkpoint_agent.agent_options,
+                agent = checkpoint_agent and { id = checkpoint_agent.id, model = checkpoint_agent.model },
+                tokens = op.tokens,
+            })
+        end
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,
@@ -1287,6 +1396,41 @@ function message_handlers.agent_continue(ctx, op)
         request_id = op.request_id,
         from_user = false
     })
+end
+
+-- Persisted proposals are at-least-once. Effects are deliberately limited to
+-- declarative targets and compaction requests, so a crash before the applied
+-- marker can replay them without re-executing tools or starting an LLM step.
+function message_handlers.recover_behavior_controls(ctx)
+    local state = ctx.reader:state() or {}
+    if not (state.meta and state.meta.behavior_controls_pending) then return true end
+    local rounds, read_err = ctx.reader:list_behavior_rounds()
+    if not rounds then return nil, read_err end
+    for _, round in ipairs(rounds) do
+        local cancelled = false
+        for _, message_id in pairs(round.metadata.behavior_call_message_ids or {}) do
+            local call, call_err = ctx.reader:get_behavior_call(message_id)
+            if not call then return nil, call_err end
+            local status = call.metadata and call.metadata.status
+            if status ~= consts.FUNC_STATUS.SUCCESS and status ~= consts.FUNC_STATUS.ERROR
+                and status ~= consts.FUNC_STATUS.CANCELLED then
+                return nil, "Behavior round still has unsettled calls"
+            end
+            if status == consts.FUNC_STATUS.CANCELLED then cancelled = true end
+        end
+        if not cancelled then
+            local applied, apply_err = control_handlers.apply_behavior_controls(ctx, round.metadata.behavior_controls)
+            if not applied then return nil, apply_err end
+        end
+        local marked, mark_err = ctx.writer:update_message_meta(round.message_id, {
+            behavior_control_state = cancelled and "cancelled" or "applied",
+        })
+        if not marked then return nil, mark_err end
+    end
+    local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+    if not cleared then return nil, clear_err end
+    ctx.reader:reset()
+    return true
 end
 
 return message_handlers

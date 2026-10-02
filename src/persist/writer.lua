@@ -13,6 +13,7 @@ local session_writer = {
     _artifact_repo = require("artifact_repo"),
     _context_repo = require("context_repo"),
     _session_contexts_repo = require("session_contexts_repo"),
+    _checkpoint_repo = require("checkpoint_repo"),
     session_id = nil :: string?,
     user_id = nil :: string?,
     actor = nil :: any,
@@ -94,6 +95,16 @@ function session_writer:update_title(title)
     end
 
     return self:update_meta({ title = title })
+end
+
+function session_writer:commit_checkpoint(op, summary, metadata)
+    local summary_id, id_err = uuid.v7()
+    if not summary_id then return nil, id_err end
+    self._meta_lock:receive()
+    local result, err = session_writer._checkpoint_repo.commit(self.session_id, self.user_id,
+        op, summary, metadata, summary_id)
+    self._meta_lock:send(true)
+    return result, err
 end
 
 function session_writer:update_status(status, error_message)
@@ -218,6 +229,7 @@ function session_writer:add_response(content, metadata, calls)
             }
         })
     end
+    if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
     local _, err = session_writer._message_repo.create_batch(self.session_id, rows)
     if err then return nil, nil, err end
     return assistant_id, call_ids, nil

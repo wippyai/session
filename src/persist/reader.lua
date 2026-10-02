@@ -200,6 +200,17 @@ function session_reader:list_all_messages()
     return session._message_repo.list_all_by_session(self.session_id)
 end
 
+function session_reader:list_behavior_rounds()
+    return session._message_repo.list_behavior_rounds(self.session_id)
+end
+
+function session_reader:get_behavior_call(message_id)
+    local message, err = session._message_repo.get(message_id)
+    if err then return nil, err end
+    if not message or message.session_id ~= self.session_id then return nil, "Behavior call is not in this session" end
+    return message
+end
+
 function session_reader:artifacts()
     local query = setmetatable({}, artifact_query)
     query._session_id = self.session_id

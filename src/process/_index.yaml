@@ -52,6 +52,7 @@ entries:
     imports:
       consts: wippy.session:consts
       input_policy: wippy.session.process:input_policy
+      behavior_controls: wippy.agent:behavior_controls
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -71,6 +72,7 @@ entries:
       prompt_builder: wippy.session:prompt_builder
       input_metadata: wippy.session:input_metadata
       tool_caller: wippy.agent.tools:caller
+      lifecycle_controller: wippy.agent:lifecycle_controller
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output

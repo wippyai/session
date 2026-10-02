@@ -82,6 +82,43 @@ local function mock_ctx()
 end
 
 local function define_tests()
+    describe("behavior controls", function()
+        it("does not reset overlays or announce an already-committed target during replay", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:target", model = "model:target", active_traits = { "trait:kept" } }
+            local result, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { agent = "agent:target", model = "model:target", traits = { "trait:kept" } } }
+            })
+            test.is_nil(err)
+            test.is_true(result)
+            test.eq(#captured.switches, 0)
+            test.eq(captured.persist_calls, 0)
+            test.eq(captured.upstream_calls, 0)
+        end)
+
+        it("validates the entire batch before applying any effects", function()
+            local ctx, captured = mock_ctx()
+            local result, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { model = "model:new" } }, { config = { stop = true } }
+            })
+            test.is_nil(result)
+            test.not_nil(err)
+            test.eq(captured.persist_calls, 0)
+        end)
+
+        it("returns storage failures without continuing later policies", function()
+            local ctx, captured = mock_ctx()
+            ctx.writer.set_context = function() return nil, "disk full" end
+            local result, err = control_handlers.apply_behavior_controls(ctx, {
+                { context = { session = { set = { key = "value" } } } },
+                { config = { model = "model:new" } }
+            })
+            test.is_nil(result)
+            test.contains(tostring(err), "disk full")
+            test.eq(captured.persist_calls, 0)
+        end)
+    end)
+
     describe("context and memory control failures", function()
         it("returns the storage error from each context write", function()
             for _, case in ipairs({
