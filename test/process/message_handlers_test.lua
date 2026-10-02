@@ -519,6 +519,23 @@ local function define_tests()
     end)
 
     describe("turn loop guards", function()
+        it("retains bounded-size failure fingerprints instead of large argument payloads", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            local payload = string.rep("large argument ", 1000)
+            for index = 1, 4 do
+                message_handlers.note_tool_round(ctx, { failed = {
+                    error = "failed", tool_call = { name = "lookup", args = { payload = payload, item = index } },
+                } })
+            end
+            local actions = 0
+            for fingerprint in pairs(ctx.turn_state.failed_actions) do
+                actions = actions + 1
+                test.eq(#fingerprint, 64)
+            end
+            test.eq(actions, 4)
+        end)
+
         it("feeds every parallel failure to the model, allows correction, and stops after final text", function()
             local agent = fake_agent(nil)
             local ctx, captured = mock_ctx(agent)

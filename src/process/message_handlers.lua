@@ -10,6 +10,7 @@ local lifecycle_runtime = require("lifecycle_runtime")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
 local message_order = require("message_order")
+local hash = require("hash")
 
 type SessionContext = {
     session_id: string,
@@ -513,7 +514,11 @@ local function action_fingerprint(call: any): string
         local decoded, err = json.decode(args)
         if not err then args = decoded end
     end
-    return canonical({ name = call.name, registry_id = call.registry_id, arguments = args })
+    -- Failure history lasts for the turn. Keep fixed-size keys rather than retaining
+    -- every large argument payload for the lifetime of a long conversation turn.
+    local fingerprint, err = hash.sha256(canonical({ name = call.name, registry_id = call.registry_id, arguments = args }))
+    if err then error(err) end
+    return fingerprint
 end
 
 -- Preserve the whole-round guard, and also count repeated failed actions across
