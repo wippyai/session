@@ -21,6 +21,9 @@ function api.describe()
         schema = api.SCHEMA,
         -- `received` echoes request_id, and an identical retry returns the same message.
         message_receipt = 1,
+        -- Input sent while a turn runs is stored as pending and applied at the next
+        -- step; session updates carry `interaction`; Stop accepts a stop_request_id.
+        steering = 1,
         attention = {
             -- Per-session attention_context state, attention_context_set and the PATCH route.
             context = 1,
