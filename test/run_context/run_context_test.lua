@@ -29,7 +29,7 @@ local function open_binding()
     test.not_nil(def)
 
     local actor = security.new_actor(TEST_ACTOR_ID, { source = "run_context_test" })
-    local scope, scope_err = security.named_scope("wippy.session.run_context:test_group")
+    local scope, scope_err = security.named_scope("app.run_context:test_group")
     test.is_nil(scope_err, "security.named_scope: " .. tostring(scope_err))
     test.not_nil(scope)
 
@@ -301,6 +301,24 @@ local function define_tests()
             test.eq(#result.events, 0)
             test.is_nil(result.range.from_id)
             test.is_nil(result.range.to_id)
+        end)
+
+        test.it("rejects unknown range endpoints", function()
+            local missing_end, end_err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "range", from_id = test_data.user_message_id,
+                    to_id = "missing-message" }
+            })
+            test.is_nil(missing_end)
+            test.contains(tostring(end_err), "not found")
+
+            local missing_same, same_err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "range", from_id = "missing-message",
+                    to_id = "missing-message" }
+            })
+            test.is_nil(missing_same)
+            test.contains(tostring(same_err), "not found")
         end)
 
         test.it("treats range without to_id as open ended", function()

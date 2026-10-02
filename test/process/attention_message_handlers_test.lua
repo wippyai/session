@@ -61,26 +61,32 @@ end
 
 local function context(writer_error, duplicate): (any, any)
     local calls = {}
+    local function write(message_type, text, metadata, request_id, request_hash)
+        table.insert(calls, {
+            type = "write",
+            message_type = message_type,
+            text = text,
+            metadata = metadata,
+            request_id = request_id,
+            request_hash = request_hash,
+        })
+        if writer_error then
+            return nil, writer_error
+        end
+        return "persisted-message-1", nil, duplicate == true
+    end
     local ctx = {
         session_id = "session-1",
         writer = {
             add_message = function(_, message_type, text, metadata, request_id, request_hash)
-                table.insert(calls, {
-                    type = "write",
-                    message_type = message_type,
-                    text = text,
-                    metadata = metadata,
-                    request_id = request_id,
-                    request_hash = request_hash,
-                })
-                if writer_error then
-                    return nil, writer_error
-                end
-                return "persisted-message-1", nil, duplicate == true
-            end
+                return write(message_type, text, metadata, request_id, request_hash)
+            end,
+            admit_message = function(_, message_type, text, metadata, _session_updates, request_id, request_hash)
+                return write(message_type, text, metadata, request_id, request_hash)
+            end,
         },
         upstream = {
-            message_received = function(_, message_id, text, file_uuids, attachments, request_id)
+            message_received = function(_, message_id, text, file_uuids, _input, request_id, attachments)
                 table.insert(calls, {
                     type = "received",
                     message_id = message_id,
@@ -424,7 +430,9 @@ local function define_tests()
         end)
         it('rejects transaction-time cancellation as a terminal rejected operation rather than failing the command bus', function()
             local ctx, calls, ref = referenced({ attachment() })
+            -- An idle session admits through admit_message; a running one appends pending input.
             ctx.writer.add_message = function() return nil, 'CONTEXT_REFERENCE_UNAVAILABLE' end
+            ctx.writer.admit_message = function() return nil, 'CONTEXT_REFERENCE_UNAVAILABLE' end
             local result, err = message_handlers.handle_message(ctx, { request_id = 'request-1', data = { context_attachments_ref = ref } })
             test.is_nil(err)
             test.is_true(result.rejected)
@@ -588,14 +596,12 @@ local function define_tests()
                 data = { text = "Do not acknowledge", context_attachments = { attachment() } }
             })
 
+            -- The session inbox reports the storage error; the handler only returns it.
             test.is_nil(result)
             test.eq(err, "storage unavailable")
             local write_call = calls[1] :: any
-            local error_call = calls[2] :: any
             test.eq(write_call.type, "write")
-            test.eq(error_call.type, "error")
-            test.eq(error_call.code, consts.ERROR_CODES.STORAGE_ERROR)
-            test.eq(#calls, 2)
+            test.eq(#calls, 1)
         end)
 
         it("replays one receipt for a duplicate without another agent step", function()
@@ -622,11 +628,11 @@ local function define_tests()
                 data = { text = "Changed retry", context_attachments = { attachment() } }
             })
 
+            -- The session inbox maps this error to REQUEST_CONFLICT.
             test.is_nil(result)
             test.eq(err, "Request ID conflict")
-            test.eq(#calls, 2)
-            test.eq(calls[2].type, "error")
-            test.eq(calls[2].code, consts.ERROR_CODES.REQUEST_CONFLICT)
+            test.eq(#calls, 1)
+            test.eq(calls[1].type, "write")
         end)
     end)
 end

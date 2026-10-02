@@ -72,6 +72,10 @@ local function define_tests()
                         has_more = false,
                     }
                 end,
+                list_pending_inputs = function(session_id)
+                    test.eq(session_id, "session-http")
+                    return {}
+                end,
             }
 
             api.handler()
@@ -86,4 +90,4 @@ local function define_tests()
     end)
 end
 
-return { run = define_tests }
+return test.run_cases(define_tests)

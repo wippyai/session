@@ -71,7 +71,7 @@ local function open_binding()
     test.not_nil(def)
 
     local actor = security.new_actor(TEST_ACTOR_ID, { source = "session_service_test" })
-    local scope, scope_err = security.named_scope("wippy.session:test_group")
+    local scope, scope_err = security.named_scope("app:test_group")
     test.is_nil(scope_err, "security.named_scope: " .. tostring(scope_err))
     test.not_nil(scope)
 

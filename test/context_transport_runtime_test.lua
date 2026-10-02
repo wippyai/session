@@ -120,7 +120,8 @@ local function define_tests()
                 assert(process.send(pid, consts.TOPICS.COMMAND, { command = 'context_transport_capabilities',
                     capabilities_version = version, request_id = req_id, conn_pid = process.pid() }))
                 local response = receive(consts.TOPIC_PREFIXES.SESSION .. session, pid, req_id)
-                test.eq(response.success, version == 1)
+                -- Session 0.6.5 reports command failures as error events without a success field.
+                test.eq(response.success == true, version == 1)
                 if version == 1 then
                     test.eq(attachments.canonical_json(response.context_attachments_capabilities), attachments.canonical_json(attachments.capabilities()))
                 else test.eq(response.code, 'INVALID_CAPABILITIES_VERSION') end
@@ -221,8 +222,8 @@ local function define_tests()
             test.is_nil(messages.get(original_id).context_receipt)
             local history = assert(messages.list_by_session(session))
             local public_json = attachments.canonical_json(history)
-            test.is_nil(string.find(public_json, 'context_receipt', 1, true))
-            test.is_nil(string.find(public_json, staged.context_attachments_ref.id, 1, true))
+            test.is_nil((string.find(public_json, 'context_receipt', 1, true)))
+            test.is_nil((string.find(public_json, staged.context_attachments_ref.id, 1, true)))
             request.data.text = 'Changed retry'
             local changed = send(second_pid, request)
             test.is_true(changed.value.rejected)

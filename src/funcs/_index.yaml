@@ -60,24 +60,6 @@ entries:
       session: wippy.session.persist:reader
     method: handle
 
-  # wippy.session.funcs:checkpoint_test
-  - name: checkpoint_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: checkpoint
-      comment: Unit tests for checkpoint option overrides and prompt token substitution.
-    source: file://checkpoint_test.lua
-    modules:
-      - json
-    imports:
-      checkpoint: wippy.session.funcs:checkpoint
-      prompt: wippy.llm:prompt
-      llm: wippy.llm:llm
-      session: wippy.session.persist:reader
-      test: wippy.test:test
-    method: run_tests
-
   # wippy.session.funcs:title
   - name: title
     kind: function.lua

@@ -268,7 +268,7 @@ local function define_tests()
             test.is_true(context_attachments.validate({ attachment }) ~= nil)
             payload.path_dictionary[2][4].tag_name = 'button'
             replace_content(attachment, payload)
-            test.is_nil(context_attachments.validate({ attachment }))
+            test.is_nil((context_attachments.validate({ attachment })))
             context_attachments._renderer = { supports = active.supports, expand_attention_v2 = active.expand_attention_v2 }
             test.is_false(context_attachments.supports('wippy.attention', 3))
             local _, err = context_attachments.validate({ attachment })
@@ -312,7 +312,7 @@ local function define_tests()
             for _, mutate in ipairs(changes) do
                 local attachment, payload = compact()
                 mutate(payload); replace_content(attachment, payload)
-                test.is_nil(context_attachments.validate({ golden_attachment(), attachment }))
+                test.is_nil((context_attachments.validate({ golden_attachment(), attachment })))
             end
             local attachment, payload = compact()
             payload.capture.points = nil
@@ -383,7 +383,7 @@ local function define_tests()
                 if sum <= 262144 then test.is_true(context_attachments.validate(array) ~= nil)
                 else
                     test.is_true(#context_attachments.canonical_json(array) < 32768)
-                    test.is_nil(context_attachments.validate(array))
+                    test.is_nil((context_attachments.validate(array)))
                     return
                 end
             end

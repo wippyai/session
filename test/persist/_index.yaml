@@ -1,0 +1,163 @@
+version: "1.0"
+namespace: app.persist
+
+# Suites for src/persist/.
+entries:
+  - name: artifact_repo_test
+    kind: function.lua
+    meta:
+      name: Artifact repository
+      type: test
+      suite: session
+      comment: Tests the artifact repository functionality
+    source: file://artifact_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - json
+      - time
+      - security
+    imports:
+      artifact_repo: wippy.session.persist:artifact_repo
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: context_repo_test
+    kind: function.lua
+    meta:
+      name: Context repository
+      type: test
+      suite: session
+      comment: Tests the context repository functionality
+    source: file://context_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: message_repo_test
+    kind: function.lua
+    meta:
+      name: Message repository
+      type: test
+      suite: session
+      comment: Tests the message repository functionality
+    source: file://message_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - json
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      writer: wippy.session.persist:writer
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: session_contexts_repo_test
+    kind: function.lua
+    meta:
+      name: Session contexts repository
+      type: test
+      suite: session
+      comment: Tests the session contexts repository functionality
+    source: file://session_contexts_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_contexts_repo: wippy.session.persist:session_contexts_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: session_repo_test
+    kind: function.lua
+    meta:
+      name: Session repository
+      type: test
+      suite: session
+      comment: Tests the session repository functionality
+    source: file://session_repo_test.lua
+    modules:
+      - sql
+      - uuid
+      - json
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: steering_persistence_test
+    kind: function.lua
+    meta:
+      name: Durable steering inputs
+      type: test
+      suite: session
+    source: file://steering_persistence_test.lua
+    modules: [uuid, security, contract, sql]
+    imports:
+      consts: wippy.session:consts
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run_tests
+
+  - name: writer_lock_test
+    kind: function.lua
+    meta:
+      name: Session writer metadata lock
+      type: test
+      suite: session
+      comment: Stop and pending input application must share one metadata lock
+    source: file://writer_lock_test.lua
+    imports:
+      writer: wippy.session.persist:writer
+      test: wippy.test:test
+    method: run_tests
+
+  - name: context_staging_repo_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://context_staging_repo_test.lua
+    modules: [uuid, time, json, hash, sql]
+    imports:
+      test: wippy.test:test
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      context_attachments: wippy.session:context_attachments
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      consts: wippy.session:consts
+    method: run

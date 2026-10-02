@@ -1,0 +1,39 @@
+version: "1.0"
+namespace: app.run_context
+
+# Suites for src/run_context/.
+entries:
+  - name: test_security_policy
+    kind: security.policy
+    meta:
+      comment: Lets the run-context contract test read its seeded session
+    policy:
+      actions: "*"
+      resources: "*"
+      effect: allow
+    groups:
+      - test_group
+
+  - name: run_context_test
+    kind: function.lua
+    meta:
+      name: Run context child binding
+      type: test
+      suite: session
+      comment: Contract-level tests for the session run-context child binding
+    source: file://run_context_test.lua
+    modules:
+      - contract
+      - json
+      - security
+      - sql
+      - uuid
+    imports:
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      session_contexts_repo: wippy.session.persist:session_contexts_repo
+      session_repo: wippy.session.persist:session_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run_tests

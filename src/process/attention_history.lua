@@ -126,7 +126,7 @@ end
 -- This Session Attention hook runs before prompt construction. It reuses the
 -- existing reader, metadata writer and stale-result rendering without changing
 -- generic prompt, provider or agent lifecycle contracts.
-function M.build(context)
+function M.build(context, options)
     local messages, err = context.reader:messages():from_checkpoint():all()
     if err then return nil, 'Failed to load messages: ' .. err end
     local projected, updates = M.prepare(messages, time.now():unix())
@@ -143,7 +143,7 @@ function M.build(context)
         end end
         return function(_, ...) return context.reader[key](context.reader, ...) end
     end })
-    return prompt_builder.from_session(adapter)
+    return prompt_builder.from_session(adapter, options)
 end
 
 return M

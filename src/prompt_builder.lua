@@ -5,6 +5,7 @@ local fs = require("fs")
 local base64 = require("base64")
 local hash = require("hash")
 local time = require("time")
+local input_metadata = require("input_metadata")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -16,6 +17,7 @@ type BuildOptions = {
     upload_repo: any?,
     now: any?,
     cache_markers: boolean?,
+    input_overrides: table?,
 }
 
 type VisualRequest = {
@@ -361,7 +363,34 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     local include_context_attachments = options.include_context_attachments ~= false
     local cache_markers = options.cache_markers ~= false
 
+    if options.input_overrides and #options.input_overrides > 0 then
+        local overrides = {}
+        for _, update in ipairs(options.input_overrides) do overrides[update.message_id] = update.metadata end
+        local preview = {}
+        for _, message in ipairs(messages) do
+            local override = overrides[message.message_id]
+            if override then
+                local copy, metadata = {}, {}
+                for key, value in pairs(message) do copy[key] = value end
+                for key, value in pairs(message.metadata or {}) do metadata[key] = value end
+                for key, value in pairs(override) do metadata[key] = value end
+                copy.metadata = metadata
+                preview[#preview + 1] = copy
+            else
+                preview[#preview + 1] = message
+            end
+        end
+        messages = preview
+    end
     local builder = prompt_builder._prompt.new()
+
+    for _, msg in ipairs(messages) do
+        local valid, validation_err = input_metadata.validate(msg)
+        if not valid then
+            return nil, "Malformed steering metadata on message " .. tostring(msg.message_id)
+                .. ": " .. tostring(validation_err)
+        end
+    end
 
     if include_contexts and contexts and #contexts > 0 then
         local memory_text = "Session context memory:\n\n"
@@ -375,8 +404,30 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
-    for i, msg in ipairs(messages) do
+    local anchored, message_ids = {}, {}
+    for _, msg in ipairs(messages) do
+        local input = (msg.metadata or {}).input
+        if not (msg.type == consts.MSG_TYPE.USER and type(input) == "table") then
+            message_ids[msg.message_id] = true
+        end
+    end
+    for _, msg in ipairs(messages) do
+        local input = (msg.metadata or {}).input
+        if msg.type == consts.MSG_TYPE.USER and type(input) == "table" and input.state == "applied" then
+            local anchor = input.after_message_id
+            if not anchor or not message_ids[anchor] then anchor = "" end
+            anchored[anchor] = anchored[anchor] or {}
+            table.insert(anchored[anchor], msg)
+        end
+    end
+
+    local function add_message(msg, render_steering)
         local metadata: table = msg.metadata or {}
+
+        local input = metadata.input
+        if not render_steering and msg.type == consts.MSG_TYPE.USER and type(input) == "table" then
+            return
+        end
 
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
@@ -488,7 +539,8 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 if metadata.status == consts.FUNC_STATUS.PENDING then
                     builder:add_function_result(func_name, "incomplete", llm_call_id)
                 elseif metadata.status == consts.FUNC_STATUS.SUCCESS or
-                    metadata.status == consts.FUNC_STATUS.ERROR then
+                    metadata.status == consts.FUNC_STATUS.ERROR or
+                    metadata.status == consts.FUNC_STATUS.CANCELLED then
                     -- A RESULT THAT HAS SINCE STOPPED BEING TRUE.
                     --
                     -- The conversation is rebuilt from these rows on every turn, so a tool
@@ -537,7 +589,67 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
+    local function add_anchored(anchor)
+        local rows = anchored[anchor or ""]
+        if rows then
+            table.sort(rows, function(a, b)
+                if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
+                return tostring(a.message_id) < tostring(b.message_id)
+            end)
+            for _, row in ipairs(rows) do
+                local _, render_err = add_message(row, true)
+                if render_err then return render_err end
+            end
+            anchored[anchor or ""] = nil
+        end
+        return nil
+    end
+
+    -- add_message returns an error when required context cannot be rendered;
+    -- the whole prompt fails closed rather than dropping that context.
+    local anchored_err = add_anchored("")
+    if anchored_err then return nil, anchored_err end
+    for _, msg in ipairs(messages) do
+        local metadata = msg.metadata or {}
+        local input = metadata.input
+        if not (msg.type == consts.MSG_TYPE.USER and type(input) == "table") then
+            local _, render_err = add_message(msg)
+            if render_err then return nil, render_err end
+            anchored_err = add_anchored(msg.message_id)
+            if anchored_err then return nil, anchored_err end
+        end
+    end
+    -- A ROLLING BREAKPOINT ON THE HISTORY TAIL.
+    --
+    -- The prompt is rebuilt from the message rows on every agent step, and the only
+    -- markers were the context memories and the last checkpoint. Everything after the
+    -- checkpoint -- every tool call and result of the current turn -- was therefore sent
+    -- uncached on every step. Marking the end of the history lets a supported provider
+    -- reuse the unchanged prefix on the next step. The new suffix is a cache write;
+    -- changed or expired prefixes can still miss.
+    --
+    -- Provider mappers deduplicate and cap breakpoints while reserving a slot for the
+    -- latest eligible history boundary. Providers without explicit caching ignore markers.
+    if cache_markers and #messages > 0 then
+        builder:add_cache_marker("history_tail")
+    end
+
     return builder, nil
+end
+
+prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Everything before this point is "
+    .. "summarized in the session context memory above. Continue the current task from the latest messages below."
+
+local function anchors_on_agent_message(session: any, messages: any): boolean
+    if type(session.get_context) ~= "function" then
+        return false
+    end
+    local checkpoint_id = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
+    local first = messages[1]
+    if not checkpoint_id or not first or first.message_id ~= checkpoint_id then
+        return false
+    end
+    return first.type ~= consts.MSG_TYPE.USER and first.type ~= consts.MSG_TYPE.DEVELOPER
 end
 
 function prompt_builder.from_session(session, options)
@@ -548,6 +660,15 @@ function prompt_builder.from_session(session, options)
     local messages, err = session:messages():from_checkpoint():all()
     if err then
         return nil, "Failed to load messages: " .. err
+    end
+
+    if anchors_on_agent_message(session, messages) then
+        table.insert(messages, 1, {
+            message_id = "checkpoint-resume:" .. tostring(messages[1].message_id),
+            type = consts.MSG_TYPE.DEVELOPER,
+            data = prompt_builder.CHECKPOINT_RESUME_NOTE,
+            metadata = {}
+        })
     end
 
     local contexts, err = session:contexts():all()

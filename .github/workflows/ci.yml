@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Wippy
+        run: |
+          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
+          . /tmp/wippy-install.sh
+          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Lint
+        run: make lint
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Wippy
+        run: |
+          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
+          . /tmp/wippy-install.sh
+          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Test
+        run: make test

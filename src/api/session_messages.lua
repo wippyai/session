@@ -17,6 +17,7 @@ type SessionMessagesResponse = {
     count: number?,
     session_id: string?,
     messages: {any}?,
+    pending_inputs: {any}?,
     pagination: {
         has_more: boolean,
         next_cursor: string?,
@@ -62,7 +63,7 @@ function api.handler()
 
     -- Verify session belongs to the authenticated user
     local session, err = api._session_repo.get(session_id, user_id)
-    if err then
+    if err or not session then
         res:set_status(http.STATUS.NOT_FOUND)
         res:write_json({
             success = false,
@@ -104,9 +105,20 @@ function api.handler()
     end
 
     local messages = result.messages
+    local pending_inputs, pending_err = api._message_repo.list_pending_inputs(session_id)
+    if pending_err then
+        res:set_status(http.STATUS.INTERNAL_ERROR)
+        res:write_json({ success = false, error = pending_err })
+        return
+    end
+    -- Pending input is returned separately so reloads retain it without changing
+    -- the history page or its cursors.
+    local visible = {}
+    for _, message in ipairs(messages) do visible[#visible + 1] = message end
+    for _, message in ipairs(pending_inputs or {}) do visible[#visible + 1] = message end
 
     -- Process message data
-    for i, message in ipairs(messages) do
+    for _, message in ipairs(visible) do
         -- If metadata exists but isn't directly accessible
         if message.metadata_json and message.metadata_json ~= "" then
             local decoded, err = json.decode(message.metadata_json :: string)
@@ -137,6 +149,7 @@ function api.handler()
         count = #messages,
         session_id = session_id,
         messages = messages,
+        pending_inputs = pending_inputs or {},
         pagination = {
             has_more = result.has_more,
             next_cursor = result.next_cursor,

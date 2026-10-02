@@ -2,28 +2,6 @@ version: "1.0"
 namespace: wippy.session.process
 
 entries:
-  - name: attention_history_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-    source: file://attention_history_test.lua
-    imports:
-      attention_history: wippy.session.process:attention_history
-      test: wippy.test:test
-    method: run
-
-  - name: attention_action_intents_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-    source: file://attention_action_intents_test.lua
-    imports:
-      attention_action_intents: wippy.session.process:attention_action_intents
-      test: wippy.test:test
-    method: run
-
   - name: attention_history
     kind: library.lua
     source: file://attention_history.lua
@@ -45,17 +23,6 @@ entries:
   - name: attention_control_runtime
     kind: library.lua
     source: file://attention_control_runtime.lua
-
-  - name: attention_control_runtime_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-    source: file://attention_control_runtime_test.lua
-    imports:
-      attention_control_runtime: wippy.session.process:attention_control_runtime
-      test: wippy.test:test
-    method: run
 
   - name: context_cleanup_group
     kind: registry.entry
@@ -111,6 +78,8 @@ entries:
       comment: Operation queuing and coordination system for session processing
       description: Manages operation queues, handler mounting, and async operation processing
     source: file://command_bus.lua
+    imports:
+      consts: wippy.session:consts
 
   # wippy.session.process:upstream
   - name: upstream
@@ -121,6 +90,7 @@ entries:
     source: file://upstream.lua
     imports:
       consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:session_handlers
   - name: session_handlers
@@ -136,19 +106,7 @@ entries:
       consts: wippy.session:consts
       tool_caller: wippy.agent.tools:caller
       checkpoint_runtime: wippy.agent:checkpoint_runtime
-
-  # wippy.session.process:session_handlers_test
-  - name: session_handlers_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session_handlers
-      comment: Unit tests for session config normalization during agent/model changes.
-    source: file://session_handlers_test.lua
-    method: run_tests
-    imports:
-      session_handlers: wippy.session.process:session_handlers
-      test: wippy.test:test
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:control_handlers
   - name: control_handlers
@@ -162,19 +120,7 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
-
-  # wippy.session.process:control_handlers_test
-  - name: control_handlers_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: control_handlers
-      comment: Unit tests for control_config trait/tool overlay routing
-    source: file://control_handlers_test.lua
-    method: run_tests
-    imports:
-      control_handlers: wippy.session.process:control_handlers
-      test: wippy.test:test
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -195,25 +141,20 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
+      input_metadata: wippy.session:input_metadata
       tool_caller: wippy.agent.tools:caller
+      tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      input_policy: wippy.session.process:input_policy
+      control_handlers: wippy.session.process:control_handlers
 
-  - name: message_handlers_test
-    kind: function.lua
+  - name: input_policy
+    kind: library.lua
     meta:
-      type: test
-      suite: session
-      comment: Tests atomic context attachment validation, persistence, and acknowledgement
-    source: file://message_handlers_test.lua
-    modules:
-      - hash
-    imports:
-      consts: wippy.session:consts
-      context_attachments: wippy.session:context_attachments
-      message_handlers: wippy.session.process:message_handlers
-      test: wippy.test:test
-    method: run
+      comment: Session-owned input admission and interaction policy resolver
+    source: file://input_policy.lua
+    modules: [json]
 
   # wippy.session.process:ui_action_broker
   - name: ui_action_broker
@@ -226,21 +167,6 @@ entries:
       - hash
     imports:
       context_attachments: wippy.session:context_attachments
-
-  - name: ui_action_broker_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-      comment: Tests targeted UI action routing correlation expiry replay and disconnect cleanup
-    source: file://ui_action_broker_test.lua
-    modules:
-      - hash
-      - json
-    imports:
-      ui_action_broker: wippy.session.process:ui_action_broker
-      test: wippy.test:test
-    method: run
 
   # wippy.session.process:session
   - name: session
@@ -271,6 +197,8 @@ entries:
       attention_control_runtime: wippy.session.process:attention_control_runtime
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
+      input_policy: wippy.session.process:input_policy
+      message_repo: wippy.session.persist:message_repo
     method: run
 
   # wippy.session.process:plugin
@@ -300,27 +228,6 @@ entries:
       ui_action_broker: wippy.session.process:ui_action_broker
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
+      input_policy: wippy.session.process:input_policy
+      reader: wippy.session.persist:reader
     method: run
-
-  # wippy.session.process:plugin_test
-  - name: plugin_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: plugin
-      comment: Unit tests for the on_session_end lifecycle hook firing.
-    source: file://plugin_test.lua
-    method: run_tests
-    modules:
-      - time
-      - json
-      - uuid
-      - logger
-      - funcs
-    imports:
-      plugin: wippy.session.process:plugin
-      consts: wippy.session:consts
-      session_repo: wippy.session.persist:session_repo
-      context_repo: wippy.session.persist:context_repo
-      start_tokens: wippy.session:start_tokens
-      test: wippy.test:test

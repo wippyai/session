@@ -17,10 +17,12 @@ local CONFIG = {
     model = "class:fast",
     temperature = 0.2,
     max_tokens = 3000,
-    max_tool_result_chars = 2000
+    max_tool_result_chars = 2000,
+    max_conversation_chars = 600000,
+    max_tool_results = 100
 }
 
-local function positive_number(value, fallback)
+local function positive_number(value: any, fallback: number): number
     local n = tonumber(value)
     if not n or n <= 0 then
         return fallback
@@ -35,7 +37,38 @@ local function config_from_args(args)
         temperature = tonumber(options.temperature) or CONFIG.temperature,
         max_tokens = positive_number(options.max_tokens, CONFIG.max_tokens),
         max_tool_result_chars = positive_number(options.max_tool_result_chars, CONFIG.max_tool_result_chars),
+        max_conversation_chars = positive_number(options.max_conversation_chars, CONFIG.max_conversation_chars),
+        max_tool_results = positive_number(options.max_tool_results, CONFIG.max_tool_results),
     }
+end
+
+local function clamp_transcript(text: string, max_chars: number): (string, number)
+    local limit = math.floor(max_chars)
+    if #text <= limit then
+        return text, 0
+    end
+
+    local cut = #text - limit
+    local newline = string.find(text, "\n", cut, true)
+    if newline then
+        cut = newline
+    end
+
+    local kept = string.sub(text, cut + 1)
+    local dropped = #text - #kept
+    return "[... " .. tostring(dropped) .. " earlier characters of this section omitted; "
+        .. "the previous checkpoint covers them ...]\n" .. kept, dropped
+end
+
+local function newest(items: { string }, max_items: number): { string }
+    if #items <= max_items then
+        return items
+    end
+    local kept = {}
+    for i = #items - max_items + 1, #items do
+        table.insert(kept, items[i])
+    end
+    return kept
 end
 
 local function checkpoint_prompt(template, max_tokens)
@@ -208,7 +241,7 @@ local function handle(args)
         summary_prompt:add_user("===FULL CONVERSATION TO CHECKPOINT===")
     end
 
-    local conversation_text = table.concat(conversation_parts, "\n")
+    local conversation_text = clamp_transcript(table.concat(conversation_parts, "\n"), cfg.max_conversation_chars)
     summary_prompt:add_user(conversation_text)
 
     if #file_references > 0 then
@@ -216,7 +249,7 @@ local function handle(args)
     end
 
     if #tool_results > 0 then
-        summary_prompt:add_user("\n===KEY TOOL RESULTS===\n" .. table.concat(tool_results, "\n"))
+        summary_prompt:add_user("\n===KEY TOOL RESULTS===\n" .. table.concat(newest(tool_results, cfg.max_tool_results), "\n"))
     end
 
     local pattern_notes = {}
@@ -255,4 +288,10 @@ local function handle(args)
     }
 end
 
-return { handle = handle, config_from_args = config_from_args, checkpoint_prompt = checkpoint_prompt }
+return {
+    handle = handle,
+    config_from_args = config_from_args,
+    checkpoint_prompt = checkpoint_prompt,
+    clamp_transcript = clamp_transcript,
+    newest = newest,
+}

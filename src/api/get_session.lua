@@ -63,6 +63,7 @@ local function handler()
     local latest_message, _ = message_repo.get_latest(session_id)
     local message_count, _ = message_repo.count_by_session(session_id)
 
+    session.interaction = session.meta and session.meta.interaction
     session.current_agent = ""
     session.current_model = ""
 

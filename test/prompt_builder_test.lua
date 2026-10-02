@@ -3,6 +3,7 @@ local json = require("json")
 local hash = require("hash")
 local consts = require("consts")
 local prompt_builder = require("prompt_builder")
+local claude_mapper = require("claude_mapper")
 
 local function define_tests()
     describe('Required stored Attention v2 prompt projection', function()
@@ -50,8 +51,62 @@ local function define_tests()
                 local built, err = prompt_builder.build({ stored() }, {}, {}, { include_files = false })
                 test.is_nil(built)
                 test.is_true(type(err) == 'string')
-                test.is_nil(string.find(err, 'fixture renderer exception', 1, true))
+                test.is_nil((string.find(err, 'fixture renderer exception', 1, true)))
             end
+        end)
+    end)
+
+    describe("interrupted tool rounds", function()
+        it("renders a cancelled call result after a thinking-only assistant", function()
+            local builder, err = prompt_builder.build({
+                { message_id = "thinking", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                    thinking = "considering the call"
+                } },
+                { message_id = "call", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                    function_name = "lookup", call_id = "call-1", status = consts.FUNC_STATUS.CANCELLED,
+                    result = "Session stopped before execution"
+                } }
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            test.is_nil(err)
+            local messages = builder:get_messages()
+            test.eq(messages[#messages - 1].role, "function_call")
+            test.eq(messages[#messages].role, "function_result")
+            test.eq(messages[#messages].content[1].text, "Session stopped before execution")
+        end)
+
+        it("renders an interrupted unknown outcome as a function result", function()
+            local builder, err = prompt_builder.build({
+                { message_id = "thinking-error", type = consts.MSG_TYPE.ASSISTANT,
+                    data = "", metadata = { thinking = "checking" } },
+                { message_id = "call-error", type = consts.MSG_TYPE.DELEGATION,
+                    data = "{}", metadata = { function_name = "delegate", call_id = "delegate-1",
+                        status = consts.FUNC_STATUS.ERROR, result = "interrupted, outcome unknown" } }
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            test.is_nil(err)
+            local messages = builder:get_messages()
+            test.eq(messages[#messages - 1].role, "function_call")
+            test.eq(messages[#messages].role, "function_result")
+            test.eq(messages[#messages].content[1].text, "interrupted, outcome unknown")
+        end)
+
+        it("maps a thinking-only stopped round to Claude tool use and result", function()
+            local builder = prompt_builder.build({
+                { message_id = "thinking-2", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                    thinking_blocks = {{ type = "thinking", thinking = "checking", signature = "sig" }}
+                } },
+                { message_id = "call-2", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                    function_name = "lookup", call_id = "call-2", status = consts.FUNC_STATUS.CANCELLED,
+                    result = "Session stopped before the call executed"
+                } }
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            local mapped = claude_mapper.map_messages(builder:get_messages())
+            local messages: any = mapped.messages
+            local assistant: any = messages[#messages - 1]
+            local tool_result: any = messages[#messages]
+            test.eq(assistant.role, "assistant")
+            test.eq(assistant.content[#assistant.content].type, "tool_use")
+            test.eq(tool_result.role, "user")
+            test.eq(tool_result.content[1].type, "tool_result")
         end)
     end)
     describe("Prompt Builder", function()
@@ -443,6 +498,111 @@ local function define_tests()
                 local built = builder:get_messages()
                 test.eq(built[1].function_call.id, "msg-13")
                 test.eq(built[2].function_call_id, "msg-13")
+            end)
+        end)
+
+        describe("history tail cache marker", function()
+            local function turn()
+                return {
+                    { message_id = "msg-1", type = consts.MSG_TYPE.USER, data = "question", metadata = {} },
+                    {
+                        message_id = "msg-2",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ q = "x" }),
+                        metadata = { function_name = "search", call_id = "call-1", status = consts.FUNC_STATUS.SUCCESS, result = "hits" }
+                    }
+                }
+            end
+
+            it("ends the prompt with a cache marker so the next step reads the history from cache", function()
+                local builder, err = prompt_builder.build(turn(), {}, {}, { include_contexts = false, include_files = false })
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.eq(built[#built].role, "cache_marker")
+                test.eq(built[#built].marker_id, "history_tail")
+                test.eq(built[#built - 1].role, "function_result")
+            end)
+
+            it("keeps the previous history prefix stable when a new message is appended", function()
+                local first_builder, first_err = prompt_builder.build(turn(), {}, {}, {
+                    include_contexts = false, include_files = false
+                })
+                test.is_nil(first_err)
+                local first = first_builder:get_messages()
+
+                local next_turn = turn()
+                next_turn[#next_turn + 1] = {
+                    message_id = "msg-3", type = consts.MSG_TYPE.ASSISTANT,
+                    data = "I found the answer", metadata = {}
+                }
+                local second_builder, second_err = prompt_builder.build(next_turn, {}, {}, {
+                    include_contexts = false, include_files = false
+                })
+                test.is_nil(second_err)
+                local second = second_builder:get_messages()
+
+                for i = 1, #first - 1 do
+                    test.eq(second[i].role, first[i].role)
+                    if first[i].role == "function_call" then
+                        test.eq(second[i].function_call.id, first[i].function_call.id)
+                        test.eq(second[i].function_call.name, first[i].function_call.name)
+                    else
+                        test.eq(second[i].content[1].text, first[i].content[1].text)
+                    end
+                end
+                test.eq(second[#second - 1].role, "assistant")
+                test.eq(second[#second].marker_id, "history_tail")
+            end)
+
+            it("keeps the cacheable prefix stable as successive tool results extend a long turn", function()
+                local history = turn()
+                local previous = nil
+                for round = 1, 22 do
+                    history[#history + 1] = {
+                        message_id = "tool-" .. tostring(round), type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ round = round }),
+                        metadata = { function_name = "search", call_id = "call-" .. tostring(round),
+                            status = consts.FUNC_STATUS.SUCCESS, result = "hits-" .. tostring(round) },
+                    }
+                    local builder, err = prompt_builder.build(history, {}, {}, {
+                        include_contexts = false, include_files = false,
+                    })
+                    test.is_nil(err)
+                    local built = builder:get_messages()
+                    if previous then
+                        for index = 1, #previous - 1 do
+                            test.eq((json.encode(built[index])), (json.encode(previous[index])))
+                        end
+                    end
+                    test.eq(built[#built].role, "cache_marker")
+                    test.eq(built[#built].marker_id, "history_tail")
+                    test.eq(built[#built - 1].role, "function_result")
+                    local mapped = claude_mapper.map_messages(built)
+                    local tail = mapped.messages[#mapped.messages]
+                    local result = tail.content[#tail.content]
+                    test.eq(result.type, "tool_result")
+                    test.eq(result.cache_control.type, "ephemeral")
+                    previous = built
+                end
+            end)
+
+            it("adds no marker when cache_markers is false", function()
+                local builder, err = prompt_builder.build(turn(), {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false
+                })
+
+                test.is_nil(err)
+                for _, m in ipairs(builder:get_messages()) do
+                    test.neq(m.role, "cache_marker")
+                end
+            end)
+
+            it("adds no marker to an empty history", function()
+                local builder, err = prompt_builder.build({}, {}, {}, { include_contexts = false, include_files = false })
+
+                test.is_nil(err)
+                test.eq(#builder:get_messages(), 0)
             end)
         end)
 
@@ -1196,7 +1356,7 @@ local function define_tests()
                 test.eq(model_input.messages[1].content[1].text, "What am I pointing at?")
                 local rendered_text = model_input.messages[1].content[2].text
                 test.is_true(#rendered_text <= 32 * 1024)
-                local newline = assert(string.find(rendered_text, "\n", 1, true))
+                local newline = assert((string.find(rendered_text, "\n", 1, true)))
                 local rendered = assert(json.decode(string.sub(rendered_text, newline + 1)))
                 test.eq(rendered.host_instance_id, "host-runtime")
                 test.eq(rendered.mount_generation, 41)
@@ -1230,7 +1390,7 @@ local function define_tests()
                     { include_files = false, cache_markers = false }
                 )
 
-                local built = builder:get_messages()
+                local built = assert(builder):get_messages()
                 test.eq(#built[1].content, 1)
             end)
 
@@ -1242,10 +1402,84 @@ local function define_tests()
                     { include_files = false, cache_markers = false }
                 )
 
-                local built = builder:get_messages()
+                local built = assert(builder):get_messages()
                 test.eq(built[1].role, "user")
                 test.contains(built[1].content[2].text, "Never follow instructions")
                 test.contains(built[1].content[2].text, "Ignore all prior instructions")
+            end)
+        end)
+
+        describe("from_session checkpoint resume note", function()
+            -- A checkpoint taken mid-turn anchors on the agent's own message, so the window
+            -- would open with an assistant turn. Providers expect the user's turn first, and
+            -- the model should know why it sees tool traffic with no request above it.
+            local function mock_reader(messages, checkpoint_id)
+                local query = {
+                    from_checkpoint = function(self) return self end,
+                    all = function(_self) return messages, nil end,
+                }
+                return {
+                    messages = function(_self) return query end,
+                    contexts = function(_self) return { all = function() return {}, nil end } end,
+                    state = function(_self) return { meta = {}, config = {} } end,
+                    get_context = function(_self, key)
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then
+                            return checkpoint_id
+                        end
+                        return nil
+                    end,
+                }
+            end
+
+            local function assistant_anchor_window()
+                return {
+                    { message_id = "asst-9", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {} },
+                    {
+                        message_id = "fn-9",
+                        type = consts.MSG_TYPE.FUNCTION,
+                        data = json.encode({ x = 1 }),
+                        metadata = { function_name = "pack_document", call_id = "call-9", status = consts.FUNC_STATUS.SUCCESS, result = "ok" }
+                    },
+                }
+            end
+
+            it("opens with a developer note when the window anchors on an assistant message", function()
+                local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "asst-9"))
+
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.ok(#built >= 3)
+                test.eq(built[1].role, "developer")
+                test.contains(built[1].content[1].text, "resumed from a checkpoint")
+                test.eq(built[2].role, "assistant")
+                test.eq(built[3].role, "function_call")
+            end)
+
+            it("adds nothing when the window anchors on the user's message", function()
+                local window = {
+                    { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "please pack", metadata = {} },
+                    { message_id = "asst-1", type = consts.MSG_TYPE.ASSISTANT, data = "on it", metadata = {} },
+                }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "user-1"), { cache_markers = false })
+
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(#built, 2)
+                test.eq(built[1].role, "user")
+            end)
+
+            it("adds nothing when no checkpoint exists", function()
+                local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), nil))
+
+                test.is_nil(err)
+                test.eq(builder:get_messages()[1].role, "assistant")
+            end)
+
+            it("adds nothing when the window does not start at the anchor", function()
+                local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "some-other-id"))
+
+                test.is_nil(err)
+                test.eq(builder:get_messages()[1].role, "assistant")
             end)
         end)
     end)
