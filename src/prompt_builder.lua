@@ -2,6 +2,7 @@ local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
 local input_metadata = require("input_metadata")
+local message_order = require("message_order")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -253,7 +254,10 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                         else
                             result_content = tostring(result_content)
                         end
-                        builder:add_function_result(func_name, tostring(result_content), llm_call_id)
+                        builder:add_function_result(func_name, tostring(result_content), llm_call_id, {
+                            is_error = metadata.status == consts.FUNC_STATUS.ERROR
+                                or metadata.status == consts.FUNC_STATUS.CANCELLED
+                        })
                     end
                 end
             end
@@ -267,10 +271,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     local function add_anchored(anchor)
         local rows = anchored[anchor or ""]
         if rows then
-            table.sort(rows, function(a, b)
-                if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
-                return tostring(a.message_id) < tostring(b.message_id)
-            end)
+            message_order.sort(rows)
             for _, row in ipairs(rows) do
                 add_message(row, true)
             end

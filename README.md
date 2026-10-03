@@ -60,6 +60,30 @@ history pagination.
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
+## Tool feedback and loop limits
+
+Settled tool failures are marked as errors in the next model prompt. Public
+function-error events carry the same error text saved in history; private and
+delegation details remain hidden from public tool events. Text-only answers end
+the turn. An explicit empty-output exhaustion is reported rather than sampled
+again; incomplete-tool and older truncation responses retain their retry behavior.
+
+Existing loop settings and defaults remain: `max_iterations` defaults to 1,000
+and `max_repeated_calls` to 50 under `agent_options.loop`. Session overrides use
+`max_turn_iterations` and `max_repeated_tool_calls`. A value of `0` disables that
+limit. There is no separate three-failure default.
+
+The repeat limit covers identical tool rounds and repeated failures of the same
+action across changing batches. Parallel duplicates count once per round.
+Changed arguments identify a different action; successful recovery clears that
+action's failure history, but unrelated successes do not. New user-started turns
+reset the counters. Stop still takes precedence, and unused steering remains
+pending for the next user-started turn.
+
+History and applied steering compare timestamps chronologically, with message
+IDs only breaking ties. Stored timestamps, IDs and pagination cursors are not
+rewritten.
+
 ## Checkpoints and prompt caching
 
 When a checkpoint function or binding is configured, the session compares each

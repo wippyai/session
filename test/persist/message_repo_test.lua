@@ -3,6 +3,7 @@ local test = require("test")
 local uuid = require("uuid")
 local json = require("json")
 local message_repo = require("message_repo")
+local message_order = require("message_order")
 local writer = require("writer")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
@@ -549,6 +550,92 @@ local function define_tests()
             -- The most recent message should be the assistant message (the second one created)
             test.eq(message.message_id, test_data.message_id2)
             test.eq(message.type, "assistant")
+        end)
+
+        it("foundation regression: keeps a newer tool error when RFC3339 fractions have different precision", function()
+            local older_id, newer_id = uuid.v7(), uuid.v7()
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, older_err = db:execute(
+                "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
+                { older_id, test_data.session_id, "2099-01-01T00:00:00.1Z", "assistant", "checking", "{}" })
+            local _, newer_err = db:execute(
+                "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
+                { newer_id, test_data.session_id, "2099-01-01T00:00:00.11Z", "function", "{}",
+                    json.encode({ status = "error", call_id = "fraction-call", function_name = "Platform", result = "permission denied" }) })
+            local window, window_err = message_repo.list_after_message(test_data.session_id, older_id)
+            local latest, latest_err = message_repo.get_latest(test_data.session_id)
+            local _, cleanup_err = db:execute("DELETE FROM messages WHERE message_id = $1 OR message_id = $2", { older_id, newer_id })
+            db:release()
+
+            test.is_nil(older_err)
+            test.is_nil(newer_err)
+            test.is_nil(cleanup_err)
+            test.is_nil(window_err)
+            test.is_nil(latest_err)
+            test.eq(#window, 2, "a tool error at 110 ms is newer than a checkpoint at 100 ms")
+            test.eq(window[#window].message_id, newer_id)
+            test.eq(latest.message_id, newer_id)
+        end)
+
+        it("orders historical dates exactly across fractions, offsets, ties and every cursor direction", function()
+            local dates = {
+                "2099-01-01T00:00:00Z", "2099-01-01T00:00:00.000000001Z",
+                "2099-01-01T00:00:00.1Z", "2099-01-01T00:00:00.100000000Z",
+                "2098-12-31T19:00:00.100000001-05:00", "2099-01-01T01:00:00.11+01:00",
+                "2099-01-01T00:00:00.9Z", "2099-01-01T00:00:00.999999999Z",
+                "2099-01-01T00:00:01Z", "2099-01-01T00:00:01.000Z", "2099-01-01T00:00:01.000000001Z",
+            }
+            local prefix = uuid.v7() .. "-"
+            local ids, insert_errors = {}, {}
+            local db = sql.get(consts.get_db_resource())
+            assert(db)
+            for index, date in ipairs(dates) do
+                ids[index] = prefix .. string.format("%02d", index)
+                local _, err = db:execute(
+                    "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
+                    {ids[index], test_data.session_id, date, "function", "{}", "{}"})
+                if err then insert_errors[#insert_errors + 1] = tostring(err) end
+            end
+            local after, after_err = message_repo.list_after_message(test_data.session_id, ids[1])
+            local tail, tail_err = message_repo.list_after_message(test_data.session_id, ids[1], 3)
+            local forward, forward_err = message_repo.list_by_session(test_data.session_id, 3, ids[3], "after")
+            local backward, backward_err = message_repo.list_by_session(test_data.session_id, 3, ids[7], "before")
+            local typed, typed_err = message_repo.list_by_type(test_data.session_id, "function", 3, 1)
+            local latest, latest_err = message_repo.get_latest(test_data.session_id)
+            local all, all_err = message_repo.list_all_by_session(test_data.session_id)
+            local plan, plan_err = db:query("EXPLAIN QUERY PLAN SELECT message_id FROM messages WHERE session_id = $1 ORDER BY "
+                .. message_order.SQLITE_DATE .. " DESC, message_id DESC LIMIT 3", {test_data.session_id})
+            local _, cleanup_err = db:execute("DELETE FROM messages WHERE session_id = $1 AND message_id LIKE $2",
+                {test_data.session_id, prefix .. "%"})
+            db:release()
+
+            test.eq(#insert_errors, 0, table.concat(insert_errors, "; "))
+            for _, err in pairs({after_err, tail_err, forward_err, backward_err, typed_err, latest_err, all_err, plan_err, cleanup_err}) do
+                test.is_nil(err)
+            end
+            test.eq(#after, #dates)
+            for index, row in ipairs(after) do
+                test.eq(row.message_id, ids[index])
+                test.eq(row.date, dates[index], "stored/output timestamp must not be rewritten")
+            end
+            for index = 1, 3 do
+                test.eq(tail[index].message_id, ids[#ids - 3 + index])
+                test.eq(forward.messages[index].message_id, ids[index + 3])
+                test.eq(backward.messages[index].message_id, ids[index + 3])
+                test.eq(typed[index].message_id, ids[#ids - 4 + index])
+            end
+            test.eq(latest.message_id, ids[#ids])
+            test.eq(all[#all].message_id, ids[#ids])
+            test.is_true(forward.has_more)
+            test.eq(forward.prev_cursor, ids[6])
+            test.eq(backward.next_cursor, ids[4])
+            local details = {}
+            for _, row in ipairs(plan) do details[#details + 1] = row.detail end
+            local description = table.concat(details, " ")
+            test.contains(description, "idx_messages_chronology")
+            test.is_false(description:find("TEMP B-TREE", 1, true) ~= nil)
+            test.eq(message_order.date("postgres"), "date", "native PostgreSQL comparison stays unchanged")
         end)
 
         it("should count messages in a session", function()

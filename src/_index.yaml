@@ -74,6 +74,8 @@ entries:
         path: ".meta.target_db"
       - entry: wippy.session.migration:11_add_content_version_to_artifacts
         path: ".meta.target_db"
+      - entry: wippy.session.migration:12_index_message_chronology
+        path: ".meta.target_db"
     default: "app:db"
 
   - name: token_checkpoint_threshold
@@ -405,7 +407,7 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.2"
+    version: ">=v0.5.4"
 
   - name: dep.wippy.migration
     kind: ns.dependency
@@ -415,7 +417,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.4.12"
+    version: ">=v0.5.2"
 
   - name: dep.wippy.views
     kind: ns.dependency
@@ -481,3 +483,4 @@ entries:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
       input_metadata: wippy.session:input_metadata
+      message_order: wippy.session.persist:message_order

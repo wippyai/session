@@ -187,6 +187,7 @@ entries:
       - json
     imports:
       claude_mapper: wippy.llm.claude:mapper
+      google_mapper: wippy.llm.google:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
