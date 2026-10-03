@@ -519,6 +519,21 @@ local function define_tests()
     end)
 
     describe("turn loop guards", function()
+        it("keeps the existing default repeat limit instead of stopping after three failures", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            user_step(ctx)
+            for index = 1, consts.DEFAULTS.MAX_REPEATED_TOOL_CALLS do
+                message_handlers.note_tool_round(ctx, { ["call-" .. index] = {
+                    error = "temporarily unavailable", tool_call = { name = "lookup", args = {} },
+                } })
+                if index < consts.DEFAULTS.MAX_REPEATED_TOOL_CALLS then
+                    test.is_nil(continue_step(ctx).stopped)
+                end
+            end
+            test.eq(continue_step(ctx).stopped, "repeated_tool_calls")
+            test.eq(consts.DEFAULTS.MAX_REPEATED_TOOL_CALLS, 50)
+        end)
+
         it("retains bounded-size failure fingerprints instead of large argument payloads", function()
             local ctx = mock_ctx(fake_agent(nil))
             user_step(ctx)
@@ -1254,7 +1269,7 @@ local function define_tests()
                 test.eq(event.payload.function_name, "one")
             end
             test.eq(events[2].payload.call_id, "function")
-            test.eq(events[2].payload.error, "Function execution failed")
+            test.eq(events[2].payload.error, "tool failed")
             for _, row in ipairs(captured.stored) do
                 test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
             end
@@ -1284,6 +1299,69 @@ local function define_tests()
             test.eq(events[1], consts.UPSTREAM_TYPES.FUNCTION_CALL)
             for _, row in ipairs(captured.stored) do
                 test.eq(row.metadata.status, consts.FUNC_STATUS.PENDING)
+            end
+        end)
+
+        it("reports settled omitted and thrown public errors without exposing private or delegation calls", function()
+            for _, throws in ipairs({ false, true }) do
+                local ctx, captured, calls, ids, validated = call_fixture()
+                local events: { PublicToolEvent } = {}
+                ctx.upstream.send_message_update = function(_self, topic_id, event_type, payload)
+                    if event_type == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+                        for _, row in ipairs(captured.stored) do
+                            if row.id == payload.message_id then
+                                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                                test.eq(row.metadata.result, payload.error)
+                            end
+                        end
+                    end
+                    events[#events + 1] = { topic_id = topic_id, type = event_type, payload = payload }
+                end
+                local result, err = message_handlers.process_tools(ctx, {
+                    tool_calls = calls, call_message_ids = ids, validated_tools = validated,
+                    caller = { set_strategy = function() end, execute = function()
+                        if throws then error("tool runner failed") end
+                        return {}
+                    end },
+                    message_id = "user", agent = { id = "agent:documents" },
+                })
+                test.is_nil(err)
+                test.not_nil(result)
+                test.eq(#events, 2)
+                test.eq(events[1].type, consts.UPSTREAM_TYPES.FUNCTION_CALL)
+                test.eq(events[2].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+                test.eq(events[2].topic_id, "function")
+                test.eq(events[2].payload.message_id, ids["function"])
+                test.eq(events[2].payload.call_id, "function")
+                test.contains(events[2].payload.error, throws and "tool runner failed" or "Call outcome unknown")
+                for _, row in ipairs(captured.stored) do
+                    test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                end
+            end
+        end)
+
+        it("hides omitted private and delegation errors even without validated call metadata", function()
+            local ctx, captured, calls, ids = call_fixture()
+            calls[1].type = consts.MSG_TYPE.FUNCTION
+            calls[2].type = consts.MSG_TYPE.PRIVATE_FUNCTION
+            calls[3].type = consts.MSG_TYPE.DELEGATION
+            local events: { PublicToolEvent } = {}
+            ctx.upstream.send_message_update = function(_self, topic_id, event_type, payload)
+                events[#events + 1] = { topic_id = topic_id, type = event_type, payload = payload }
+            end
+            local result, err = message_handlers.process_tools(ctx, {
+                tool_calls = calls, call_message_ids = ids,
+                caller = { set_strategy = function() end, execute = function() return {} end },
+                message_id = "user", agent = { id = "agent:documents" },
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(#events, 1)
+            test.eq(events[1].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+            test.eq(events[1].topic_id, "function")
+            test.eq(events[1].payload.error, "Call outcome unknown")
+            for _, row in ipairs(captured.stored) do
+                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
             end
         end)
 

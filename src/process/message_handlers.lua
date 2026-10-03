@@ -1204,117 +1204,115 @@ function message_handlers.process_tools(ctx, op)
         local result_data = results[call_id]
         if not result_data then
             local failure = execute_err and tostring(execute_err) or "Call outcome unknown"
-            local _, skipped_err = ctx.writer:update_message_meta(op.call_message_ids[call_id], {
-                status = consts.FUNC_STATUS.ERROR,
-                result = failure
-            })
-            if skipped_err then return fail_remaining(index, skipped_err) end
-            results[call_id] = { error = failure, tool_call = {
-                name = call.name, registry_id = call.registry_id, args = call.arguments
+            result_data = { error = failure, tool_call = (validated_tools or {})[call_id] or {
+                name = call.name, registry_id = call.registry_id, args = call.arguments,
+                meta = { private = call.type == consts.MSG_TYPE.PRIVATE_FUNCTION },
             } }
-        else
-            local message_id = result_data.tool_call.message_id
-            local is_delegation = ctx.config.delegation_func_id
-                and result_data.tool_call.registry_id == ctx.config.delegation_func_id
-            local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
+            result_data.tool_call.message_id = op.call_message_ids[call_id]
+            results[call_id] = result_data
+        end
 
-            local policy_result = result_data.result
-            if not result_data.error and not is_delegation and type(policy_result) == "table"
-                and type(policy_result._control) == "table" then
-                local control = policy_result._control
-                local request = nil
-                if type(control.config) == "table" then request = control.config.input_policy end
-                if request ~= nil then
-                    local resolved, policy_err
-                    if type(ctx.request_input_policy) == "function" then
-                        resolved, policy_err = ctx.request_input_policy(request, op.agent or current_agent(ctx))
-                    else
-                        resolved, policy_err = input_policy.apply_request(ctx, request, op.agent or current_agent(ctx))
-                    end
-                    if not resolved then
-                        result_data.error = policy_err or "Input policy change failed"
-                    else
-                        control.config.input_policy = nil
-                        if next(control.config) == nil then control.config = nil end
-                        policy_result.interaction = resolved
+        local message_id = result_data.tool_call.message_id
+        local is_delegation = ctx.config.delegation_func_id
+            and result_data.tool_call.registry_id == ctx.config.delegation_func_id
+        local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
+
+        local policy_result = result_data.result
+        if not result_data.error and not is_delegation and type(policy_result) == "table"
+            and type(policy_result._control) == "table" then
+            local control = policy_result._control
+            local request = nil
+            if type(control.config) == "table" then request = control.config.input_policy end
+            if request ~= nil then
+                local resolved, policy_err
+                if type(ctx.request_input_policy) == "function" then
+                    resolved, policy_err = ctx.request_input_policy(request, op.agent or current_agent(ctx))
+                else
+                    resolved, policy_err = input_policy.apply_request(ctx, request, op.agent or current_agent(ctx))
+                end
+                if not resolved then
+                    result_data.error = policy_err or "Input policy change failed"
+                else
+                    control.config.input_policy = nil
+                    if next(control.config) == nil then control.config = nil end
+                    policy_result.interaction = resolved
+                end
+            end
+        end
+
+        if result_data.error then
+            local _, update_err = ctx.writer:update_message_meta(message_id, {
+                result = tostring(result_data.error),
+                status = consts.FUNC_STATUS.ERROR,
+                function_name = result_data.tool_call.name,
+                call_id = call_id,
+                registry_id = result_data.tool_call.registry_id
+            })
+            if update_err then return fail_remaining(index, update_err) end
+
+            if not is_delegation and not is_private then
+                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+                    message_id = message_id,
+                    call_id = call_id,
+                    function_name = result_data.tool_call.name,
+                    error = tostring(result_data.error)
+                })
+            end
+        else
+            local tool_result = result_data.result
+
+            local control = not is_delegation and type(tool_result) == "table"
+                and tool_result._control or nil
+            if control then
+                local _, control_err = ctx.writer:update_message_meta(message_id, {
+                    control_operations = control
+                })
+                if control_err then return fail_remaining(index, control_err) end
+                tool_result._control = nil
+            end
+
+            local _, update_err = ctx.writer:update_message_meta(message_id, {
+                result = tool_result,
+                status = consts.FUNC_STATUS.SUCCESS,
+                function_name = result_data.tool_call.name,
+                call_id = call_id,
+                registry_id = result_data.tool_call.registry_id
+            })
+            if update_err then return fail_remaining(index, update_err) end
+
+            if control then
+                local effects = {}
+                if control.artifacts and #control.artifacts > 0 then
+                    table.insert(effects, { control_handlers.control_artifacts,
+                        { artifacts = control.artifacts } })
+                end
+                if control.context then
+                    table.insert(effects, { control_handlers.control_context,
+                        { context_operations = control.context } })
+                end
+                if control.memory then
+                    table.insert(effects, { control_handlers.control_memory,
+                        { memory_operations = control.memory } })
+                end
+                if control.config then
+                    table.insert(effects, { control_handlers.control_config,
+                        { config_changes = control.config } })
+                end
+                for _, effect in ipairs(effects) do
+                    local ran, applied, effect_err = pcall(effect[1], ctx, effect[2])
+                    if not ran or effect_err or not applied then
+                        local reason = ran and (effect_err or "Control effect failed") or applied
+                        return fail_remaining(index, reason)
                     end
                 end
             end
 
-            if result_data.error then
-                local _, update_err = ctx.writer:update_message_meta(message_id, {
-                    result = tostring(result_data.error),
-                    status = consts.FUNC_STATUS.ERROR,
-                    function_name = result_data.tool_call.name,
+            if not is_delegation and not is_private then
+                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
+                    message_id = message_id,
                     call_id = call_id,
-                    registry_id = result_data.tool_call.registry_id
+                    function_name = result_data.tool_call.name
                 })
-                if update_err then return fail_remaining(index, update_err) end
-
-                if not is_delegation and not is_private then
-                    ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
-                        message_id = message_id,
-                        call_id = call_id,
-                        function_name = result_data.tool_call.name,
-                        error = "Function execution failed"
-                    })
-                end
-            else
-                local tool_result = result_data.result
-
-                local control = not is_delegation and type(tool_result) == "table"
-                    and tool_result._control or nil
-                if control then
-                    local _, control_err = ctx.writer:update_message_meta(message_id, {
-                        control_operations = control
-                    })
-                    if control_err then return fail_remaining(index, control_err) end
-                    tool_result._control = nil
-                end
-
-                local _, update_err = ctx.writer:update_message_meta(message_id, {
-                    result = tool_result,
-                    status = consts.FUNC_STATUS.SUCCESS,
-                    function_name = result_data.tool_call.name,
-                    call_id = call_id,
-                    registry_id = result_data.tool_call.registry_id
-                })
-                if update_err then return fail_remaining(index, update_err) end
-
-                if control then
-                    local effects = {}
-                    if control.artifacts and #control.artifacts > 0 then
-                        table.insert(effects, { control_handlers.control_artifacts,
-                            { artifacts = control.artifacts } })
-                    end
-                    if control.context then
-                        table.insert(effects, { control_handlers.control_context,
-                            { context_operations = control.context } })
-                    end
-                    if control.memory then
-                        table.insert(effects, { control_handlers.control_memory,
-                            { memory_operations = control.memory } })
-                    end
-                    if control.config then
-                        table.insert(effects, { control_handlers.control_config,
-                            { config_changes = control.config } })
-                    end
-                    for _, effect in ipairs(effects) do
-                        local ran, applied, effect_err = pcall(effect[1], ctx, effect[2])
-                        if not ran or effect_err or not applied then
-                            local reason = ran and (effect_err or "Control effect failed") or applied
-                            return fail_remaining(index, reason)
-                        end
-                    end
-                end
-
-                if not is_delegation and not is_private then
-                    ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
-                        message_id = message_id,
-                        call_id = call_id,
-                        function_name = result_data.tool_call.name
-                    })
-                end
             end
         end
     end
