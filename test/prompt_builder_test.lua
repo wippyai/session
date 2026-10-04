@@ -616,6 +616,36 @@ local function define_tests()
                 test.contains(all_text(builder:get_messages()), "notes.txt")
             end)
 
+            it("places extracted PDF text and image parts in the model prompt", function()
+                prompt_builder._contract = stub_contract({ "app:file_provider" }, function(args)
+                    return { size = 42, mime_type = "application/pdf", metadata = { filename = "dispatch.pdf" },
+                        prompt_content = {
+                            { type = "text", text = "Dispatch code: BLUE HERON. Order total: $84." },
+                            { type = "image", source = { type = "base64", mime_type = "image/png", data = "AAA" } },
+                        },
+                    }
+                end)
+                local builder, err = prompt_builder.build(user_with_file("file-pdf"), {}, {}, { cache_markers = false })
+                prompt_builder._contract = original_contract
+                test.is_nil(err)
+                local messages = builder:get_messages()
+                test.contains(all_text(messages), "BLUE HERON")
+                local attachment = messages[#messages]
+                test.eq(attachment.role, "user")
+                test.eq(attachment.content[2].type, "image")
+                test.eq(attachment.content[2].source.data, "AAA")
+            end)
+
+            it("propagates attachment read failures before generation", function()
+                prompt_builder._contract = stub_contract({ "app:file_provider" }, function(args)
+                    return nil, "attachment access denied"
+                end)
+                local builder, err = prompt_builder.build(user_with_file("private"), {}, {}, {})
+                prompt_builder._contract = original_contract
+                test.is_nil(builder)
+                test.contains(tostring(err), "attachment access denied")
+            end)
+
             it("falls back to options.upload_repo when nothing binds the contract", function()
                 -- Empty implementations => contract path is a no-op => fallback runs.
                 prompt_builder._contract = stub_contract({}, function() return nil end)

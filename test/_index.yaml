@@ -5,6 +5,17 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: fixture_users
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      timestamp: "2025-01-01T00:00:00Z"
+    source: file://fixture_users.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
   - name: db
     kind: db.sql.sqlite
     meta:
@@ -145,6 +156,7 @@ entries:
     modules:
       - sql
       - time
+      - security
     imports:
       encryption_key_bootloader: wippy.bootloader.bootloaders:encryption_key
       migration_bootloader: wippy.migration:migration_bootloader

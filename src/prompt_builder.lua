@@ -16,12 +16,12 @@ local prompt_builder = {
 
 -- The session-owned, optional file-provider contract. An application that stores
 -- uploads binds it (e.g. an uploads module) so the session can resolve a file_uuid to
--- its metadata WITHOUT the session depending on any concrete uploads module. Modeled on
+-- authorized metadata and content without depending on a concrete uploads module. Modeled on
 -- wippy.agent:resolver: consumed only when something binds it; otherwise the caller
 -- falls back to the injected options below, so apps that never bound it keep working.
 local FILE_PROVIDER_CONTRACT = "wippy.session:file_provider"
 
--- resolve_via_contract returns the upload record for file_uuid through the file_provider
+-- resolve_via_contract returns attachment metadata and content through the file_provider
 -- contract, or nil when no application binds it (the optional-contract pattern: inspect
 -- implementations() first, fall back when none). Swappable for tests via the seam below.
 prompt_builder._contract = contract
@@ -31,24 +31,28 @@ local function resolve_via_contract(file_uuid: string): any
         return nil
     end
     local impls, impl_err = (def :: any):implementations()
-    if impl_err or type(impls) ~= "table" or #(impls :: { any }) == 0 then
+    if impl_err then return nil, impl_err end
+    if type(impls) ~= "table" or #(impls :: { any }) == 0 then
         -- Contract defined but unbound: this app provides no uploads. Fall back.
         return nil
     end
     local inst, open_err = (def :: any):open()
     if open_err or not inst then
-        return nil
+        return nil, open_err or "file provider returned no instance"
     end
-    local ok, info = pcall(function() return (inst :: any):get_info({ file_uuid = file_uuid }) end)
-    if not ok or type(info) ~= "table" then
-        return nil
-    end
+    local ok, info, read_err = pcall(function()
+        return (inst :: any):get_info({ file_uuid = file_uuid, include_content = true })
+    end)
+    if not ok then return nil, info end
+    if read_err then return nil, read_err end
+    if type(info) ~= "table" then return nil end
     return info
 end
 
 local function resolve_file(file_uuid: string, options: table)
     -- 1. Canonical: the session's file_provider contract, when an app binds one.
-    local via_contract = resolve_via_contract(file_uuid)
+    local via_contract, read_err = resolve_via_contract(file_uuid)
+    if read_err then return nil, read_err end
     if via_contract ~= nil then
         return via_contract
     end
@@ -58,7 +62,9 @@ local function resolve_file(file_uuid: string, options: table)
     local resolver = options.file_resolver or options.file_lookup
     if type(resolver) == "function" then
         local ok, upload_or_err, err = pcall(resolver, file_uuid)
-        if ok and not err and upload_or_err then
+        if not ok then return nil, upload_or_err end
+        if err then return nil, err end
+        if upload_or_err then
             return upload_or_err
         end
     end
@@ -66,7 +72,9 @@ local function resolve_file(file_uuid: string, options: table)
     local upload_repo = options.upload_repo
     if type(upload_repo) == "table" and type(upload_repo.get) == "function" then
         local ok, upload, err = pcall(upload_repo.get, file_uuid)
-        if ok and not err and upload then
+        if not ok then return nil, upload end
+        if err then return nil, err end
+        if upload then
             return upload
         end
     end
@@ -110,6 +118,24 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         if not valid then
             return nil, "Malformed steering metadata on message " .. tostring(msg.message_id)
                 .. ": " .. tostring(validation_err)
+        end
+    end
+
+    local resolved_files = {}
+    if include_files then
+        for _, msg in ipairs(messages) do
+            local metadata = msg.metadata or {}
+            local input = metadata.input
+            local applied = type(input) ~= "table" or input.state == "applied"
+            if msg.type == consts.MSG_TYPE.USER and applied then
+                for _, file_uuid in ipairs(metadata.file_uuids or {}) do
+                    if type(file_uuid) == "string" and resolved_files[file_uuid] == nil then
+                        local upload, read_err = resolve_file(file_uuid, options)
+                        if read_err then return nil, "Failed to read attachment: " .. tostring(read_err) end
+                        resolved_files[file_uuid] = upload or false
+                    end
+                end
+            end
         end
     end
 
@@ -159,12 +185,13 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 local file_info = {}
                 for _, file_uuid in ipairs(metadata.file_uuids) do
                     if type(file_uuid) == "string" then
-                        local upload = resolve_file(file_uuid, options)
+                        local upload = resolved_files[file_uuid] or nil
                         table.insert(file_info, {
                             filename = upload and upload.metadata and upload.metadata.filename or "Unknown filename",
                             size = upload and upload.size or 0,
                             type = upload and upload.mime_type or "Unknown type",
-                            uuid = file_uuid
+                            uuid = file_uuid,
+                            prompt_content = upload and upload.prompt_content,
                         })
                     end
                 end
@@ -178,6 +205,14 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                         )
                     end
                     builder:add_developer(files_text)
+                    for _, file in ipairs(file_info) do
+                        if type(file.prompt_content) == "table" and #file.prompt_content > 0 then
+                            builder:add_message("user", file.prompt_content)
+                        else
+                            builder:add_developer("Attachment content is unavailable for " .. file.filename
+                                .. ". Do not infer or quote its contents from its filename or metadata.")
+                        end
+                    end
                 end
             end
 

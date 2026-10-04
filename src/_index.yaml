@@ -453,14 +453,14 @@ entries:
         uploads module.
     methods:
       - name: get_info
-        description: Resolve a file_uuid to its upload metadata.
+        description: Resolve a file_uuid to its upload metadata and, when include_content is true, authorized prompt_content parts.
         input_schemas:
           - definition: |
-              { "type": "object", "properties": { "file_uuid": { "type": "string" } }, "required": ["file_uuid"] }
+              { "type": "object", "properties": { "file_uuid": { "type": "string" }, "include_content": { "type": "boolean", "default": false } }, "required": ["file_uuid"] }
             format: application/schema+json
         output_schemas:
           - definition: |
-              { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" } } } } }
+              { "type": "object", "properties": { "prompt_content": { "type": "array", "items": { "type": "object" } }, "size": { "type": "integer" }, "mime_type": { "type": "string" }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" } } } } }
             format: application/schema+json
 
   - name: input_metadata

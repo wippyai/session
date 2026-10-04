@@ -1,5 +1,6 @@
 local sql = require("sql")
 local time = require("time")
+local security = require("security")
 local encryption_key_bootloader = require("encryption_key_bootloader")
 local migration_bootloader = require("migration_bootloader")
 
@@ -42,13 +43,20 @@ local function run()
         local db, err = sql.get("app:db")
         if not err then
             local result, query_err = db:query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='contexts'"
+                "SELECT COUNT(*) FROM contexts"
             )
-            db:release()
-
             if not query_err and result and #result > 0 then
+                local actor = security.actor()
+                if not actor then error("Session test actor is required") end
+                for _, user_id in ipairs({ actor:id(), "session-service-test@wippy.local",
+                    "session-run-context-test@wippy.local", "session-prompt-window-test@wippy.local" }) do
+                    local _, seed_err = db:execute("INSERT INTO app_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", { user_id })
+                    if seed_err then db:release(); error(seed_err) end
+                end
+                db:release()
                 return true
             end
+            db:release()
         end
 
         time.sleep(sleep_ms .. "ms")
