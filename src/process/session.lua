@@ -518,13 +518,14 @@ local function run(args: SessionArgs)
         end
         bus_done:send({ error = bus_err })
     end)
+    local ingress_cases = {
+        inbox:case_receive(),
+        events:case_receive(),
+        bus_done:case_receive(),
+        policy_requests:case_receive()
+    }
     while not session_state.stopping do
-        local result = channel.select({
-            inbox:case_receive(),
-            events:case_receive(),
-            bus_done:case_receive(),
-            policy_requests:case_receive()
-        })
+        local result = channel.select(ingress_cases)
 
         if not result.ok then
             break
@@ -613,24 +614,27 @@ local function run(args: SessionArgs)
     context.stop_requested = true
     local _, settle_err = settle_exit(bus, exit_err)
 
-    while not session_state.bus_done_received do
-        local pending = channel.select({
+    if not session_state.bus_done_received then
+        local shutdown_cases = {
             bus_done:case_receive(), policy_requests:case_receive(), inbox:case_receive(),
-        })
-        if not pending.ok then break end
-        if pending.channel == bus_done then
-            session_state.bus_done_received = true
-            settle_err = settle_err or (pending.value and pending.value.error)
-        elseif pending.channel == policy_requests then
-            (pending.value :: any).reply:send({ error = "Session is closing" })
-        elseif pending.channel == inbox then
-            local msg = pending.value
-            if msg:topic() == boundary_topic then
-                boundary_reply:send({ error = "Session is closing" })
-            else
-                local payload = msg:payload():data() or {}
-                if payload.request_id then
-                    session_upstream:command_error(payload.request_id, "SESSION_FINISHING", "Session is closing")
+        }
+        while not session_state.bus_done_received do
+            local pending = channel.select(shutdown_cases)
+            if not pending.ok then break end
+            if pending.channel == bus_done then
+                session_state.bus_done_received = true
+                settle_err = settle_err or (pending.value and pending.value.error)
+            elseif pending.channel == policy_requests then
+                (pending.value :: any).reply:send({ error = "Session is closing" })
+            elseif pending.channel == inbox then
+                local msg = pending.value
+                if msg:topic() == boundary_topic then
+                    boundary_reply:send({ error = "Session is closing" })
+                else
+                    local payload = msg:payload():data() or {}
+                    if payload.request_id then
+                        session_upstream:command_error(payload.request_id, "SESSION_FINISHING", "Session is closing")
+                    end
                 end
             end
         end
