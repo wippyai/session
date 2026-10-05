@@ -3,6 +3,24 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: session_select_test
+    kind: function.lua
+    meta:
+      name: Session receive-case lifetime
+      type: test
+      suite: session
+    source: file://session_select_test.lua
+    modules: [security, uuid]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
   - name: command_bus_startup_test
     kind: function.lua
     meta:
