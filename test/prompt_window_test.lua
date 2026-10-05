@@ -233,6 +233,137 @@ local function define_tests()
                 )
             )
         end)
+
+        it("preserves precise chronology through the session reader", function()
+            local older_id, newer_id = uuid.v7(), uuid.v7()
+            create_message(older_id, consts.MSG_TYPE.ASSISTANT, "Checking access", {})
+            create_message(newer_id, consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = "fraction-call", function_name = "Platform",
+                status = consts.FUNC_STATUS.ERROR, result = "Permission denied",
+            })
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, first_err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2",
+                { "2099-01-01T00:00:00.1Z", older_id })
+            local _, second_err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2",
+                { "2099-01-01T00:00:00.11Z", newer_id })
+            db:release()
+            local history, history_err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "since_checkpoint" },
+            })
+            message_repo.delete(older_id)
+            message_repo.delete(newer_id)
+            test.is_nil(first_err)
+            test.is_nil(second_err)
+            test.is_nil(history_err)
+            local older_position, newer_position = 0, 0
+            for index, event in ipairs(history.events) do
+                if event.id == older_id then older_position = index end
+                if event.id == newer_id then newer_position = index end
+            end
+            test.is_true(older_position > 0 and newer_position > 0)
+            test.lt(older_position, newer_position, "reader must not reverse the SQL chronology")
+        end)
+
+        it("merges pending inputs outside the checkpoint window in precise chronological order", function()
+            local older_id, newer_id = uuid.v7(), uuid.v7()
+            create_message(older_id, consts.MSG_TYPE.USER, "Earlier steering", { input = { state = "pending" } })
+            create_message(newer_id, consts.MSG_TYPE.USER, "Later steering", { input = { state = "pending" } })
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, first_err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2",
+                { "2000-01-01T00:00:00.1Z", older_id })
+            local _, second_err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2",
+                { "2000-01-01T00:00:00.11Z", newer_id })
+            db:release()
+            local history, history_err = open_binding():get_history({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "since_checkpoint" },
+            })
+            message_repo.delete(older_id)
+            message_repo.delete(newer_id)
+            test.is_nil(first_err)
+            test.is_nil(second_err)
+            test.is_nil(history_err)
+            test.eq(history.events[1].id, older_id)
+            test.eq(history.events[2].id, newer_id)
+            test.eq(history.events[1].metadata.input.state, "pending")
+            test.eq(history.events[2].metadata.input.state, "pending")
+        end)
+
+        it("retains timestamp precedence for applied steering in contract prompts", function()
+            local anchor_id, first_id, second_id = uuid.v7(), uuid.v7(), uuid.v7()
+            local later_id = first_id < second_id and first_id or second_id
+            local earlier_id = first_id < second_id and second_id or first_id
+            create_message(anchor_id, consts.MSG_TYPE.ASSISTANT, "Working", {})
+            create_message(earlier_id, consts.MSG_TYPE.USER, "Earlier instruction", {
+                input = { state = "applied", after_message_id = anchor_id },
+            })
+            create_message(later_id, consts.MSG_TYPE.USER, "Latest instruction", {
+                input = { state = "applied", after_message_id = anchor_id },
+            })
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local errors = {}
+            for _, row in ipairs({ {anchor_id, "2099-01-02T00:00:00Z"},
+                {earlier_id, "2099-01-02T00:00:00.1Z"}, {later_id, "2099-01-02T00:00:00.11Z"} }) do
+                local _, err = db:execute("UPDATE messages SET date = $1 WHERE message_id = $2", {row[2], row[1]})
+                if err then errors[#errors + 1] = tostring(err) end
+            end
+            db:release()
+            local result, result_err = open_binding():get_prompt({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "since_checkpoint" }, format = "messages",
+            })
+            message_repo.delete(anchor_id)
+            message_repo.delete(earlier_id)
+            message_repo.delete(later_id)
+            test.eq(#errors, 0, table.concat(errors, "; "))
+            test.is_nil(result_err)
+            local instructions = ""
+            for _, message in ipairs(result.messages) do
+                for _, part in ipairs(message.content or {}) do
+                    if part.text and part.text:find("instruction", 1, true) then instructions = part.text end
+                end
+            end
+            test.eq(instructions, "Earlier instruction\n\nLatest instruction")
+        end)
+
+        it("foundation: the next prompt includes a newly saved failure after a long history", function()
+            local call_id = "canonical-failure-call"
+            local failure_id = uuid.v7()
+            local failure_text = "FOUNDATION_ACTUAL_TOOL_ERROR: permission denied, do not repeat unchanged"
+            create_message(uuid.v7(), consts.MSG_TYPE.ASSISTANT, "checking access", {})
+            create_message(failure_id, consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = call_id,
+                function_name = "Platform",
+                status = consts.FUNC_STATUS.PENDING,
+            })
+            local updated, update_err = message_repo.update_metadata(failure_id, {
+                status = consts.FUNC_STATUS.ERROR,
+                result = failure_text,
+            })
+            test.is_nil(update_err)
+            test.not_nil(updated)
+            local result, err = open_binding():get_prompt({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "since_checkpoint" },
+                format = "messages",
+            })
+            test.is_nil(err)
+            local matching_results, matching_calls = 0, 0
+            for _, message in ipairs(result.messages) do
+                if message.role == "function_call" and message.function_call.id == call_id then
+                    matching_calls = matching_calls + 1
+                elseif message.role == "function_result" and message.function_call_id == call_id then
+                    matching_results = matching_results + 1
+                    test.eq(message.content[1].text, failure_text)
+                end
+            end
+            test.eq(matching_calls, 1)
+            test.eq(matching_results, 1)
+        end)
     end)
 end
 

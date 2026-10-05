@@ -171,6 +171,22 @@ entries:
       migration: wippy.migration:migration
     method: migrate
 
+  - name: 12_index_message_chronology
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: "app:db"
+      timestamp: "2026-10-02T12:00:00Z"
+      description: Index precise chronological comparison of historical SQLite message dates.
+      depends_on:
+        - ns:wippy.migration
+        - wippy.session.migration:04_create_messages_table
+    source: file://12_index_message_chronology.lua
+    imports:
+      migration: wippy.migration:migration
+      message_order: wippy.session.persist:message_order
+    method: migrate
+
   # wippy.session.migration:11_add_content_version_to_artifacts
   - name: 11_add_content_version_to_artifacts
     kind: function.lua

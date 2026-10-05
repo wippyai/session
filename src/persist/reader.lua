@@ -1,6 +1,7 @@
 local security = require("security")
 local json = require("json")
 local consts = require("consts")
+local message_order = require("message_order")
 
 type SessionState = {
     session_id: string,
@@ -306,6 +307,7 @@ function message_query:all()
         end
         messages = messages or {}
         local seen, all_ids = {}, {}
+        local added = false
         for _, message in ipairs(messages) do
             seen[message.message_id] = true
         end
@@ -325,12 +327,12 @@ function message_query:all()
             if relevant and not seen[message.message_id] then
                 table.insert(messages, message)
                 seen[message.message_id] = true
+                added = true
             end
         end
-        table.sort(messages, function(a, b)
-            if a.date ~= b.date then return tostring(a.date or "") < tostring(b.date or "") end
-            return tostring(a.message_id) < tostring(b.message_id)
-        end)
+        -- Repository results are already chronological. Only merged steering
+        -- requires another sort; do not re-parse an unchanged history window.
+        if added then message_order.sort(messages) end
     end
 
     return messages or {}, nil

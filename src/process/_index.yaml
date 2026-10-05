@@ -62,6 +62,7 @@ entries:
     source: file://message_handlers.lua
     modules:
       - json
+      - hash
       - uuid
       - funcs
       - time
@@ -70,6 +71,7 @@ entries:
       agent_context: wippy.agent:context
       prompt_builder: wippy.session:prompt_builder
       input_metadata: wippy.session:input_metadata
+      message_order: wippy.session.persist:message_order
       tool_caller: wippy.agent.tools:caller
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
