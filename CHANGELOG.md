@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.6](https://github.com/wippyai/session/compare/v0.6.5...v0.6.6) (2026-10-06)
+
+
+### Bug Fixes
+
+* continue the turn with the new agent after a tool-driven handoff ([#59](https://github.com/wippyai/session/issues/59)) ([f0219a6](https://github.com/wippyai/session/commit/f0219a628b148306a9a06f3926fef006d69c76cd))
+* preserve tool feedback chronology and failed-action loop accounting ([#55](https://github.com/wippyai/session/issues/55)) ([06464d1](https://github.com/wippyai/session/commit/06464d1c7a8b807068a10c4b1a36662ba5c4b966))
+
+
+### Performance Improvements
+
+* **process:** reuse session receive cases ([#56](https://github.com/wippyai/session/issues/56)) ([4393c3a](https://github.com/wippyai/session/commit/4393c3a04c40bd83342ad0b5935baff8849684c5))
+
 ## [0.6.5](https://github.com/wippyai/session/compare/v0.6.4...v0.6.5) (2026-10-01)
 
 
