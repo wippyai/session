@@ -1495,6 +1495,114 @@ local function define_tests()
             test.eq(continued, 0)
         end)
     end)
+
+    describe("agent handoff", function()
+        local function handoff_fixture()
+            local steps = { router = 0, help = 0 }
+            local router = fake_agent(nil)
+            router.id = "agent:router"
+            router.step = function()
+                steps.router = steps.router + 1
+                return { result = "", tool_calls = { { id = "call-1", name = "switch_agent",
+                    arguments = "{}", registry_id = "app:switch_agent" } } }
+            end
+            local help = {
+                id = "agent:help", model = "model:help", tool_wrappers = {}, bindings = nil,
+                agent_options = { session_input = { while_running = "steer" } },
+                step = function()
+                    steps.help = steps.help + 1
+                    return { result = "Here is the answer from the help agent.", tool_calls = {} }
+                end,
+            }
+            local ctx, captured = mock_ctx(router)
+            local current = router
+            ctx.agent_ctx = {
+                current_model = router.model,
+                load_agent = function() return current, nil end,
+                get_current_agent = function() return current end,
+                switch_to_agent = function(self, agent_id)
+                    if agent_id ~= help.id then return nil, "unknown agent " .. tostring(agent_id) end
+                    current = help
+                    self.current_model = help.model
+                    return true
+                end,
+            }
+            local interactions = {} :: {any}
+            ctx.writer.update_meta = function(_self, updates)
+                if updates.meta and updates.meta.interaction then
+                    table.insert(interactions, updates.meta.interaction)
+                end
+                return true
+            end
+            local announced = {} :: {string}
+            ctx.upstream.update_session = function(_self, update)
+                if update.agent then table.insert(announced, update.agent) end
+            end
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop() end
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_strategy = function() end,
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(_self, calls)
+                        local call = calls[1]
+                        return { [call.id] = { valid = true, name = call.name, args = {},
+                            registry_id = call.registry_id } }, nil
+                    end,
+                    execute = function(_self, _context, tools)
+                        if ctx.stop_in_handoff then bus:request_stop() end
+                        return { ["call-1"] = { result = { _control = { config = { agent = help.id } } },
+                            tool_call = tools["call-1"] } }
+                    end,
+                }
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, message_handlers.agent_step)
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, message_handlers.agent_continue)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                message_id = "msg-user", request_id = "req-1", from_user = true })
+            return ctx, captured, bus, steps, interactions, announced,
+                function() tool_caller.new = original_new end
+        end
+
+        it("continues the turn with the new agent after a tool-driven agent switch", function()
+            local ctx, captured, bus, steps, interactions, announced, restore = handoff_fixture()
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.router, 1)
+            test.eq(steps.help, 1)
+            test.eq(ctx.config.agent_id, "agent:help")
+            test.eq(ctx.config.model, "model:help")
+            test.eq(announced[1], "agent:help")
+            test.is_nil(ctx.turn_state.handoff)
+            test.is_nil(ctx.turn_state.failed)
+            local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
+            test.eq(#calls, 1)
+            test.eq(calls[1].metadata.status, consts.FUNC_STATUS.SUCCESS)
+            local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(answers[#answers].content, "Here is the answer from the help agent.")
+            test.is_false(interactions[1].can_send)
+            test.is_true(interactions[#interactions].can_send)
+        end)
+
+        it("does not start the new agent when Stop lands in the handoff round", function()
+            local ctx, captured, bus, steps, _interactions, _announced, restore = handoff_fixture()
+            ctx.stop_in_handoff = true
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.router, 1)
+            test.eq(steps.help, 0)
+            test.eq(ctx.config.agent_id, "agent:help")
+            local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
+            test.eq(calls[1].metadata.status, consts.FUNC_STATUS.SUCCESS)
+        end)
+    end)
 end
 
 return { run_tests = test.run_cases(define_tests) }

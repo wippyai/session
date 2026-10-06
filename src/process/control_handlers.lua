@@ -610,10 +610,7 @@ function control_handlers.control_config(ctx, op)
         local candidate_state = clone(ctx.turn_state)
         if agent_changed and candidate_state then
             candidate_state.input_policy = nil
-            if candidate_state.active then
-                candidate_state.handoff = true
-                candidate_state.failed = true
-            end
+            if candidate_state.active then candidate_state.handoff = true end
         end
         local candidate = {
             config = current_config,

@@ -38,6 +38,14 @@ The tool is bound to its calling session. The session validates and persists a
 change before reporting tool success. Temporary overrides clear on completion,
 Stop, failure, recovery, and agent handoff.
 
+A tool that returns `_control.config.agent` while a turn is running hands that
+turn to the new agent. The session commits the switch, and the next agent step
+in the same turn is taken by the new agent with the conversation so far, so a
+router agent whose only action is a handoff still produces the answer. The
+session re-publishes `interaction` for the new agent at that step, and pending
+steering is applied there. Stop still ends the turn at the operation boundary,
+and the committed switch stays in place.
+
 The server generates the canonical message ID. A request ID correlates the
 command response. The session saves a message before acknowledging it. There
 is no automatic retry or client message deduplication. If acknowledgement is

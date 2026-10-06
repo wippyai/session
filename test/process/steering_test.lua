@@ -389,6 +389,37 @@ local function define_tests()
             test.eq(#events, 0)
         end)
 
+        it("hands a pending input to the new agent after a handoff", function()
+            local ctx, rows, events = fixture({ pending("p") })
+            ctx.status = "running"
+            ctx.interaction = { can_send = false, revision = 3 }
+            ctx.turn_state = { active = true, message_id = "turn", steps = 0, repeated_calls = 0,
+                handoff = true }
+            local result, err = handlers.agent_step(ctx, { message_id = "turn" })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.is_nil(ctx.turn_state.handoff)
+            test.eq(rows[1].metadata.input.state, "applied")
+            test.contains(table.concat(events, ","), "model")
+            test.is_true(ctx.last_meta.meta.interaction.can_send)
+            test.eq(ctx.last_meta.meta.interaction.revision, 4)
+            test.eq(ctx.expected_revision, 4)
+        end)
+
+        it("keeps input pending when a handoff is stopped", function()
+            local ctx, rows, events = fixture({ pending("p") })
+            ctx.status = "running"
+            ctx.stop_requested = true
+            ctx.turn_state = { active = true, message_id = "turn", steps = 0, repeated_calls = 0,
+                handoff = true }
+            local result, err = handlers.agent_step(ctx, { message_id = "turn" })
+            test.is_nil(err)
+            test.not_nil(result)
+            test.is_true(ctx.turn_state.handoff)
+            test.eq(rows[1].metadata.input.state, "pending")
+            test.eq(#events, 0)
+        end)
+
         it("cancels the persisted old-agent intent after handoff without duplicating it", function()
             local call = { message_id = "call-message", date = "2026-01-02T00:00:00Z",
                 type = consts.MSG_TYPE.FUNCTION, data = "{}",
