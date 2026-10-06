@@ -6,7 +6,7 @@ intents.__index = intents
 
 function intents.new(broker, broker_pid)
     return setmetatable({ broker = broker, broker_pid = broker_pid, pending = {}, by_request = {},
-        activated = {}, sequence = 0, count = 0, now = function() return time.now():unix() end }, intents)
+        activated = {}, count = 0, now = function() return time.now():unix() end }, intents)
 end
 
 function intents:stage(intent)
@@ -22,7 +22,6 @@ function intents:stage(intent)
         self.count = self.count - 1
     end
     if self.count >= 128 then return nil end
-    self.sequence = self.sequence + 1
     local nonce = uuid.v7()
     if not nonce then return nil end
     self.pending[nonce] = { nonce = nonce, key = key, value = intent, expires_at = self.now() + 120 }

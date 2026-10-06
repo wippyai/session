@@ -4,6 +4,7 @@ local hash = require("hash")
 local consts = require("consts")
 local prompt_builder = require("prompt_builder")
 local claude_mapper = require("claude_mapper")
+local context_attachments = require("context_attachments")
 
 local function define_tests()
     describe('Required stored Attention v2 prompt projection', function()
@@ -572,7 +573,13 @@ local function define_tests()
                     local built = builder:get_messages()
                     if previous then
                         for index = 1, #previous - 1 do
-                            test.eq((json.encode(built[index])), (json.encode(previous[index])))
+                            local current, current_err = context_attachments.canonical_json(built[index])
+                            local prior, prior_err = context_attachments.canonical_json(previous[index])
+                            test.is_nil(current_err)
+                            test.is_nil(prior_err)
+                            test.not_nil(current)
+                            test.not_nil(prior)
+                            test.eq(current, prior)
                         end
                     end
                     test.eq(built[#built].role, "cache_marker")
@@ -1108,6 +1115,27 @@ local function define_tests()
                 test.is_nil(err)
                 test.eq(#requested_bytes, 1)
                 test.eq(requested_bytes[1], #data)
+            end)
+
+            it("rejects a non-string prepared upload ID before provider access", function()
+                local lookups = 0
+                prompt_builder._contract = {
+                    get = function()
+                        lookups = lookups + 1
+                        return nil, "unexpected provider access"
+                    end,
+                }
+                local data = "authorized-visual-bytes"
+                local valid, err = prompt_builder.validate_prepared_file({
+                    uuid = 123,
+                    name = "attention-target.png",
+                    mime_type = "image/png",
+                    byte_size = #data,
+                    sha256 = "sha256:" .. hash.sha256(data),
+                }, "actor-visual", "session-visual")
+                test.is_false(valid)
+                test.eq(err, "prepared visual identity is invalid")
+                test.eq(lookups, 0)
             end)
 
             it("rejects prepared visuals owned by another actor before reading bytes", function()

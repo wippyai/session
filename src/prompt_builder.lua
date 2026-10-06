@@ -262,7 +262,8 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
         or type(session_id) ~= "string" or session_id == "" then
         return false, "prepared visual identity is invalid"
     end
-    if type(prepared_file.uuid) ~= "string" or prepared_file.uuid == ""
+    local file_uuid = prepared_file.uuid
+    if type(file_uuid) ~= "string" or file_uuid == ""
         or type(prepared_file.name) ~= "string" or prepared_file.name == ""
         or type(prepared_file.mime_type) ~= "string"
         or prepared_file.mime_type ~= "image/png" and prepared_file.mime_type ~= "image/webp"
@@ -275,13 +276,13 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
         or string.match(prepared_file.sha256, "^sha256:[a-f0-9]+$") == nil then
         return false, "prepared visual identity is invalid"
     end
-    local upload = resolve_file_via_contract(prepared_file.uuid)
+    local upload = resolve_file_via_contract(file_uuid)
     if type(upload) ~= "table" or upload.user_id ~= actor_id
         or not upload_session_matches(upload, session_id)
         or not upload_not_expired(upload) then
         return false, "prepared visual is not owned by the session user"
     end
-    local info = authorized_file_info(prepared_file.uuid)
+    local info = authorized_file_info(file_uuid)
     if not info
         or prepared_file.mime_type ~= upload.mime_type
         or prepared_file.mime_type ~= info.content_type
@@ -296,7 +297,7 @@ function prompt_builder.validate_prepared_file(prepared_file, actor_id, session_
     local visual_request: VisualRequest = {
         reference = {
             kind = "upload",
-            opaque_id = prepared_file.uuid :: string,
+            opaque_id = file_uuid,
         },
         media = {
             content_type = prepared_file.mime_type :: string,

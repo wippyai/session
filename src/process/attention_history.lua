@@ -88,7 +88,8 @@ end
 -- compared with server time, so clock skew cannot expire or extend context.
 local function expired(row_date, lifetime, now)
     local start = row_time(row_date)
-    return start == nil or start + lifetime <= now
+    if start == nil then return true end
+    return start + lifetime <= now
 end
 
 -- A shorter lifetime declared by the client still applies, measured as a duration

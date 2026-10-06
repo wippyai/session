@@ -96,7 +96,9 @@ local function define_tests()
             local msg_id = uuid.v7()
             local result, err = messages.create(msg_id, session, 'user', 'question', { context_attachments = {} }, 'request-1', 'sha256:' .. hash.sha256('fingerprint'), receipt)
             test.is_nil(err)
-            test.eq(result.message_id, msg_id)
+            if type(result) ~= 'table' then error('Expected a committed message') end
+            local committed = test.not_nil(result) :: {message_id: string}
+            test.eq(committed.message_id, msg_id)
             test.is_nil(messages.get(msg_id).context_receipt)
             staging._now = function() return original_now() + 61 end
             staging.cleanup()

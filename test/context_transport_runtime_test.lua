@@ -56,7 +56,7 @@ local function define_tests()
             workers[pid] = entry or 'app:context_transport_worker'
             if not entry then
                 local ready = receive('context_worker_ready', pid)
-                assert(ready.authorized, ready.reason or 'worker authorization missing')
+                assert(ready.authorized, tostring(ready.reason or 'worker authorization missing'))
             end
             return pid
         end

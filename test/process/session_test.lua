@@ -185,6 +185,24 @@ local function define_tests()
             test.eq((errors :: any)[1].id, "stop")
         end)
 
+        it("reports a storage failure when Stop persistence returns no error detail", function()
+            local ctx, bus, _, _, errors, successes = fixture()
+            ctx.status = consts.STATUS.RUNNING
+            ctx.turn_state.active = true
+            bus.state = "running"
+            ctx.writer.update_meta = function() return nil end
+
+            local stopped, err = session._commit_stop(ctx, ctx.upstream, "stop")
+
+            test.is_nil(stopped)
+            test.eq(err, "Failed to persist Stop")
+            test.eq(errors[1].id, "stop")
+            test.eq(errors[1].message, err)
+            test.eq((bus :: any).state, "running")
+            test.is_nil(ctx.stop_requested)
+            test.eq(#successes, 0)
+        end)
+
         it("keeps a shared Stop identity valid when an earlier persistence attempt fails", function()
             local ctx, bus = fixture()
             ctx.status = consts.STATUS.RUNNING
@@ -442,7 +460,7 @@ local function define_tests()
             ctx.queue_empty_callback = function()
                 local finished, finish_err = message_handlers.finish_turn(ctx)
                 if not finished then return nil, finish_err end
-                table.insert(boundaries, { bus_state = bus.state, status = ctx.status,
+                table.insert(boundaries, { bus_state = bus and bus.state, status = ctx.status,
                     can_send = ctx.interaction and ctx.interaction.can_send })
                 if #boundaries == 1 then
                     local routed, route_err = session.route_input(ctx, bus, consts.TOPICS.MESSAGE,

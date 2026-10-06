@@ -121,7 +121,9 @@ local function define_tests()
             test.is_nil(context_err, "context get: " .. tostring(context_err))
             test.eq(context_row.type, consts.CONTEXT_TYPES.SESSION)
 
-            local decoded, decode_err = json.decode(context_row.data)
+            local context_data = context_row.data
+            if type(context_data) ~= "string" then error("Expected encoded context data") end
+            local decoded, decode_err = json.decode(context_data)
             test.is_nil(decode_err, "context decode: " .. tostring(decode_err))
             test.eq(decoded.topic, "owned-context")
         end)

@@ -1100,7 +1100,7 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
-        it("sends the initial idle update before receipt and running", function()
+        it("announces idle then committed running state before receipt", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Startup order")
             local hub_pid = "startup-order-hub"
@@ -1152,6 +1152,7 @@ local function define_tests()
             mock("channel.select", original_channel_select)
             mock("coroutine.spawn", original_spawn)
 
+            cleanup_session_fixture(session_id, context_id)
             test.is_true(ok, tostring(result))
             test.eq(result.status, "shutdown")
             local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
@@ -1163,8 +1164,7 @@ local function define_tests()
                     table.insert(order, "received")
                 end
             end
-            test.eq(table.concat(order, ","), "idle,received,running")
-            cleanup_session_fixture(session_id, context_id)
+            test.eq(table.concat(order, ","), "idle,running,received")
         end)
 
         it("forwards the first input after creating a new session", function()

@@ -64,7 +64,7 @@ type ToolWrapperExecutionContext = {
 
 local message_handlers = {
     _prompt_builder = nil :: any,
-    _lifecycle_runtime = nil :: any,
+    _lifecycle_runtime = nil :: { apply: (bindings: any, payload: any) -> (table?, string?) }?,
 }
 message_handlers._context_staging = require('context_staging_repo')
 
@@ -443,9 +443,9 @@ end
 
 local function is_turn_blocked(ctx: any): boolean
     local state = ctx.turn_state
-    return ctx.stop_requested == true
+    return not not (ctx.stop_requested == true
         or (ctx.coordinator and ctx.coordinator:stop_requested())
-        or (state and (state.failed or state.handoff)) or false
+        or (state and (state.failed or state.handoff)) or false)
 end
 local function all_messages(ctx)
     if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
@@ -686,7 +686,7 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     local detail = error_text(err)
     if opts and opts.tokens then
         local _, token_err = persist_token_usage(ctx, opts.tokens)
-        if token_err then return nil, token_err end
+        if token_err then return nil, error_text(token_err) end
     end
 
     turn_state(ctx).failed = true
@@ -921,8 +921,8 @@ function message_handlers.handle_message(ctx, op)
         ctx.stop_requested = false
         ctx.status = consts.STATUS.RUNNING
     end
-    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id, attachments)
     if committed_interaction then input_policy.accept_committed(ctx, committed_interaction) end
+    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id, attachments)
     return {
         message_id = message_id, completed = active,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,

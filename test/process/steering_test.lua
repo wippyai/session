@@ -3,17 +3,27 @@ local consts = require("consts")
 local handlers = require("message_handlers")
 local prompt_builder = require("prompt_builder")
 
-local function pending(id, date)
+type FixtureMessage = {
+    message_id: string,
+    date: string,
+    type: string,
+    data: any,
+    metadata: {[string]: any},
+}
+
+local function pending(id: string, date: string?): FixtureMessage
     return { message_id = id, date = date or "2026-01-01T00:00:00Z", type = consts.MSG_TYPE.USER,
         data = id, metadata = { input = { state = "pending" } } }
 end
 
-local function fixture(rows)
-    rows = rows or {}
-    local events, applied = {}, {}
+local function fixture(initial_rows: {FixtureMessage}?, while_running: string?): (any, {FixtureMessage}, {string}, {string})
+    local rows: {FixtureMessage} = {}
+    for _, row in ipairs(initial_rows or {}) do rows[#rows + 1] = row end
+    local events: {string} = {}
+    local applied: {string} = {}
     local ctx: any
     local agent = { id = "agent:test", model = "model:test", agent_options = {
-        session_input = { while_running = "steer", can_manage = true },
+        session_input = { while_running = while_running or "steer", can_manage = true },
     } }
     agent.step = function(_, builder)
         ctx.prompt = builder:get_messages()
@@ -126,12 +136,16 @@ local function fixture(rows)
         },
         upstream = {
             message_received = function(_, message_id, text, files, input, request_id)
+                ctx.receipt_count = (ctx.receipt_count or 0) + 1
                 ctx.ack = { request_id = request_id, data = { message_id = message_id, text = text, file_uuids = files, input = input } }
                 events[#events + 1] = "received"
             end,
             command_error = function(_, _, code) ctx.rejection = code end,
             send_message_update = function(_, _, kind) events[#events + 1] = kind end,
-            update_session = function() events[#events + 1] = "session" end,
+            update_session = function(_, update)
+                ctx.session_update = update
+                events[#events + 1] = "session"
+            end,
             session_error = function() end, message_error = function() end,
             response_beginning = function() events[#events + 1] = "response" end,
             invalidate_message = function() end,
@@ -142,21 +156,29 @@ end
 
 local function define_tests()
     describe("steering lifecycle", function()
-        it("commits idle admission before receipt and request acknowledgement", function()
-            local ctx, rows, events = fixture()
-            local result, err = handlers.handle_message(ctx, { data = { text = "start" }, request_id = "request-1" })
-            test.is_nil(err)
-            test.eq(events[1], "admit")
-            test.eq(events[2], "received")
-            test.eq(events[3], "session")
-            test.is_nil(events[4])
-            test.eq(ctx.status, "running")
-            local admission = test.not_nil(ctx.admission, "admission metadata is captured")
-            local acknowledgement = test.not_nil(ctx.ack, "receipt is captured")
-            test.eq(admission.status, "running")
-            test.eq(acknowledgement.data.message_id, rows[1].message_id)
-            test.eq((result :: any).next_ops[1].request_id, "request-1")
-        end)
+        for _, mode in ipairs({ "block", "steer" }) do
+            it("announces committed " .. mode .. " permission before the one receipt", function()
+                local ctx, rows, events = fixture(nil, mode)
+                local result, err = handlers.handle_message(ctx, { data = { text = "start" }, request_id = "request-1" })
+                test.is_nil(err)
+                test.eq(events[1], "admit")
+                test.eq(events[2], "session")
+                test.eq(events[3], "received")
+                test.is_nil(events[4])
+                test.eq(ctx.status, "running")
+                local admission = test.not_nil(ctx.admission, "admission metadata is captured")
+                local acknowledgement = test.not_nil(ctx.ack, "receipt is captured")
+                local update = test.not_nil(ctx.session_update, "committed state is announced")
+                test.eq(admission.status, "running")
+                test.eq(update.status, "running")
+                test.is_nil(update.request_id)
+                test.eq(update.interaction.can_send, mode == "steer")
+                test.eq(ctx.receipt_count, 1)
+                test.eq(acknowledgement.request_id, "request-1")
+                test.eq(acknowledgement.data.message_id, rows[1].message_id)
+                test.eq((result :: any).next_ops[1].request_id, "request-1")
+            end)
+        end
 
         it("does not replace committed interaction with cached token metadata", function()
             local ctx = fixture()
@@ -237,7 +259,7 @@ local function define_tests()
         it("fails visibly and preserves malformed steering metadata", function()
             local bad = { message_id = "bad", date = "2026-01-01", type = consts.MSG_TYPE.USER,
                 data = "bad", metadata = { input = { state = "unknown" } } }
-            local ctx, rows = fixture({ bad })
+            local ctx, rows = fixture({ bad } :: {FixtureMessage})
             local count, err = handlers.apply_pending_inputs(ctx)
             test.is_nil(count)
             test.not_nil(err)
@@ -310,8 +332,9 @@ local function define_tests()
             local reported = {} :: {any}
             ctx.upstream.message_error = function(_, id, code) reported[#reported + 1] = { id = id, code = code } end
             ctx.load_error = "missing agent"
-            local result, err = handlers.agent_step(ctx, { message_id = "turn" })
+            local result: {completed: boolean, failed: string?, response_id: string?}?, err = handlers.agent_step(ctx, { message_id = "turn" })
             test.is_nil(err)
+            if not result then error("Expected an agent-load failure result") end
             test.is_true(result.completed)
             test.contains(result.failed, "missing agent")
             test.eq(#reported, 1)
@@ -321,11 +344,12 @@ local function define_tests()
             local original_lifecycle = handlers._lifecycle_runtime
             ctx.current_agent.bindings = { lifecycle = { "binding" } }
             handlers._lifecycle_runtime = { apply = function() return nil, "lifecycle unavailable" end }
-            result, err = handlers.agent_step(ctx, { message_id = "turn" })
+            local lifecycle_result, lifecycle_err = handlers.agent_step(ctx, { message_id = "turn" })
             handlers._lifecycle_runtime = original_lifecycle
-            test.is_nil(err)
-            test.is_true(result.completed)
-            test.eq(result.failed, "lifecycle unavailable")
+            test.is_nil(lifecycle_err)
+            local failure = test.not_nil(lifecycle_result) :: {completed: boolean, failed: string}
+            test.is_true(failure.completed)
+            test.eq(failure.failed, "lifecycle unavailable")
             test.eq(#reported, 2)
             test.eq(rows[1].metadata.input.state, "pending")
         end)
@@ -353,8 +377,9 @@ local function define_tests()
             ctx.provider_error = "provider failed"
             local result, err = handlers.agent_step(ctx, { message_id = "turn" })
             test.is_nil(err)
-            test.is_true(result.completed)
-            test.eq(result.failed, "provider failed")
+            local failure = test.not_nil(result) :: {completed: boolean, failed: string}
+            test.is_true(failure.completed)
+            test.eq(failure.failed, "provider failed")
             test.eq(rows[1].metadata.input.state, "applied")
             local finished, finish_err = handlers.finish_turn(ctx)
             test.is_nil(finish_err)
@@ -410,7 +435,7 @@ local function define_tests()
             local call = { message_id = "call-message", date = "2026-01-02T00:00:00Z",
                 type = consts.MSG_TYPE.FUNCTION, data = "{}",
                 metadata = { call_id = "old-call", status = consts.FUNC_STATUS.PENDING } }
-            local ctx, rows = fixture({ call })
+            local ctx, rows = fixture({ call } :: {FixtureMessage})
             ctx.turn_state = { active = true, handoff = true }
             local result, err = handlers.process_tools(ctx, {
                 tool_calls = { { id = "old-call", name = "lookup", arguments = "{}" } },

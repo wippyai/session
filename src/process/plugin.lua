@@ -164,10 +164,12 @@ local function run(args)
             return id
         end,
         now = function()
-            return time.now():unix()
+            return time.now():unix_nano() / 1000000000
         end,
         format_time = function(unix_seconds)
-            return time.unix(unix_seconds, 0):utc():format_rfc3339()
+            local seconds = math.floor(unix_seconds)
+            local nanoseconds = math.floor((unix_seconds - seconds) * 1000000000)
+            return time.unix(seconds, nanoseconds):utc():format(time.RFC3339NANO)
         end,
         validate_prepared_file = function(prepared_file, actor_id, session_id)
             return prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
@@ -877,8 +879,10 @@ local function run(args)
                 state.shutting_down = true
 
                 for session_id, session_info in pairs(state.active_sessions) do
-                    broker:cancel_session(session_id, "disconnected", "client transport disconnected")
-                    graceful_terminate_session(session_id, session_info, "shutdown")
+                    if type(session_id) == "string" then
+                        broker:cancel_session(session_id, "disconnected", "client transport disconnected")
+                        graceful_terminate_session(session_id, session_info, "shutdown")
+                    end
                 end
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
@@ -987,7 +991,7 @@ local function run(args)
                 local exit_result = event.result and event.result.value
                 local exit_error = event.result and event.result.error
                 for session_id, session_info in pairs(state.active_sessions) do
-                    if session_info.pid == event.from then
+                    if type(session_id) == "string" and session_info.pid == event.from then
                         action_intents:forget(session_id)
                         if type(exit_result) == "table" and exit_result.status == "refused" then
                             fail_start_requests(session_info,

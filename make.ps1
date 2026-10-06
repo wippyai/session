@@ -32,13 +32,13 @@ if (-not $wippy -or -not (Test-Path -LiteralPath $wippy -PathType Leaf)) {
 
 if ($Target -eq 'test') { Clear-TestDatabase }
 # TEST_CONFIG names an extra runtime config, as in the Makefile.
-$configArgs = @()
-if ($env:TEST_CONFIG) { $configArgs = @('--config', $env:TEST_CONFIG) }
+$configArgs = @('--config', '.wippy.yaml')
+if ($env:TEST_CONFIG) { $configArgs += @('--config', $env:TEST_CONFIG) }
 Push-Location $testDir
 try {
     switch ($Target) {
         'test' { & $wippy 'test' @configArgs }
-        'lint' { & $wippy 'lint' '--level' 'error' }
+        'lint' { & $wippy 'lint' @configArgs '--level' 'error' }
         'install' { & $wippy 'install' }
     }
     $code = $LASTEXITCODE

@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+Attention features require compatible Web Host and agent modules.
+
+### Features
+
+* Sessions support per-session Attention settings and authorized browser reads and actions. Fresh explicit reads remain available when automatic context attachment is off.
+* Context attachments use a kind/version envelope with strict payload validation. The receiver supports inline delivery and authenticated HTTP staging.
+* Approved PNG and WebP captures can supply image content through `wippy.attention.visual` attachments. Capture approval creates a removable Host draft, and the image is submitted only on a later explicit Send.
+
+### Bug fixes
+
+* Message admission validates and persists user text, file references and required context atomically. Committed permission and status are announced before the one existing correlated `received` response.
+* Attention inspection keeps its existing time limit and now uses fractional server receive times, avoiding deadline loss from whole-second rounding.
+* Prompt construction lists ordinary files instead of automatically inlining every image. Image content is included only through authorized visual context attachments.
+
+### Changed
+
+* Attention traits withdraw expired or superseded observations through existing message-ID metadata updates and `metadata.stale`. Prompt construction preserves matching tool calls and results while replacing stale observations with a bounded notice.
+* Authenticated capability discovery lets the Host select supported Attention features. Ordinary chat keeps its existing commands and receipts, and browser-operation terminal results remain separate from message acceptance.
+* V1 does not collect page URLs, route owners or Vue renderer details. Context kind/version handling preserves extension without adding those fields to V1.
+
 ## [0.6.5](https://github.com/wippyai/session/compare/v0.6.4...v0.6.5) (2026-10-01)
 
 

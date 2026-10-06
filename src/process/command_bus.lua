@@ -252,7 +252,7 @@ function command_bus:run_initial_ops()
     while true do
         local op = self.ops[1]
         if not op or op.init ~= true then break end
-        table.remove(self.ops, 1)
+        table.remove(self.ops :: {table}, 1)
         self.pending_ops = self.pending_ops - 1
         self.current_op = op
         local result, err = self:process_operation(op)
@@ -267,7 +267,7 @@ end
 
 function command_bus:run()
     while self.state ~= "closed" do
-        local op = table.remove(self.ops, 1)
+        local op = table.remove(self.ops :: {table}, 1)
         if op then
             self.pending_ops = self.pending_ops - 1
             if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" then

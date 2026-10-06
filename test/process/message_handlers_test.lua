@@ -285,6 +285,25 @@ local function define_tests()
     end)
 
     describe("turn failures", function()
+        it("returns token storage error text without persisting a failed response", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return { tokens = { total_tokens = 1 } }, "provider failed"
+            end
+            local ctx, captured = mock_ctx(agent)
+            ctx.writer.update_meta = function()
+                return nil, { message = "token storage failed" }
+            end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(result)
+            test.eq(err, "token storage failed")
+            test.eq(#captured.response_batches, 0)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
+            test.eq(#captured.message_errors, 0)
+        end)
+
         it("ends only the turn on a provider failure and returns to idle at the queue boundary", function()
             local agent = fake_agent(nil)
             agent.step = function() return nil, { message = "provider rate limited", code = 429 } end
@@ -342,7 +361,7 @@ local function define_tests()
             local agent = fake_agent(nil)
             agent.bindings = { lifecycle = { { binding = "app:lifecycle" } } }
             agent.step = function() return nil, "provider failed" end
-            local phases = {} :: {any}
+            local phases: {{[string]: any}} = {}
             local failing_phase = nil :: string?
             local original_lifecycle = message_handlers._lifecycle_runtime
             message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
@@ -356,9 +375,10 @@ local function define_tests()
             test.is_nil(err)
             test.is_true(result.completed)
             test.eq(#phases, 3)
-            test.eq(phases[3].phase, "after_step")
-            test.eq(phases[3].outcome.state, "failed")
-            test.eq(phases[3].refs.response_id, result.response_id)
+            local after_step = test.not_nil(phases[3]) :: {phase: string, outcome: {state: string}, refs: {response_id: string}}
+            test.eq(after_step.phase, "after_step")
+            test.eq(after_step.outcome.state, "failed")
+            test.eq(after_step.refs.response_id, result.response_id)
             test.eq(#captured.message_errors, 1)
 
             phases = {}
@@ -371,7 +391,8 @@ local function define_tests()
             test.is_true(lifecycle_result.completed)
             test.eq(lifecycle_result.failed, "lifecycle unavailable")
             test.eq(#phases, 2)
-            test.eq(phases[2].phase, "before_step")
+            local before_step = test.not_nil(phases[2]) :: {phase: string}
+            test.eq(before_step.phase, "before_step")
             test.eq(#lifecycle_captured.message_errors, 1)
             test.eq(lifecycle_captured.message_errors[1].id, lifecycle_result.response_id)
         end)
@@ -546,7 +567,7 @@ local function define_tests()
         it("checks cached context throughout a long tool loop before admitting the next step", function()
             local steps = 0
             local checks = 0
-            local checkpoints = {}
+            local checkpoints: {{trigger_tokens: number, checkpoint_id: string, message_id: string}} = {}
             local events = {}
             local agent = fake_agent(nil)
             agent.step = function()

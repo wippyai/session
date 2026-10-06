@@ -11,6 +11,8 @@ local security = require("security")
 local consts = require("consts")
 local wait_for_boot = require("wait_for_boot")
 
+type CreatedMessage = {message_id: string, session_id: string, type: string, date: string}
+
 local function define_tests()
     describe("Message Repository", function()
         -- Test data
@@ -127,11 +129,12 @@ local function define_tests()
             )
 
             test.is_nil(err)
-            test.not_nil(message)
-            test.eq(message.message_id, test_data.message_id)
-            test.eq(message.session_id, test_data.session_id)
-            test.eq(message.type, "user")
-            test.not_nil(message.date)
+            if type(message) ~= "table" then error("Expected a created message") end
+            local created = test.not_nil(message) :: CreatedMessage
+            test.eq(created.message_id, test_data.message_id)
+            test.eq(created.session_id, test_data.session_id)
+            test.eq(created.type, "user")
+            test.not_nil(created.date)
         end)
 
         it("commits an assistant and all pending calls together and resolves them on recovery", function()
@@ -385,10 +388,11 @@ local function define_tests()
             )
 
             test.is_nil(err)
-            test.not_nil(message)
-            test.eq(message.message_id, test_data.message_id2)
-            test.eq(message.session_id, test_data.session_id)
-            test.eq(message.type, "assistant")
+            if type(message) ~= "table" then error("Expected a created assistant message") end
+            local created = test.not_nil(message) :: CreatedMessage
+            test.eq(created.message_id, test_data.message_id2)
+            test.eq(created.session_id, test_data.session_id)
+            test.eq(created.type, "assistant")
         end)
 
         it("should get a message by ID", function()
@@ -514,8 +518,9 @@ local function define_tests()
                 "sha256:" .. string.rep("c", 64)
             )
             test.is_nil(accepted_err)
-            test.not_nil(accepted)
-            message_repo.delete(accepted.message_id)
+            if type(accepted) ~= "table" then error("Expected an accepted message") end
+            local created = test.not_nil(accepted) :: CreatedMessage
+            message_repo.delete(created.message_id)
         end)
 
         it("should preserve ordered context attachments across repository retrieval paths", function()

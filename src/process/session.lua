@@ -99,13 +99,14 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
         })
     end
     if not stopped then
-        if stop_gate then stop_gate:send({ success = false, error = stop_err }) end
+        local detail = tostring(stop_err or "Failed to persist Stop")
+        if stop_gate then stop_gate:send({ success = false, error = detail }) end
         if request_id then
-            session_upstream:command_error(request_id, "STORAGE_ERROR", stop_err or "Failed to persist Stop")
+            session_upstream:command_error(request_id, "STORAGE_ERROR", detail)
         else
-            session_upstream:session_error("STORAGE_ERROR", stop_err or "Failed to persist Stop")
+            session_upstream:session_error("STORAGE_ERROR", detail)
         end
-        return nil, stop_err
+        return nil, detail
     end
     context.stop_requested = true
     context.turn_state = candidate_state
@@ -339,9 +340,13 @@ local function run(args: SessionArgs)
     end
 
     -- Configure delegation if enabled
-    if session_config.delegation_func_id then
+    local delegation_func_id = session_config.delegation_func_id
+    if delegation_func_id then
+        if type(delegation_func_id) ~= "string" then
+            error("delegation_func_id must be a string")
+        end
         local delegation_schema = nil
-        local tool_schema, schema_err = tools.get_tool_schema(session_config.delegation_func_id)
+        local tool_schema, schema_err = tools.get_tool_schema(delegation_func_id)
         if tool_schema and tool_schema.schema then
             delegation_schema = tool_schema.schema
         end

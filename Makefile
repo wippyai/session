@@ -13,7 +13,7 @@ TEST_DIR := test
 TEST_DB  := .wippy/test.db
 WIPPY ?= wippy
 TEST_CONFIG ?=
-TEST_CONFIG_ARG := $(if $(TEST_CONFIG),--config $(TEST_CONFIG))
+TEST_CONFIG_ARG := --config .wippy.yaml $(if $(strip $(TEST_CONFIG)),--config "$(TEST_CONFIG)")
 
 .PHONY: test lint install clean
 
@@ -21,7 +21,7 @@ test: clean
 	cd $(TEST_DIR) && $(WIPPY) test $(TEST_CONFIG_ARG)
 
 lint:
-	cd $(TEST_DIR) && $(WIPPY) lint --level error
+	cd $(TEST_DIR) && $(WIPPY) lint $(TEST_CONFIG_ARG) --level error
 
 install:
 	cd $(TEST_DIR) && $(WIPPY) install

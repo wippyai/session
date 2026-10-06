@@ -52,6 +52,17 @@ local function define_tests()
             test.eq(projected[3], unrelated)
             test.is_nil(projected[3].metadata.stale)
         end)
+        it('withdraws an observation with an invalid row date while retaining a fresh observation', function()
+            local invalid, fresh = observation('invalid'), observation('fresh', 1, '{"name":"Cancel"}')
+            invalid.date = 'not-a-timestamp'
+            local projected, updates = history.prepare({ user('first'), invalid, fresh }, now + 1)
+            test.eq(#updates, 1)
+            test.eq(updates[1].message_id, 'invalid')
+            test.eq(updates[1].stale, 'Attention observation expired.')
+            test.eq(projected[3], fresh)
+            test.eq(projected[2].metadata.call_id, invalid.metadata.call_id)
+            test.eq(projected[2].metadata.result, invalid.metadata.result)
+        end)
         it('withdraws replaced queries and changed revisions but keeps distinct pages at one revision', function()
             local rows = { user('first'), observation('old'), observation('replacement'), observation('page', 1, '{"name":"Save","continuation":"next"}') }
             local _, updates = history.prepare(rows, now + 1)
@@ -102,7 +113,7 @@ local function define_tests()
             test.eq(updates[1].message_id, 'first')
         end)
         local function read_of(id, tool, revisions, args)
-            local row = observation(id, nil, args or '{}')
+            local row = observation(id, 1, args or '{}')
             row.metadata.registry_id = 'wippy.agent.tools:' .. tool
             row.metadata.function_name = tool
             row.metadata.result.revisions = revisions
