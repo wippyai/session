@@ -362,12 +362,25 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     return state
 end
 
-local function is_turn_blocked(ctx: any): boolean
+local function is_turn_stopped(ctx: any): boolean
     local state = ctx.turn_state
     return ctx.stop_requested == true
         or (ctx.coordinator and ctx.coordinator:stop_requested())
-        or (state and (state.failed or state.handoff)) or false
+        or (state and state.failed) or false
 end
+
+local function is_turn_blocked(ctx: any): boolean
+    local state = ctx.turn_state
+    return is_turn_stopped(ctx) or (state and state.handoff) or false
+end
+
+local function take_over_handoff(ctx: any): boolean
+    local state = ctx.turn_state
+    if not state or not state.handoff or is_turn_stopped(ctx) then return false end
+    state.handoff = nil
+    return true
+end
+
 local function all_messages(ctx)
     if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
     return ctx.reader:messages():all()
@@ -699,6 +712,7 @@ function message_handlers.handle_message(ctx, op)
 end
 
 function message_handlers.agent_step(ctx, op)
+    local handed_off = take_over_handoff(ctx)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
@@ -744,6 +758,11 @@ function message_handlers.agent_step(ctx, op)
                 tostring(state.last_round_tools), state.repeated_calls, max_repeats)
         end
         return stop_turn(ctx, op, agent, state, "repeated_tool_calls", detail)
+    end
+
+    if handed_off then
+        local _, policy_err = input_policy.publish(ctx :: any, agent)
+        if policy_err then return nil, policy_err end
     end
 
     local response_id, err = uuid.v7()
@@ -1319,7 +1338,7 @@ function message_handlers.process_tools(ctx, op)
 
     message_handlers.note_tool_round(ctx, results)
 
-    if #op.tool_calls > 0 and not is_turn_blocked(ctx) then
+    if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,
@@ -1334,7 +1353,7 @@ function message_handlers.process_tools(ctx, op)
 end
 
 function message_handlers.agent_continue(ctx, op)
-    if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    if is_turn_stopped(ctx) then return { completed = true, next_ops = {} } end
     return message_handlers.agent_step(ctx, {
         message_id = op.message_id,
         request_id = op.request_id,
