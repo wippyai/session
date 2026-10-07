@@ -61,7 +61,7 @@ local function mock_ctx()
             state = function()
                 return { config = {} }
             end,
-            reset = function() end
+            reset = function() return true end
         },
         writer = {
             update_meta = function(self, meta)
@@ -94,7 +94,7 @@ local function define_tests()
             }) do
                 local ctx = {
                     reader = { state = function() return { public_meta = {} } end,
-                        reset = function() end },
+                        reset = function() return true end },
                     writer = {},
                     upstream = { update_session = function() end }
                 }

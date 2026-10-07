@@ -68,6 +68,43 @@ history pagination.
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
+## Runtime tests and benchmarks
+
+On Unix, `make install test` runs the suite against the locked dependencies.
+`make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
+registered tools, agent compilation, the Session
+process, and SQLite persistence with deterministic model responses. It covers
+handoff history, persisted control operations, mixed tool results, and Stop.
+The Framework checkout supplies local agent, LLM, and test sources. Required
+runtime checks need the candidate runner so missing or empty suites fail.
+CI runs both locked compatibility and candidate tests.
+
+`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes local JSON reports
+with median, p95, throughput, samples, allocation counters, and revision
+metadata. Defaults are 100 warmups and 100 measured batches at
+sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
+(comma-separated). Each operation checks the complete persisted handoff.
+Normal garbage collection remains enabled for latency samples. A separate
+256-operation pass measures allocated bytes, exact allocation counts, heap
+growth, and retained heap. Override `BENCH_MEMORY_OPERATIONS` for its size.
+The metadata-write workload checks real persisted patches while retaining
+128-byte and 4096-byte payloads. It uses 32 writes per sample and 2048 writes
+for memory measurement; override `BENCH_METADATA_SIZES` and
+`BENCH_METADATA_MEMORY_OPERATIONS` as needed. Session creation and deletion
+are outside that workload's measured loops.
+Exact counters use the local runtime profiler; `BENCH_EXACT_ALLOCATIONS=0`
+records tracked heap objects instead. Reports include measurement overhead.
+Run one benchmark process at a time with port 6060 free for its profiler.
+CI runs correctness checks; performance comparisons run locally.
+Set `BENCH_REVISION` and `BENCH_FRAMEWORK_REVISION` when comparing external
+source snapshots without Git metadata.
+
+Dependencies, the database, environment file, backups, and benchmark reports
+stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
+backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
+location or `TEST_CONFIG` for an external runtime configuration. These targets
+require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+
 ## Tool feedback and loop limits
 
 Settled tool failures are marked as errors in the next model prompt. Public

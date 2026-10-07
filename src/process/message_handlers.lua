@@ -24,6 +24,7 @@ type SessionContext = {
     lifecycle_state: table?,
     turn_state: table?,
     stop_requested: boolean?,
+    step_stop_check: (() -> boolean)?,
     status: string?,
     current_agent: any?,
     request_input_policy: any?,
@@ -362,11 +363,34 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     return state
 end
 
+local CONTROL_TABLE_FIELDS = { "artifacts", "context", "memory", "config" }
+
+local function control_shape_error(control: any): string?
+    if control == nil then return nil end
+    if type(control) ~= "table" then return "Invalid tool control: expected a table" end
+    for _, field in ipairs(CONTROL_TABLE_FIELDS) do
+        local value = control[field]
+        if value ~= nil and type(value) ~= "table" then
+            return "Invalid tool control: " .. field .. " must be a table"
+        end
+    end
+    return nil
+end
+
 local function is_turn_stopped(ctx: any): boolean
     local state = ctx.turn_state
     return ctx.stop_requested == true
         or (ctx.coordinator and ctx.coordinator:stop_requested())
         or (state and state.failed) or false
+end
+
+local function step_stop_check(ctx: any): () -> boolean
+    local check = ctx.step_stop_check
+    if not check then
+        check = function() return is_turn_stopped(ctx) end
+        ctx.step_stop_check = check
+    end
+    return check
 end
 
 local function is_turn_blocked(ctx: any): boolean
@@ -820,7 +844,8 @@ function message_handlers.agent_step(ctx, op)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
-        context = session_context
+        context = session_context,
+        stop_check = step_stop_check(ctx)
     }
     if ctx.upstream.conn_pid then
         runtime_options.stream_target = {
@@ -833,6 +858,10 @@ function message_handlers.agent_step(ctx, op)
     if exec_err then
         ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, exec_err)
         return nil, exec_err
+    end
+    if result.stopped then
+        ctx.upstream:invalidate_message(response_id)
+        return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
     local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
@@ -1237,6 +1266,9 @@ function message_handlers.process_tools(ctx, op)
         local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
 
         local policy_result = result_data.result
+        if not result_data.error and not is_delegation and type(policy_result) == "table" then
+            result_data.error = control_shape_error(policy_result._control)
+        end
         if not result_data.error and not is_delegation and type(policy_result) == "table"
             and type(policy_result._control) == "table" then
             local control = policy_result._control

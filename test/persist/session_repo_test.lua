@@ -270,6 +270,23 @@ local function define_tests()
             test.contains(tostring(err_count), "User ID is required")
         end)
 
+        it("rejects a metadata update when the session disappears before the write", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "Disappearing session", "test"))
+            local db_resource = consts.get_db_resource()
+            local db = assert(sql.get(db_resource))
+            local trigger = "delete_before_update_" .. id:gsub("-", "")
+            assert(db:execute("CREATE TRIGGER " .. trigger .. " BEFORE UPDATE ON sessions WHEN OLD.session_id = '" .. id ..
+                "' BEGIN DELETE FROM sessions WHERE session_id = OLD.session_id; SELECT RAISE(IGNORE); END"))
+            local ok, result, err = pcall(session_repo.update_session_meta, id, {title = "Not persisted"})
+            assert(db:execute("DROP TRIGGER " .. trigger))
+            db:release()
+            session_repo.delete(id)
+            test.is_true(ok)
+            test.is_nil(result)
+            test.eq(err, "Session not found")
+        end)
+
         it("should delete a session", function()
             -- Create a session to delete
             local temp_session_id = uuid.v7()

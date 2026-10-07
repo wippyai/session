@@ -284,9 +284,10 @@ function session_handlers.generate_title(ctx, op)
         return nil, err
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     ctx.upstream:update_session({ title = result.title })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -418,7 +419,7 @@ function session_handlers.create_checkpoint(ctx, op)
         return nil, err1
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     ctx.writer:delete_session_contexts_by_type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY)
 
@@ -435,6 +436,7 @@ function session_handlers.create_checkpoint(ctx, op)
             current_checkpoint_id = op.checkpoint_id
         })
     end
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -503,7 +505,7 @@ function session_handlers.agent_change(ctx, op)
     ctx.config = current_config
     ctx.turn_state = candidate_state
     ctx.current_agent = next_agent
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
     input_policy.accept_committed(ctx, interaction)
 
     local switch_message = string.format("Agent changed to: %s (model: %s)", op.agent_id, new_model)
@@ -522,6 +524,7 @@ function session_handlers.agent_change(ctx, op)
         agent = op.agent_id,
         model = new_model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -558,7 +561,7 @@ function session_handlers.model_change(ctx, op)
     end
 
     ctx.config = staged_config
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     local change_message = string.format("Model changed to: %s", op.model)
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, change_message, {
@@ -573,6 +576,7 @@ function session_handlers.model_change(ctx, op)
     ctx.upstream:update_session({
         model = op.model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,

@@ -1118,6 +1118,50 @@ local function define_tests()
         end)
     end)
 
+    describe("step stop check", function()
+        it("passes one cached stop check that reports a later stop request", function()
+            local agent = fake_agent(nil)
+            local seen = {} :: { any }
+            agent.step = function(_self, _builder, runtime_options)
+                table.insert(seen, runtime_options.stop_check)
+                return { result = "done", tool_calls = {} }
+            end
+            local ctx = mock_ctx(agent)
+
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(select(2, user_step(ctx)))
+
+            test.eq(#seen, 2)
+            test.eq(type(seen[1]), "function")
+            test.is_true(rawequal(seen[1], seen[2]))
+            test.is_false(seen[1]())
+            ctx.stop_requested = true
+            test.is_true(seen[1]())
+        end)
+
+        it("invalidates the response and schedules nothing when the step stops before generation", function()
+            local agent = fake_agent(nil)
+            agent.step = function() return { stopped = true } end
+            local ctx, captured = mock_ctx(agent)
+            local began, invalidated = {} :: { any }, {} :: { any }
+            ctx.upstream.response_beginning = function(_self, id) table.insert(began, id) end
+            ctx.upstream.invalidate_message = function(_self, id) table.insert(invalidated, id) end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(#result.next_ops, 0)
+            test.eq(result.message_id, "msg-user")
+            test.eq(#began, 1)
+            test.eq(#invalidated, 1)
+            test.eq(invalidated[1], began[1])
+            test.eq(result.response_id, began[1])
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 0)
+            test.eq(#captured.message_errors, 0)
+        end)
+    end)
+
     describe("stop during tool execution", function()
         it("records the returned result and ends the turn before another agent step", function()
             local steps = 0
@@ -1444,6 +1488,88 @@ local function define_tests()
             test.eq((function_row or {}).metadata.status, consts.FUNC_STATUS.ERROR)
             test.contains(tostring((function_row or {}).metadata.result), "config store unavailable")
             test.eq(((function_row or {}).metadata.control_operations or {}).config.tools[1], "app:tool")
+        end)
+
+        it("fails the turn when the state refresh after a durable control write fails", function()
+            local ctx, _captured, calls, ids, validated = call_fixture()
+            local persisted = 0
+            ctx.writer.update_meta = function() persisted = persisted + 1; return true end
+            ctx.reader.reset = function() return nil, "Session not found during reset" end
+            ctx.agent_ctx.set_active_tools = function() return true end
+
+            local continued = 0
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop(); return true end
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                continued = continued + 1
+                return { completed = true }
+            end)
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = {
+                        result = { value = "written", _control = { config = { tools = { "app:tool" } } } },
+                        tool_call = tools["function"]
+                    } }
+                end
+            }
+            bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS,
+                tool_calls = { calls[1] }, call_message_ids = ids, caller = caller,
+                validated_tools = validated, message_id = "user", agent = { id = "agent:documents" } })
+
+            local ok, err = bus:run()
+
+            test.eq(persisted, 1)
+            test.eq(continued, 0)
+            test.is_nil(ok)
+            test.contains(tostring(err), "Session not found during reset")
+        end)
+
+        it("rejects malformed tool controls without applying their effects", function()
+            local malformed = {
+                { control = "stop", message = "Invalid tool control: expected a table" },
+                { control = { artifacts = "a" }, message = "Invalid tool control: artifacts must be a table" },
+                { control = { context = 1 }, message = "Invalid tool control: context must be a table" },
+                { control = { memory = true }, message = "Invalid tool control: memory must be a table" },
+                { control = { config = "c" }, message = "Invalid tool control: config must be a table" },
+            }
+            for _, case in ipairs(malformed) do
+                local ctx, captured, calls, ids, validated = call_fixture()
+                local persisted = 0
+                ctx.writer.update_meta = function() persisted = persisted + 1; return true end
+                ctx.agent_ctx.set_active_tools = function() return true end
+
+                local bus = command_bus.new(ctx)
+                ctx.queue_empty_callback = function() bus:stop(); return true end
+                bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+                bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONFIG, control_handlers.control_config)
+                bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function() return { completed = true } end)
+                local caller = {
+                    set_strategy = function() end,
+                    execute = function(_self, _context, tools)
+                        return { ["function"] = {
+                            result = { value = "written", _control = case.control },
+                            tool_call = tools["function"]
+                        } }
+                    end
+                }
+                bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS,
+                    tool_calls = { calls[1] }, call_message_ids = ids, caller = caller,
+                    validated_tools = validated, message_id = "user", agent = { id = "agent:documents" } })
+
+                bus:run()
+
+                test.eq(persisted, 0)
+                local function_row = nil
+                for _, row in ipairs(captured.stored) do
+                    if row.id == ids["function"] then function_row = row end
+                end
+                test.not_nil(function_row)
+                test.eq((function_row or {}).metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring((function_row or {}).metadata.result), case.message)
+                test.is_nil((function_row or {}).metadata.control_operations)
+            end
         end)
 
         it("applies the first call's effect before a later result write fails", function()

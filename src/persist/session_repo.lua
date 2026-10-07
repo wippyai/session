@@ -309,24 +309,6 @@ function session_repo.update_session_meta(session_id, updates)
         return nil, err
     end
 
-    -- Check if session exists
-    local check_query = sql.builder.select("session_id")
-        :from("sessions")
-        :where("session_id = ?", session_id)
-
-    local check_executor = check_query:run_with(db)
-    local sessions, err = check_executor:query()
-
-    if err then
-        db:release()
-        return nil, "Failed to check if session exists: " .. err
-    end
-
-    if #sessions == 0 then
-        db:release()
-        return nil, "Session not found"
-    end
-
     -- Build update query
     local update_query = sql.builder.update("sessions")
     local result = { session_id = session_id, updated = true }
@@ -398,6 +380,9 @@ function session_repo.update_session_meta(session_id, updates)
 
     if err then
         return nil, "Failed to update session metadata: " .. err
+    end
+    if not update_result or update_result.rows_affected == 0 then
+        return nil, "Session not found"
     end
 
     return result

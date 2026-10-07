@@ -232,17 +232,8 @@ function session_writer:update_message_meta(message_id, metadata)
         return nil, "Metadata must be a table"
     end
 
-    local message, get_err = session_writer._message_repo.get(message_id)
-    if get_err then
-        return nil, "Failed to get message: " .. get_err
-    end
-    if not message then
-        return nil, "Message not found"
-    end
-    if message.session_id ~= self.session_id then
-        return nil, "Message belongs to different session"
-    end
-    local result, err = session_writer._message_repo.update_metadata(message_id, metadata)
+    local result, err, stage = session_writer._message_repo.update_metadata(message_id, metadata, self.session_id or "")
+    if stage == "read" or stage == "ownership" then return nil, err end
     if err or not result then
         return nil, "Failed to update message metadata: " .. tostring(err or "No result")
     end
@@ -279,18 +270,7 @@ function session_writer:update_function_result(message_id, result, success, addi
         return nil, "Function result is required"
     end
 
-    local message, err = session_writer._message_repo.get(message_id)
-    if err then
-        return nil, "Failed to get message: " .. err
-    end
-
-    if not message then
-        return nil, "Message not found"
-    end
-
-    local metadata = message.metadata or {}
-    metadata.result = result
-    metadata.status = success and "success" or "error"
+    local metadata = {result = result, status = success and "success" or "error"}
 
     if additional_metadata and type(additional_metadata) == "table" then
         for k, v in pairs(additional_metadata) do
