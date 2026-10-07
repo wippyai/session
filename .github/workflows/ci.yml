@@ -24,13 +24,15 @@ jobs:
     defaults:
       run:
         working-directory: session
-    env:
-      TEST_ARTIFACTS: ${{ runner.temp }}/session-lint
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: session
           persist-credentials: false
+      - name: Configure external test paths
+        run: |
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-lint" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: wippyai/framework
@@ -54,14 +56,15 @@ jobs:
     defaults:
       run:
         working-directory: session
-    env:
-      TEST_ARTIFACTS: ${{ runner.temp }}/session-compatibility
-      TEST_BACKUP_DIR: ${{ runner.temp }}/backups/session
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: session
           persist-credentials: false
+      - name: Configure external test paths
+        run: |
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-compatibility" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: wippyai/framework
@@ -87,13 +90,15 @@ jobs:
         working-directory: session
     env:
       FRAMEWORK_DIR: ${{ github.workspace }}/framework
-      TEST_ARTIFACTS: ${{ runner.temp }}/session-runtime
-      TEST_BACKUP_DIR: ${{ runner.temp }}/backups/session
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: session
           persist-credentials: false
+      - name: Configure external test paths
+        run: |
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-runtime" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: wippyai/framework
