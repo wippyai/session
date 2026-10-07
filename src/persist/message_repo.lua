@@ -497,7 +497,7 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
     return true
 end
 
-function message_repo.update_metadata(message_id, metadata)
+function message_repo.update_metadata(message_id, metadata, expected_session_id)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
@@ -508,7 +508,13 @@ function message_repo.update_metadata(message_id, metadata)
 
     local message, err = message_repo.get(message_id)
     if not message or err then
+        if expected_session_id ~= nil then
+            return nil, err and ("Failed to get message: " .. err) or "Message not found", "read"
+        end
         return nil, "Message not found"
+    end
+    if expected_session_id ~= nil and message.session_id ~= expected_session_id then
+        return nil, "Message belongs to different session", "ownership"
     end
 
     if type(message.metadata) == "table" and type(metadata) == "table" then
@@ -538,6 +544,9 @@ function message_repo.update_metadata(message_id, metadata)
     local update_query = sql.builder.update("messages")
         :set("metadata", metadata_json)
         :where("message_id = ?", message_id)
+    if expected_session_id ~= nil then
+        update_query = update_query:where("session_id = ?", expected_session_id)
+    end
 
     local update_executor = update_query:run_with(db)
     local result, err = update_executor:exec()
@@ -546,6 +555,12 @@ function message_repo.update_metadata(message_id, metadata)
 
     if err then
         return nil, "Failed to update message metadata: " .. err
+    end
+    if not result or result.rows_affected == 0 then
+        if expected_session_id ~= nil then
+            return nil, "Message not found or belongs to different session", "ownership"
+        end
+        return nil, "Message not found"
     end
 
     return {

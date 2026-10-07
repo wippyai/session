@@ -18,8 +18,12 @@ local function generate(args)
     if args.model == "router" then
         content = "Transferring the request."
         calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }}
-        if scenario.mixed then
+        if scenario.mixed or scenario.malformed then
             calls[#calls + 1] = { id = "call-failure", name = "failing_tool", arguments = "{}" }
+        end
+        if scenario.malformed then
+            table.insert(calls, scenario.malformed == "artifacts" and 2 or 1,
+                { id = "call-malformed", name = "malformed_effects", arguments = "{}" })
         end
     end
     return {
@@ -50,8 +54,31 @@ local function handoff()
     }
 end
 
+local function held_prompt()
+    local scenario = state():get("scenario")
+    if scenario and scenario.hold_prompt then
+        local release = process.listen("fixture:prompt_release")
+        process.send(scenario.parent, "fixture:prompt_ready", { pid = process.pid() })
+        local timer = time.timer("5s")
+        local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
+        timer:stop()
+        process.unlisten(release)
+        if selected.channel ~= release then error("prompt release deadline exceeded") end
+    end
+    return ""
+end
+
+local function malformed_effects()
+    if state():get("scenario").malformed == "artifacts" then
+        return { message = "Malformed control.", _control = { artifacts = 42 } }
+    end
+    return { message = "Malformed control.", _control = true }
+end
+
 return {
     generate = generate,
     handoff = handoff,
+    malformed_effects = malformed_effects,
+    held_prompt = held_prompt,
     fail = function() error("Expected mixed-result failure") end,
 }

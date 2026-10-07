@@ -143,3 +143,37 @@ entries:
       writer: wippy.session.persist:writer
       test: wippy.test:test
     method: run_tests
+
+  - name: writer_metadata_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://writer_metadata_test.lua
+    method: run
+    modules: [security, uuid, sql]
+    imports:
+      writer: wippy.session.persist:writer
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+
+  - name: control_refresh_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://control_refresh_test.lua
+    method: run
+    modules: [security, uuid]
+    imports:
+      writer: wippy.session.persist:writer
+      reader: wippy.session.persist:reader
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      control_handlers: wippy.session.process:control_handlers
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test

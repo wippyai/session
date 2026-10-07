@@ -1446,6 +1446,42 @@ local function define_tests()
             test.eq(((function_row or {}).metadata.control_operations or {}).config.tools[1], "app:tool")
         end)
 
+        it("fails the turn when the state refresh after a durable control write fails", function()
+            local ctx, _captured, calls, ids, validated = call_fixture()
+            local persisted = 0
+            ctx.writer.update_meta = function() persisted = persisted + 1; return true end
+            ctx.reader.reset = function() return nil, "Session not found during reset" end
+            ctx.agent_ctx.set_active_tools = function() return true end
+
+            local continued = 0
+            local bus = command_bus.new(ctx)
+            ctx.queue_empty_callback = function() bus:stop(); return true end
+            bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, function()
+                continued = continued + 1
+                return { completed = true }
+            end)
+            local caller = {
+                set_strategy = function() end,
+                execute = function(_self, _context, tools)
+                    return { ["function"] = {
+                        result = { value = "written", _control = { config = { tools = { "app:tool" } } } },
+                        tool_call = tools["function"]
+                    } }
+                end
+            }
+            bus:queue_op({ type = consts.OP_TYPE.PROCESS_TOOLS,
+                tool_calls = { calls[1] }, call_message_ids = ids, caller = caller,
+                validated_tools = validated, message_id = "user", agent = { id = "agent:documents" } })
+
+            local ok, err = bus:run()
+
+            test.eq(persisted, 1)
+            test.eq(continued, 0)
+            test.is_nil(ok)
+            test.contains(tostring(err), "Session not found during reset")
+        end)
+
         it("applies the first call's effect before a later result write fails", function()
             local ctx, captured, calls, ids, validated = call_fixture()
             local applied = nil :: any

@@ -79,12 +79,23 @@ The Framework checkout supplies local agent, LLM, and test sources. Required
 runtime checks need the candidate runner so missing or empty suites fail.
 CI runs both locked compatibility and candidate tests.
 
-`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes JSON reports with
-median, p95, throughput, samples, and
-revision metadata. Defaults are five warmups and thirty measured batches at
+`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes local JSON reports
+with median, p95, throughput, samples, allocation counters, and revision
+metadata. Defaults are 100 warmups and 100 measured batches at
 sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
 (comma-separated). Each operation checks the complete persisted handoff.
-Reports measure local runtime work and have no timing threshold.
+Normal garbage collection remains enabled for latency samples. A separate
+256-operation pass measures allocated bytes, exact allocation counts, heap
+growth, and retained heap. Override `BENCH_MEMORY_OPERATIONS` for its size.
+The metadata-write workload checks real persisted patches while retaining
+128-byte and 4096-byte payloads. It uses 32 writes per sample and 2048 writes
+for memory measurement; override `BENCH_METADATA_SIZES` and
+`BENCH_METADATA_MEMORY_OPERATIONS` as needed. Session creation and deletion
+are outside that workload's measured loops.
+Exact counters use the local runtime profiler; `BENCH_EXACT_ALLOCATIONS=0`
+records tracked heap objects instead. Reports include measurement overhead.
+Run one benchmark process at a time with port 6060 free for its profiler.
+CI runs correctness checks; performance comparisons run locally.
 Set `BENCH_REVISION` and `BENCH_FRAMEWORK_REVISION` when comparing external
 source snapshots without Git metadata.
 

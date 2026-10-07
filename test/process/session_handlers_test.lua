@@ -162,6 +162,23 @@ local function define_tests()
             test.eq((captured.upstream or {}).model, "model:new")
         end)
 
+        for _, change in ipairs({
+            { name = "agent_change", op = { agent_id = "agent:new", init = true } },
+            { name = "model_change", op = { model = "model:next" } },
+        }) do
+            it(change.name .. " returns a failed reader refresh after the durable config write", function()
+                local ctx, captured = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+                ctx.reader.reset = function() return nil, "Session not found during reset" end
+
+                local result, err = session_handlers[change.name](ctx, change.op)
+
+                test.is_nil(result)
+                test.contains(tostring(err), "Session not found during reset")
+                test.not_nil(captured.persisted)
+                test.not_nil(captured.upstream)
+            end)
+        end
+
         it("model_change tolerates a missing live ctx.config", function()
             local ctx, captured = mock_ctx({
                 agent_id = "agent:current",
@@ -587,6 +604,55 @@ local function define_tests()
             test.eq(captured.context_value, "msg-assistant-7")
             test.gte(captured.resets, 1,
                 "the reader caches the primary context; without a reset the next prompt is built from the old anchor")
+        end)
+
+        it("returns a failed reader refresh after storing a generated title", function()
+            local ctx = mock_checkpoint_ctx({ title_function_id = "app:title" })
+            local stored, announced
+            ctx.writer.update_title = function(_self, title) stored = title; return true end
+            ctx.upstream = { update_session = function(_self, payload) announced = payload.title end }
+            ctx.reader.reset = function() return nil, "Session not found during reset" end
+            session_handlers._funcs = {
+                new = function()
+                    return {
+                        with_context = function(self, _context) return self end,
+                        call = function() return { title = "Stored title", tokens = {} } end
+                    }
+                end
+            }
+
+            local result, err = session_handlers.generate_title(ctx, {})
+
+            test.is_nil(result)
+            test.contains(tostring(err), "Session not found during reset")
+            test.eq(stored, "Stored title")
+            test.eq(announced, "Stored title")
+        end)
+
+        it("returns a failed reader refresh after recording the checkpoint", function()
+            local ctx, captured = mock_checkpoint_ctx({
+                checkpoint_function_id = "fallback:checkpoint",
+                title_function_id = nil,
+            })
+            ctx.reader.reset = function() return nil, "Session not found during reset" end
+            session_handlers._funcs = {
+                new = function()
+                    return {
+                        with_context = function(self, _context) return self end,
+                        call = function() return { summary = "summary", tokens = { prompt_tokens = 1 } } end
+                    }
+                end
+            }
+
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "msg-assistant-8",
+                message_id = "msg-assistant-8",
+                trigger_tokens = 200,
+            })
+
+            test.is_nil(result)
+            test.contains(tostring(err), "Session not found during reset")
+            test.eq(captured.context_value, "msg-assistant-8")
         end)
     end)
 end
