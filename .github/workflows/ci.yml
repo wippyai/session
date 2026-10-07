@@ -114,11 +114,3 @@ jobs:
         run: make lint
       - name: Verify runtime handoff
         run: make test-runtime
-      - name: Measure handoff batches
-        run: make bench
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: session-runtime-evidence
-          path: ${{ runner.temp }}/session-runtime/benchmarks
-          if-no-files-found: error
