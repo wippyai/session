@@ -133,7 +133,6 @@ entries:
       - json
       - hash
       - uuid
-      - hash
       - funcs
       - time
     imports:
