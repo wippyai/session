@@ -3,6 +3,24 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
+  - name: session_select_test
+    kind: function.lua
+    meta:
+      name: Session receive-case lifetime
+      type: test
+      suite: session
+    source: file://session_select_test.lua
+    modules: [security, uuid]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
   - name: command_bus_startup_test
     kind: function.lua
     meta:
@@ -138,11 +156,16 @@ entries:
       suite: session
       comment: Tests tool persistence, stops, and checkpoints
     source: file://message_handlers_test.lua
+    modules:
+      - uuid
+      - json
     imports:
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       control_handlers: wippy.session.process:control_handlers
       message_handlers: wippy.session.process:message_handlers
+      output: wippy.llm:output
+      google_mapper: wippy.llm.google:mapper
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
       tool_caller: wippy.agent.tools:caller

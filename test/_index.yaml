@@ -290,6 +290,7 @@ entries:
     imports:
       claude_mapper: wippy.llm.claude:mapper
       context_attachments: wippy.session:context_attachments
+      google_mapper: wippy.llm.google:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test

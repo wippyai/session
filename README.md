@@ -38,6 +38,14 @@ The tool is bound to its calling session. The session validates and persists a
 change before reporting tool success. Temporary overrides clear on completion,
 Stop, failure, recovery, and agent handoff.
 
+A tool that returns `_control.config.agent` while a turn is running hands that
+turn to the new agent. The session commits the switch, and the next agent step
+in the same turn is taken by the new agent with the conversation so far, so a
+router agent whose only action is a handoff still produces the answer. The
+session re-publishes `interaction` for the new agent at that step, and pending
+steering is applied there. Stop still ends the turn at the operation boundary,
+and the committed switch stays in place.
+
 The server generates the canonical message ID. A request ID correlates the
 command response. The session saves a message before acknowledging it. There
 is no automatic retry or client message deduplication. If acknowledgement is
@@ -59,6 +67,30 @@ history pagination.
 
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
+
+## Tool feedback and loop limits
+
+Settled tool failures are marked as errors in the next model prompt. Public
+function-error events carry the same error text saved in history; private and
+delegation details remain hidden from public tool events. Text-only answers end
+the turn. An explicit empty-output exhaustion is reported rather than sampled
+again; incomplete-tool and older truncation responses retain their retry behavior.
+
+Existing loop settings and defaults remain: `max_iterations` defaults to 1,000
+and `max_repeated_calls` to 50 under `agent_options.loop`. Session overrides use
+`max_turn_iterations` and `max_repeated_tool_calls`. A value of `0` disables that
+limit. There is no separate three-failure default.
+
+The repeat limit covers identical tool rounds and repeated failures of the same
+action across changing batches. Parallel duplicates count once per round.
+Changed arguments identify a different action; successful recovery clears that
+action's failure history, but unrelated successes do not. New user-started turns
+reset the counters. Stop still takes precedence, and unused steering remains
+pending for the next user-started turn.
+
+History and applied steering compare timestamps chronologically, with message
+IDs only breaking ties. Stored timestamps, IDs and pagination cursors are not
+rewritten.
 
 ## Checkpoints and prompt caching
 

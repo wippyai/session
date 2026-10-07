@@ -52,6 +52,13 @@ entries:
     imports:
       consts: wippy.session:consts
 
+  - name: message_order
+    kind: library.lua
+    meta:
+      comment: Chronological message comparison keys without changing stored dates
+    source: file://message_order.lua
+    modules: [time]
+
   # wippy.session.persist:message_repo
   - name: message_repo
     kind: library.lua
@@ -66,6 +73,7 @@ entries:
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
       input_metadata: wippy.session:input_metadata
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo
@@ -109,3 +117,4 @@ entries:
       artifact_repo: wippy.session.persist:artifact_repo
       session_contexts_repo: wippy.session.persist:session_contexts_repo
       context_repo: wippy.session.persist:context_repo
+      message_order: wippy.session.persist:message_order

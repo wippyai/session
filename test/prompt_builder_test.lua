@@ -4,6 +4,7 @@ local hash = require("hash")
 local consts = require("consts")
 local prompt_builder = require("prompt_builder")
 local claude_mapper = require("claude_mapper")
+local google_mapper = require("google_mapper")
 local context_attachments = require("context_attachments")
 
 local function define_tests()
@@ -57,6 +58,58 @@ local function define_tests()
         end)
     end)
 
+    describe("steering chronology", function()
+        it("keeps later applied instructions last when timestamp fractions differ", function()
+            local builder, err = prompt_builder.build({
+                { message_id = "anchor", type = consts.MSG_TYPE.ASSISTANT, data = "working", metadata = {} },
+                { message_id = "old", date = "2099-01-01T00:00:00.1Z", type = consts.MSG_TYPE.USER,
+                    data = "earlier instruction", metadata = { input = {state = "applied", after_message_id = "anchor"} } },
+                { message_id = "new", date = "2099-01-01T00:00:00.11Z", type = consts.MSG_TYPE.USER,
+                    data = "latest instruction", metadata = { input = {state = "applied", after_message_id = "anchor"} } },
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            test.is_nil(err)
+            local messages = builder:get_messages()
+            test.eq(messages[#messages].content[1].text, "earlier instruction\n\nlatest instruction")
+        end)
+    end)
+    describe("foundation error feedback", function()
+        it("preserves canonical failure status while leaving successful provider results unchanged", function()
+            local rendered = {}
+            local google_rendered = {}
+            for _, status in ipairs({ consts.FUNC_STATUS.SUCCESS, consts.FUNC_STATUS.ERROR }) do
+                local builder, err = prompt_builder.build({
+                    { message_id = "function-row", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                        function_name = "Platform", call_id = "call-1", status = status,
+                        result = "permission denied",
+                    } },
+                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+                test.is_nil(err)
+                local messages = builder:get_messages()
+                test.eq(messages[#messages].content[1].text, "permission denied")
+                local mapped = claude_mapper.map_messages(messages)
+                local result = mapped.messages[#mapped.messages].content[1]
+                test.eq(result.tool_use_id, "call-1")
+                if status == consts.FUNC_STATUS.ERROR then
+                    test.is_true(result.is_error)
+                else
+                    test.is_nil(result.is_error)
+                end
+                rendered[#rendered + 1] = json.encode(result)
+                local google_messages = google_mapper.map_messages(messages)
+                local google_result = google_messages[#google_messages].parts[1].functionResponse
+                if status == consts.FUNC_STATUS.ERROR then
+                    test.eq(google_result.response.error, "permission denied")
+                    test.is_nil(google_result.response.content)
+                else
+                    test.eq(google_result.response.content, "permission denied")
+                    test.is_nil(google_result.response.error)
+                end
+                google_rendered[#google_rendered + 1] = json.encode(google_result)
+            end
+            test.is_false(rendered[1] == rendered[2])
+            test.is_false(google_rendered[1] == google_rendered[2])
+        end)
+    end)
     describe("interrupted tool rounds", function()
         it("renders a cancelled call result after a thinking-only assistant", function()
             local builder, err = prompt_builder.build({

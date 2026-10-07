@@ -1,4 +1,4 @@
-version: "0.6.5" # x-release-please-version
+version: "0.6.6" # x-release-please-version
 namespace: wippy.session
 
 entries:
@@ -104,6 +104,8 @@ entries:
         path: ".meta.target_db"
       - entry: wippy.session:migration
         path: .parameters[0].value
+      - entry: wippy.session.migration:12_index_message_chronology
+        path: ".meta.target_db"
     default: "app:db"
 
   - name: token_checkpoint_threshold
@@ -448,7 +450,7 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.2"
+    version: ">=v0.5.4"
 
   - name: migration
     kind: ns.dependency
@@ -461,7 +463,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.4.12"
+    version: ">=v0.5.2"
 
   - name: dep.wippy.views
     kind: ns.dependency
@@ -533,6 +535,7 @@ entries:
       prompt: wippy.llm:prompt
       context_attachments: wippy.llm:context_attachments
       input_metadata: wippy.session:input_metadata
+      message_order: wippy.session.persist:message_order
 
   # wippy.session:context_attachments
   - name: context_attachments
