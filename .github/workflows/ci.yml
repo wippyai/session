@@ -10,18 +10,36 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  FRAMEWORK_REF: 3e8ea12d77b353e8c1ff9ab2d6808b16e18c901d
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: session
+    env:
+      TEST_ARTIFACTS: ${{ runner.temp }}/session-lint
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wippy
-        run: |
-          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
-          . /tmp/wippy-install.sh
-          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: make install
@@ -32,17 +50,70 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: session
+    env:
+      TEST_ARTIFACTS: ${{ runner.temp }}/session-compatibility
+      TEST_BACKUP_DIR: ${{ runner.temp }}/backups/session
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wippy
-        run: |
-          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
-          . /tmp/wippy-install.sh
-          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: make install
 
       - name: Test
         run: make test
+
+  runtime:
+    name: Required runtime handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: session
+    env:
+      FRAMEWORK_DIR: ${{ github.workspace }}/framework
+      TEST_ARTIFACTS: ${{ runner.temp }}/session-runtime
+      TEST_BACKUP_DIR: ${{ runner.temp }}/backups/session
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
+      - name: Install candidate dependencies
+        run: make install
+      - name: Lint candidate
+        run: make lint
+      - name: Verify runtime handoff
+        run: make test-runtime
+      - name: Measure handoff batches
+        run: make bench
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: session-runtime-evidence
+          path: ${{ runner.temp }}/session-runtime/benchmarks
+          if-no-files-found: error

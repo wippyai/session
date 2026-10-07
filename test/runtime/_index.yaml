@@ -1,0 +1,206 @@
+version: "1.0"
+namespace: app.runtime
+
+entries:
+  - name: benchmark_output
+    kind: fs.directory
+    directory: /tmp/wippy-session-tests/benchmarks
+
+  - name: benchmark_report
+    kind: library.lua
+    source: file://benchmark_report.lua
+    modules: [fs, json, env, io]
+
+  - name: benchmark_env
+    kind: env.storage.os
+
+  - name: benchmark_samples
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_BENCH_SAMPLES
+
+  - name: benchmark_warmup
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_BENCH_WARMUP
+
+  - name: benchmark_size
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_BENCH_SIZE
+
+  - name: benchmark_revision
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_BENCH_REVISION
+
+  - name: benchmark_runtime
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_BENCH_RUNTIME
+
+  - name: benchmark_framework_revision
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_BENCH_FRAMEWORK_REVISION
+
+  - name: repository
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_TEST_REPOSITORY
+
+  - name: artifacts
+    kind: env.variable
+    storage: app.runtime:benchmark_env
+    variable: WIPPY_TEST_ARTIFACTS
+
+  - name: executor
+    kind: exec.native
+
+  - name: bootstrap_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 20s
+    source: file://bootstrap_test.lua
+    method: run
+    modules: [exec, env, json, uuid]
+    imports:
+      test: wippy.test:test
+
+  - name: state
+    kind: store.memory
+    max_size: 100
+
+  - name: generate
+    kind: function.lua
+    source: file://fixtures.lua
+    method: generate
+    modules: [store, json, time]
+
+  - name: driver
+    kind: contract.binding
+    contracts:
+      - contract: wippy.llm:generator
+        methods:
+          generate: app.runtime:generate
+      - contract: wippy.llm:provider
+        methods:
+          status: app.runtime:generate
+
+  - name: provider
+    kind: registry.entry
+    meta:
+      type: llm.provider
+      name: session-runtime-fixture
+    driver:
+      id: app.runtime:driver
+      options: {}
+
+  - name: router_model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-runtime-router
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.runtime:provider
+        provider_model: router
+
+  - name: help_model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-runtime-help
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.runtime:provider
+        provider_model: help
+
+  - name: router
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Session runtime router
+    model: session-runtime-router
+    prompt: Route the request using the handoff tool.
+    tools:
+      - id: app.runtime:handoff
+        alias: handoff
+      - id: app.runtime:failing_tool
+        alias: failing_tool
+
+  - name: help
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Session runtime help
+    model: session-runtime-help
+    prompt: Answer using the chronological conversation and handoff result.
+
+  - name: handoff
+    kind: function.lua
+    meta:
+      type: tool
+      name: handoff
+      description: Transfer the active session to the help agent.
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: handoff
+    modules: [store, json, time]
+
+  - name: failing_tool
+    kind: function.lua
+    meta:
+      type: tool
+      name: failing_tool
+      description: Return a deterministic tool execution error.
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: fail
+    modules: [store, json, time]
+
+  - name: handoff_runtime
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: run
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+
+  - name: handoff_benchmark
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 180s
+    source: file://handoff_test.lua
+    method: benchmark
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report

@@ -68,6 +68,32 @@ history pagination.
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
+## Runtime tests and benchmarks
+
+On Unix, `make install test` runs the suite against the locked dependencies.
+`make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
+registered tools, agent compilation, the Session
+process, and SQLite persistence with deterministic model responses. It covers
+handoff history, persisted control operations, mixed tool results, and Stop.
+The Framework checkout supplies local agent, LLM, and test sources. Required
+runtime checks need the candidate runner so missing or empty suites fail.
+CI runs both locked compatibility and candidate tests.
+
+`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes JSON reports with
+median, p95, throughput, samples, and
+revision metadata. Defaults are five warmups and thirty measured batches at
+sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
+(comma-separated). Each operation checks the complete persisted handoff.
+Reports measure local runtime work and have no timing threshold.
+Set `BENCH_REVISION` and `BENCH_FRAMEWORK_REVISION` when comparing external
+source snapshots without Git metadata.
+
+Dependencies, the database, environment file, backups, and benchmark reports
+stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
+backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
+location or `TEST_CONFIG` for an external runtime configuration. These targets
+require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+
 ## Tool feedback and loop limits
 
 Settled tool failures are marked as errors in the next model prompt. Public
