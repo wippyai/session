@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.7] (2026-10-07)
 
-Attention features require compatible Web Host and agent modules.
+Attention features require Web Host 1.0.61, Agent 0.5.3 and LLM 0.5.5. Use Relay 0.3.16 to forward the initial Attention setting through WebSocket session opening.
 
 ### Features
 
