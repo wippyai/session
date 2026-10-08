@@ -1602,6 +1602,134 @@ local function define_tests()
             local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
             test.eq(calls[1].metadata.status, consts.FUNC_STATUS.SUCCESS)
         end)
+
+        it("does not carry the pinned route over to the agent that takes over", function()
+            local ctx, captured, bus, steps, _interactions, _announced, restore = handoff_fixture()
+            local pin = { model = "backup", provider_id = "p.b", provider_model = "b-1" }
+            local router = ctx.agent_ctx:load_agent()
+            local original_router_step = router.step
+            router.step = function(self, builder, runtime_options)
+                local response = original_router_step(self, builder, runtime_options)
+                response.route_pin = pin
+                response.metadata = { route = pin, fallbacks = { { model = "primary", error_type = "server_error" } } }
+                return response
+            end
+            local help_route = "unset"
+            local original_switch = ctx.agent_ctx.switch_to_agent
+            ctx.agent_ctx.switch_to_agent = function(self, agent_id)
+                local ok, err = original_switch(self, agent_id)
+                if ok then
+                    local help = self:get_current_agent()
+                    local original_help_step = help.step
+                    help.step = function(hself, builder, runtime_options)
+                        help_route = runtime_options.route
+                        return original_help_step(hself, builder, runtime_options)
+                    end
+                end
+                return ok, err
+            end
+
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.router, 1)
+            test.eq(steps.help, 1)
+            local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(answers[1].metadata.route.model, "backup", "the router's step was recorded with its route")
+            test.is_nil(help_route)
+            test.is_nil(ctx.turn_state.route)
+        end)
+    end)
+
+    describe("route pinning", function()
+        local pin = { model = "backup", provider_id = "p.b", provider_model = "b-1" }
+
+        -- Falls back on its first step of a turn, then keeps answering with tool calls.
+        local function pinning_agent(): (any, { any })
+            local seen = {} :: { any }
+            local agent = fake_agent(1000)
+            agent.step = function(_self, _builder, runtime_options)
+                table.insert(seen, { route = runtime_options.route })
+                local response = {
+                    result = "",
+                    tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+                    tool_calls = { { id = "call-" .. tostring(#seen), name = "pack_document",
+                        arguments = "{}", registry_id = "app:pack_document" } }
+                }
+                if runtime_options.route ~= nil then
+                    response.route_pin = runtime_options.route
+                    response.metadata = { route = runtime_options.route }
+                else
+                    response.route_pin = pin
+                    response.metadata = { route = pin, fallbacks = { { model = "primary", provider_id = "p.a",
+                        error_type = "server_error" } } }
+                end
+                return response
+            end
+            return agent, seen
+        end
+
+        it("passes the route pinned by an earlier step to the rest of the turn", function()
+            local agent, seen = pinning_agent()
+            local ctx, captured = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+
+            user_step(ctx)
+            continue_step(ctx)
+            continue_step(ctx)
+
+            test.eq(#seen, 3)
+            test.is_nil(seen[1].route)
+            test.eq(seen[2].route, pin)
+            test.eq(seen[3].route, pin)
+            test.eq(ctx.turn_state.route, pin)
+
+            local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(answers[1].metadata.route.model, "backup")
+            test.eq(answers[1].metadata.fallbacks[1].error_type, "server_error")
+        end)
+
+        it("drops the pin when a new user turn starts", function()
+            local agent, seen = pinning_agent()
+            local ctx = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+
+            user_step(ctx)
+            continue_step(ctx)
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            test.eq(ctx.turn_state.route, pin, "the finished turn keeps its state until a new turn begins")
+
+            message_handlers.agent_step(ctx, { message_id = "msg-user-2", request_id = "req-2", from_user = true })
+
+            test.eq(#seen, 3)
+            test.eq(seen[2].route, pin)
+            test.is_nil(seen[3].route)
+        end)
+
+        it("keeps the pin when a later step reports none", function()
+            local seen = {} :: { any }
+            local agent = fake_agent(1000)
+            agent.step = function(_self, _builder, runtime_options)
+                table.insert(seen, { route = runtime_options.route })
+                local response = {
+                    result = "",
+                    tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+                    tool_calls = { { id = "call-" .. tostring(#seen), name = "pack_document",
+                        arguments = "{}", registry_id = "app:pack_document" } }
+                }
+                if #seen == 1 then response.route_pin = pin end
+                return response
+            end
+            local ctx = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+
+            user_step(ctx)
+            continue_step(ctx)
+            continue_step(ctx)
+
+            test.eq(seen[2].route, pin)
+            test.eq(seen[3].route, pin)
+        end)
     end)
 end
 
