@@ -358,6 +358,7 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.last_round = nil
     state.last_round_failed = false
     state.last_round_tools = nil
+    state.route = nil
     state.active = true
     return state
 end
@@ -761,6 +762,7 @@ function message_handlers.agent_step(ctx, op)
     end
 
     if handed_off then
+        state.route = nil
         local _, policy_err = input_policy.publish(ctx :: any, agent)
         if policy_err then return nil, policy_err end
     end
@@ -822,6 +824,11 @@ function message_handlers.agent_step(ctx, op)
     local runtime_options = {
         context = session_context
     }
+
+    if state.route ~= nil then
+        runtime_options.route = state.route
+    end
+
     if ctx.upstream.conn_pid then
         runtime_options.stream_target = {
             reply_to = ctx.upstream.conn_pid,
@@ -833,6 +840,10 @@ function message_handlers.agent_step(ctx, op)
     if exec_err then
         ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, exec_err)
         return nil, exec_err
+    end
+
+    if result.route_pin ~= nil then
+        state.route = result.route_pin
     end
 
     local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
