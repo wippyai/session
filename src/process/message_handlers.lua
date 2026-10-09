@@ -801,11 +801,11 @@ function message_handlers.handle_message(ctx, op)
     local attachments = data.context_attachments
     local reference = data.context_attachments_ref
     local receipt, accepted_message = nil, nil
-    local existing_file_message = nil
-    if reference == nil and attachments == nil and data.file_uuids ~= nil
+    local existing_plain_message = nil
+    if reference == nil and attachments == nil
         and op.request_id and type(ctx.writer.get_message_by_request_id) == 'function' then
         local lookup_err
-        existing_file_message, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        existing_plain_message, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
         if lookup_err then return nil, lookup_err end
     end
     if reference == nil and attachments ~= nil and op.request_id and type(ctx.writer.get_message_by_request_id) == 'function' then
@@ -885,11 +885,11 @@ function message_handlers.handle_message(ctx, op)
         if digest_err then return nil, digest_err end
         request_hash = "sha256:" .. digest
     end
-    if existing_file_message then
-        if existing_file_message.request_hash ~= request_hash then
+    if existing_plain_message then
+        if existing_plain_message.request_hash ~= request_hash then
             return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
         end
-        accepted_message = existing_file_message
+        accepted_message = existing_plain_message
     end
     if accepted_message and accepted_message.request_hash ~= request_hash then
         return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)

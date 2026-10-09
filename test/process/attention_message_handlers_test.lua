@@ -633,6 +633,38 @@ local function define_tests()
             test.eq(calls[2].message_id, "persisted-message-1")
         end)
 
+        it("replays a plain-text receipt while a running turn blocks new input", function()
+            local ctx, calls = context()
+            ctx.config = {}
+            ctx.status = "running"
+            ctx.turn_state = { active = true }
+            local original = {
+                message_id = "persisted-message-1",
+                request_hash = "sha256:" .. hash.sha256(context_attachments.canonical_json({
+                    text = "Already accepted", file_uuids = {}, context_attachments = {},
+                })),
+            }
+            ctx.writer.get_message_by_request_id = function() return original end
+
+            local result, err = message_handlers.handle_message(ctx, {
+                request_id = "request-plain-retry", data = { text = "Already accepted" },
+            })
+            test.is_nil(err)
+            test.is_true(result.duplicate)
+            test.eq(result.message_id, original.message_id)
+            test.is_nil(result.next_ops)
+            test.eq(#calls, 1)
+            test.eq(calls[1].type, "received")
+            test.eq(calls[1].request_id, "request-plain-retry")
+
+            result = message_handlers.handle_message(ctx, {
+                request_id = "request-plain-retry", data = { text = "Changed text" },
+            })
+            test.is_true(result.rejected)
+            test.eq(calls[2].type, "error")
+            test.eq(calls[2].code, consts.ERROR_CODES.REQUEST_CONFLICT)
+        end)
+
         it("rejects conflicting reuse of a durable request ID", function()
             local ctx, calls = context("Request ID conflict")
             local result, err = message_handlers.handle_message(ctx, {
