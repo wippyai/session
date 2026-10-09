@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.7](https://github.com/wippyai/session/compare/v0.6.6...v0.6.7) (2026-10-09)
+
+
+### Features
+
+* add Attention context and compatible optimistic delivery ([#60](https://github.com/wippyai/session/issues/60)) ([1eb65e7](https://github.com/wippyai/session/commit/1eb65e7e02859e0b042509832e46bddd434dba6f))
+
 ## [0.6.7] (2026-10-07)
 
 Attention features require Web Host 1.0.61, Agent 0.5.3 and LLM 0.5.5. Use Relay 0.3.16 to forward the initial Attention setting through WebSocket session opening.
