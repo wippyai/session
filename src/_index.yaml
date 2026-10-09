@@ -15,7 +15,23 @@ entries:
       description: Injects API router configuration into endpoints
       parent: app.deps:dep.wippy.session
     targets:
+      - entry: wippy.session.api:get_capabilities
+        path: .meta.router
+      - entry: wippy.session.api:get_capabilities.endpoint
+        path: .meta.router
+      - entry: wippy.session.api:set_attention_context
+        path: .meta.router
+      - entry: wippy.session.api:set_attention_context.endpoint
+        path: .meta.router
       - entry: wippy.session.api:delete_session
+        path: .meta.router
+      - entry: wippy.session.api:context_staging
+        path: .meta.router
+      - entry: wippy.session.api:context_staging.get
+        path: .meta.router
+      - entry: wippy.session.api:context_staging.post
+        path: .meta.router
+      - entry: wippy.session.api:context_staging.delete
         path: .meta.router
       - entry: wippy.session.api:delete_session.endpoint
         path: .meta.router
@@ -39,6 +55,10 @@ entries:
         path: .meta.router
       - entry: wippy.session.api:list_sessions.endpoint
         path: .meta.router
+      - entry: wippy.session.api:rename_session
+        path: .meta.router
+      - entry: wippy.session.api:rename_session.endpoint
+        path: .meta.router
       - entry: wippy.session.api:session_messages
         path: .meta.router
       - entry: wippy.session.api:session_messages.endpoint
@@ -50,9 +70,15 @@ entries:
     meta:
       description: "Database resource for session storage"
     targets:
+      - entry: wippy.session.process:context_cleanup_db_policy
+        path: .policy.resources
+      - entry: wippy.session.migration:13_add_attention_context
+        path: .meta.target_db
       - entry: wippy.session.env:database_resource
         path: ".default"
       - entry: wippy.session.migration:01_create_contexts_table
+        path: .meta.target_db
+      - entry: wippy.session.migration:11_add_context_staging
         path: ".meta.target_db"
       - entry: wippy.session.migration:02_create_sessions_table
         path: ".meta.target_db"
@@ -74,6 +100,10 @@ entries:
         path: ".meta.target_db"
       - entry: wippy.session.migration:11_add_content_version_to_artifacts
         path: ".meta.target_db"
+      - entry: wippy.session.migration:10_add_message_request_idempotency
+        path: ".meta.target_db"
+      - entry: wippy.session:migration
+        path: .parameters[0].value
       - entry: wippy.session.migration:12_index_message_chronology
         path: ".meta.target_db"
     default: "app:db"
@@ -128,6 +158,8 @@ entries:
     meta:
       description: "Default host for session processes"
     targets:
+      - entry: wippy.session.process:context_cleanup.service
+        path: .host
       - entry: wippy.session.env:default_host
         path: ".default"
     default: "app:processes"
@@ -140,6 +172,15 @@ entries:
       - entry: wippy.session.env:gc_interval
         path: ".default"
     default: "300s"
+
+  - name: ui_action_ttl_seconds
+    kind: ns.requirement
+    meta:
+      description: "Maximum lifetime in seconds for a pending agent UI clarification action (1-120)"
+    targets:
+      - entry: wippy.session.env:ui_action_ttl_seconds
+        path: ".default"
+    default: "120"
 
   - name: delegation_func_id
     kind: ns.requirement
@@ -185,6 +226,8 @@ entries:
       - entry: wippy.session.env:delegation_func_id
         path: ".storage"
       - entry: wippy.session.env:on_session_end_func_id
+        path: ".storage"
+      - entry: wippy.session.env:ui_action_ttl_seconds
         path: ".storage"
 
   # wippy.session:consts
@@ -407,17 +450,20 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.4"
+    version: ">=v0.5.5"
 
-  - name: dep.wippy.migration
+  - name: migration
     kind: ns.dependency
     component: wippy/migration
     version: ">=v0.3.0"
+    parameters:
+      - name: app_db
+        value: null
 
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.5.2"
+    version: ">=v0.5.3"
 
   - name: dep.wippy.views
     kind: ns.dependency
@@ -452,7 +498,9 @@ entries:
         Resolve a file/upload identifier to its metadata for prompt rendering. Applications
         that own uploads provide a binding; when none exists, prompt_builder falls back to
         the upload_repo / file_resolver passed via build options. The session depends on no
-        uploads module.
+        uploads module. When a binding returns user_id, session_id or expires_at (top level
+        or in metadata), the session accepts the file only from that user, in that session,
+        before that time; omitted fields are not checked.
     methods:
       - name: get_info
         description: Resolve a file_uuid to its upload metadata.
@@ -462,7 +510,7 @@ entries:
             format: application/schema+json
         output_schemas:
           - definition: |
-              { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" } } } } }
+              { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "user_id": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] } } } } }
             format: application/schema+json
 
   - name: input_metadata
@@ -479,8 +527,25 @@ entries:
     modules:
       - json
       - contract
+      - fs
+      - hash
+      - time
     imports:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
+      context_attachments: wippy.llm:context_attachments
       input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order
+
+  # wippy.session:context_attachments
+  - name: context_attachments
+    kind: library.lua
+    meta:
+      comment: Validates and canonicalizes atomic message context attachments
+    source: file://context_attachments.lua
+    modules:
+      - json
+      - hash
+      - time
+    imports:
+      renderer: wippy.llm:context_attachments

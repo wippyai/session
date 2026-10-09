@@ -104,6 +104,7 @@ entries:
     modules:
       - sql
       - uuid
+      - json
       - time
       - security
     imports:
@@ -143,3 +144,21 @@ entries:
       writer: wippy.session.persist:writer
       test: wippy.test:test
     method: run_tests
+
+  - name: context_staging_repo_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://context_staging_repo_test.lua
+    modules: [uuid, time, json, hash, sql]
+    imports:
+      test: wippy.test:test
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      context_attachments: wippy.session:context_attachments
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      consts: wippy.session:consts
+    method: run

@@ -56,14 +56,15 @@ function session_upstream:response_beginning(response_id, message_id)
 end
 
 -- Confirm message reception
-function session_upstream:message_received(message_id, text, file_uuids, input, request_id)
+function session_upstream:message_received(message_id, text, file_uuids, input, request_id, context_attachments)
     self:send_message_update(message_id, consts.UPSTREAM_TYPES.RECEIVED, {
         message_id = message_id,
+        request_id = request_id,
         text = text,
         timestamp = os.time(),
         file_uuids = file_uuids,
         input = input,
-        request_id = request_id
+        context_attachments = context_attachments
     })
 end
 
@@ -82,6 +83,18 @@ function session_upstream:invalidate_message(message_id, reason)
         response_id = message_id,
         reason = reason
     })
+end
+
+-- Report command success with request_id
+function session_upstream:command_success(request_id, details)
+    local payload = {
+        request_id = request_id,
+        success = true
+    }
+    for key, value in pairs(details or {}) do
+        payload[key] = value
+    end
+    self:_send_session_update(consts.UPSTREAM_TYPES.COMMAND_RESPONSE, payload)
 end
 
 -- Report command error with request_id

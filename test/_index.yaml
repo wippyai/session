@@ -5,11 +5,110 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: context_cleanup_worker
+    kind: process.lua
+    source: file://context_cleanup_worker.lua
+    modules: [env, sql, security]
+    imports:
+      context_cleanup: wippy.session.process:context_cleanup_runtime
+    method: run
+
+  - name: context_cleanup_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://context_cleanup_runtime_test.lua
+    modules: [time, uuid, sql, security]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      context_cleanup: wippy.session.process:context_cleanup_runtime
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: context_transport_reply_policy
+    kind: security.policy
+    policy:
+      actions: [process.send]
+      resources: '*'
+      effect: allow
+      conditions:
+        - field: resource
+          operator: eq
+          value_from: actor.meta.context_transport_reply_pid
+
+  - name: context_transport_name_policy
+    kind: security.policy
+    policy:
+      actions: [process.registry.register]
+      resources: 'session.*'
+      effect: allow
+
+  - name: context_transport_env_policy
+    kind: security.policy
+    policy:
+      actions: [env.get]
+      resources: 'wippy.session.env:*'
+      effect: allow
+
+  - name: context_transport_db_policy
+    kind: security.policy
+    policy:
+      actions: [db.get]
+      resources: 'app:db'
+      effect: allow
+
+  - name: context_transport_session_policy
+    kind: security.policy
+    policy:
+      actions: [read, write]
+      resources: 'session:*'
+      effect: allow
+
+  - name: context_transport_worker
+    kind: process.lua
+    source: file://context_transport_worker.lua
+    modules: [time]
+    imports:
+      writer: wippy.session.persist:writer
+      message_handlers: wippy.session.process:message_handlers
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      session_repo: wippy.session.persist:session_repo
+    method: run
+
+  - name: context_transport_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://context_transport_runtime_test.lua
+    modules: [time, uuid, hash, sql, security]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run
+
   - name: db
     kind: db.sql.sqlite
     meta:
       comment: File-backed SQLite, recreated on every run by `make test`. A plain in-memory DB gives each pooled connection its own empty database, so the schema can vanish under parallel test connections.
     file: ./.wippy/test.db
+
+  - name: migration_probe_db
+    kind: db.sql.sqlite
+    meta:
+      comment: Disposable database for migration tests; each test recreates the tables it needs.
+    file: ./.wippy/migration-probe.db
 
   - name: env_storage
     kind: env.storage.file
@@ -77,6 +176,8 @@ entries:
         value: app:api.public
       - name: env_storage
         value: app:env_storage
+      - name: ui_action_ttl_seconds
+        value: "2"
       - name: default_host
         value: app:processes
       - name: on_session_end_func_id
@@ -185,8 +286,10 @@ entries:
     source: file://prompt_builder_test.lua
     modules:
       - json
+      - hash
     imports:
       claude_mapper: wippy.llm.claude:mapper
+      context_attachments: wippy.session:context_attachments
       google_mapper: wippy.llm.google:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
@@ -285,3 +388,74 @@ entries:
       input_policy: wippy.session.process:input_policy
       test: wippy.test:test
     method: run_tests
+
+  - name: attention_monitor_worker
+    kind: process.lua
+    source: file://attention_monitor_worker.lua
+    modules:
+      - time
+    method: run
+
+  - name: attention_monitor_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+      comment: Exercises real monitor and unmonitor without terminating the target
+    source: file://attention_monitor_test.lua
+    modules:
+      - time
+    imports:
+      test: wippy.test:test
+    method: run
+
+  - name: attention_context_state_worker
+    kind: process.lua
+    source: file://attention_context_state_worker.lua
+    imports:
+      session_repo: wippy.session.persist:session_repo
+    method: run
+
+  - name: attention_context_state_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://attention_context_state_runtime_test.lua
+    modules: [time, uuid, security]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: file_provider_func
+    kind: function.lua
+    source: file://file_provider_func.lua
+    method: get_info
+
+  - name: file_provider
+    kind: contract.binding
+    contracts:
+      - contract: wippy.session:file_provider
+        default: true
+        methods:
+          get_info: app:file_provider_func
+
+  - name: context_attachments_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Tests message context attachment validation and cross-language golden vectors
+    source: file://context_attachments_test.lua
+    modules:
+      - json
+      - hash
+      - time
+    imports:
+      prompt_builder: wippy.session:prompt_builder
+      context_attachments: wippy.session:context_attachments
+      test: wippy.test:test
+    method: run

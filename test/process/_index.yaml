@@ -235,3 +235,69 @@ entries:
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
     method: run_tests
+
+  - name: attention_history_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://attention_history_test.lua
+    modules:
+      - time
+    imports:
+      attention_history: wippy.session.process:attention_history
+      test: wippy.test:test
+    method: run
+
+  - name: attention_action_intents_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://attention_action_intents_test.lua
+    imports:
+      attention_action_intents: wippy.session.process:attention_action_intents
+      test: wippy.test:test
+    method: run
+
+  - name: attention_control_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://attention_control_runtime_test.lua
+    imports:
+      attention_control_runtime: wippy.session.process:attention_control_runtime
+      test: wippy.test:test
+    method: run
+
+  - name: attention_message_handlers_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Tests atomic context attachment validation, persistence, and acknowledgement
+    source: file://attention_message_handlers_test.lua
+    modules:
+      - hash
+    imports:
+      consts: wippy.session:consts
+      context_attachments: wippy.session:context_attachments
+      message_handlers: wippy.session.process:message_handlers
+      test: wippy.test:test
+    method: run
+
+  - name: ui_action_broker_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+      comment: Tests targeted UI action routing correlation expiry replay and disconnect cleanup
+    source: file://ui_action_broker_test.lua
+    modules:
+      - hash
+      - json
+    imports:
+      ui_action_broker: wippy.session.process:ui_action_broker
+      test: wippy.test:test
+    method: run

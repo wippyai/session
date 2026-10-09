@@ -100,3 +100,13 @@ entries:
       icon: tabler:checkpoint
       private: true
     variable: SESSION_TOKEN_CHECKPOINT_THRESHOLD
+
+  # wippy.session.env:ui_action_ttl_seconds
+  - name: ui_action_ttl_seconds
+    kind: env.variable
+    meta:
+      comment: Maximum lifetime in seconds for a pending agent UI clarification action
+      icon: tabler:clock-hour-2
+      private: true
+
+    variable: SESSION_UI_ACTION_TTL_SECONDS

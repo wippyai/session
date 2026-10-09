@@ -7,11 +7,12 @@ end
 
 local function context(config, status, turn)
     local ctx
-    local writes, events = {}, {}
+    local writes: {table} = {}
+    local events = {}
     ctx = {
         config = config or {}, status = status or "running", turn_state = turn or { active = true },
         input_policy_revision = 0,
-        writer = { update_meta = function(_, update)
+        writer = { update_meta = function(_, update: table)
             if ctx.write_error then return nil, ctx.write_error end
             writes[#writes + 1] = update
             return true
@@ -54,7 +55,8 @@ local function define_tests()
             test.is_nil(err)
             test.is_false(value.can_send)
             test.eq(ctx.turn_state.input_policy.while_running, "block")
-            test.is_nil((writes :: any)[1].config)
+            local first_write = assert(writes[1], "Expected interaction metadata write")
+            test.is_nil(first_write.config)
             value, err = policy.apply_request(ctx, { mode = "inherit" }, steering)
             test.is_nil(err)
             test.is_nil(ctx.turn_state.input_policy)
@@ -68,7 +70,12 @@ local function define_tests()
             test.is_true(value.can_send)
             test.eq(ctx.config.input_policy.while_running, "steer")
             test.eq(ctx.config.model, "m")
-            test.is_true((writes :: any)[1].config.nested.keep)
+            local first_write = assert(writes[1], "Expected session configuration write")
+            local config = first_write.config
+            if type(config) ~= "table" then error("Expected persisted session configuration") end
+            local nested = config.nested
+            if type(nested) ~= "table" then error("Expected preserved nested configuration") end
+            test.is_true(nested.keep)
             value, err = policy.apply_request(ctx, { mode = "inherit", scope = "session" }, agent("block", true, "a"))
             test.is_nil(err)
             test.is_nil(ctx.config.input_policy.while_running)

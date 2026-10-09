@@ -16,7 +16,8 @@ local start_tokens = require("start_tokens")
 local function plugin_message(topic, data)
     return {
         topic = function() return topic end,
-        payload = function() return { data = function() return data end } end
+        payload = function() return { data = function() return data end } end,
+        from = function() return nil end
     }
 end
 
@@ -38,12 +39,13 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
             spawned_init = init
+            local spawned_pid = options.pid_for and options.pid_for(init) or session_pid
             if options.confirm_start ~= false then
                 table.insert(inputs, { topic = consts.TOPICS.SESSION_OPENED,
-                    data = { session_id = init.session_id, from_pid = session_pid } })
+                    data = { session_id = init.session_id, from_pid = spawned_pid } })
                 for _, input in ipairs(options.after_open or {}) do table.insert(inputs, input) end
             end
-            return session_pid, nil
+            return spawned_pid, nil
         end }
     end)
     mock("process.send", function(pid, topic, payload)
@@ -1098,7 +1100,7 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
-        it("sends the initial idle update before receipt and running", function()
+        it("announces idle then committed running state before receipt", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Startup order")
             local hub_pid = "startup-order-hub"
@@ -1150,6 +1152,7 @@ local function define_tests()
             mock("channel.select", original_channel_select)
             mock("coroutine.spawn", original_spawn)
 
+            cleanup_session_fixture(session_id, context_id)
             test.is_true(ok, tostring(result))
             test.eq(result.status, "shutdown")
             local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
@@ -1161,8 +1164,7 @@ local function define_tests()
                     table.insert(order, "received")
                 end
             end
-            test.eq(table.concat(order, ","), "idle,received,running")
-            cleanup_session_fixture(session_id, context_id)
+            test.eq(table.concat(order, ","), "idle,running,received")
         end)
 
         it("forwards the first input after creating a new session", function()
@@ -1623,6 +1625,32 @@ local function define_tests()
             end)
         end
 
+        it("finishes sessions on shutdown but not a session opened after resume", function()
+            local actor = security.actor()
+            local first_id, first_context = create_session_fixture(actor, "Before shutdown")
+            local second_id, second_context = create_session_fixture(actor, "After resume")
+            local pids = { [first_id] = "pre-shutdown-session", [second_id] = "post-resume-session" }
+            local run = run_plugin_lifecycle(actor, first_id, nil, {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                { topic = consts.PLUGIN_TOPICS.RESUME, data = {} },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = second_id } },
+            }, nil, {
+                cancel_plugin = true,
+                pid_for = function(init) return pids[init.session_id] end,
+            })
+            test.is_nil(run.error)
+            test.eq((run.spawned_init :: any).session_id, second_id)
+            local finished = {} :: {[string]: number}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.TOPICS.FINISH_AND_EXIT then
+                    finished[sent.pid] = (finished[sent.pid] or 0) + 1
+                end
+            end
+            test.eq(finished["pre-shutdown-session"], 1)
+            test.is_nil(finished["post-resume-session"])
+            cleanup_session_fixture(first_id, first_context)
+            cleanup_session_fixture(second_id, second_context)
+        end)
     end)
     describe("plugin on_session_end hook", function()
         it("schedules the hook with provenance params when configured", function()

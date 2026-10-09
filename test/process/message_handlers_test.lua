@@ -209,14 +209,18 @@ local function define_tests()
             tool_caller.new = original_new
 
             test.is_true(ok, tostring(result))
-            test.is_nil(result)
-            test.contains(tostring(err), "Duplicate tool call ID")
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.contains(tostring(result.failed), "Duplicate tool call ID")
+            test.eq(#result.next_ops, 0)
             test.eq(#captured.response_batches, 0)
             test.eq(#captured.assistant_ids, 0)
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
             test.eq(#captured.message_errors, 1)
+            test.eq(captured.message_errors[1].id, result.response_id)
             test.eq(captured.message_errors[1].code, consts.ERROR_CODES.AGENT_ERROR)
             test.contains(captured.message_errors[1].message, "Duplicate tool call ID")
+            test.eq(#captured.session_errors, 0)
         end
 
         it("rejects duplicate ids returned by the model before persistence", function()
@@ -246,9 +250,14 @@ local function define_tests()
         end)
 
         it("surfaces strict wrapper validation errors without storing pending intents", function()
-            local agent = fake_agent(nil)
+            local agent = fake_agent(1000)
             agent.tool_wrappers = {{ id = "strict-wrapper" }}
             local ctx, captured = mock_ctx(agent)
+            local token_updates = {} :: {any}
+            ctx.writer.update_meta = function(_self, updates)
+                table.insert(token_updates, updates)
+                return true
+            end
             local original_new = tool_caller.new
             tool_caller.new = function()
                 return {
@@ -264,14 +273,132 @@ local function define_tests()
             local result, err = user_step(ctx)
 
             tool_caller.new = original_new
-            test.is_nil(result)
-            test.contains(tostring(err), "strict wrapper rejected call")
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.contains(tostring(result.failed), "strict wrapper rejected call")
             test.eq(#captured.message_errors, 1)
+            test.eq(captured.message_errors[1].id, result.response_id)
             test.eq(captured.message_errors[1].code, consts.ERROR_CODES.AGENT_ERROR)
             test.contains(captured.message_errors[1].message, "strict wrapper rejected call")
             test.eq(#captured.response_batches, 0)
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
             test.eq(#captured.assistant_ids, 0)
+            test.eq(#token_updates, 1, "the step ran, so its usage is recorded")
+            test.eq(token_updates[1].meta.tokens.total_tokens, 1084)
+        end)
+    end)
+
+    describe("turn failures", function()
+        it("returns token storage error text without persisting a failed response", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return { tokens = { total_tokens = 1 } }, "provider failed"
+            end
+            local ctx, captured = mock_ctx(agent)
+            ctx.writer.update_meta = function()
+                return nil, { message = "token storage failed" }
+            end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(result)
+            test.eq(err, "token storage failed")
+            test.eq(#captured.response_batches, 0)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
+            test.eq(#captured.message_errors, 0)
+        end)
+
+        it("ends only the turn on a provider failure and returns to idle at the queue boundary", function()
+            local agent = fake_agent(nil)
+            agent.step = function() return nil, { message = "provider rate limited", code = 429 } end
+            local ctx, captured = mock_ctx(agent)
+            ctx.turn_state = { active = true, message_id = "msg-user", steps = 0, repeated_calls = 0,
+                input_policy = { while_running = "block" } }
+            ctx.status = consts.STATUS.RUNNING
+            local persisted = nil :: any
+            ctx.writer.update_meta = function(_self, updates)
+                persisted = updates
+                return true
+            end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(result.failed, "provider rate limited")
+            test.eq(#result.next_ops, 0)
+            test.eq(#captured.message_errors, 1)
+            test.eq(captured.message_errors[1].id, result.response_id)
+            test.eq(captured.message_errors[1].code, consts.ERROR_CODES.AGENT_ERROR)
+            test.eq(captured.message_errors[1].message, "provider rate limited")
+            test.eq(#captured.session_errors, 0)
+            local notices = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(#notices, 1)
+            test.eq(notices[1].metadata.system_action, consts.SYSTEM_ACTIONS.TURN_FAILED)
+            test.eq(notices[1].metadata.response_id, result.response_id)
+            test.is_true((ctx.turn_state :: any).failed)
+            test.is_nil((ctx.turn_state :: any).input_policy)
+
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            test.eq(ctx.status, consts.STATUS.IDLE)
+            test.is_nil((ctx.turn_state :: any).failed)
+            test.eq(persisted.status, consts.STATUS.IDLE)
+            test.is_true(persisted.meta.interaction.can_send)
+        end)
+
+        it("reports a missing agent on the response without failing the session", function()
+            local ctx, captured = mock_ctx(fake_agent(nil), { agent_id = "" })
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.contains(result.failed, "No agent configured")
+            test.eq(#captured.message_errors, 1)
+            test.eq(captured.message_errors[1].id, result.response_id)
+        end)
+
+        it("closes a failed step with a failed AFTER_STEP, but not a failed lifecycle phase", function()
+            local agent = fake_agent(nil)
+            agent.bindings = { lifecycle = { { binding = "app:lifecycle" } } }
+            agent.step = function() return nil, "provider failed" end
+            local phases: {{[string]: any}} = {}
+            local failing_phase = nil :: string?
+            local original_lifecycle = message_handlers._lifecycle_runtime
+            message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                table.insert(phases, payload)
+                if payload.phase == failing_phase then return nil, "lifecycle unavailable" end
+                return { applied = 1, skipped = 0 }, nil
+            end }
+
+            local ctx, captured = mock_ctx(agent)
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(#phases, 3)
+            local after_step = test.not_nil(phases[3]) :: {phase: string, outcome: {state: string}, refs: {response_id: string}}
+            test.eq(after_step.phase, "after_step")
+            test.eq(after_step.outcome.state, "failed")
+            test.eq(after_step.refs.response_id, result.response_id)
+            test.eq(#captured.message_errors, 1)
+
+            phases = {}
+            failing_phase = "before_step"
+            local lifecycle_ctx, lifecycle_captured = mock_ctx(agent)
+            local lifecycle_result, lifecycle_err = user_step(lifecycle_ctx)
+            message_handlers._lifecycle_runtime = original_lifecycle
+
+            test.is_nil(lifecycle_err)
+            test.is_true(lifecycle_result.completed)
+            test.eq(lifecycle_result.failed, "lifecycle unavailable")
+            test.eq(#phases, 2)
+            local before_step = test.not_nil(phases[2]) :: {phase: string}
+            test.eq(before_step.phase, "before_step")
+            test.eq(#lifecycle_captured.message_errors, 1)
+            test.eq(lifecycle_captured.message_errors[1].id, lifecycle_result.response_id)
         end)
     end)
 
@@ -444,7 +571,7 @@ local function define_tests()
         it("checks cached context throughout a long tool loop before admitting the next step", function()
             local steps = 0
             local checks = 0
-            local checkpoints = {}
+            local checkpoints: {{trigger_tokens: number, checkpoint_id: string, message_id: string}} = {}
             local events = {}
             local agent = fake_agent(nil)
             agent.step = function()

@@ -6,6 +6,7 @@ local context_repo = require("context_repo")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
+local json = require("json")
 local wait_for_boot = require("wait_for_boot")
 
 local function define_tests()
@@ -105,6 +106,38 @@ local function define_tests()
             test.not_nil(session.last_message_date)
         end)
 
+        it("matches the documented Attention session-state output", function()
+            -- ATTENTION:SESSION-STATE-EXAMPLE:BEGIN
+            local expected = json.decode([[{"schema":"wippy.attention.session.v1","enabled":true,"revision":4,"updated_at":"2026-09-15T12:00:00.000Z","updated_by":"user"}]])
+            -- ATTENTION:SESSION-STATE-EXAMPLE:END
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Documented Attention state", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local db_resource = consts.get_db_resource()
+            local db, db_err = sql.get(db_resource)
+            test.is_nil(db_err)
+            local updated, update_err = db:execute(
+                "UPDATE sessions SET attention_enabled = $1, attention_revision = $2, attention_updated_at = $3, attention_updated_by = $4 WHERE session_id = $5",
+                {1, expected.revision, expected.updated_at, expected.updated_by, session_id})
+            db:release()
+            test.is_nil(update_err)
+            test.not_nil(updated)
+            local current, read_err = session_repo.get(session_id)
+            local removed, remove_err = session_repo.delete(session_id)
+            test.is_nil(remove_err)
+            test.not_nil(removed)
+            test.is_nil(read_err)
+            test.not_nil(current)
+            local fields = 0
+            for key, value in pairs(current.attention_context) do
+                fields = fields + 1
+                test.eq(value, expected[key])
+            end
+            test.eq(fields, 5)
+        end)
+
         it("should get a session by ID", function()
             local session, err = session_repo.get(test_data.session_id)
 
@@ -119,6 +152,165 @@ local function define_tests()
             test.eq(session.meta.model, "test-model")
             test.is_table(session.config)
             test.eq(session.config.max_tokens, 1000)
+        end)
+
+        it("should persist the default disabled Attention state", function()
+            local session, err = session_repo.get(test_data.session_id)
+
+            test.is_nil(err)
+            test.not_nil(session)
+            test.not_nil(session.attention_context)
+            test.is_false(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 0)
+            test.eq(session.attention_context.updated_by, "system")
+            test.not_nil(session.attention_context.updated_at)
+        end)
+
+        it("should report no change time for a session that predates the Attention columns", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Migrated session", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local db = assert(sql.get(consts.get_db_resource()))
+            assert(db:execute("UPDATE sessions SET attention_updated_at = '' WHERE session_id = $1", { session_id }))
+            db:release()
+
+            local session, err = session_repo.get(session_id)
+            test.is_nil(err)
+            test.is_false(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 0)
+            test.is_nil(session.attention_context.updated_at)
+            session_repo.delete(session_id)
+        end)
+
+        it("should not change another user's Attention state", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Owned session", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local state, err = session_repo.update_attention_context(session_id, true, 0, "user", "someone-else")
+            test.is_nil(state)
+            test.eq(err, "SESSION_NOT_FOUND")
+            local unchanged = session_repo.get(session_id)
+            test.is_false(unchanged.attention_context.enabled)
+            test.eq(unchanged.attention_context.revision, 0)
+
+            state, err = session_repo.update_attention_context(session_id, true, 0, "user", test_data.user_id)
+            test.is_nil(err)
+            test.is_true(state.enabled)
+            session_repo.delete(session_id)
+        end)
+
+        it("should create and read back an enabled Attention state", function()
+            local session_id = uuid.v7()
+            local session, err = session_repo.create(
+                session_id,
+                test_data.user_id,
+                test_data.context_id,
+                "Attention Enabled Session",
+                "test",
+                {},
+                { attention_context = { enabled = true } }
+            )
+
+            test.is_nil(err)
+            test.not_nil(session)
+            test.is_true(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 1)
+            test.eq(session.attention_context.updated_by, "application")
+
+            local stored, stored_err = session_repo.get(session_id, test_data.user_id)
+            test.is_nil(stored_err)
+            test.not_nil(stored)
+            test.is_true(stored.attention_context.enabled)
+            test.eq(stored.attention_context.revision, 1)
+            test.eq(stored.attention_context.updated_by, "application")
+
+            local deleted, delete_err = session_repo.delete(session_id)
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
+        end)
+
+        it("should update Attention state with revisions and preserve idempotence", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(
+                session_id, test_data.user_id, test_data.context_id, "Attention Revision Session"
+            )
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local enabled, update_err = session_repo.update_attention_context(
+                session_id, true, 0, test_data.user_id
+            )
+
+            test.is_nil(update_err)
+            test.not_nil(enabled)
+            test.is_true(enabled.enabled)
+            test.eq(enabled.revision, 1)
+            test.eq(enabled.updated_by, test_data.user_id)
+
+            local repeated, repeated_err = session_repo.update_attention_context(
+                session_id, true, 1, test_data.user_id
+            )
+
+            test.is_nil(repeated_err)
+            test.not_nil(repeated)
+            test.is_true(repeated.enabled)
+            test.eq(repeated.revision, 1)
+            test.eq(repeated.updated_at, enabled.updated_at)
+            test.eq(repeated.updated_by, enabled.updated_by)
+
+            local disabled, disabled_err = session_repo.update_attention_context(
+                session_id, false, 1, test_data.user_id
+            )
+
+            test.is_nil(disabled_err)
+            test.not_nil(disabled)
+            test.is_false(disabled.enabled)
+            test.eq(disabled.revision, 2)
+
+            local stored, stored_err = session_repo.get(session_id)
+            test.is_nil(stored_err)
+            test.is_false(stored.attention_context.enabled)
+            test.eq(stored.attention_context.revision, 2)
+            test.eq(stored.attention_context.updated_by, test_data.user_id)
+
+            local deleted, delete_err = session_repo.delete(session_id)
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
+        end)
+
+        it("should return the current state for a stale Attention revision", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(
+                session_id, test_data.user_id, test_data.context_id, "Attention Conflict Session"
+            )
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local current, current_err = session_repo.update_attention_context(
+                session_id, true, 0, test_data.user_id
+            )
+            test.is_nil(current_err)
+            test.not_nil(current)
+            test.eq(current.revision, 1)
+
+            local rejected, rejected_err, conflict_state = session_repo.update_attention_context(
+                session_id, false, 0, test_data.user_id
+            )
+
+            test.is_nil(rejected)
+            test.eq(rejected_err, "ATTENTION_CONTEXT_REVISION_CONFLICT")
+            test.not_nil(conflict_state)
+            test.is_true(conflict_state.enabled)
+            test.eq(conflict_state.revision, 1)
+
+            local deleted, delete_err = session_repo.delete(session_id)
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
         end)
 
         it("should get a session by ID with user filter", function()
@@ -263,6 +455,30 @@ local function define_tests()
             result, err = session_repo.update_session_meta(uuid.v7(), { title = "x" })
             test.is_nil(result)
             test.contains(tostring(err), "Session not found")
+
+            local state, attention_err = session_repo.update_attention_context(
+                "", true, 0, test_data.user_id
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_SESSION_ID")
+
+            state, attention_err = session_repo.update_attention_context(
+                test_data.session_id, "true", 0, test_data.user_id
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_ATTENTION_CONTEXT_ENABLED")
+
+            state, attention_err = session_repo.update_attention_context(
+                test_data.session_id, true, 1.5, test_data.user_id
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_ATTENTION_CONTEXT_REVISION")
+
+            state, attention_err = session_repo.update_attention_context(
+                test_data.session_id, true, 0, ""
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_ATTENTION_CONTEXT_UPDATED_BY")
 
             -- Count with invalid user ID
             local count, err_count = session_repo.count_by_user("")

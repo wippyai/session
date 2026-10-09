@@ -70,7 +70,7 @@ local function handle(args)
     else
         title_prompt:add_system(PROMPTS.secondary)
 
-        table.sort(existing_summaries, function(a, b)
+        table.sort(existing_summaries :: {table}, function(a, b)
             return (a.time or a.created_at or "") > (b.time or b.created_at or "")
         end)
 

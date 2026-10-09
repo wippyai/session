@@ -1,0 +1,20 @@
+version: "1.0"
+namespace: app.migration
+
+# Suites for src/migration/.
+entries:
+  - name: attention_context_migration_test
+    kind: function.lua
+    meta:
+      name: Attention context migration
+      type: test
+      suite: session
+      comment: Applies migration 13 to a disposable SQLite sessions table that already has rows
+    source: file://attention_context_migration_test.lua
+    modules:
+      - sql
+      - uuid
+      - funcs
+    imports:
+      test: wippy.test:test
+    method: run

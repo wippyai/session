@@ -466,6 +466,10 @@ function session_handlers.agent_change(ctx, op)
     local new_model = ctx.agent_ctx.current_model
     current_config.model = new_model
 
+    if previous_agent ~= op.agent_id and type(ctx.invalidate_attention_control) == "function" then
+        ctx.invalidate_attention_control()
+    end
+
     local next_agent = nil
     if type(ctx.agent_ctx.get_current_agent) == "function" then
         next_agent = ctx.agent_ctx:get_current_agent()

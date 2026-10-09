@@ -1,9 +1,11 @@
 local json = require("json")
 local uuid = require("uuid")
+local hash = require("hash")
 local consts = require("consts")
 local input_metadata = require("input_metadata")
 local input_policy = require("input_policy")
 local prompt_builder = require("prompt_builder")
+local context_attachments = require("context_attachments")
 local tool_caller = require("tool_caller")
 local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
@@ -14,6 +16,7 @@ local hash = require("hash")
 
 type SessionContext = {
     session_id: string,
+    controller_pid: string,
     user_id: string,
     reader: any,
     writer: any,
@@ -31,6 +34,18 @@ type SessionContext = {
     interaction: any?,
     stop_commit_channel: any?,
     input_apply_batch: any?,
+    activate_attention_turn: any?,
+    prepare_attention_prompt: any?,
+    set_attention_context: any?,
+}
+
+type AttentionToolContext = {
+    session_id: string?,
+    controller_pid: string?,
+    config: {[string]: any}?,
+    agent_ctx: any?,
+    set_attention_context: any?,
+    issue_attention_control: any?,
 }
 
 type ToolWrapperHostRef = {
@@ -51,8 +66,68 @@ type ToolWrapperExecutionContext = {
 
 local message_handlers = {
     _prompt_builder = nil :: any,
-    _lifecycle_runtime = nil :: any,
+    _lifecycle_runtime = nil :: { apply: (bindings: any, payload: any) -> (table?, string?) }?,
 }
+message_handlers._context_staging = require('context_staging_repo')
+
+message_handlers._authorize_file = function(file_uuid, actor_id, session_id)
+    return prompt_builder._authorize_file(file_uuid, actor_id, session_id)
+end
+
+function message_handlers.context_transport_capabilities(capabilities_version)
+    if capabilities_version ~= nil and capabilities_version ~= 1 then return nil, 'INVALID_CAPABILITIES_VERSION' end
+    local result = { context_attachments_transport = { version = 1, staging = true, max_context_bytes = 32768 } }
+    if capabilities_version == 1 then result.context_attachments_capabilities = context_attachments.capabilities() end
+    return result
+end
+
+local function reject_transport(ctx, op, code)
+    if op.request_id then ctx.upstream:command_error(op.request_id, code, 'Context transport request rejected') end
+    return { completed = true, rejected = true, error = code }
+end
+
+local function reject_file_references(ctx, op)
+    local code = consts.ERROR_CODES.INVALID_FILE_REFERENCES
+    if op.request_id then
+        ctx.upstream:command_error(op.request_id, code, 'One or more attached files are unavailable')
+    end
+    return { completed = true, rejected = true, error = code }
+end
+
+local function validate_file_references(file_uuids, actor_id, session_id)
+    if file_uuids == nil then return true end
+    if type(file_uuids) ~= 'table' then return false end
+
+    local length = #file_uuids
+    local key_count = 0
+    for key, _ in pairs(file_uuids) do
+        key_count = key_count + 1
+        if type(key) ~= 'number' or key % 1 ~= 0 or key < 1 or key > length then
+            return false
+        end
+    end
+    if key_count ~= length then return false end
+
+    local seen = {}
+    for index = 1, length do
+        local file_uuid = file_uuids[index]
+        if type(file_uuid) ~= 'string' or file_uuid == '' or seen[file_uuid] then
+            return false
+        end
+        local ok, authorized = pcall(message_handlers._authorize_file, file_uuid, actor_id, session_id)
+        if not ok or authorized ~= true then return false end
+        seen[file_uuid] = true
+    end
+    return true
+end
+
+message_handlers._authorize_visual = function(request)
+    return prompt_builder._authorize_visual(request)
+end
+
+message_handlers._resolve_visual = function(request)
+    return prompt_builder._resolve_visual(request)
+end
 
 local RUN_CONTEXT_CONTRACT = "wippy.agent:run_context"
 local DEFAULT_RUN_CONTEXT_BINDING = "wippy.session.run_context:binding"
@@ -197,7 +272,7 @@ local function append_lifecycle_messages(builder: any, result: table?)
     end
 end
 
-local function current_agent(ctx: SessionContext): any?
+local function current_agent(ctx: AttentionToolContext): any?
     if ctx.agent_ctx and type(ctx.agent_ctx.get_current_agent) == "function" then
         local agent = ctx.agent_ctx:get_current_agent()
         if agent then
@@ -259,13 +334,23 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
     end
 
     if state.active_agent_id then
-        local _, deactivate_err = message_handlers.deactivate_current_agent(ctx, REASON.AGENT_SWITCH, {
-            state = OUTCOME.CONTINUES,
-            reason = REASON.AGENT_SWITCH
-        })
-        if deactivate_err then
-            return nil, deactivate_err
+        local previous_agent = state.active_agent or current_agent(ctx)
+        if previous_agent then
+            local _, deactivate_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, previous_agent, {
+                reason = REASON.AGENT_SWITCH,
+                outcome = {
+                    state = OUTCOME.CONTINUES,
+                    reason = REASON.AGENT_SWITCH
+                }
+            })
+            if deactivate_err then
+                return nil, deactivate_err
+            end
         end
+
+        state.active_agent_id = nil
+        state.active_model = nil
+        state.active_agent = nil
     end
 
     local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.ACTIVATE, agent, {
@@ -364,9 +449,9 @@ end
 
 local function is_turn_stopped(ctx: any): boolean
     local state = ctx.turn_state
-    return ctx.stop_requested == true
+    return not not (ctx.stop_requested == true
         or (ctx.coordinator and ctx.coordinator:stop_requested())
-        or (state and state.failed) or false
+        or (state and state.failed) or false)
 end
 
 local function is_turn_blocked(ctx: any): boolean
@@ -456,6 +541,7 @@ function message_handlers.finish_turn(ctx)
             return { completed = false, next_ops = { {
                 type = consts.OP_TYPE.AGENT_STEP, message_id = state.message_id,
                 request_id = state.request_id, from_user = false,
+                ui_action_runtime = state.ui_action_runtime,
             } } }
         end
     end
@@ -631,6 +717,62 @@ local function stop_turn(ctx: SessionContext, op: any, agent: any, state: table,
     }
 end
 
+local function error_text(err: any): string
+    if type(err) == "table" and type(err.message) == "string" then
+        return err.message
+    end
+    return tostring(err)
+end
+
+-- Ends only the current turn after an agent, provider, or configuration failure; the
+-- session stays open and accepts the next message. Use it only before add_response:
+-- after that the turn has stored tool intents, and failures must stay fatal so the
+-- command bus settles them.
+-- opts.after_step: BEFORE_STEP ran and AFTER_STEP has not, so close the step as failed.
+-- opts.tokens: usage reported by a step that did run.
+local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: string,
+    code: string, err: any, opts: table?): (table?, string?)
+    local detail = error_text(err)
+    if opts and opts.tokens then
+        local _, token_err = persist_token_usage(ctx, opts.tokens)
+        if token_err then return nil, error_text(token_err) end
+    end
+
+    turn_state(ctx).failed = true
+    input_policy.clear_turn(ctx)
+    ctx.upstream:message_error(response_id, code, detail)
+
+    if opts and opts.after_step then
+        apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+            reason = REASON.HOST_FAILED,
+            refs = {
+                message_id = op.message_id,
+                response_id = response_id,
+                request_id = op.request_id
+            },
+            outcome = {
+                state = OUTCOME.FAILED,
+                reason = REASON.HOST_FAILED
+            }
+        })
+    end
+
+    ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: " .. detail, {
+        system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
+        error_code = code,
+        source_id = op.message_id,
+        response_id = response_id
+    })
+
+    return {
+        message_id = op.message_id,
+        response_id = response_id,
+        completed = true,
+        failed = detail,
+        next_ops = {}
+    }
+end
+
 -- Persists one input message and announces a user message as received once it is stored.
 function message_handlers.write_input(ctx, item)
     local data = type(item.data) == "table" and item.data or {}
@@ -655,6 +797,116 @@ function message_handlers.handle_message(ctx, op)
         if not message_id then return nil, write_err end
         return { message_id = message_id, completed = true }
     end
+
+    local attachments = data.context_attachments
+    local reference = data.context_attachments_ref
+    local receipt, accepted_message = nil, nil
+    local existing_plain_message = nil
+    if reference == nil and attachments == nil
+        and op.request_id and type(ctx.writer.get_message_by_request_id) == 'function' then
+        local lookup_err
+        existing_plain_message, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        if lookup_err then return nil, lookup_err end
+    end
+    if reference == nil and attachments ~= nil and op.request_id and type(ctx.writer.get_message_by_request_id) == 'function' then
+        local existing, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        if lookup_err then return reject_transport(ctx, op, 'CONTEXT_STAGING_UNAVAILABLE') end
+        if existing then
+            local supplied = context_attachments.canonical_json(attachments)
+            local original = context_attachments.canonical_json(existing.metadata and existing.metadata.context_attachments)
+            if existing.context_receipt or not supplied or supplied ~= original then
+                return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
+            end
+            accepted_message = existing
+            attachments = existing.metadata.context_attachments
+        end
+    end
+    if reference ~= nil then
+        local staging = message_handlers._context_staging
+        if attachments ~= nil or not staging.valid_reference(reference) or not staging.valid_request_id(op.request_id) then
+            return reject_transport(ctx, op, 'INVALID_CONTEXT_REFERENCE')
+        end
+        local existing, lookup_err = ctx.writer:get_message_by_request_id(op.request_id)
+        if lookup_err then return reject_transport(ctx, op, 'CONTEXT_STAGING_UNAVAILABLE') end
+        local prior = existing and existing.context_receipt
+        if prior and prior.actor_id == ctx.user_id
+            and context_attachments.canonical_json(prior.reference) == context_attachments.canonical_json(reference) then
+            accepted_message = existing
+            attachments = existing.metadata and existing.metadata.context_attachments
+            if type(attachments) ~= 'table' then return reject_transport(ctx, op, 'INVALID_CONTEXT_RECEIPT') end
+            local canonical = context_attachments.canonical_json(attachments)
+            if not canonical or #canonical ~= reference.content_bytes
+                or 'sha256:' .. hash.sha256(canonical) ~= reference.content_hash then
+                return reject_transport(ctx, op, 'INVALID_CONTEXT_RECEIPT')
+            end
+        else
+            local resolve_err
+            attachments, resolve_err = staging.resolve(ctx.user_id, ctx.session_id, op.request_id, reference)
+            if not attachments then return reject_transport(ctx, op, resolve_err) end
+            receipt = { actor_id = ctx.user_id, reference = reference }
+        end
+    end
+    if attachments ~= nil and not accepted_message then
+        local validated, validation_err = context_attachments.validate(attachments, {
+            session_id = ctx.session_id,
+            require_visual_authorization = true,
+            visual_authorizer = message_handlers._authorize_visual,
+            visual_resolver = message_handlers._resolve_visual,
+        })
+        if not validated then
+            if op.request_id then
+                ctx.upstream:command_error(
+                    op.request_id,
+                    consts.ERROR_CODES.INVALID_CONTEXT_ATTACHMENTS,
+                    context_attachments.format_error(validation_err)
+                )
+            end
+            return {
+                completed = true,
+                rejected = true,
+                error = validation_err
+            }
+        end
+        attachments = validated
+    end
+
+    local request_hash = nil
+    if op.request_id then
+        local canonical, canonical_err = context_attachments.canonical_json({
+            text = data.text or "",
+            file_uuids = data.file_uuids or {},
+            context_attachments = attachments or {},
+        })
+        if not canonical then
+            ctx.upstream:command_error(op.request_id, consts.ERROR_CODES.INVALID_JSON, tostring(canonical_err))
+            return { completed = true, rejected = true, error = consts.ERROR_CODES.INVALID_JSON }
+        end
+        local digest, digest_err = hash.sha256(canonical)
+        if digest_err then return nil, digest_err end
+        request_hash = "sha256:" .. digest
+    end
+    if existing_plain_message then
+        if existing_plain_message.request_hash ~= request_hash then
+            return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
+        end
+        accepted_message = existing_plain_message
+    end
+    if accepted_message and accepted_message.request_hash ~= request_hash then
+        return reject_transport(ctx, op, consts.ERROR_CODES.REQUEST_CONFLICT)
+    end
+
+    -- An exact retry of a stored request is acknowledged again, even when the
+    -- input policy would block a new message now.
+    local function acknowledge_duplicate(message_id, stored)
+        local stored_metadata = type(stored) == "table" and type(stored.metadata) == "table" and stored.metadata or nil
+        ctx.upstream:message_received(message_id, data.text or "", data.file_uuids,
+            stored_metadata and stored_metadata.input, op.request_id, attachments)
+        return { completed = true, duplicate = true, message_id = message_id }
+    end
+    if accepted_message then
+        return acknowledge_duplicate(accepted_message.message_id, accepted_message)
+    end
+
     local active = ctx.turn_state and ctx.turn_state.active == true or false
     local interaction = input_policy.resolve(ctx, current_agent(ctx))
     if not interaction.can_send then
@@ -662,19 +914,24 @@ function message_handlers.handle_message(ctx, op)
             "Session is not accepting messages right now") end
         return { completed = true }
     end
+    if not validate_file_references(data.file_uuids, ctx.user_id, ctx.session_id) then
+        return reject_file_references(ctx, op)
+    end
 
     local input = active and { state = "pending" } or nil
-    local metadata = { file_uuids = data.file_uuids }
+    local metadata = { file_uuids = data.file_uuids, context_attachments = attachments }
     if input then metadata.input = input end
-    local message_id, err
+    local message_id, err, duplicate
     local committed_interaction
+    local next_turn = nil
     if active then
-        message_id, err = ctx.writer:add_message(consts.MSG_TYPE.USER, data.text or "", metadata)
+        message_id, err, duplicate = ctx.writer:add_message(consts.MSG_TYPE.USER, data.text or "", metadata,
+            op.request_id, request_hash, receipt)
     else
         if type(ctx.writer.admit_message) ~= "function" then
             return nil, "Session writer does not support atomic admission"
         end
-        local next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        next_turn = { active = true, steps = 0, repeated_calls = 0 }
         local candidate = {
             config = ctx.config,
             turn_state = next_turn,
@@ -685,53 +942,80 @@ function message_handlers.handle_message(ctx, op)
             interaction = ctx.interaction,
         }
         local next_interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
-        message_id, err = ctx.writer:admit_message(consts.MSG_TYPE.USER, data.text or "", metadata, {
+        message_id, err, duplicate = ctx.writer:admit_message(consts.MSG_TYPE.USER, data.text or "", metadata, {
             status = consts.STATUS.RUNNING,
             meta = { interaction = next_interaction },
-        })
-        if message_id then
-            next_turn.message_id = message_id
-            ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
-            ctx.turn_state = next_turn
-            ctx.stop_requested = false
-            ctx.status = consts.STATUS.RUNNING
-            committed_interaction = next_interaction
+        }, op.request_id, request_hash, receipt)
+        if message_id and not duplicate then committed_interaction = next_interaction end
+    end
+    -- Storage failures return to the session inbox, which reports them once.
+    if err then
+        if receipt and (err == 'CONTEXT_REFERENCE_UNAVAILABLE' or err == 'INVALID_CONTEXT_REFERENCE'
+            or err == 'CONTEXT_SESSION_UNAVAILABLE') then
+            return reject_transport(ctx, op, err)
         end
+        return nil, err
     end
     if not message_id then
-        return nil, err or "Failed to persist input"
+        return nil, "Failed to persist input"
+    end
+    if duplicate then
+        return acknowledge_duplicate(message_id, nil)
     end
 
-    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id)
+    if next_turn then
+        next_turn.message_id = message_id
+        ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
+        ctx.turn_state = next_turn
+        ctx.stop_requested = false
+        ctx.status = consts.STATUS.RUNNING
+    end
     if committed_interaction then input_policy.accept_committed(ctx, committed_interaction) end
+    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id, attachments)
     return {
         message_id = message_id, completed = active,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
-            request_id = op.request_id, from_user = true } },
+            request_id = op.request_id, from_user = true, ui_action_runtime = op.ui_action_runtime } },
     }
 end
 
+-- Agent, provider, and configuration failures end the turn through fail_turn and keep
+-- the session open. Storage and consistency failures return nil, err, which the
+-- command bus treats as fatal.
 function message_handlers.agent_step(ctx, op)
     local handed_off = take_over_handoff(ctx)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    local response_id, id_err = uuid.v7()
+    if id_err then
+        return nil, "Failed to generate response ID: " .. tostring(id_err)
+    end
+    if op.from_user and type(ctx.activate_attention_turn) == "function" then
+        op.ui_action_runtime = ctx.activate_attention_turn(op)
+    end
     local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
-    local builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, {
-        input_overrides = input_updates,
-    })
+    local prompt_options = { input_overrides = input_updates }
+    local builder, err
+    if type(ctx.prepare_attention_prompt) == "function" then
+        builder, err = ctx.prepare_attention_prompt(prompt_options)
+    else
+        builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+    end
     if not builder then
-        return nil, "Failed to build prompt: " .. err
+        return nil, "Failed to build prompt: " .. tostring(err)
     end
 
     if not ctx.config.agent_id or ctx.config.agent_id == "" then
-        return nil, "No agent configured for this session"
+        return fail_turn(ctx, op, nil, response_id, consts.ERROR_CODES.AGENT_ERROR,
+            "No agent configured for this session")
     end
 
     local agent, agent_err = ctx.agent_ctx:load_agent(ctx.config.agent_id, {
         model = ctx.config.model
     })
     if not agent then
-        return nil, "Failed to load agent: " .. (agent_err or "unknown error")
+        return fail_turn(ctx, op, nil, response_id, consts.ERROR_CODES.AGENT_ERROR,
+            "Failed to load agent: " .. error_text(agent_err or "unknown error"))
     end
 
     -- Loop guards (see above). Every step of the turn is counted, including the one that
@@ -742,6 +1026,8 @@ function message_handlers.agent_step(ctx, op)
         state = begin_turn(ctx, op.message_id)
     end
     if op.from_user then state.request_id = op.request_id end
+    -- Steered input continues the same turn, so it keeps the turn's Host binding.
+    state.ui_action_runtime = op.ui_action_runtime
     state.steps = state.steps + 1
     local max_steps, max_repeats = loop_limits(ctx, agent)
     if max_steps > 0 and state.steps > max_steps then
@@ -765,11 +1051,6 @@ function message_handlers.agent_step(ctx, op)
         if policy_err then return nil, policy_err end
     end
 
-    local response_id, err = uuid.v7()
-    if err then
-        return nil, "Failed to generate response ID: " .. err
-    end
-
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         return nil, "Failed to load session context: " .. tostring(ctx_err)
@@ -781,7 +1062,7 @@ function message_handlers.agent_step(ctx, op)
         request_id = op.request_id
     })
     if activate_err then
-        return nil, activate_err
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_err)
     end
     append_lifecycle_messages(builder, activate_result)
 
@@ -797,7 +1078,7 @@ function message_handlers.agent_step(ctx, op)
         }
     })
     if before_err then
-        return nil, before_err
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_err)
     end
     append_lifecycle_messages(builder, before_result)
 
@@ -822,7 +1103,9 @@ function message_handlers.agent_step(ctx, op)
     local runtime_options = {
         context = session_context
     }
-    if ctx.upstream.conn_pid then
+    if ctx.stream_target then
+        runtime_options.stream_target = ctx.stream_target
+    elseif ctx.upstream.conn_pid then
         runtime_options.stream_target = {
             reply_to = ctx.upstream.conn_pid,
             topic = ctx.upstream:get_message_topic(response_id)
@@ -830,9 +1113,12 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local result, exec_err = agent:step(builder, runtime_options)
-    if exec_err then
-        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, exec_err)
-        return nil, exec_err
+    if exec_err or type(result) ~= "table" then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+            exec_err or "Agent step returned no result", {
+                after_step = true,
+                tokens = type(result) == "table" and result.tokens or nil
+            })
     end
 
     local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
@@ -845,8 +1131,8 @@ function message_handlers.agent_step(ctx, op)
         outcome = outcome_from_agent_result(result)
     })
     if after_err then
-        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
-        return nil, after_err
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err,
+            { tokens = result.tokens })
     end
 
     if result.truncated and result.truncation_reason == "empty_output" then
@@ -893,7 +1179,8 @@ function message_handlers.agent_step(ctx, op)
                     type = consts.OP_TYPE.AGENT_STEP,
                     message_id = op.message_id,
                     request_id = op.request_id,
-                    from_user = false
+                    from_user = false,
+                    ui_action_runtime = op.ui_action_runtime,
                 }
             }
         }
@@ -938,8 +1225,8 @@ function message_handlers.agent_step(ctx, op)
         prepared_caller:set_wrapper_context(wrapper_context)
         validated_tools, validate_err = prepared_caller:validate(unified_tool_calls)
         if validate_err then
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, validate_err)
-            return nil, validate_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, validate_err,
+                { tokens = result.tokens })
         end
         unified_tool_calls = prepared_caller.last_tool_calls or unified_tool_calls
     end
@@ -947,22 +1234,20 @@ function message_handlers.agent_step(ctx, op)
     local seen_call_ids = {}
     for _, call in ipairs(unified_tool_calls) do
         if type(call.id) ~= "string" or not string.find(call.id, "%S") then
-            local id_err = "Tool call ID must be a non-empty string"
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, id_err)
-            return nil, id_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Tool call ID must be a non-empty string", { tokens = result.tokens })
         end
         if seen_call_ids[call.id] then
-            local duplicate_err = "Duplicate tool call ID: " .. tostring(call.id)
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, duplicate_err)
-            return nil, duplicate_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Duplicate tool call ID: " .. tostring(call.id), { tokens = result.tokens })
         end
         seen_call_ids[call.id] = true
     end
     for call_id in pairs(validated_tools or {}) do
         if not seen_call_ids[call_id] then
-            local id_err = "Validated tool call ID is missing from wrapper output: " .. tostring(call_id)
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, id_err)
-            return nil, id_err
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Validated tool call ID is missing from wrapper output: " .. tostring(call_id),
+                { tokens = result.tokens })
         end
     end
 
@@ -993,6 +1278,8 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
+        -- fail_turn must not be used from add_response on: the stored tool intents are
+        -- settled only by the fatal path.
         local intents = {}
         for _, call in ipairs(unified_tool_calls) do
             local call_type = consts.MSG_TYPE.FUNCTION
@@ -1075,7 +1362,8 @@ function message_handlers.agent_step(ctx, op)
             message_id = op.message_id,
             response_id = response_id,
             request_id = op.request_id,
-            has_text_response = (result.result and result.result ~= "")
+            has_text_response = (result.result and result.result ~= ""),
+            ui_action_runtime = op.ui_action_runtime,
         })
     end
 
@@ -1087,6 +1375,7 @@ function message_handlers.agent_step(ctx, op)
 
         table.insert(background_ops, {
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
+            background = true,
             tokens = result.tokens,
             agent_options = agent.agent_options or {},
             checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
@@ -1117,6 +1406,85 @@ function message_handlers.agent_step(ctx, op)
     }
 end
 
+message_handlers._resolve_tool_runtime_context = function(context: AttentionToolContext, operation: any, tool_call: any, call_id: string?): (table?, string?)
+    local active = current_agent(context)
+    local expected_agent = type(operation.agent) == "table" and operation.agent.id
+        or context.config and context.config.agent_id
+    local tool_id = tostring(tool_call.registry_id)
+    if not active or active.id ~= expected_agent then
+        return nil, "Attention authority requires the current effective agent"
+    end
+    local allowed = false
+    for _, tool in pairs(active.tools or {}) do
+        if tostring(tool.registry_id) == tool_id then allowed = true; break end
+    end
+    if not allowed then
+        return nil, "Attention tool is not enabled for the current effective agent"
+    end
+    -- The legacy generic inspect tool must not fall through to UI action authority below.
+    if tool_id == "wippy.agent.tools:attention_inspect" then
+        return nil, "Attention inspect is retired; use the explicit Attention read tools"
+    end
+    if tool_id == "wippy.agent.tools:attention_find_semantic"
+        or tool_id == "wippy.agent.tools:attention_find_css"
+        or tool_id == "wippy.agent.tools:attention_get_node"
+        or tool_id == "wippy.agent.tools:attention_get_tree"
+        or tool_id == "wippy.agent.tools:attention_get_geometry"
+        or tool_id == "wippy.agent.tools:attention_get_cursor"
+        or tool_id == "wippy.agent.tools:attention_get_focus"
+        or tool_id == "wippy.agent.tools:attention_get_selection"
+        or tool_id == "wippy.agent.tools:attention_hit_test" then
+        local runtime = operation.ui_action_runtime
+        if not runtime or runtime.inspection_authorized ~= true then
+            return nil, "Attention inspection unavailable: this turn has no authenticated Host binding"
+        end
+        return { attention_inspection_runtime = {
+            broker_pid = runtime.broker_pid, delivery_handle = runtime.delivery_handle,
+            session_id = runtime.session_id, host_instance_id = runtime.host_instance_id,
+        } }, nil
+    end
+    if tostring(tool_call.registry_id) == "wippy.agent.tools:attention_context_set" then
+        if not operation.ui_action_runtime or operation.ui_action_runtime.inspection_authorized ~= true then
+            return nil, "Attention context control unavailable: this turn has no authenticated Host binding"
+        end
+        if type(context.set_attention_context) ~= "function" then
+            return nil, "Attention context control unavailable for this Session"
+        end
+        local op_agent = type(operation.agent) == "table" and operation.agent or nil
+        local agent_id = string_or_nil(op_agent and op_agent.id)
+            or string_or_nil(context.config and context.config.agent_id)
+        if not agent_id then
+            return nil, "Attention context control requires an active agent identity"
+        end
+        if type(context.issue_attention_control) ~= "function" then
+            return nil, "Attention context control authority is unavailable for this Session"
+        end
+        local capability, capability_err = context.issue_attention_control(agent_id, call_id)
+        if not capability then
+            return nil, "Attention context control authority failed: " .. tostring(capability_err)
+        end
+        return {
+            attention_context_runtime = {
+                session_id = context.session_id,
+                controller_pid = context.controller_pid,
+                agent_id = agent_id,
+                capability = capability,
+            },
+        }, nil
+    end
+    if not operation.ui_action_runtime or operation.ui_action_runtime.agent_actions_authorized ~= true then
+        return nil, "UI action unavailable: agent actions were not enabled for this turn"
+    end
+    return {
+        ui_action_runtime = {
+            broker_pid = operation.ui_action_runtime.broker_pid,
+            delivery_handle = operation.ui_action_runtime.delivery_handle,
+            session_id = operation.ui_action_runtime.session_id,
+            host_instance_id = operation.ui_action_runtime.host_instance_id,
+        }
+    }, nil
+end
+
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
@@ -1144,6 +1512,12 @@ function message_handlers.process_tools(ctx, op)
         return { completed = true }
     end
     caller:set_strategy(tool_caller.STRATEGY.PARALLEL)
+    -- A caller without the resolver gives Attention tools no runtime, so they fail closed.
+    if type(caller.set_runtime_context_resolver) == "function" then
+        caller:set_runtime_context_resolver(function(call_id, tool_call)
+            return message_handlers._resolve_tool_runtime_context(ctx, op, tool_call, call_id)
+        end)
+    end
 
     local op_agent = op.agent
     if type(op_agent) ~= "table" then
@@ -1342,7 +1716,8 @@ function message_handlers.process_tools(ctx, op)
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,
-            request_id = op.request_id
+            request_id = op.request_id,
+            ui_action_runtime = op.ui_action_runtime,
         })
     end
 
@@ -1357,7 +1732,8 @@ function message_handlers.agent_continue(ctx, op)
     return message_handlers.agent_step(ctx, {
         message_id = op.message_id,
         request_id = op.request_id,
-        from_user = false
+        from_user = false,
+        ui_action_runtime = op.ui_action_runtime,
     })
 end
 

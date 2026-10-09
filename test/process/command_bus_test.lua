@@ -104,7 +104,7 @@ local function define_tests()
         end)
     end)
     describe("turn boundaries", function()
-        it("persists received input on a fatal turn before exiting and accepts input after reopen", function()
+        it("persists received input on a fatal storage failure before exiting and accepts input after reopen", function()
             local session_id, context_id = create_persisted_fixture()
             local session_writer, writer_err = writer.new(session_id)
             test.is_nil(writer_err)
@@ -273,7 +273,7 @@ local function define_tests()
             test.eq(errors[1].code, "SESSION_FINISHING")
         end)
 
-        it("keeps agent work failures fatal without reporting them as command errors", function()
+        it("keeps agent work storage failures fatal without reporting them as command errors", function()
             local errors = {} :: {any}
             local bus = command_bus.new({ upstream = {
                 command_error = function(_self, request_id, code, message)
@@ -293,7 +293,7 @@ local function define_tests()
             test.eq(#errors, 0)
         end)
 
-        it("terminalizes pending tool intents before returning a fatal error", function()
+        it("terminalizes pending tool intents before returning a fatal storage error", function()
             local cancelled = false
             local bus = command_bus.new({})
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()

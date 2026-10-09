@@ -7,6 +7,7 @@ local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
 local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
+local session_repo = require("session_repo")
 local agent_context = require("agent_context")
 local tools = require("tools")
 local message_repo = require("message_repo")
@@ -25,6 +26,7 @@ type SessionArgs = {
 
 type SessionContext = {
     session_id: string,
+    controller_pid: string,
     user_id: string,
     reader: any,
     writer: any,
@@ -33,7 +35,20 @@ type SessionContext = {
     agent_ctx: any,
     queue_empty_callback: any?,
     lifecycle_state: table?,
+    set_attention_context: any?,
+    activate_attention_turn: any?,
+    prepare_attention_prompt: any?,
 }
+
+local attention_turn_runtime = require('attention_turn_runtime')
+local attention_history = require('attention_history')
+local context_attachments = require('context_attachments')
+local time = require('time')
+local hash = require('hash')
+local attention_control_runtime = require('attention_control_runtime')
+local ATTENTION_CONTROL_REQUEST_TOPIC = 'session_attention_context_request'
+local ATTENTION_CONTROL_RESULT_PREFIX = 'session_attention_context_result:'
+local ATTENTION_CONTROL_RESULT_SCHEMA = 'wippy.attention.session-control.v1'
 
 local function clone(value)
     if type(value) ~= "table" then return value end
@@ -84,13 +99,14 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
         })
     end
     if not stopped then
-        if stop_gate then stop_gate:send({ success = false, error = stop_err }) end
+        local detail = tostring(stop_err or "Failed to persist Stop")
+        if stop_gate then stop_gate:send({ success = false, error = detail }) end
         if request_id then
-            session_upstream:command_error(request_id, "STORAGE_ERROR", stop_err or "Failed to persist Stop")
+            session_upstream:command_error(request_id, "STORAGE_ERROR", detail)
         else
-            session_upstream:session_error("STORAGE_ERROR", stop_err or "Failed to persist Stop")
+            session_upstream:session_error("STORAGE_ERROR", detail)
         end
-        return nil, stop_err
+        return nil, detail
     end
     context.stop_requested = true
     context.turn_state = candidate_state
@@ -193,10 +209,12 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             -- The inbox serializes durable admission with Stop and completion.
             local admitted, admit_err = message_handlers.handle_message(ctx, {
                 data = data, request_id = payload_data.request_id,
+                ui_action_runtime = payload_data.ui_action_runtime,
             })
             if not admitted then
-                ctx.upstream:command_error(payload_data.request_id, consts.ERROR_CODES.STORAGE_ERROR,
-                    admit_err or "Failed to accept input")
+                local code = admit_err == "Request ID conflict" and consts.ERROR_CODES.REQUEST_CONFLICT
+                    or consts.ERROR_CODES.STORAGE_ERROR
+                ctx.upstream:command_error(payload_data.request_id, code, admit_err or "Failed to accept input")
             else
                 for _, next_op in ipairs(admitted.next_ops or {}) do
                     local queued, queue_err = bus:queue_op(next_op)
@@ -322,9 +340,13 @@ local function run(args: SessionArgs)
     end
 
     -- Configure delegation if enabled
-    if session_config.delegation_func_id then
+    local delegation_func_id = session_config.delegation_func_id
+    if delegation_func_id then
+        if type(delegation_func_id) ~= "string" then
+            error("delegation_func_id must be a string")
+        end
         local delegation_schema = nil
-        local tool_schema, schema_err = tools.get_tool_schema(session_config.delegation_func_id)
+        local tool_schema, schema_err = tools.get_tool_schema(delegation_func_id)
         if tool_schema and tool_schema.schema then
             delegation_schema = tool_schema.schema
         end
@@ -338,6 +360,7 @@ local function run(args: SessionArgs)
 
     local context: any = {
         session_id = args.session_id,
+        controller_pid = tostring(process.pid()),
         user_id = args.user_id,
         reader = session_reader,
         writer = session_writer,
@@ -403,6 +426,106 @@ local function run(args: SessionArgs)
     context.settle_intents = function()
         return message_repo.recover_pending(args.session_id,
             session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
+    end
+
+    local attention_control: any = attention_control_runtime.new({
+        connection_id = args.conn_pid,
+        new_id = function()
+            return uuid.v7()
+        end,
+        now = function()
+            return time.now():unix()
+        end,
+    })
+    context.issue_attention_control = function(agent_id, call_id)
+        return attention_control:issue({
+            session_id = args.session_id,
+            agent_id = agent_id,
+            request_id = call_id,
+        })
+    end
+    context.invalidate_attention_control = function()
+        attention_control:invalidate()
+    end
+
+    local attention_turn: any = attention_turn_runtime.new(context)
+    context.activate_attention_turn = function(op) return attention_turn:activate(op) end
+    context.prepare_attention_prompt = function(options) return attention_history.build(context, options) end
+
+    local current_attention_context = session_data.attention_context or { revision = 0 }
+    local function emit_attention_context(attention_context)
+        local incoming_revision = tonumber(attention_context and attention_context.revision)
+        local current_revision = tonumber(current_attention_context.revision) or 0
+        if not incoming_revision or incoming_revision <= current_revision then
+            return false
+        end
+        current_attention_context = attention_context
+        session_upstream:update_session({ attention_context = attention_context })
+        return true
+    end
+    local function update_attention_context(enabled: any, expected_revision: any, updated_by: string)
+        if enabled and not context_attachments.supports('wippy.attention', 4) then
+            return nil, 'ATTENTION_CONTEXT_CAPABILITY_UNAVAILABLE'
+        end
+        return session_repo.update_attention_context(
+            args.session_id,
+            enabled,
+            expected_revision,
+            updated_by
+        )
+    end
+    context.set_attention_context = function(enabled, expected_revision, agent_id)
+        if type(agent_id) ~= "string" or agent_id == "" then
+            return nil, "ATTENTION_CONTEXT_AGENT_REQUIRED"
+        end
+        if agent_id ~= context.config.agent_id then
+            return nil, "ATTENTION_CONTEXT_AGENT_STALE"
+        end
+        local state, update_err, current = update_attention_context(
+            enabled,
+            expected_revision,
+            "agent:" .. agent_id
+        )
+        if state then
+            emit_attention_context(state)
+        end
+        return state, update_err, current
+    end
+
+    -- Attention commands answer directly from the inbox; they never queue on
+    -- the command bus. Returns true when the command was handled here.
+    local function handle_attention_command(payload_data)
+        if payload_data.command == 'context_transport_capabilities' then
+            local capabilities, capability_err = message_handlers.context_transport_capabilities(payload_data.capabilities_version)
+            if capabilities then
+                session_upstream:command_success(payload_data.request_id, capabilities)
+            else
+                session_upstream:command_error(payload_data.request_id,
+                    capability_err == 'INVALID_CAPABILITIES_VERSION' and capability_err or 'CONTEXT_STAGING_UNAVAILABLE', 'Context transport unavailable')
+            end
+            return true
+        end
+        if payload_data.command == consts.COMMANDS.ATTENTION_CONTEXT_SET then
+            local attention_context, attention_err = update_attention_context(
+                payload_data.enabled,
+                payload_data.expected_revision,
+                args.user_id
+            )
+            if attention_context then
+                emit_attention_context(attention_context)
+                session_upstream:command_success(payload_data.request_id, {
+                    attention_context = attention_context,
+                })
+            elseif attention_err == 'ATTENTION_CONTEXT_REVISION_CONFLICT' then
+                session_upstream:command_error(payload_data.request_id, attention_err,
+                    'Attention context revision is stale')
+            else
+                session_upstream:command_error(payload_data.request_id, attention_err,
+                    'Attention context update rejected')
+            end
+            return true
+        end
+        return false
     end
 
     local bus = command_bus.new(context)
@@ -508,6 +631,7 @@ local function run(args: SessionArgs)
         last_message_date = session_data.last_message_date,
         public_meta = session_data.public_meta,
         interaction = context.interaction,
+        attention_context = session_data.attention_context,
     })
 
     coroutine.spawn(function()
@@ -579,11 +703,45 @@ local function run(args: SessionArgs)
                 session_state.finishing = true
                 context.status = "finishing"
                 bus:finish()
+            elseif topic == 'session_attention_activated' then
+                attention_turn:activated(msg:from(), msg:payload():data())
+            elseif topic == ATTENTION_CONTROL_REQUEST_TOPIC then
+                local request = msg:payload():data() or {}
+                if type(request.request_id) == 'string' and request.request_id ~= '' then
+                    local digest = hash.sha256(request.request_id)
+                    local reply_topic = digest and ATTENTION_CONTROL_RESULT_PREFIX .. digest or ''
+                    local response = attention_control:handle(request, tostring(msg:from()), {
+                        schema = ATTENTION_CONTROL_RESULT_SCHEMA,
+                        session_id = args.session_id,
+                        agent_id = context.config.agent_id,
+                        reply_topic = reply_topic,
+                    }, context.set_attention_context)
+                    if reply_topic ~= '' then
+                        process.send(msg:from(), reply_topic, response)
+                    end
+                end
+            elseif topic == consts.TOPICS.ATTENTION_CONTEXT_UPDATED then
+                local notification = msg:payload():data() or {}
+                if type(notification.attention_context) == 'table' then
+                    emit_attention_context(notification.attention_context)
+                end
             else
-                local _, route_err = route_input(context, bus, topic, msg:payload():data(), session_state)
-                if route_err then
-                    exit_err = "Session ingress failed: " .. route_err
-                    break
+                local payload_data = msg:payload():data()
+                local attention_handled = false
+                if type(payload_data) == 'table'
+                    and (topic == consts.TOPICS.MESSAGE or topic == consts.TOPICS.COMMAND) then
+                    if payload_data.conn_pid then
+                        attention_control:set_connection(payload_data.conn_pid)
+                        session_upstream.conn_pid = payload_data.conn_pid
+                    end
+                    attention_handled = topic == consts.TOPICS.COMMAND and handle_attention_command(payload_data)
+                end
+                if not attention_handled then
+                    local _, route_err = route_input(context, bus, topic, payload_data, session_state)
+                    if route_err then
+                        exit_err = "Session ingress failed: " .. route_err
+                        break
+                    end
                 end
             end
         elseif result.channel == events then
@@ -639,6 +797,7 @@ local function run(args: SessionArgs)
             end
         end
     end
+    attention_control:invalidate()
 
     if settle_err then error(settle_err) end
 

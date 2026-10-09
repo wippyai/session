@@ -1,0 +1,51 @@
+version: "1.0"
+namespace: app.api
+
+# Suites for src/api/.
+entries:
+
+  - name: get_capabilities_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://get_capabilities_test.lua
+    imports:
+      test: wippy.test:test
+      get_capabilities: wippy.session.api:get_capabilities
+    method: run
+
+  - name: set_attention_context_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://set_attention_context_test.lua
+    imports:
+      test: wippy.test:test
+      set_attention_context: wippy.session.api:set_attention_context
+    method: run
+
+  - name: session_messages_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://session_messages_test.lua
+    imports:
+      test: wippy.test:test
+      session_messages: wippy.session.api:session_messages
+    method: run
+
+  - name: context_staging_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://context_staging_test.lua
+    modules: [hash, time]
+    imports:
+      test: wippy.test:test
+      context_staging: wippy.session.api:context_staging
+      context_attachments: wippy.session:context_attachments
+    method: run
