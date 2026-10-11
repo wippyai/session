@@ -142,7 +142,7 @@ local function define_tests()
             test.not_nil(message_repo.create(uuid.v7(), session_b, "user", "next turn", {}))
             local failed_boundary = { message_id = uuid.v7(), data = boundary.data, metadata = boundary.metadata }
             ok, err = message_repo.stop_with_input_rollback(session_b, {
-                { message_id = other, metadata = { input = { state = "applied", after_message_id = "missing" } } },
+                { message_id = first, metadata = { input = { state = "applied", after_message_id = "missing" } } },
             }, { status = "failed" }, failed_boundary)
             test.is_nil(ok)
             test.not_nil(err)

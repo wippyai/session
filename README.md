@@ -57,6 +57,13 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn.
 
+Stop commits a developer message in conversation history together with its
+interaction state and any pending-input rollback. The message tells the model
+that the preceding turn is cancelled and subsequent user messages are new
+requests. Recovery persists an interruption message before accepting input
+when the preceding turn does not finish, including when no assistant response
+exists. Reopening preserves an existing boundary without duplicating it.
+
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
 for Stop, keep explicit false values, and ignore older revisions. Servers

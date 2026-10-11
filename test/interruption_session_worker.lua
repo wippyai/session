@@ -2,7 +2,7 @@ local session = require('session')
 local llm = require('llm')
 local time = require('time')
 
-local function run(args)
+local function run(args: any)
     local fixture = args.user_metadata
     llm._models = {
         get_by_name = function(name)

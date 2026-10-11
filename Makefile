@@ -15,7 +15,7 @@ WIPPY ?= wippy
 TEST_CONFIG ?=
 TEST_CONFIG_ARG := --config .wippy.yaml $(if $(strip $(TEST_CONFIG)),--config "$(TEST_CONFIG)")
 
-.PHONY: test lint install clean
+.PHONY: test lint install lockrefresh clean
 
 test: clean
 	cd $(TEST_DIR) && $(WIPPY) test $(TEST_CONFIG_ARG)
@@ -25,6 +25,9 @@ lint:
 
 install:
 	cd $(TEST_DIR) && $(WIPPY) install
+
+lockrefresh:
+	cd $(TEST_DIR) && $(WIPPY) update $(TEST_CONFIG_ARG)
 
 clean:
 	cd $(TEST_DIR) && rm -f $(TEST_DB) $(TEST_DB)-wal $(TEST_DB)-shm

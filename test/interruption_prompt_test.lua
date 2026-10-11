@@ -131,6 +131,21 @@ local function define_tests(blocked_only)
         it('preserves Stop on continuation without restarting', function() continuation('cooperative', false) end)
         it('preserves Stop when the plugin reopens the session', function() continuation('cooperative', true) end)
         it('persists recovery when interruption precedes an assistant row', function() continuation('crash', true) end)
+        it('keeps a completed turn when a finished session reopens', function()
+            label = 'completed-reopen'
+            start(nil)
+            send('Perform the earlier request.', 'earlier')
+            idle()
+            shutdown()
+            assert(sessions.update_session_meta(session_id, { status = consts.STATUS.COMPLETED }))
+            start(nil)
+            local request = send('Perform only the new request.', 'followup')
+            idle()
+            for _, message in ipairs(request.messages) do
+                test.is_false(message.role == 'developer' and message.metadata and message.metadata.interruption ~= nil,
+                    'completed work does not become interrupted history')
+            end
+        end)
         else
             it('preserves Stop when termination precedes an assistant row', function() continuation('blocked', true) end)
         end

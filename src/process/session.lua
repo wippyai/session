@@ -57,6 +57,19 @@ local function clone(value)
     return result
 end
 
+local function interruption_boundary(reason)
+    local id, err = uuid.v7()
+    if not id then return nil, err end
+    local detail = reason == "stop" and "The user cancels the preceding turn."
+        or "The preceding turn is interrupted before completion; its outcome may be unknown."
+    return {
+        message_id = id,
+        data = detail .. " Do not resume that turn or carry out its remaining instructions. "
+            .. "Treat subsequent user messages as new requests.",
+        metadata = { interruption = { reason = reason } },
+    }
+end
+
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -85,18 +98,19 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
     local interaction = input_policy.snapshot(context, candidate, context.current_agent)
     local stop_gate = nil
     local stopped, stop_err
-    if context.input_apply_batch and type(context.writer.stop_with_input_rollback) == "function" then
+    if context.input_apply_batch then
         stop_gate = channel.new(1)
         context.stop_commit_channel = stop_gate
-        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch, {
+    end
+    local boundary, boundary_err
+    if running then boundary, boundary_err = interruption_boundary("stop") end
+    if not running or boundary then
+        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch or {}, {
             status = context.status,
             meta = { interaction = interaction },
-        })
+        }, boundary)
     else
-        stopped, stop_err = context.writer:update_meta({
-            status = context.status,
-            meta = { interaction = interaction },
-        })
+        stop_err = boundary_err
     end
     if not stopped then
         local detail = tostring(stop_err or "Failed to persist Stop")
@@ -314,6 +328,15 @@ local function run(args: SessionArgs)
             session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID))
         if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
         recovered_calls = count
+    end
+
+    local interrupted = session_data.status == consts.STATUS.RUNNING
+        or session_data.status == consts.STATUS.FAILED or session_data.status == consts.STATUS.ERROR
+    if not args.create and (interrupted or recovered_calls > 0) then
+        local boundary, boundary_err = interruption_boundary("recovery")
+        if not boundary then error("Failed to create recovery boundary: " .. tostring(boundary_err)) end
+        local committed, commit_err = session_writer:stop_with_input_rollback({}, {}, boundary)
+        if not committed then error("Failed to persist recovery boundary: " .. tostring(commit_err)) end
     end
 
     local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
