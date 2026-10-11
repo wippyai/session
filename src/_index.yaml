@@ -450,7 +450,7 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.5"
+    version: ">=v0.5.7"
 
   - name: migration
     kind: ns.dependency

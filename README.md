@@ -62,7 +62,8 @@ interaction state and any pending-input rollback. The message tells the model
 that the preceding turn is cancelled and subsequent user messages are new
 requests. Recovery persists an interruption message before accepting input
 when the preceding turn does not finish, including when no assistant response
-exists. Reopening preserves an existing boundary without duplicating it.
+exists. Reopening preserves an existing boundary without duplicating it. Positional
+message metadata requires the LLM companion in version 0.5.7 or later.
 
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status

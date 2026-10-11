@@ -66,7 +66,7 @@ local function interruption_boundary(reason)
         message_id = id,
         data = detail .. " Do not resume that turn or carry out its remaining instructions. "
             .. "Treat subsequent user messages as new requests.",
-        metadata = { interruption = { reason = reason } },
+        metadata = { preserve_position = true, interruption = { reason = reason } },
     }
 end
 
