@@ -118,6 +118,38 @@ local function define_tests()
             test.eq(message_repo.get(id).data, "new turn")
         end)
 
+        it("commits interruption history with Stop and rolls it back on failure", function()
+            local boundary = {
+                message_id = uuid.v7(), data = "Do not resume interrupted work.",
+                metadata = { interruption = { reason = "stop" } },
+            }
+            local ok, err = message_repo.stop_with_input_rollback(session_b, {}, {
+                status = "running", meta = { interaction = { can_send = false, revision = 4 } },
+            }, boundary)
+            test.is_nil(err)
+            test.is_true(ok)
+            local stored = message_repo.get(boundary.message_id)
+            test.not_nil(stored, "Stop commits a durable developer boundary")
+            test.eq(stored.type, "developer")
+            test.eq(stored.metadata.interruption.reason, "stop")
+            test.eq(session_repo.get(session_b, user_id).meta.interaction.revision, 4)
+
+            local duplicate = { message_id = uuid.v7(), data = boundary.data, metadata = boundary.metadata }
+            test.is_true(message_repo.stop_with_input_rollback(session_b, {}, {}, duplicate))
+            local missing = message_repo.get(duplicate.message_id)
+            test.is_nil(missing, "recovery preserves the existing boundary")
+
+            test.not_nil(message_repo.create(uuid.v7(), session_b, "user", "next turn", {}))
+            local failed_boundary = { message_id = uuid.v7(), data = boundary.data, metadata = boundary.metadata }
+            ok, err = message_repo.stop_with_input_rollback(session_b, {
+                { message_id = other, metadata = { input = { state = "applied", after_message_id = "missing" } } },
+            }, { status = "failed" }, failed_boundary)
+            test.is_nil(ok)
+            test.not_nil(err)
+            test.is_nil(message_repo.get(failed_boundary.message_id))
+            test.eq(session_repo.get(session_b, user_id).status, "running")
+        end)
+
         it("ignores legacy metadata but rejects an explicit false input", function()
             local resource = consts.get_db_resource()
             local function set_raw_metadata(id, raw_metadata)

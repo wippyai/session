@@ -42,11 +42,11 @@ local function run()
         local db, err = sql.get("app:db")
         if not err then
             local result, query_err = db:query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='contexts'"
+                "SELECT context_id FROM contexts LIMIT 0"
             )
             db:release()
 
-            if not query_err and result and #result > 0 then
+            if not query_err and result then
                 return true
             end
         end

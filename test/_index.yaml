@@ -5,6 +5,72 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: dep.wippy.test
+    kind: ns.dependency
+    component: wippy/test
+    version: ">=0.4.18"
+
+  - name: users_fixture_migration
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      timestamp: '2020-01-01T00:00:00Z'
+      depends_on: [ns:wippy.migration]
+    source: file://users_fixture_migration.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
+  - name: interruption_plugin_worker
+    kind: process.lua
+    source: file://interruption_plugin_worker.lua
+    imports:
+      plugin: wippy.session.process:plugin
+      consts: wippy.session:consts
+    method: run
+
+  - name: interruption_session_worker
+    kind: process.lua
+    source: file://interruption_session_worker.lua
+    modules: [time]
+    imports:
+      session: wippy.session.process:session
+      llm: wippy.llm:llm
+    method: run
+
+  - name: interruption_prompt_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
+  - name: interruption_prompt_blocked_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_blocked
+
   - name: context_cleanup_worker
     kind: process.lua
     source: file://context_cleanup_worker.lua
