@@ -120,6 +120,18 @@ local function define_tests(blocked_only)
             test.not_nil(followup, 'follow-up remains its own user instruction')
             test.eq(boundaries, 1, 'recovery does not duplicate Stop')
             test.is_true(earlier < boundary and boundary < followup)
+            local wire_earlier, wire_boundary, wire_followup
+            for index, message in ipairs(request.responses_input) do
+                for _, part in ipairs(message.content or {}) do
+                    if part.text == 'Perform the earlier request.' then wire_earlier = index end
+                    if part.text == 'Perform only the new request.' then wire_followup = index end
+                    if message.role == 'developer' and part.text and part.text:find('Do not resume', 1, true) then
+                        wire_boundary = index
+                    end
+                end
+            end
+            test.not_nil(wire_boundary, 'Responses preserves the boundary in its chronological input')
+            test.is_true(wire_earlier < wire_boundary and wire_boundary < wire_followup)
             local page = assert(messages.list_by_session(session_id))
             local durable = 0
             for _, message in ipairs(page.messages) do

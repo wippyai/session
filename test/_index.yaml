@@ -37,6 +37,7 @@ entries:
     imports:
       session: wippy.session.process:session
       llm: wippy.llm:llm
+      response_mapper: wippy.llm.openai:mapper
     method: run
 
   - name: interruption_prompt_test
