@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.8](https://github.com/wippyai/session/compare/v0.6.7...v0.6.8) (2026-10-14)
+
+
+### Bug Fixes
+
+* harden tool controls and persisted handoffs ([#61](https://github.com/wippyai/session/issues/61)) ([e8cce7c](https://github.com/wippyai/session/commit/e8cce7c0d2507bf897724f955f991b1dbf5caf92))
+* **session:** drain accepted work before lifecycle retirement ([#65](https://github.com/wippyai/session/issues/65)) ([7b7e2b4](https://github.com/wippyai/session/commit/7b7e2b413b0ccf34f1d5e2cd9113d57794b6d0d3))
+
 ## [0.6.7](https://github.com/wippyai/session/compare/v0.6.6...v0.6.7) (2026-10-09)
 
 
