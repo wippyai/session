@@ -37,12 +37,13 @@ end
 local function handoff()
     local storage = state()
     local scenario = storage:get("scenario")
-    if scenario.stop then
+    if scenario.stop or scenario.hold_handoff then
         local release = process.listen("fixture:release")
         process.send(scenario.parent, "fixture:handoff_ready", { pid = process.pid() })
         local timer = time.timer("5s")
         local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
         timer:stop()
+        process.unlisten(release)
         if selected.channel ~= release then error("handoff release deadline exceeded") end
     end
     return {

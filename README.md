@@ -70,6 +70,12 @@ when Wippy is not on PATH. The test target clears only its own test database.
 
 ## Runtime tests and benchmarks
 
+`make test-postgres FRAMEWORK_DIR=/absolute/path/to/framework` checks the
+affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
+disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
+`PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
+supplies the application's user-table contract and runs these checks in UTC.
+
 On Unix, `make install test` runs the suite against the locked dependencies.
 `make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
 registered tools, agent compilation, the Session
@@ -104,6 +110,22 @@ stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database i
 backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
 location or `TEST_CONFIG` for an external runtime configuration. These targets
 require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+
+## Session retirement
+
+Disconnect, chat close, inactivity cleanup, and session-capacity retirement let
+accepted turns and queued writes finish before the process exits. Reconnect or
+reopen cancels pending retirement. Explicit Stop still cancels the turn; normal
+provider and turn limits continue to apply. Relay inactivity collection must
+also wait for the session plugin to exit instead of cancelling its parent hub.
+
+Retiring children occupy their live session slots until EXIT. A new session at
+capacity receives `session_limit_reached` and can be retried after a child exits;
+reopening an existing child needs no additional slot.
+
+Cancelled public tools emit a terminal function-error event after their outcome
+is stored. History keeps `cancelled` in storage and exposes `status: error` with
+`outcome: cancelled` to existing clients, so reloads show a settled result.
 
 ## Tool feedback and loop limits
 

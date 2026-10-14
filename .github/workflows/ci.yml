@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  FRAMEWORK_REF: 5f4d1e8a95a58a1d7ce3cd1202696a62042a2767
+  FRAMEWORK_REF: 7a485e9b59fc4d59720104bf55157adb3a01a386
 
 jobs:
   lint:
@@ -114,3 +114,44 @@ jobs:
         run: make lint
       - name: Verify runtime handoff
         run: make test-runtime
+
+  postgres:
+    name: PostgreSQL persistence and handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: session
+    env:
+      FRAMEWORK_DIR: ${{ github.workspace }}/framework
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: session_test
+          POSTGRES_USER: kickside
+          POSTGRES_PASSWORD: kickside
+        ports: [5433:5432]
+        options: >-
+          --health-cmd "pg_isready -U kickside -d session_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
+        run: echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-postgres" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
+      - name: Verify PostgreSQL persistence and handoff
+        run: make test-postgres

@@ -2,6 +2,96 @@ version: "1.0"
 namespace: wippy.session.api
 
 entries:
+  - name: get_capabilities
+    kind: function.lua
+    meta:
+      comment: Describe the protocol features this Session module supports
+      router: app:api
+    source: file://get_capabilities.lua
+    modules:
+      - http
+      - security
+    imports:
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
+    method: handler
+    pool:
+      size: 2
+
+  - name: get_capabilities.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Session capability descriptor
+      router: app:api
+    method: GET
+    func: get_capabilities
+    path: /sessions/capabilities
+
+  - name: set_attention_context
+    kind: function.lua
+    meta:
+      comment: Update normalized per-session Attention context state
+      router: app:api
+    source: file://set_attention_context.lua
+    modules:
+      - http
+      - security
+    imports:
+      session_repo: wippy.session.persist:session_repo
+      consts: wippy.session:consts
+      context_attachments: wippy.session:context_attachments
+    method: handler
+    pool:
+      size: 4
+
+  - name: set_attention_context.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Update session Attention context state
+      router: app:api
+    method: PATCH
+    func: set_attention_context
+    path: /sessions/{session_id}/attention-context
+
+  - name: context_staging
+    kind: function.lua
+    meta:
+      router: app:api
+    source: file://context_staging.lua
+    modules: [http, security, json, time]
+    imports:
+      session_writer: wippy.session.persist:writer
+      context_attachments: wippy.session:context_attachments
+      context_staging_repo: wippy.session.persist:context_staging_repo
+      prompt_builder: wippy.session:prompt_builder
+    method: handler
+    pool:
+      size: 4
+
+  - name: context_staging.get
+    kind: http.endpoint
+    meta:
+      router: app:api
+    method: GET
+    func: context_staging
+    path: /sessions/context
+
+  - name: context_staging.post
+    kind: http.endpoint
+    meta:
+      router: app:api
+    method: POST
+    func: context_staging
+    path: /sessions/context
+
+  - name: context_staging.delete
+    kind: http.endpoint
+    meta:
+      router: app:api
+    method: DELETE
+    func: context_staging
+    path: /sessions/context
+
   # wippy.session.api:delete_session
   - name: delete_session
     kind: function.lua
@@ -196,9 +286,9 @@ entries:
     source: file://session_messages.lua
     modules:
       - http
+      - json
       - security
       - time
-      - json
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo

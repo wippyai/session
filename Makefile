@@ -6,6 +6,11 @@ TEST_DB ?= $(TEST_ARTIFACTS)/test.db
 TEST_BACKUP_DIR ?= $(TEST_ARTIFACTS)/backups
 TEST_FILTER ?=
 FRAMEWORK_DIR ?=
+PGHOST ?= localhost
+PGPORT ?= 5433
+PGDATABASE ?= session_test
+PGUSER ?= kickside
+PGPASSWORD ?= kickside
 BENCH_WARMUP ?= 100
 BENCH_SAMPLES ?= 100
 BENCH_SIZES ?= 1,8,32
@@ -16,7 +21,7 @@ BENCH_EXACT_ALLOCATIONS ?= 1
 BENCH_REVISION ?= $(shell git rev-parse HEAD)
 BENCH_FRAMEWORK_REVISION ?= $(if $(FRAMEWORK_DIR),$(shell git -C "$(FRAMEWORK_DIR)" rev-parse HEAD),locked)
 
-.PHONY: test test-runtime bench lint install prepare clean
+.PHONY: test test-runtime test-postgres bench lint install prepare clean
 
 test: clean
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
@@ -31,6 +36,19 @@ test-runtime:
 	@test -n "$(FRAMEWORK_DIR)" || { echo 'Set FRAMEWORK_DIR to use the required runtime test runner' >&2; exit 1; }
 	$(MAKE) install
 	WIPPY_TEST_REQUIRE_CASES=1 $(MAKE) test TEST_FILTER="$(TEST_FILTER)"
+
+# The caller supplies a fresh disposable database; this target never drops one.
+test-postgres:
+	@test -n "$(FRAMEWORK_DIR)" || { echo 'Set FRAMEWORK_DIR to use the required runtime test runner' >&2; exit 1; }
+	$(MAKE) install
+	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
+	cd "$(TEST_DIR)" && TZ=UTC WIPPY_TEST_REQUIRE_CASES=1 WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test --config "$(TEST_CONFIG)" \
+		-o "app:db:kind=db.sql.postgres" -o "app:db:host=$(PGHOST)" -o "app:db:port=$(PGPORT)" \
+		-o "app:db:database=$(PGDATABASE)" -o "app:db:username=$(PGUSER)" -o "app:db:password=$(PGPASSWORD)" \
+		-o "app:db:options.sslmode=disable" \
+		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
+		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
+		test -- app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime
 
 bench:
 	@set -eu; run_benchmark() { \

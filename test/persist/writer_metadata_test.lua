@@ -162,6 +162,21 @@ local function define_tests()
             test.contains(err, "different session")
             test.is_true(row.metadata.protected)
         end)
+        test.it("reports deletion between the ownership read and metadata write without recreating the message", function()
+            local id = message({status = "pending"})
+            local original_get = message_repo.get
+            message_repo.get = function(requested_id)
+                local row, err = original_get(requested_id)
+                assert(message_repo.delete(requested_id))
+                return row, err
+            end
+            local ok, result, err = pcall(persistence.update_message_meta, persistence, id, {status = "success"})
+            message_repo.get = original_get
+            test.is_true(ok)
+            test.is_nil(result)
+            test.contains(tostring(err), "not found")
+            test.is_nil(message_repo.get(id))
+        end)
     end)
 end
 

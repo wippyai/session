@@ -2,6 +2,13 @@ version: "1.0"
 namespace: wippy.session.persist
 
 entries:
+  - name: context_staging_repo
+    kind: library.lua
+    source: file://context_staging_repo.lua
+    modules: [sql, json, hash, uuid, time]
+    imports:
+      consts: wippy.session:consts
+
   # wippy.session.persist:writer
   - name: writer
     kind: library.lua
@@ -63,6 +70,7 @@ entries:
       - json
       - time
     imports:
+      context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
       input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order

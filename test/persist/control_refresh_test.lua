@@ -7,6 +7,8 @@ local control_handlers = require("control_handlers")
 local wait_for_boot = require("wait_for_boot")
 local security = require("security")
 local uuid = require("uuid")
+local command_bus = require("command_bus")
+local consts = require("consts")
 
 local REFRESH_ERROR = "Session not found during reset"
 
@@ -34,6 +36,35 @@ end
 
 local function define_tests()
     test.describe("Control effect state refresh", function()
+        test.it("does not replay a committed control write or continue after refresh failure", function()
+            with_failing_refresh(function(session_id, persistence, state, observed)
+                local writes, continuations = 0, 0
+                local original_set = persistence.set_context
+                persistence.set_context = function(self, key, value)
+                    writes = writes + 1
+                    return original_set(self, key, value)
+                end
+                local bus = command_bus.new({writer = persistence, reader = state,
+                    upstream = {update_session = function() end}})
+                bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONTEXT, control_handlers.control_context)
+                bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                    continuations = continuations + 1
+                    return {completed = true}
+                end)
+                assert(bus:queue_op({type = consts.OP_TYPE.CONTROL_CONTEXT,
+                    context_operations = {session = {set = {once = "committed"}}}}))
+                assert(bus:queue_op({type = consts.OP_TYPE.AGENT_STEP}))
+                local ok, err = bus:run()
+                test.is_nil(ok)
+                test.contains(tostring(err), REFRESH_ERROR)
+                test.eq(writes, 1)
+                test.eq(continuations, 0)
+                test.eq(bus.state, "closed")
+                test.eq(assert(reader.open(session_id)):get_context("once"), "committed")
+                bus:run()
+                test.eq(writes, 1, "a closed bus must not replay the committed operation")
+            end)
+        end)
         test.it("returns a failed refresh after a durable context write", function()
             with_failing_refresh(function(session_id, persistence, state, observed)
                 local result, err = control_handlers.control_context({

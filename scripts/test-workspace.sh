@@ -8,6 +8,7 @@ if [ -n "$framework" ]; then framework=$(cd "$framework" && pwd -P); fi
 case "$workspace/" in
   "$repository/"*) printf 'Test workspace must be outside the repository\n' >&2; exit 1 ;;
 esac
+mkdir -p "$workspace/.wippy"
 modules=$(jq -cn --arg path "$workspace/modules" '$path')
 source=$(jq -cn --arg path "$repository/test" '$path')
 awk -v modules="$modules" -v source="$source" '

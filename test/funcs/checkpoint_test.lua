@@ -1,5 +1,6 @@
 local test = require("test")
 local checkpoint = require("checkpoint")
+local prompt = require("prompt")
 
 local function define_tests()
     describe("checkpoint config_from_args", function()
@@ -112,6 +113,16 @@ local function define_tests()
     end)
 
     describe("checkpoint prompt token substitution", function()
+        it("adds the rendered system prompt without replacement-count metadata", function()
+            local builder = prompt.new()
+            builder:add_system(checkpoint.checkpoint_prompt("Use full 3000 tokens here.", 8000))
+
+            local messages = builder:get_messages()
+            test.eq(#messages, 1)
+            test.eq(messages[1].role, "system")
+            test.is_nil(rawget(messages[1], "metadata"))
+        end)
+
         it("substitutes the default 3000 token marker with the configured budget", function()
             local rendered = checkpoint.checkpoint_prompt("Use full 3000 tokens here.", 8000)
             test.eq(rendered, "Use full 8000 tokens here.")

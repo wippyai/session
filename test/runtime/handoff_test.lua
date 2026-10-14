@@ -61,10 +61,7 @@ local function open_process(session_id, user_id, create)
     return pid
 end
 
-local function close_process(pid, session_id)
-    local sent, err = process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {})
-    test.is_nil(err)
-    test.is_true(sent)
+local function wait_for_exit(pid, session_id)
     local events, timer = process.events(), time.timer("5s")
     local deadline = timer:channel()
     while true do
@@ -83,6 +80,13 @@ local function close_process(pid, session_id)
     local registered = process.registry.lookup("session." .. session_id)
     test.is_nil(registered, "Session registry entry leaked after shutdown")
     active_pid = nil
+end
+
+local function close_process(pid, session_id)
+    local sent, err = process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {})
+    test.is_nil(err)
+    test.is_true(sent)
+    wait_for_exit(pid, session_id)
 end
 
 local function stop_active_process()
@@ -126,8 +130,10 @@ local function run_scenario(options)
     local storage = store.get("app.runtime:state")
     storage:set("requests", {})
     storage:set("scenario", { mixed = options.mixed == true, stop = options.stop == true,
-        malformed = options.malformed, hold_prompt = options.hold_prompt == true, parent = process.pid() })
-    local stopped = options.stop or options.hold_prompt
+        malformed = options.malformed,
+        hold_handoff = options.retire_at == "handoff",
+        hold_prompt = options.hold_prompt == true or options.retire_at == "prompt", parent = process.pid() })
+    local stopped = options.stop or (options.hold_prompt and not options.retire_at) or options.stop_after_retire
     local actor = security.actor()
     local session_id, context_id = uuid.v7(), uuid.v7()
     local _, context_err = context_repo.create(context_id, "primary", "{}")
@@ -145,6 +151,24 @@ local function run_scenario(options)
     local _, answer_err = persistence:add_message(consts.MSG_TYPE.ASSISTANT, "Earlier answer.")
     test.is_nil(answer_err)
     local pid
+    local function retire()
+        assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {reason = "shutdown"}))
+        if options.cancel_retire then
+            assert(process.send(pid, "cancel_finish", {}))
+            assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {finish_generation = 1}))
+        end
+        if options.stop_after_retire then
+            assert(process.send(pid, consts.TOPICS.STOP, {request_id = "runtime-stop"}))
+            receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
+        end
+        -- Same-sender FIFO plus a reply proves the lifecycle request was
+        -- processed while handoff/prompt construction is still suspended.
+        assert(process.send(pid, consts.TOPICS.COMMAND, {
+            command = "context_transport_capabilities", capabilities_version = 1,
+            request_id = "retirement-barrier",
+        }))
+        receive_until(function(_, payload) return payload.request_id == "retirement-barrier" end, "retirement barrier")
+    end
     local ok, failure = pcall(function()
         pid = open_process(session_id, actor:id(), true)
         if options.fail_after_open then error("Injected handoff fixture failure") end
@@ -156,21 +180,33 @@ local function run_scenario(options)
         receive_until(function(_, payload)
             return payload.type == consts.UPSTREAM_TYPES.RECEIVED and payload.request_id == "runtime-input"
         end, "accepted user message")
-        if options.stop then
+        if options.stop or options.retire_at == "handoff" then
             local ready = receive_until(function(topic) return topic == "fixture:handoff_ready" end, "handoff barrier")
-            process.send(pid, consts.TOPICS.STOP, { request_id = "runtime-stop" })
-            receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
+            if options.retire_at then retire() else
+                process.send(pid, consts.TOPICS.STOP, { request_id = "runtime-stop" })
+                receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
+            end
             process.send(ready.pid, "fixture:release", true)
         end
-        if options.hold_prompt then
+        if options.hold_prompt or options.retire_at == "prompt" then
             local ready = receive_until(function(topic) return topic == "fixture:prompt_ready" end, "prompt barrier")
-            process.send(pid, consts.TOPICS.STOP, { request_id = "runtime-stop" })
-            receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
+            if options.retire_at then retire() else
+                process.send(pid, consts.TOPICS.STOP, { request_id = "runtime-stop" })
+                receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
+            end
             process.send(ready.pid, "fixture:prompt_release", true)
         end
-        receive_until(function(topic, payload)
-            return topic == "session:" .. session_id and payload.status == "idle"
-        end, "completed turn")
+        if options.retire_at and not options.cancel_retire then
+            wait_for_exit(pid, session_id)
+        else
+            receive_until(function(topic, payload)
+                return topic == "session:" .. session_id and payload.status == "idle"
+            end, "completed turn")
+            if options.cancel_retire then
+                test.eq(process.registry.lookup("session." .. session_id), pid, "reconnect must retain the same process")
+            end
+            close_process(pid, session_id)
+        end
         local requests = storage:get("requests")
         test.eq(#requests, stopped and 1 or 2, "Expected exactly one handoff continuation unless stopped")
         test.eq(requests[1].model, "router")
@@ -178,7 +214,6 @@ local function run_scenario(options)
             test.eq(requests[2].model, "help")
             assert_history(requests[2].messages, options.mixed or options.malformed ~= nil)
         end
-        close_process(pid, session_id)
         pid = nil
         local reopened, reopen_err = reader.open(session_id)
         test.is_nil(reopen_err)
@@ -256,15 +291,27 @@ local function define_tests()
         test.it("retains the successful handoff alongside a failed tool result", function()
             run_scenario({ mixed = true })
         end)
+        for _, phase in ipairs({"handoff", "prompt"}) do
+            test.it("finishes the persisted handoff when retirement arrives during " .. phase, function()
+                run_scenario({retire_at = phase, reopen = true})
+            end)
+        end
+        test.it("cancels pending retirement during prompt construction and keeps the same session", function()
+            run_scenario({retire_at = "prompt", cancel_retire = true, reopen = true})
+        end)
         test.it("commits a handoff but suppresses its continuation after Stop", function()
             run_scenario({ stop = true, reopen = true })
         end)
         local stop_boundary = "suppresses provider generation when Stop commits while the next prompt is built"
         if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_stops_before_generation() then
+            test.it("honors Stop during prompt construction even after retirement is pending", function()
+                run_scenario({retire_at = "prompt", stop_after_retire = true, reopen = true})
+            end)
             test.it(stop_boundary, function()
                 run_scenario({ hold_prompt = true, reopen = true })
             end)
         else
+            test.it_skip("Stop after pending retirement (requires Framework step stop_check)", function() end)
             test.it_skip(stop_boundary .. " (requires Framework step stop_check)", function() end)
         end
         test.it("settles every call when a malformed control result precedes its peers", function()
