@@ -26,6 +26,7 @@ function command_bus.new(context)
     local self = setmetatable({}, command_bus)
     self.context = context
     self.state = "idle"
+    self.finishing = false
     self.ops = {}
     self.settle_ops = {}
     self.wake = channel.new(1)
@@ -55,7 +56,7 @@ end
 
 function command_bus:queue_op(op)
     if self.state == "closed" then return false, "Command bus is closed" end
-    if self.state == "draining_finish" then
+    if self.finishing and op.user_command then
         return false, "Command bus is draining"
     end
     if self.state == "draining_stop" and not op.user_command then
@@ -82,7 +83,7 @@ function command_bus:is_turn_active()
 end
 
 function command_bus:request_stop(stop_request_id)
-    if self.state == "closed" or self.state == "draining_finish" then return false end
+    if self.state == "closed" then return false end
     if not self:is_turn_active() then return false end
     if self.state ~= "draining_stop" then self.state = "draining_stop" end
     self.turn_state.stop_request_id = stop_request_id or self.turn_state.stop_request_id
@@ -91,13 +92,19 @@ function command_bus:request_stop(stop_request_id)
 end
 
 function command_bus:stop_requested()
-    return self.state == "draining_stop" or self.state == "draining_finish"
+    return self.state == "draining_stop"
 end
 
 function command_bus:finish()
     if self.state == "closed" then return end
-    self.state = "draining_finish"
+    self.finishing = true
     self:wake_loop()
+end
+
+function command_bus:cancel_finish()
+    if self.state == "closed" or not self.finishing then return false end
+    self.finishing = false
+    return true
 end
 
 function command_bus:stop()
@@ -146,7 +153,8 @@ end
 
 function command_bus:admitted(op)
     if self.state == "closed" then return false end
-    if self.state == "draining_stop" or self.state == "draining_finish" then
+    if self.finishing and op.user_command then return false end
+    if self.state == "draining_stop" then
         if op.type == consts.OP_TYPE.HANDLE_MESSAGE then return true end
         return (op.type == consts.OP_TYPE.PROCESS_TOOLS or is_control(op)) and op.round_effect == true
     end
@@ -217,13 +225,13 @@ end
 function command_bus:end_turn()
     local stop_id = self.turn_state.stop_request_id
     local turn_id = self.turn_state.id
-    local was_draining = self.state == "draining_stop" or self.state == "draining_finish"
+    local was_draining = self.state == "draining_stop" or self.finishing
     local last_id, err, request_id = self:flush_held(not was_draining)
     if err then return nil, err end
-    local draining = self.state == "draining_stop" or self.state == "draining_finish"
+    local draining = self.state == "draining_stop"
     local settle_ops = self.settle_ops
     self.settle_ops = {}
-    if self.state == "draining_finish" then
+    if self.finishing then
         self.state = "closed"
         for _, op in ipairs(settle_ops) do
             self.pending_ops = self.pending_ops - 1
@@ -270,7 +278,7 @@ function command_bus:run()
         local op = table.remove(self.ops :: {table}, 1)
         if op then
             self.pending_ops = self.pending_ops - 1
-            if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" then
+            if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" and not self.finishing then
                 local _, flush_err = self:flush_held(true)
                 if flush_err then return self:fail(flush_err, true) end
             end
@@ -288,10 +296,10 @@ function command_bus:run()
                 if err then return self:fail(err) end
                 self:enqueue_result(result)
             elseif op.user_command then
-                local code = self.state == "closed" and "SESSION_FINISHING" or "SESSION_STOPPING"
+                local code = (self.state == "closed" or self.finishing) and "SESSION_FINISHING" or "SESSION_STOPPING"
                 reject_user_command(self, op, code, "Session no longer accepts this command")
             end
-        elseif self.state == "running" or self.state == "draining_stop" or self.state == "draining_finish" then
+        elseif self.state == "running" or self.state == "draining_stop" or self.finishing then
             local completed, err
             if self.context.turn_boundary_callback then
                 completed, err = self.context.turn_boundary_callback()

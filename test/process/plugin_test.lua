@@ -52,6 +52,7 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
         local sent_item = { pid = pid, topic = topic, payload = payload }
         table.insert(sent, sent_item)
         table.insert(trace, { kind = "send", item = sent_item })
+        if topic == options.send_failure_topic then return nil, "Process not found" end
         return true, nil
     end)
     mock("process.cancel", function() cancelled = cancelled + 1; return true, nil end)
@@ -87,13 +88,14 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
         return { ok = true, channel = events, value = event }
     end)
 
-    local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = hub_pid })
+    local ok, result, run_err = pcall(plugin.run, { user_id = actor:id(), user_hub_pid = hub_pid })
     restore_mock("channel.select")
     restore_mock("coroutine.spawn")
     restore_mock("process.terminate")
     restore_mock("process.cancel")
     restore_mock("process.send")
     restore_mock("process.with_context")
+    if not ok then error(result) end
 
     return {
         result = result, error = run_err, sent = sent, trace = trace, scheduled = scheduled,
@@ -1458,7 +1460,12 @@ local function define_tests()
             mock("channel.new", original_channel_new)
             test.eq(result.status, "shutdown")
             test.is_true(result.interrupted)
-            test.eq(message_repo.count_by_session(session_id), before)
+            test.eq(message_repo.count_by_session(session_id), before + 1)
+            local page = assert(message_repo.list_by_session(session_id))
+            local boundary = page.messages[#page.messages]
+            test.eq(boundary.type, consts.MSG_TYPE.DEVELOPER)
+            test.eq(boundary.metadata.interruption.reason, "recovery")
+            test.contains(boundary.data, "Do not resume")
             test.eq(message_repo.get(call_id).metadata.status, consts.FUNC_STATUS.ERROR)
             cleanup_session_fixture(session_id, context_id)
         end)
@@ -1648,6 +1655,26 @@ local function define_tests()
             end
             test.eq(finished["pre-shutdown-session"], 1)
             test.is_nil(finished["post-resume-session"])
+            local resumed = {}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.PLUGIN_TOPICS.RESUME then resumed[sent.pid] = true end
+            end
+            test.is_true(resumed["pre-shutdown-session"])
+            test.is_nil(resumed["post-resume-session"])
+            cleanup_session_fixture(first_id, first_context)
+            cleanup_session_fixture(second_id, second_context)
+        end)
+        it("keeps other sessions available when resume reaches an exited child", function()
+            local actor = security.actor()
+            local first_id, first_context = create_session_fixture(actor, "Exiting session")
+            local second_id, second_context = create_session_fixture(actor, "Available session")
+            local run = run_plugin_lifecycle(actor, first_id, nil, {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                { topic = consts.PLUGIN_TOPICS.RESUME, data = {} },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = second_id } },
+            }, nil, { cancel_plugin = true, send_failure_topic = consts.PLUGIN_TOPICS.RESUME })
+            test.is_nil(run.error)
+            test.eq((run.spawned_init :: any).session_id, second_id)
             cleanup_session_fixture(first_id, first_context)
             cleanup_session_fixture(second_id, second_context)
         end)

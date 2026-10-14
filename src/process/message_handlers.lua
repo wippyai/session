@@ -459,6 +459,38 @@ local function is_turn_blocked(ctx: any): boolean
     return is_turn_stopped(ctx) or (state and state.handoff) or false
 end
 
+local function call_type(ctx: any, call: any, validated: any): string
+    if call.type == consts.MSG_TYPE.DELEGATION
+        or (ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id) then
+        return consts.MSG_TYPE.DELEGATION
+    end
+    local schema = type(call.registry_id) == "string" and tools.get_tool_schema(call.registry_id) or nil
+    if call.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+        or (call.meta and call.meta.private) or (validated and validated.meta and validated.meta.private)
+        or (schema and schema.meta and schema.meta.private) then
+        return consts.MSG_TYPE.PRIVATE_FUNCTION
+    end
+    return consts.MSG_TYPE.FUNCTION
+end
+
+local function cancel_calls(ctx: any, calls: any, message_ids: any, validated_tools: any): (boolean?, string?)
+    local reason = "Session stopped before the call executed"
+    for _, call in ipairs(calls) do
+        local message_id = message_ids[call.id]
+        local _, err = ctx.writer:update_message_meta(message_id, {
+            status = consts.FUNC_STATUS.CANCELLED, result = reason,
+        })
+        if err then return nil, err end
+        if call_type(ctx, call, validated_tools and validated_tools[call.id]) == consts.MSG_TYPE.FUNCTION then
+            ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+                message_id = message_id, call_id = call.id, function_name = call.name,
+                registry_id = call.registry_id, status = consts.FUNC_STATUS.CANCELLED, error = reason,
+            })
+        end
+    end
+    return true
+end
+
 local function take_over_handoff(ctx: any): boolean
     local state = ctx.turn_state
     if not state or not state.handoff or is_turn_stopped(ctx) then return false end
@@ -1282,23 +1314,10 @@ function message_handlers.agent_step(ctx, op)
         -- settled only by the fatal path.
         local intents = {}
         for _, call in ipairs(unified_tool_calls) do
-            local call_type = consts.MSG_TYPE.FUNCTION
-            if ctx.config.delegation_func_id
-                and call.registry_id == ctx.config.delegation_func_id then
-                call_type = consts.MSG_TYPE.DELEGATION
-            elseif type(call.registry_id) == "string" then
-                local validated = validated_tools and validated_tools[call.id]
-                local schema = tools.get_tool_schema(call.registry_id :: string)
-                if (call.meta and call.meta.private)
-                    or (validated and validated.meta and validated.meta.private)
-                    or (schema and schema.meta and schema.meta.private) then
-                    call_type = consts.MSG_TYPE.PRIVATE_FUNCTION
-                end
-            end
             table.insert(intents, {
                 id = call.id, name = call.name, arguments = call.arguments,
                 registry_id = call.registry_id, provider_metadata = call.provider_metadata,
-                type = call_type
+                type = call_type(ctx, call, validated_tools and validated_tools[call.id])
             })
         end
         local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
@@ -1310,13 +1329,8 @@ function message_handlers.agent_step(ctx, op)
         result.call_message_ids = call_message_ids
 
         if is_turn_blocked(ctx) then
-            for _, call in ipairs(unified_tool_calls) do
-                local _, cancel_err = ctx.writer:update_message_meta((call_message_ids :: table)[call.id], {
-                    status = consts.FUNC_STATUS.CANCELLED,
-                    result = "Session stopped before the call executed"
-                })
-                if cancel_err then return nil, cancel_err end
-            end
+            local _, cancel_err = cancel_calls(ctx, unified_tool_calls, call_message_ids, validated_tools)
+            if cancel_err then return nil, cancel_err end
         end
 
         if result.result and result.result ~= "" then
@@ -1491,13 +1505,8 @@ function message_handlers.process_tools(ctx, op)
     end
 
     if op.cancel_only or is_turn_blocked(ctx) then
-        for _, call in ipairs(op.tool_calls) do
-            local _, err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
-                status = consts.FUNC_STATUS.CANCELLED,
-                result = "Session stopped before the call executed"
-            })
-            if err then return nil, err end
-        end
+        local _, err = cancel_calls(ctx, op.tool_calls, op.call_message_ids, op.validated_tools)
+        if err then return nil, err end
         return { completed = true, next_ops = {} }
     end
 

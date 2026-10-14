@@ -19,6 +19,7 @@ local function define_tests()
             for i = 1, count do
                 if (i - 1) % staging.MAX_SESSION == 0 then
                     actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+                    boot.ensure_user(actor)
                     assert(contexts.create(context_id, 'primary', 'Cleanup lifecycle'))
                     assert(sessions.create(session, actor, context_id, 'Cleanup lifecycle', 'test'))
                     table.insert(fixtures, { session = session, context_id = context_id })

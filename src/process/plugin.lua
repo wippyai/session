@@ -275,7 +275,6 @@ local function run(args)
 
         session_info.terminating = true
         session_info.terminate_reason = reason
-        broker:cancel_session(session_id, "unavailable", "session is terminating")
 
         logger:info("initiating graceful session termination", {
             user_id = state.user_id,
@@ -880,13 +879,25 @@ local function run(args)
 
                 for session_id, session_info in pairs(state.active_sessions) do
                     if type(session_id) == "string" then
-                        broker:cancel_session(session_id, "disconnected", "client transport disconnected")
                         graceful_terminate_session(session_id, session_info, "shutdown")
                     end
                 end
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
                     state.shutting_down = false
+                    for session_id, session_info in pairs(state.active_sessions) do
+                        if session_info.terminating and session_info.terminate_reason == "shutdown" then
+                            local sent, send_err = process.send(session_info.pid, consts.PLUGIN_TOPICS.RESUME, {})
+                            if sent then
+                                session_info.terminating = false
+                                session_info.terminate_reason = nil
+                            else
+                                logger:error("session resume delivery failed", {
+                                    session_id = session_id, error = tostring(send_err),
+                                })
+                            end
+                        end
+                    end
                     logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
                 end
             elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_REQUEST then
