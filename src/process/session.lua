@@ -146,7 +146,7 @@ end
 
 local function queue_error_code(bus)
     if bus.state == "closed" then return "SESSION_FINISHING" end
-    if bus.state == "draining_finish" then return "SESSION_FINISHING" end
+    if bus.finishing then return "SESSION_FINISHING" end
     return "SESSION_BUSY"
 end
 
@@ -211,7 +211,7 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         local is_user = data.type ~= consts.MSG_TYPE.DEVELOPER
             and data.type ~= consts.MSG_TYPE.SYSTEM
         if is_user then
-            if bus.state == "closed" or bus.state == "draining_finish" or bus.state == "draining_stop" then
+            if bus.state == "closed" or bus.finishing or bus.state == "draining_stop" then
                 ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus),
                     "Session is not accepting messages")
                 return true
@@ -721,11 +721,10 @@ local function run(args: SessionArgs)
                 end
                 boundary_reply:send({ value = not boundary_err, error = boundary_err })
             elseif topic == consts.TOPICS.FINISH_AND_EXIT then
-                local committed, stop_err = commit_stop(context, session_upstream, nil)
-                if not committed then exit_err = stop_err; break end
                 session_state.finishing = true
-                context.status = "finishing"
                 bus:finish()
+            elseif topic == consts.PLUGIN_TOPICS.RESUME then
+                if bus:cancel_finish() then session_state.finishing = false end
             elseif topic == 'session_attention_activated' then
                 attention_turn:activated(msg:from(), msg:payload():data())
             elseif topic == ATTENTION_CONTROL_REQUEST_TOPIC then
