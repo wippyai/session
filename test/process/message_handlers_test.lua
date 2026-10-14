@@ -1133,6 +1133,32 @@ local function define_tests()
             test.eq(captured.message_updates[1].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
         end)
 
+        it("keeps classified and validated private cancellations off the public upstream", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local stored = {}
+            ctx.writer.update_message_meta = function(_self, id, metadata)
+                stored[id] = metadata
+                return true
+            end
+            local calls = {
+                { id = "public", name = "public" },
+                { id = "private", name = "private", type = consts.MSG_TYPE.PRIVATE_FUNCTION },
+                { id = "delegation", name = "delegation", type = consts.MSG_TYPE.DELEGATION },
+                { id = "validated-private", name = "validated-private" },
+            }
+            local ids = {}
+            for _, call in ipairs(calls) do ids[call.id] = "stored-" .. call.id end
+            local result, err = message_handlers.process_tools(ctx, {
+                cancel_only = true, tool_calls = calls, call_message_ids = ids,
+                validated_tools = { ["validated-private"] = { meta = { private = true } } },
+            })
+            test.is_nil(err)
+            test.is_true(result.completed)
+            for _, call in ipairs(calls) do test.eq(stored[ids[call.id]].status, consts.FUNC_STATUS.CANCELLED) end
+            test.eq(#captured.message_updates, 1)
+            test.eq(captured.message_updates[1].id, "public")
+        end)
+
         it("stops the turn once the agent steps exceed max_turn_iterations", function()
             local ctx, captured = mock_ctx(fake_agent(1000), { max_turn_iterations = 3 })
 
