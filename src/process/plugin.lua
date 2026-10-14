@@ -885,12 +885,17 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
                     state.shutting_down = false
-                    for _, session_info in pairs(state.active_sessions) do
+                    for session_id, session_info in pairs(state.active_sessions) do
                         if session_info.terminating and session_info.terminate_reason == "shutdown" then
                             local sent, send_err = process.send(session_info.pid, consts.PLUGIN_TOPICS.RESUME, {})
-                            if not sent then error("Failed to resume session: " .. tostring(send_err)) end
-                            session_info.terminating = false
-                            session_info.terminate_reason = nil
+                            if sent then
+                                session_info.terminating = false
+                                session_info.terminate_reason = nil
+                            else
+                                logger:error("session resume delivery failed", {
+                                    session_id = session_id, error = tostring(send_err),
+                                })
+                            end
                         end
                     end
                     logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
