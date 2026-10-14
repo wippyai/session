@@ -6,6 +6,19 @@ local migration_bootloader = require("migration_bootloader")
 
 local bootloaders_started = false
 
+-- Newer Bootloader releases run migrations before the test entrypoint.
+-- Supply the external user-table contract before Session's PostgreSQL DDL.
+local function prepare_postgres_dependencies()
+    local db = assert(sql.get("app:db"))
+    local _, err
+    if db:type() == "postgres" then
+        _, err = db:execute("CREATE TABLE IF NOT EXISTS app_users (user_id TEXT PRIMARY KEY)")
+    end
+    db:release()
+    if err then error(err) end
+    return {status = "success", message = "Session test user-table contract is ready"}
+end
+
 local function call_bootloader(module, options)
     if type(module) == "function" then
         return module(options)
@@ -68,4 +81,4 @@ local function run()
     error("bootloader did not complete within " .. (max_attempts * sleep_ms) .. "ms")
 end
 
-return { run = run }
+return { run = run, prepare_postgres_dependencies = prepare_postgres_dependencies }
