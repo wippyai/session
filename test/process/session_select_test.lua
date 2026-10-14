@@ -21,6 +21,7 @@ local function message(topic, data)
     return {
         topic = function() return topic end,
         payload = function() return { data = function() return data end } end,
+        from = function() return "select-test-parent" end,
     }
 end
 

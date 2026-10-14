@@ -528,7 +528,26 @@ local function run(args: SessionArgs)
         return false
     end
 
+    local session_state = {
+        stopping = false,
+        finishing = false,
+        interrupted = false,
+        bus_done_received = false
+    }
+    local finish_generation = 0
+    local pending_finish = false
+    local finish_check_sent = false
     local bus = command_bus.new(context)
+    local function schedule_finish_check()
+        if pending_finish and not finish_check_sent then
+            finish_check_sent = true
+            process.send(process.pid(), consts.TOPICS.FINISH_AND_EXIT, {
+                finish_generation = finish_generation,
+            })
+        end
+        return true
+    end
+    context.queue_empty_callback = schedule_finish_check
     context.on_turn_end = function(turn_id, stop_requested, stop_request_id)
         if stop_requested and args.parent_pid then
             process.send(args.parent_pid :: string, consts.TOPICS.STOP_RESOLVED, {
@@ -536,6 +555,7 @@ local function run(args: SessionArgs)
                 stop_request_id = stop_request_id, from_pid = process.pid()
             })
         end
+        schedule_finish_check()
     end
 
     -- Mount all operation handlers
@@ -592,12 +612,6 @@ local function run(args: SessionArgs)
         end
     end
 
-    local session_state = {
-        stopping = false,
-        finishing = false,
-        interrupted = false,
-        bus_done_received = false
-    }
     local bus_done = channel.new()
 
 
@@ -697,12 +711,32 @@ local function run(args: SessionArgs)
                     end
                 end
                 boundary_reply:send({ value = not boundary_err, error = boundary_err })
+            elseif topic == "cancel_finish" then
+                if msg:from() == args.parent_pid and not session_state.finishing then
+                    finish_generation = finish_generation + 1
+                    pending_finish = false
+                    finish_check_sent = false
+                end
             elseif topic == consts.TOPICS.FINISH_AND_EXIT then
-                local committed, stop_err = commit_stop(context, session_upstream, nil)
-                if not committed then exit_err = stop_err; break end
-                session_state.finishing = true
-                context.status = "finishing"
-                bus:finish()
+                local request = msg:payload():data() or {}
+                local internal = msg:from() == process.pid()
+                local current = (internal and pending_finish
+                    and request.finish_generation == finish_generation)
+                    or (msg:from() == args.parent_pid and request.finish_generation == nil)
+                if current then
+                    finish_check_sent = false
+                    if request.finish_generation == nil then
+                        finish_generation = finish_generation + 1
+                    end
+                    if not bus:is_quiescent() then
+                        pending_finish = true
+                    else
+                        pending_finish = false
+                        session_state.finishing = true
+                        context.status = "finishing"
+                        bus:finish()
+                    end
+                end
             elseif topic == 'session_attention_activated' then
                 attention_turn:activated(msg:from(), msg:payload():data())
             elseif topic == ATTENTION_CONTROL_REQUEST_TOPIC then

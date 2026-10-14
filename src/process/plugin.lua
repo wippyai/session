@@ -283,7 +283,7 @@ local function run(args)
             reason = reason
         })
 
-        process.send(session_info.pid :: string, consts.TOPICS.FINISH_AND_EXIT, {})
+        process.send(session_info.pid :: string, consts.TOPICS.FINISH_AND_EXIT, { reason = reason })
     end
 
     local function get_oldest_session()
@@ -305,20 +305,18 @@ local function run(args)
 
     local function enforce_session_limit()
         local active_count = 0
-        for _, info in pairs(state.active_sessions) do
-            if not info.terminating then
-                active_count = active_count + 1
-            end
+        for _ in pairs(state.active_sessions) do
+            active_count = active_count + 1
         end
-
-        while active_count >= consts.LIMITS.MAX_SESSIONS_PER_USER do
+        if active_count >= consts.LIMITS.MAX_SESSIONS_PER_USER then
             local oldest_id = get_oldest_session()
-            if not oldest_id then
-                break
+            if oldest_id then
+                graceful_terminate_session(oldest_id, state.active_sessions[oldest_id], "limit_exceeded")
             end
-            graceful_terminate_session(oldest_id, state.active_sessions[oldest_id], "limit_exceeded")
-            active_count = active_count - 1
+            -- Retirement is asynchronous; capacity is released only on EXIT.
+            return false
         end
+        return true
     end
 
     local function unpack_start_token(token)
@@ -434,11 +432,6 @@ local function run(args)
     local function forward_request(session_info, session_id, topic_type, request_data)
         local conn_pid = request_data.conn_pid
         local request_id = request_data.request_id
-        if session_info.terminating then
-            send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
-                "Session is finishing", request_id)
-            return
-        end
         if topic_type == consts.HANDLER_TYPES.MESSAGE then
             local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
                 conn_pid = conn_pid, data = request_data.data, request_id = request_id,
@@ -492,8 +485,6 @@ local function run(args)
             return nil, "attention_context_enabled must be a boolean"
         end
 
-        enforce_session_limit()
-
         local session_id = payload_data.session_id
         if not session_id then
             local id, err = uuid.v7()
@@ -509,6 +500,11 @@ local function run(args)
             logger:debug("session already exists", { user_id = state.user_id, session_id = session_id })
             local session_info = state.active_sessions[session_id]
             if is_open then
+                if session_info.terminating then
+                    session_info.terminating = false
+                    session_info.terminate_reason = nil
+                    process.send(session_info.pid :: string, "cancel_finish", {})
+                end
                 if session_info.open_notified then
                     notify_session_opened(session_id, payload_data.request_id)
                 else
@@ -516,6 +512,12 @@ local function run(args)
                 end
             end
             return session_id, nil
+        end
+
+        if not enforce_session_limit() then
+            local message = "Session limit reached; retry after a retiring session finishes"
+            send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_LIMIT, message, payload_data.request_id)
+            return nil, message
         end
 
         local existing_session, _ = session_repo.get(session_id, state.user_id)
@@ -884,10 +886,21 @@ local function run(args)
                         graceful_terminate_session(session_id, session_info, "shutdown")
                     end
                 end
+                -- An auto-started plugin may never have opened a session.
+                -- Leave through normal ticker/broker cleanup instead of
+                -- waiting forever for an EXIT that cannot arrive.
+                if state.session_count == 0 then break end
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 if state.shutting_down then
                     state.shutting_down = false
                     logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
+                end
+                for _, session_info in pairs(state.active_sessions) do
+                    if session_info.terminating and session_info.terminate_reason == "shutdown" then
+                        session_info.terminating = false
+                        session_info.terminate_reason = nil
+                        process.send(session_info.pid :: string, "cancel_finish", {})
+                    end
                 end
             elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_REQUEST then
                 local accepted, request_err = broker:request(msg:from(), payload:data())

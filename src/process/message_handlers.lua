@@ -454,6 +454,30 @@ local function is_turn_stopped(ctx: any): boolean
         or (state and state.failed) or false)
 end
 
+local function settle_cancelled_call(ctx, call, message_id, call_type, validated)
+    local reason = "Session stopped before the call executed"
+    local _, err = ctx.writer:update_message_meta(message_id, {
+        status = consts.FUNC_STATUS.CANCELLED, result = reason,
+    })
+    if err then return nil, err end
+    local private = call_type == consts.MSG_TYPE.PRIVATE_FUNCTION
+        or (call.meta and call.meta.private)
+        or (validated and validated.meta and validated.meta.private)
+    local delegation = call_type == consts.MSG_TYPE.DELEGATION
+        or (ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id)
+    if not call_type and type(call.registry_id) == "string" then
+        local schema = tools.get_tool_schema(call.registry_id)
+        private = private or (schema and schema.meta and schema.meta.private)
+    end
+    if not private and not delegation then
+        ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+            message_id = message_id, call_id = call.id, function_name = call.name,
+            error = reason, status = consts.FUNC_STATUS.CANCELLED,
+        })
+    end
+    return true
+end
+
 local function is_turn_blocked(ctx: any): boolean
     local state = ctx.turn_state
     return is_turn_stopped(ctx) or (state and state.handoff) or false
@@ -1281,6 +1305,7 @@ function message_handlers.agent_step(ctx, op)
         -- fail_turn must not be used from add_response on: the stored tool intents are
         -- settled only by the fatal path.
         local intents = {}
+        local call_message_types = {}
         for _, call in ipairs(unified_tool_calls) do
             local call_type = consts.MSG_TYPE.FUNCTION
             if ctx.config.delegation_func_id
@@ -1300,6 +1325,7 @@ function message_handlers.agent_step(ctx, op)
                 registry_id = call.registry_id, provider_metadata = call.provider_metadata,
                 type = call_type
             })
+            call_message_types[call.id] = call_type
         end
         local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
         if store_err then
@@ -1308,13 +1334,15 @@ function message_handlers.agent_step(ctx, op)
         end
         assistant_message_id = stored_id
         result.call_message_ids = call_message_ids
+        result.call_message_types = call_message_types
 
         if is_turn_blocked(ctx) then
-            for _, call in ipairs(unified_tool_calls) do
-                local _, cancel_err = ctx.writer:update_message_meta((call_message_ids :: table)[call.id], {
-                    status = consts.FUNC_STATUS.CANCELLED,
-                    result = "Session stopped before the call executed"
-                })
+            for index, call in ipairs(unified_tool_calls) do
+                local intent = intents[index]
+                if not intent then return nil, "Tool intent missing before cancellation" end
+                local _, cancel_err = settle_cancelled_call(ctx, call,
+                    (call_message_ids :: table)[call.id], intent.type,
+                    validated_tools and validated_tools[call.id])
                 if cancel_err then return nil, cancel_err end
             end
         end
@@ -1350,6 +1378,7 @@ function message_handlers.agent_step(ctx, op)
             type = consts.OP_TYPE.PROCESS_TOOLS,
             tool_calls = unified_tool_calls,
             call_message_ids = result.call_message_ids,
+            call_message_types = result.call_message_types,
             tool_wrappers = agent.tool_wrappers or {},
             caller = prepared_caller,
             validated_tools = validated_tools,
@@ -1492,10 +1521,9 @@ function message_handlers.process_tools(ctx, op)
 
     if op.cancel_only or is_turn_blocked(ctx) then
         for _, call in ipairs(op.tool_calls) do
-            local _, err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
-                status = consts.FUNC_STATUS.CANCELLED,
-                result = "Session stopped before the call executed"
-            })
+            local _, err = settle_cancelled_call(ctx, call, op.call_message_ids[call.id],
+                op.call_message_types and op.call_message_types[call.id],
+                op.validated_tools and op.validated_tools[call.id])
             if err then return nil, err end
         end
         return { completed = true, next_ops = {} }

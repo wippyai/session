@@ -81,6 +81,12 @@ function command_bus:is_turn_active()
     return false
 end
 
+-- Retirement must wait for accepted control and background work as well as turns.
+function command_bus:is_quiescent()
+    return self.state == "idle" and self.current_op == nil
+        and self.pending_ops == 0 and #self.ops == 0 and #self.settle_ops == 0
+end
+
 function command_bus:request_stop(stop_request_id)
     if self.state == "closed" or self.state == "draining_finish" then return false end
     if not self:is_turn_active() then return false end
