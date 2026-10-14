@@ -460,11 +460,13 @@ local function is_turn_blocked(ctx: any): boolean
 end
 
 local function call_type(ctx: any, call: any, validated: any): string
-    if ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id then
+    if call.type == consts.MSG_TYPE.DELEGATION
+        or (ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id) then
         return consts.MSG_TYPE.DELEGATION
     end
     local schema = type(call.registry_id) == "string" and tools.get_tool_schema(call.registry_id) or nil
-    if (call.meta and call.meta.private) or (validated and validated.meta and validated.meta.private)
+    if call.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+        or (call.meta and call.meta.private) or (validated and validated.meta and validated.meta.private)
         or (schema and schema.meta and schema.meta.private) then
         return consts.MSG_TYPE.PRIVATE_FUNCTION
     end

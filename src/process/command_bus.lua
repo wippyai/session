@@ -296,7 +296,7 @@ function command_bus:run()
                 if err then return self:fail(err) end
                 self:enqueue_result(result)
             elseif op.user_command then
-                local code = self.state == "closed" and "SESSION_FINISHING" or "SESSION_STOPPING"
+                local code = (self.state == "closed" or self.finishing) and "SESSION_FINISHING" or "SESSION_STOPPING"
                 reject_user_command(self, op, code, "Session no longer accepts this command")
             end
         elseif self.state == "running" or self.state == "draining_stop" or self.finishing then
