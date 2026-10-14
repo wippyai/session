@@ -247,7 +247,7 @@ local function define_tests()
 
         it("writes held input without an agent step on finish", function()
             local ctx, bus, saved = fixture()
-            bus.state = "draining_finish"
+            bus:finish()
             ctx.held = {{ message_id = "held-user", data = { text = "later" } }}
             local last_id, err = session.flush_held(ctx, false)
             test.is_nil(err)

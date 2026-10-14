@@ -9,10 +9,11 @@ local sessions = require('session_repo')
 local messages = require('message_repo')
 local consts = require('consts')
 local boot = require('wait_for_boot')
+local relay_consts = require('relay_consts')
 
-local function define_tests(blocked_only)
+local function define_tests(blocked_only, lifecycle_only)
     describe('Persisted interruption in the provider prompt', function()
-        local session_id, context_id, plugin_pid, actor_id, label
+        local session_id, context_id, plugin_pid, actor_id, label, hub_pid
         local exited = {}
         local function receive(predicate, timeout)
             local inbox, events, deadline = process.inbox(), process.events(), time.after(timeout)
@@ -21,6 +22,9 @@ local function define_tests(blocked_only)
                 assert(selected.ok and selected.channel ~= deadline, 'interruption event deadline')
                 if selected.channel == events then
                     exited[selected.value.from] = selected.value
+                    if selected.value.from == hub_pid and selected.value.result and selected.value.result.error then
+                        error(selected.value.result.error)
+                    end
                     if predicate('exit', selected.value) then return selected.value end
                 else
                     local message = selected.value
@@ -44,7 +48,7 @@ local function define_tests(blocked_only)
             plugin_pid = assert(process.with_context({}):with_actor(actor):with_scope(scope)
                 :spawn_monitored('app:interruption_plugin_worker', 'app:processes', {
                     user_id = actor_id, user_hub_pid = process.pid(),
-                    user_metadata = { reply_pid = process.pid(), interrupt = interrupt },
+                    user_metadata = { reply_pid = process.pid(), interrupt = interrupt, lifecycle = lifecycle_only },
                 }))
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.OPEN, { session_id = session_id, conn_pid = process.pid() }))
             receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s')
@@ -64,18 +68,19 @@ local function define_tests(blocked_only)
         before_all(function() boot.run() end)
         before_each(function()
             actor_id, session_id, context_id = uuid.v7(), uuid.v7(), uuid.v7()
-            plugin_pid = nil
+            plugin_pid, hub_pid = nil, nil
             local db = assert(sql.get('app:db'))
             local _, err = db:execute('INSERT INTO app_users (user_id) VALUES ($1)', {actor_id})
             db:release()
             assert(not err, tostring(err))
             assert(contexts.create(context_id, 'primary', '{}'))
             assert(sessions.create(session_id, actor_id, context_id, 'Interruption prompt', 'test', {}, {
-                agent_id = 'app.process:initial_agent',
+                agent_id = lifecycle_only and 'app:lifecycle_agent' or 'app.process:initial_agent',
             }))
         end)
         after_each(function()
             if plugin_pid and not exited[plugin_pid] then shutdown() end
+            if hub_pid and not exited[hub_pid] then assert(process.cancel(hub_pid, '2s')) end
             assert(sessions.delete(session_id))
             assert(contexts.delete(context_id))
             local db = assert(sql.get('app:db'))
@@ -139,7 +144,83 @@ local function define_tests(blocked_only)
             end
             test.eq(durable, 1, 'boundary persists in the native history')
         end
-        if not blocked_only then
+        if lifecycle_only then
+            it('settles a Stop-cancelled call live and in durable history', function()
+                label = 'cancelled-call-settlement'
+                start(nil)
+                send('Perform the tool.', 'work')
+                assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.COMMAND, {
+                    session_id = session_id, conn_pid = process.pid(),
+                    data = { command = consts.COMMANDS.STOP }, request_id = 'stop',
+                }))
+                receive(function(_, data) return data.request_id == 'stop' end, '3s')
+                local event = receive(function(_, data)
+                    return data.type == consts.UPSTREAM_TYPES.FUNCTION_ERROR and data.status == consts.FUNC_STATUS.CANCELLED
+                end, '3s')
+                idle()
+                local row = assert(messages.get(event.message_id))
+                test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(row.metadata.call_id, event.call_id)
+                test.eq(row.metadata.function_name, event.function_name)
+                test.eq(row.metadata.result, event.error)
+            end)
+            it('resumes a pending shutdown with the same session process', function()
+                label = 'resume-pending-finish'
+                start(nil)
+                local first = send('Perform the tool.', 'work')
+                assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.SHUTDOWN, {}))
+                assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.RESUME, {}))
+                receive(function(topic) return topic == 'provider_prompt' end, '3s')
+                idle()
+                local next_request = send('Perform only the new request.', 'followup')
+                test.eq(next_request.worker_pid, first.worker_pid)
+                idle()
+                local page = assert(messages.list_by_session(session_id))
+                for _, message in ipairs(page.messages) do test.is_nil(message.metadata.interruption) end
+            end)
+            it('disconnects mid-turn and stores completed tools and the final answer', function()
+                label = 'disconnect-turn-completion'
+                local actor = security.new_actor(actor_id, {})
+                local scope = security.new_scope():with(assert(security.policy('wippy.security:general')) :: security.Policy)
+                hub_pid = assert(process.with_context({}):with_actor(actor):with_scope(scope)
+                    :spawn_monitored(relay_consts.USER_HUB_PROCESS_ID, 'app:processes', {
+                        user_id = actor_id, user_metadata = { reply_pid = process.pid(), lifecycle = true },
+                        plugins = { session_ = { prefix = 'session_', process_id = 'app:interruption_plugin_worker',
+                            host = 'app:processes', auto_start = true } },
+                        config = { user_hub_host = 'app:processes' },
+                    }))
+                assert(process.send(hub_pid, relay_consts.WS_TOPICS.JOIN, { client_pid = process.pid() }))
+                receive(function(topic) return topic == relay_consts.CLIENT_TOPICS.WELCOME end, '3s')
+                assert(process.send(hub_pid, relay_consts.WS_TOPICS.MESSAGE, (assert(json.encode({
+                    type = 'session_open', session_id = session_id, request_id = 'open',
+                })))))
+                receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s')
+                assert(process.send(hub_pid, relay_consts.WS_TOPICS.MESSAGE, (assert(json.encode({
+                    type = 'session_message', session_id = session_id, request_id = 'work', data = { text = 'Perform the tool.' },
+                })))))
+                receive(function(topic) return topic == 'provider_prompt' end, '3s')
+                assert(process.send(hub_pid, relay_consts.WS_TOPICS.LEAVE, { client_pid = process.pid() }))
+                receive(function(topic) return topic == 'provider_prompt' end, '3s')
+                local deadline = time.after('3s')
+                while true do
+                    local page = assert(messages.list_by_session(session_id))
+                    local tool, answer
+                    for _, message in ipairs(page.messages) do
+                        if message.type == consts.MSG_TYPE.FUNCTION then tool = message end
+                        if message.type == consts.MSG_TYPE.ASSISTANT and message.data == 'Scripted answer' then answer = message end
+                        test.is_nil(message.metadata.interruption, 'disconnect does not persist a Stop boundary')
+                    end
+                    if answer then
+                        test.not_nil(tool)
+                        test.eq(tool.metadata.status, consts.FUNC_STATUS.SUCCESS)
+                        test.eq(tool.metadata.result.marker, 'stored-tool-result')
+                        break
+                    end
+                    local selected = channel.select({ time.after('10ms'):case_receive(), deadline:case_receive() })
+                    assert(selected.channel ~= deadline, 'completed turn storage deadline')
+                end
+            end)
+        elseif not blocked_only then
         it('preserves Stop on continuation without restarting', function() continuation('cooperative', false) end)
         it('preserves Stop when the plugin reopens the session', function() continuation('cooperative', true) end)
         it('persists recovery when interruption precedes an assistant row', function() continuation('crash', true) end)
@@ -167,4 +248,5 @@ end
 return {
     run_tests = test.run_cases(function() define_tests(false) end),
     run_blocked = test.run_cases(function() define_tests(true) end),
+    run_lifecycle = test.run_cases(function() define_tests(false, true) end),
 }

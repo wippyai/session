@@ -64,6 +64,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         session_errors = {} :: { any },
         response_batches = {} :: { any },
         message_errors = {} :: { any },
+        message_updates = {} :: { any },
     }
 
     local empty_query = {
@@ -132,7 +133,9 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         },
         upstream = {
             response_beginning = function() end,
-            send_message_update = function() end,
+            send_message_update = function(_self, id, event_type, payload)
+                table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
+            end,
             invalidate_message = function() end,
             message_error = function(_self, id, code, message)
                 table.insert(captured.message_errors, { id = id, code = code, message = message })
@@ -1101,6 +1104,33 @@ local function define_tests()
             for _, call in ipairs(calls) do
                 test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
             end
+            test.eq(#captured.message_updates, 2)
+            for index, update in ipairs(captured.message_updates) do
+                test.eq(update.type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+                test.eq(update.payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(update.payload.message_id, calls[index].id)
+                test.eq(update.payload.call_id, calls[index].metadata.call_id)
+                test.eq(update.id, calls[index].metadata.call_id)
+            end
+        end)
+
+        it("settles queued cancelled calls durably before public upstream events", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local result = assert(user_step(ctx))
+            local op = assert((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+            op.cancel_only = true
+            ctx.upstream.send_message_update = function(_self, id, event_type, payload)
+                local row = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1]
+                test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(payload.message_id, row.id)
+                test.eq(payload.status, consts.FUNC_STATUS.CANCELLED)
+                table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
+            end
+            local settled, err = message_handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.is_true(settled.completed)
+            test.eq(#captured.message_updates, 1)
+            test.eq(captured.message_updates[1].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
         end)
 
         it("stops the turn once the agent steps exceed max_turn_iterations", function()

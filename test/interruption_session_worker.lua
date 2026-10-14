@@ -17,16 +17,21 @@ local function run(args: any)
             return {
                 generate = function(_, request)
                     calls = calls + 1
+                    request.worker_pid = process.pid()
                     request.responses_input = response_mapper.map_messages(request.messages)
                     request.responses_instructions = response_mapper.extract_instructions(request.messages)
                     assert(process.send(fixture.reply_pid :: string, 'provider_prompt', request))
+                    if fixture.lifecycle and calls == 1 then time.sleep('1500ms') end
                     if fixture.interrupt and calls == 1 then
                         if fixture.interrupt == 'blocked' then time.sleep('1h') end
                         time.sleep('300ms')
                         if fixture.interrupt == 'crash' then error('Scripted provider interruption') end
                     end
                     return { success = true, result = {
-                        content = 'Scripted answer', tool_calls = {}, finish_reason = 'stop',
+                        content = fixture.lifecycle and calls == 1 and '' or 'Scripted answer',
+                        tool_calls = fixture.lifecycle and calls == 1 and {{
+                            id = 'lifecycle-call', name = 'lifecycle_tool', registry_id = 'app:lifecycle_tool', arguments = '{}',
+                        }} or {}, finish_reason = 'stop',
                         tokens = { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 },
                     } }
                 end,

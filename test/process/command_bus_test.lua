@@ -12,17 +12,6 @@ local uuid = require("uuid")
 local wait_for_boot = require("wait_for_boot")
 local writer = require("writer")
 
--- The session asks the bus to finish (FINISH_AND_EXIT: the client disconnected, the plugin
--- is shutting down, the session went inactive) expecting the in-flight work to wind down and
--- the process to exit. An agent turn is a self-perpetuating chain of operations: every
--- handler result carries the next op. finish() only stops the bus once the queue is empty,
--- so if the chain keeps re-feeding itself through next_ops the queue never empties and the
--- "finishing" session runs forever (observed 2026-09-21: a tool loop survived every
--- graceful-termination signal for 10.5 hours and was only killed by a redeploy).
---
--- A handler that returns next_ops is a continuation of the SAME turn, not new work, so a
--- finishing bus must stop feeding it, exactly the way an intercept (STOP) already does.
-
 local SAFETY_VALVE = 5
 
 local function create_persisted_fixture(): (string, string)
@@ -437,7 +426,7 @@ local function define_tests()
             test.eq(table.concat(order, ","), "result-written,control,held-only")
         end)
 
-        it("finishes after writing held input without an agent step", function()
+        it("finishes the active continuation before writing held input without starting another turn", function()
             local order = {}
             local ctx = { held = { "held" } }
             local bus = command_bus.new(ctx)
@@ -456,7 +445,7 @@ local function define_tests()
             bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
             local _, err = bus:run()
             test.is_nil(err)
-            test.eq(table.concat(order, ","), "held-only")
+            test.eq(table.concat(order, ","), "continued,held-only")
             test.eq(bus.state, "closed")
         end)
     end)

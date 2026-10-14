@@ -5,6 +5,52 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: dep.wippy.relay
+    kind: ns.dependency
+    component: wippy/relay
+    version: '*'
+    parameters:
+      - name: application_host
+        value: app:processes
+      - name: user_security_scope
+        value: app:relay_user
+
+  - name: relay_user
+    kind: registry.entry
+
+  - name: lifecycle_tool
+    kind: function.lua
+    meta:
+      type: tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://lifecycle_tool.lua
+    method: run
+
+  - name: lifecycle_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: gpt-4o
+    prompt: Test only.
+    tools: [app:lifecycle_tool]
+
+  - name: lifecycle_disconnect_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_lifecycle
+
   - name: dep.wippy.test
     kind: ns.dependency
     component: wippy/test
@@ -53,6 +99,7 @@ entries:
       session_repo: wippy.session.persist:session_repo
       message_repo: wippy.session.persist:message_repo
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run_tests
 
@@ -69,6 +116,7 @@ entries:
       session_repo: wippy.session.persist:session_repo
       message_repo: wippy.session.persist:message_repo
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run_blocked
 
@@ -94,6 +142,7 @@ entries:
       context_staging_repo: wippy.session.persist:context_staging_repo
       context_cleanup: wippy.session.process:context_cleanup_runtime
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run
 
@@ -162,6 +211,7 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run
 

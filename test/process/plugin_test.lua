@@ -1653,6 +1653,12 @@ local function define_tests()
             end
             test.eq(finished["pre-shutdown-session"], 1)
             test.is_nil(finished["post-resume-session"])
+            local resumed = {}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.PLUGIN_TOPICS.RESUME then resumed[sent.pid] = true end
+            end
+            test.is_true(resumed["pre-shutdown-session"])
+            test.is_nil(resumed["post-resume-session"])
             cleanup_session_fixture(first_id, first_context)
             cleanup_session_fixture(second_id, second_context)
         end)
