@@ -5,6 +5,24 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: dep.wippy.test
+    kind: ns.dependency
+    component: wippy/test
+    version: ">=v0.4.22"
+
+  - name: prepare_postgres_dependencies
+    kind: function.lua
+    meta:
+      type: bootloader
+      order: 19
+      requires: [app:db]
+    source: file://wait_for_boot.lua
+    modules: [sql, time, security]
+    imports:
+      encryption_key_bootloader: wippy.bootloader.bootloaders:encryption_key
+      migration_bootloader: wippy.migration:migration_bootloader
+    method: prepare_postgres_dependencies
+
   - name: context_cleanup_worker
     kind: process.lua
     source: file://context_cleanup_worker.lua
