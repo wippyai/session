@@ -68,6 +68,22 @@ history pagination.
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
+## Session retirement
+
+Disconnect, chat close, inactivity cleanup, and session-capacity retirement let
+accepted turns and queued writes finish before the process exits. Reconnect or
+reopen cancels pending retirement. Explicit Stop still cancels the turn; normal
+provider and turn limits continue to apply. Relay inactivity collection must
+also wait for the session plugin to exit instead of cancelling its parent hub.
+
+Retiring children occupy their live session slots until EXIT. A new session at
+capacity receives `session_limit_reached` and can be retried after a child exits;
+reopening an existing child needs no additional slot.
+
+Cancelled public tools emit a terminal function-error event after their outcome
+is stored. History keeps `cancelled` in storage and exposes `status: error` with
+`outcome: cancelled` to existing clients, so reloads show a settled result.
+
 ## Tool feedback and loop limits
 
 Settled tool failures are marked as errors in the next model prompt. Public

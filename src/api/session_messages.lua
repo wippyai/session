@@ -131,6 +131,17 @@ function api.handler()
             message.metadata = {}
         end
 
+        -- Existing facades only settle success/error. Keep the durable outcome
+        -- cancelled, but expose a terminal status to those clients on reload.
+        if message.metadata.status == "cancelled" then
+            local projected = {}
+            for key, value in pairs(message.metadata) do projected[key] = value end
+            projected.status = "error"
+            projected.outcome = "cancelled"
+            message.metadata = projected
+            if message.metadata_json then message.metadata_json = json.encode(projected) end
+        end
+
         -- Extract file_uuids from metadata to top level for easier access
         if message.metadata.file_uuids then
             message.file_uuids = message.metadata.file_uuids

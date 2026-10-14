@@ -189,6 +189,92 @@ local function round(report: any, args: any?): any
 end
 
 local function define_tests()
+
+    describe("reported cancelled tool event regression", function()
+        it("settles public cancellation without publishing private or delegation intents", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local calls, ids, types = {}, {}, {}
+            for index, kind in ipairs({consts.MSG_TYPE.FUNCTION,
+                consts.MSG_TYPE.PRIVATE_FUNCTION, consts.MSG_TYPE.DELEGATION}) do
+                local id = "cancel-" .. tostring(index)
+                calls[#calls + 1] = { id = id, name = "tool", arguments = "{}" }
+                ids[id] = ctx.writer:add_message(kind, "{}", { call_id = id, status = consts.FUNC_STATUS.PENDING })
+                types[id] = kind
+            end
+            local terminal = {}
+            ctx.upstream.send_message_update = function(_, id, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then terminal[#terminal + 1] = payload end
+            end
+            local settled, err = message_handlers.process_tools(ctx, {
+                cancel_only = true, tool_calls = calls, call_message_ids = ids, call_message_types = types,
+            })
+            test.is_nil(err)
+            test.is_true(settled.completed)
+            for _, row in ipairs(captured.stored) do test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED) end
+            test.eq(#terminal, 1)
+            test.eq(terminal[1].call_id, "cancel-1")
+            test.eq(terminal[1].message_id, ids["cancel-1"])
+        end)
+        it("emits no terminal cancellation event when durable settlement fails", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            local terminal = 0
+            ctx.writer.update_message_meta = function() return nil, "storage unavailable" end
+            ctx.upstream.send_message_update = function() terminal = terminal + 1 end
+            local _, err = message_handlers.process_tools(ctx, {
+                cancel_only = true, tool_calls = {{id = "call", name = "tool", arguments = "{}"}},
+                call_message_ids = {call = "message"},
+            })
+            test.eq(err, "storage unavailable")
+            test.eq(terminal, 0, "events must follow a committed terminal outcome")
+        end)
+        it("settles a tool cancelled after provider generation in the live event stream", function()
+            local agent = fake_agent(nil)
+            local stopped = false
+            local original_step = agent.step
+            agent.step = function(...)
+                local result = original_step(...)
+                stopped = true
+                return result
+            end
+            local ctx, captured = mock_ctx(agent)
+            local terminal = {}
+            ctx.upstream.send_message_update = function(_, id, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+                    terminal[#terminal + 1] = { id = id, payload = payload }
+                end
+            end
+            ctx.coordinator = { stop_requested = function() return stopped end }
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
+            test.eq(#calls, 1)
+            test.eq(calls[1].metadata.status, consts.FUNC_STATUS.CANCELLED)
+            test.eq(#terminal, 1, "durably cancelled public tool needs a terminal live event")
+        end)
+
+        it("settles a persisted intent cancelled before tool dispatch in the live event stream", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = "call-1", function_name = "pack_document", status = consts.FUNC_STATUS.PENDING,
+            })
+            local terminal = {}
+            ctx.upstream.send_message_update = function(_, message_id, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+                    terminal[#terminal + 1] = { id = message_id, payload = payload }
+                end
+            end
+            local result, err = message_handlers.process_tools(ctx, {
+                cancel_only = true,
+                tool_calls = {{ id = "call-1", name = "pack_document", arguments = "{}" }},
+                call_message_ids = { ["call-1"] = id },
+            })
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.stored[1].metadata.status, consts.FUNC_STATUS.CANCELLED)
+            test.eq(#terminal, 1, "cancellation before dispatch needs a terminal live event")
+        end)
+    end)
     describe("duplicate model call ids", function()
         local function rejects_response(agent, expanded_calls)
             local ctx, captured = mock_ctx(agent)

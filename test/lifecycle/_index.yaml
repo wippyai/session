@@ -1,0 +1,75 @@
+version: "1.0"
+namespace: app.lifecycle
+entries:
+  - name: state
+    kind: store.memory
+    max_size: 100
+  - name: generate
+    kind: function.lua
+    source: file://fixtures.lua
+    method: generate
+    modules: [store, time, sql]
+  - name: driver
+    kind: contract.binding
+    contracts:
+      - contract: wippy.llm:generator
+        methods:
+          generate: app.lifecycle:generate
+      - contract: wippy.llm:provider
+        methods:
+          status: app.lifecycle:generate
+  - name: provider
+    kind: registry.entry
+    meta:
+      type: llm.provider
+      name: session-lifecycle
+    driver:
+      id: app.lifecycle:driver
+      options: {}
+  - name: model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-lifecycle-model
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.lifecycle:provider
+        provider_model: audit
+  - name: agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Lifecycle audit
+    model: session-lifecycle-model
+    prompt: Run the edit tool then finish.
+    tools:
+      - id: app.lifecycle:edit
+        alias: edit
+  - name: edit
+    kind: function.lua
+    meta:
+      type: tool
+      name: edit
+      description: Commit a deterministic edit for lifecycle testing.
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: edit
+    modules: [sql, store, time]
+  - name: lifecycle_runtime_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-lifecycle-native
+      timeout: 60s
+    source: file://lifecycle_runtime_test.lua
+    method: run_tests
+    modules: [store, security, uuid, time, sql]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      boot: app:wait_for_boot
