@@ -62,14 +62,20 @@ message_order.SQLITE_DATE = sqlite_date("date")
 
 -- The SQL expression that orders and compares message dates. `column`
 -- qualifies the date column when the query aliases the messages table
--- (for example "m.date").
+-- (for example "m.date"). A query without that alias reads the messages
+-- table under its own name.
 function message_order.date(db_type: string, column: string?): string
     if db_type == "sqlite" then
         if column == nil or column == "date" then return message_order.SQLITE_DATE end
         return sqlite_date(column)
     end
-    -- PostgreSQL already compares native timestamps, not text.
-    return column or "date"
+    -- PostgreSQL already compares native timestamps, not text. The column is
+    -- always qualified: select_date names its output column "date", and
+    -- PostgreSQL resolves a bare name in ORDER BY to that output column (the
+    -- to_char text) before the table column, so a bare "date" sorts by text and
+    -- cannot use idx_messages_session_date.
+    if column == nil or column == "date" then return "messages.date" end
+    return column
 end
 
 -- The value to compare with message_order.date(db_type) for the stored date

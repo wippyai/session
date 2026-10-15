@@ -942,7 +942,8 @@ local function define_tests()
                 test.contains(description, "idx_messages_chronology")
                 test.is_false(description:find("TEMP B-TREE", 1, true) ~= nil)
             end
-            test.eq(message_order.date("postgres"), "date", "native PostgreSQL comparison stays unchanged")
+            test.eq(message_order.date("postgres"), "messages.date",
+                "the native PostgreSQL column, qualified so ORDER BY cannot resolve it to the output alias")
         end
 
         if postgres then
@@ -1419,7 +1420,11 @@ local function define_tests()
                 test.eq(message_order.date("sqlite"), message_order.SQLITE_DATE)
                 test.eq(message_order.date("sqlite", "date"), message_order.SQLITE_DATE)
                 test.eq(message_order.date("postgres", "m.date"), "m.date")
-                test.eq(message_order.date("postgres"), "date")
+                -- Qualified: a bare "date" in ORDER BY resolves to the
+                -- output column named date (the to_char text) before the
+                -- table column, which defeats idx_messages_session_date.
+                test.eq(message_order.date("postgres"), "messages.date")
+                test.eq(message_order.date("postgres", "date"), "messages.date")
                 -- The date a read returns: the column as is on SQLite, the
                 -- microsecond text on PostgreSQL, whose driver would cut a
                 -- timestamp to whole seconds.
