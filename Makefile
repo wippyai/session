@@ -50,6 +50,14 @@ BENCH_METADATA_MEMORY_OPERATIONS ?= 2048
 BENCH_EXACT_ALLOCATIONS ?= 1
 BENCH_REVISION ?= $(shell git rev-parse HEAD)
 BENCH_FRAMEWORK_REVISION ?= $(if $(FRAMEWORK_DIR),$(shell git -C "$(FRAMEWORK_DIR)" rev-parse HEAD),locked)
+# The suites test-postgres runs, as entry id prefixes: every namespace of the
+# test workspace except two that are SQLite only by design. app.runtime holds
+# only the SQLite bootstrap test (it builds a workspace with sqlite3, bash and
+# make, and checks the SQLite backup) and the benchmarks, so just its handoff
+# suite is listed. app.migration probes the migrations on its own SQLite file,
+# which no database setting reaches. A prefix, not a list of suites, so a new
+# suite runs on PostgreSQL unless someone excludes it here.
+POSTGRES_SUITES ?= app: app.api: app.forms: app.funcs: app.lifecycle: app.persist: app.process: app.run_context: app.runtime:handoff_runtime
 UI_DIR ?= frontend/wippy-form
 UI_ANSWERS_DIR ?= frontend/wippy-form-answers
 
@@ -80,7 +88,7 @@ test-postgres:
 		-o "app:db:options.sslmode=disable" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
-		test -- app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime
+		test -- $(POSTGRES_SUITES)
 
 bench:
 	@set -eu; run_benchmark() { \

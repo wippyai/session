@@ -4,7 +4,7 @@
 # Settings are read from environment variables of the same name as the
 # Makefile variables (TEST_ARTIFACTS, TEST_DIR, TEST_CONFIG, TEST_DB,
 # TEST_BACKUP_DIR, TEST_FILTER, FRAMEWORK_DIR, PGHOST, PGPORT, PGDATABASE,
-# PGUSER, PGPASSWORD, the BENCH_* sizes, UI_DIR, UI_ANSWERS_DIR). Set WIPPY_BIN
+# PGUSER, PGPASSWORD, POSTGRES_SUITES, the BENCH_* sizes, UI_DIR, UI_ANSWERS_DIR). Set WIPPY_BIN
 # (or WIPPY) to a runtime binary path when wippy is not on PATH.
 #
 # prepare and clean do what scripts/test-workspace.sh and
@@ -48,6 +48,9 @@ $testDb = ConvertTo-FullPath (Get-Setting 'TEST_DB' "$testArtifacts/test.db")
 $testBackupDir = ConvertTo-FullPath (Get-Setting 'TEST_BACKUP_DIR' "$testArtifacts/backups")
 $testFilter = Get-Setting 'TEST_FILTER'
 $frameworkDir = Get-Setting 'FRAMEWORK_DIR'
+# The suites test-postgres runs, as entry id prefixes (see POSTGRES_SUITES in
+# the Makefile for what is left out and why).
+$postgresSuites = (Get-Setting 'POSTGRES_SUITES' 'app: app.api: app.forms: app.funcs: app.lifecycle: app.persist: app.process: app.run_context: app.runtime:handoff_runtime') -split '\s+' | Where-Object { $_ }
 $uiDir = Join-Path $repo (Get-Setting 'UI_DIR' 'frontend/wippy-form')
 $uiAnswersDir = Join-Path $repo (Get-Setting 'UI_ANSWERS_DIR' 'frontend/wippy-form-answers')
 
@@ -71,7 +74,9 @@ function Invoke-Native([string]$Dir, [string]$Command, [string[]]$Arguments) {
     try {
         & $Command @Arguments
         if ($LASTEXITCODE -ne 0) {
-            $failure = New-Object System.Exception("$Command $($Arguments -join ' ') failed in $Dir (exit $LASTEXITCODE)")
+            # The failure text reaches logs, so a password override is masked.
+            $shown = $Arguments | ForEach-Object { $_ -replace '(?i)(password=).*', '$1***' }
+            $failure = New-Object System.Exception("$Command $($shown -join ' ') failed in $Dir (exit $LASTEXITCODE)")
             $failure.Data['ExitCode'] = $LASTEXITCODE
             throw $failure
         }
@@ -226,7 +231,7 @@ function Invoke-TestPostgres {
         '-o', 'app:db:options.sslmode=disable',
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
         '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks",
-        'test', '--', 'app.persist:writer_metadata_test', 'app.persist:control_refresh_test', 'app.persist:session_repo_test', 'app.runtime:handoff_runtime')
+        'test', '--') + $postgresSuites
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
 }
 
