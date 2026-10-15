@@ -13,18 +13,11 @@ local message_order = require("message_order")
 -- does not sort by time, and the timestamp on PostgreSQL, which rounds to
 -- microseconds).
 
--- The layout of every new date: RFC3339 in the host's offset, with the
--- fraction padded to 9 digits.
+-- The layout of every new date: RFC3339 in UTC, with the fraction padded to 9
+-- digits. A timestamp column discards an offset and keeps the wall clock, so
+-- a date written in the host's offset would read hours off on a host that is
+-- not in UTC.
 local FIXED_LAYOUT = "2006-01-02T15:04:05.000000000Z07:00"
-
--- Layouts a stored date may come back in: the RFC3339 text SQLite keeps, and
--- the forms a timestamp column may be returned in.
-local READ_LAYOUTS = {
-    time.RFC3339NANO,
-    "2006-01-02 15:04:05.999999999Z07:00",
-    "2006-01-02 15:04:05.999999999 -0700 MST",
-    "2006-01-02 15:04:05.999999999",
-}
 
 -- Steps tried past the latest stored date, smallest first. One microsecond
 -- survives a timestamp column; the larger steps get a text value past a
@@ -43,9 +36,18 @@ local message_date = {}
 -- same fixed-width layout without duplicating the literal.
 message_date.LAYOUT = FIXED_LAYOUT
 
--- now() returns the current instant, fixed width, host offset.
-function message_date.now()
-    return time.now():format(FIXED_LAYOUT)
+-- now(db_type) returns the current instant, fixed width, UTC. PostgreSQL
+-- keeps microseconds and rounds a finer value, so for it the date is cut to
+-- microseconds first: the date handed back is the date the row stores.
+function message_date.now(db_type: string?)
+    local now = time.now()
+    if db_type == "postgres" then
+        -- Seconds and the nanosecond part apart: a Lua number cannot hold
+        -- the whole unix_nano() exactly.
+        local nanosecond = now:nanosecond()
+        now = time.unix(now:unix(), nanosecond - nanosecond % 1000)
+    end
+    return now:utc():format(FIXED_LAYOUT)
 end
 
 -- Takes the session row's write lock in `conn` (a transaction) before the
@@ -93,7 +95,7 @@ local function after_all_rows(conn, session_id, candidate)
 end
 
 local function latest_date(conn, session_id)
-    local rows, err = sql.builder.select("date")
+    local rows, err = sql.builder.select(message_order.select_date(tx.type_of(conn)))
         :from("messages")
         :where("session_id = ?", session_id)
         :order_by(message_order.date(tx.type_of(conn)) .. " DESC")
@@ -104,15 +106,10 @@ local function latest_date(conn, session_id)
     return rows[1] and rows[1].date
 end
 
--- The instant a stored date names, in any layout it may come back in
--- (READ_LAYOUTS), or nil when `value` is not such a date.
+-- The instant a stored date names, in any layout it may come back in, or nil
+-- when `value` is not such a date.
 function message_date.parse_stored(value: any)
-    if type(value) ~= "string" or value == "" then return nil end
-    for _, layout in ipairs(READ_LAYOUTS) do
-        local parsed, parse_err = time.parse(layout, value)
-        if not parse_err and parsed then return parsed end
-    end
-    return nil
+    return message_order.parse(value)
 end
 
 -- next(conn, session_id) returns a date the store orders after every
@@ -122,12 +119,11 @@ end
 --
 -- It returns the current instant when that already sorts last. Otherwise
 -- it returns the latest stored date plus the smallest step that sorts last,
--- formatted in that value's own offset, which keeps its wall-clock digits
--- on a timestamp column. If no step does (the stored value cannot be
+-- in UTC. If no step does (the stored value cannot be
 -- parsed), it returns the current instant and the tie falls to message_id,
 -- rather than blocking writes to the session.
 function message_date.next(conn, session_id)
-    local now = message_date.now()
+    local now = message_date.now(tx.type_of(conn))
     local is_last, err = after_all_rows(conn, session_id, now)
     if err then return nil, err end
     if is_last then return now end
@@ -137,7 +133,7 @@ function message_date.next(conn, session_id)
     local parsed = message_date.parse_stored(latest)
     if parsed then
         for _, step in ipairs(STEPS) do
-            local candidate = parsed:add(step):format(FIXED_LAYOUT)
+            local candidate = parsed:add(step):utc():format(FIXED_LAYOUT)
             local sorts_last, check_err = after_all_rows(conn, session_id, candidate)
             if check_err then return nil, check_err end
             if sorts_last then return candidate end

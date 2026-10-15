@@ -6,6 +6,42 @@
 local time = require("time")
 local message_order = {}
 
+-- Layouts a stored date may come back in: the RFC3339 text SQLite keeps, and
+-- the forms a timestamp column may be returned in.
+local READ_LAYOUTS = {
+    time.RFC3339NANO,
+    "2006-01-02 15:04:05.999999999Z07:00",
+    "2006-01-02 15:04:05.999999999 -0700 MST",
+    "2006-01-02 15:04:05.999999999",
+}
+
+-- The instant a stored date names, in any layout it may come back in, or nil
+-- when `value` is not such a date.
+function message_order.parse(value: any)
+    if type(value) ~= "string" or value == "" then return nil end
+    for _, layout in ipairs(READ_LAYOUTS) do
+        local parsed, parse_err = time.parse(layout, value)
+        if not parse_err and parsed then return parsed end
+    end
+    return nil
+end
+
+-- PostgreSQL's driver returns a timestamp column at one-second precision, so
+-- a date read as is loses its fraction and rows of one second tie. Reads of a
+-- message date select this text instead: UTC, in the nine-digit layout of
+-- message_date.LAYOUT (the column holds microseconds, so the last three
+-- digits are zeros).
+local POSTGRES_READ_DATE = [[to_char(@DATE@, 'YYYY-MM-DD"T"HH24:MI:SS.US"000Z"') AS date]]
+
+-- The select-list item that reads a message date in full precision. `column`
+-- qualifies the date column (default "date"); the result is always named
+-- "date" on PostgreSQL.
+function message_order.select_date(db_type: string, column: string?): string
+    if db_type ~= "postgres" then return column or "date" end
+    local item = string.gsub(POSTGRES_READ_DATE, "@DATE@", column or "date")
+    return item
+end
+
 local SQLITE_KEY_TEMPLATE = [[
     (strftime('%Y-%m-%dT%H:%M:%S', substr(@DATE@, 1, 19) ||
         CASE WHEN substr(@DATE@, -6, 1) IN ('+', '-') THEN substr(@DATE@, -6) ELSE 'Z' END)
@@ -37,11 +73,12 @@ function message_order.date(db_type: string, column: string?): string
 end
 
 -- The value to compare with message_order.date(db_type) for the stored date
--- `date`. SQLite compares the normalized key text, so the date is converted
--- to the same text; PostgreSQL compares the timestamp, so it passes as is.
+-- `date`, in any layout a stored date comes back in. SQLite compares the
+-- normalized key text, so the date is converted to the same text. PostgreSQL
+-- compares the timestamp, which drops an offset it is given, so the date goes
+-- as the UTC wall clock. A value that is no date passes as is.
 function message_order.bind(db_type: string, date: string): string
-    if db_type ~= "sqlite" then return date end
-    local parsed = time.parse(time.RFC3339NANO, date)
+    local parsed = message_order.parse(date)
     if not parsed then return date end
     return parsed:utc():format("2006-01-02T15:04:05.000000000")
 end
@@ -53,7 +90,7 @@ function message_order.sort(rows: {any})
     local keys = {}
     for _, row in ipairs(rows) do
         local key = tostring(row.date or "")
-        local parsed = time.parse(time.RFC3339NANO, key)
+        local parsed = message_order.parse(key)
         if parsed then key = parsed:utc():format("2006-01-02T15:04:05.000000000Z") end
         keys[row] = key
     end

@@ -27,6 +27,15 @@ local function insert_artifact(db, artifact_id, session_id, user_id, kind, title
     )
 end
 
+-- A stored date is the current instant: within minutes of now when read with
+-- its own offset. A host-offset string that a timestamp column keeps as wall
+-- clock reads hours off on a host that is not in UTC.
+local function is_current_instant(value)
+    local parsed = type(value) == "string" and time.parse(time.RFC3339NANO, value) or nil
+    if not parsed then return false end
+    return math.abs(parsed:unix() - os.time()) < 300
+end
+
 local function define_tests()
     describe("Artifact Repository", function()
         -- Test data
@@ -135,6 +144,24 @@ local function define_tests()
                 test.is_nil(artifact)
                 test.contains(tostring(err), "No authenticated user found")
             end
+        end)
+
+        it("stamps created_at and updated_at with the current instant", function()
+            if security.actor() == nil then return end
+            local artifact_id = uuid.v7()
+            local created, create_err = artifact_repo.create(artifact_id, test_data.session_id, "static",
+                "Date stamp", "content")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local stored = artifact_repo.get(artifact_id)
+            local _, update_err = artifact_repo.update(artifact_id, { title = "Date stamp 2" })
+            local changed = artifact_repo.get(artifact_id)
+            -- The other cases count the session's artifacts, so remove this one first.
+            artifact_repo.delete(artifact_id)
+            test.is_nil(update_err)
+            test.is_true(is_current_instant(stored.created_at), "created_at: " .. tostring(stored.created_at))
+            test.is_true(is_current_instant(stored.updated_at), "updated_at: " .. tostring(stored.updated_at))
+            test.is_true(is_current_instant(changed.updated_at), "changed updated_at: " .. tostring(changed.updated_at))
         end)
 
         it("should get an artifact by ID", function()
@@ -316,6 +343,12 @@ local function define_tests()
             local third_id = uuid.v7()
             local foreign_id = uuid.v7()
 
+            -- The sessions exist: PostgreSQL enforces the artifact foreign key.
+            for _, session_id in ipairs({ session_a, session_b }) do
+                test.is_nil(select(2, session_repo.create(session_id, owner_id, test_data.context_id,
+                    "Catalog session", "test")))
+            end
+
             local db_resource, _ = consts.get_db_resource()
             local db, db_err = sql.get(db_resource)
             if db_err then
@@ -399,6 +432,8 @@ local function define_tests()
             db:execute("DELETE FROM artifacts WHERE session_id = $1 OR session_id = $2",
                 { session_a, session_b })
             db:release()
+            session_repo.delete(session_a)
+            session_repo.delete(session_b)
         end)
 
         describe("get_owned", function()

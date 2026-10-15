@@ -79,7 +79,7 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
         end
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local _, write_err = with_connection(opts, function(conn)
         if session_id and session_id ~= "" then
@@ -402,7 +402,7 @@ function artifact_repo.update(artifact_id, updates, opts)
         end
 
         -- Always update the updated_at timestamp
-        update_query = update_query:set("updated_at", time.now():format(time.RFC3339))
+        update_query = update_query:set("updated_at", time.now():utc():format(time.RFC3339))
 
         -- Add where clause - the conditional update is the CAS winner check
         -- when a caller supplies expected_version, and the lost-update guard

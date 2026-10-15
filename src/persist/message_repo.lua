@@ -431,7 +431,7 @@ function message_repo.find(message_id)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
         :from("messages")
         :where("message_id = ?", message_id)
         :limit(1)
@@ -479,7 +479,7 @@ function message_repo.get_by_request_id(session_id, request_id)
     local query = sql.builder.select(
         "message_id",
         "session_id",
-        "date",
+        message_order.select_date(tx.type_of(db)),
         "type",
         "data",
         "metadata",
@@ -528,7 +528,7 @@ function message_repo.list_all_by_session(session_id)
     if err then
         return nil, err
     end
-    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
         :order_by(message_order.date(tx.type_of(db)) .. " ASC, message_id ASC")
@@ -791,7 +791,7 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
 
@@ -880,7 +880,7 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
     local date_key = message_order.date(tx.type_of(db))
 
     -- Build the SELECT query
-    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
@@ -936,7 +936,7 @@ function message_repo.list_by_type(session_id, msg_type, limit, offset)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
@@ -985,7 +985,7 @@ function message_repo.get_latest(session_id)
     end
 
     -- Build the SELECT query
-    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
         :order_by(message_order.date(tx.type_of(db)) .. " DESC, message_id DESC")
@@ -1144,7 +1144,7 @@ function message_repo.list_pending_answers(session_id, limit)
 
     local pending = {}
     local _, scan_err = scan(db, function()
-        return sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+        return sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(db)), "type", "data", "metadata")
             :from("messages")
             :where(sql.builder.and_({
                 sql.builder.expr("session_id = ?", session_id),
@@ -1221,7 +1221,7 @@ function message_repo.admit_pending_answer(session_id, message_id)
         local _, lock_err = message_date.lock_session(dbtx, session_id)
         if lock_err then return nil, lock_err end
 
-        local rows, select_err = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+        local rows, select_err = sql.builder.select("message_id", "session_id", message_order.select_date(tx.type_of(dbtx)), "type", "data", "metadata")
             :from("messages")
             :where("message_id = ?", message_id)
             :limit(1):run_with(dbtx):query()

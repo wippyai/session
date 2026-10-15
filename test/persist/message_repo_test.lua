@@ -16,9 +16,40 @@ local security = require("security")
 local consts = require("consts")
 local wait_for_boot = require("wait_for_boot")
 
+-- Whether `date` is chronologically after `earlier`. Dates are compared as
+-- instants: PostgreSQL returns trimmed fractions, which do not sort as text.
+local function later_than(date, earlier)
+    local a, b = message_date.parse_stored(date), message_date.parse_stored(earlier)
+    return a ~= nil and b ~= nil and a:unix_nano() > b:unix_nano()
+end
+
+local function same_instant(date, other)
+    local a, b = message_date.parse_stored(date), message_date.parse_stored(other)
+    return a ~= nil and b ~= nil and a:unix_nano() == b:unix_nano()
+end
+
+-- "sqlite" or "postgres", read when the cases are defined.
+local function database_kind()
+    local db = sql.get(consts.get_db_resource())
+    if not db then return "unknown" end
+    local kind = db:type()
+    db:release()
+    return kind
+end
+
 type CreatedMessage = {message_id: string, session_id: string, type: string, date: string}
 
+-- A stored date is the current instant: within minutes of now when read with
+-- its own offset. A host-offset string that a timestamp column keeps as wall
+-- clock reads hours off on a host that is not in UTC.
+local function is_current_instant(value)
+    local parsed = type(value) == "string" and time.parse(time.RFC3339NANO, value) or nil
+    if not parsed then return false end
+    return math.abs(parsed:unix() - os.time()) < 300
+end
+
 local function define_tests()
+    local postgres = database_kind() == "postgres"
     describe("Message Repository", function()
         -- Test data
         local test_data = {
@@ -847,14 +878,12 @@ local function define_tests()
             test.eq(latest.message_id, newer_id)
         end)
 
-        it("orders historical dates exactly across fractions, offsets, ties and every cursor direction", function()
-            local dates = {
-                "2099-01-01T00:00:00Z", "2099-01-01T00:00:00.000000001Z",
-                "2099-01-01T00:00:00.1Z", "2099-01-01T00:00:00.100000000Z",
-                "2098-12-31T19:00:00.100000001-05:00", "2099-01-01T01:00:00.11+01:00",
-                "2099-01-01T00:00:00.9Z", "2099-01-01T00:00:00.999999999Z",
-                "2099-01-01T00:00:01Z", "2099-01-01T00:00:01.000Z", "2099-01-01T00:00:01.000000001Z",
-            }
+        -- Eleven dates in chronological order, ties included (index 3 and 4,
+        -- 9 and 10), written under one session. `exact` is the SQLite layout
+        -- set: nanoseconds and numeric offsets, kept as text. PostgreSQL keeps
+        -- microseconds and drops an offset, so its dates are UTC and at least a
+        -- microsecond apart.
+        local function check_historical_order(dates, exact)
             local prefix = uuid.v7() .. "-"
             local ids, insert_errors = {}, {}
             local db = sql.get(consts.get_db_resource())
@@ -873,8 +902,11 @@ local function define_tests()
             local typed, typed_err = message_repo.list_by_type(test_data.session_id, "function", 3, 1)
             local latest, latest_err = message_repo.get_latest(test_data.session_id)
             local all, all_err = message_repo.list_all_by_session(test_data.session_id)
-            local plan, plan_err = db:query("EXPLAIN QUERY PLAN SELECT message_id FROM messages WHERE session_id = $1 ORDER BY "
-                .. message_order.SQLITE_DATE .. " DESC, message_id DESC LIMIT 3", {test_data.session_id})
+            local plan, plan_err = nil, nil
+            if exact then
+                plan, plan_err = db:query("EXPLAIN QUERY PLAN SELECT message_id FROM messages WHERE session_id = $1 ORDER BY "
+                    .. message_order.SQLITE_DATE .. " DESC, message_id DESC LIMIT 3", {test_data.session_id})
+            end
             local _, cleanup_err = db:execute("DELETE FROM messages WHERE session_id = $1 AND message_id LIKE $2",
                 {test_data.session_id, prefix .. "%"})
             db:release()
@@ -886,7 +918,11 @@ local function define_tests()
             test.eq(#after, #dates)
             for index, row in ipairs(after) do
                 test.eq(row.message_id, ids[index])
-                test.eq(row.date, dates[index], "stored/output timestamp must not be rewritten")
+                if exact then
+                    test.eq(row.date, dates[index], "stored/output timestamp must not be rewritten")
+                else
+                    test.is_true(same_instant(row.date, dates[index]), "stored instant " .. tostring(row.date))
+                end
             end
             for index = 1, 3 do
                 test.eq(tail[index].message_id, ids[#ids - 3 + index])
@@ -899,13 +935,38 @@ local function define_tests()
             test.is_true(forward.has_more)
             test.eq(forward.prev_cursor, ids[6])
             test.eq(backward.next_cursor, ids[4])
-            local details = {}
-            for _, row in ipairs(plan) do details[#details + 1] = row.detail end
-            local description = table.concat(details, " ")
-            test.contains(description, "idx_messages_chronology")
-            test.is_false(description:find("TEMP B-TREE", 1, true) ~= nil)
+            if exact then
+                local details = {}
+                for _, row in ipairs(plan) do details[#details + 1] = row.detail end
+                local description = table.concat(details, " ")
+                test.contains(description, "idx_messages_chronology")
+                test.is_false(description:find("TEMP B-TREE", 1, true) ~= nil)
+            end
             test.eq(message_order.date("postgres"), "date", "native PostgreSQL comparison stays unchanged")
-        end)
+        end
+
+        if postgres then
+            it("orders historical dates by microsecond, ties and every cursor direction", function()
+                check_historical_order({
+                    "2099-01-01T00:00:00Z", "2099-01-01T00:00:00.000001Z",
+                    "2099-01-01T00:00:00.1Z", "2099-01-01T00:00:00.100000Z",
+                    "2099-01-01T00:00:00.100001Z", "2099-01-01T00:00:00.11Z",
+                    "2099-01-01T00:00:00.9Z", "2099-01-01T00:00:00.999999Z",
+                    "2099-01-01T00:00:01Z", "2099-01-01T00:00:01.000Z", "2099-01-01T00:00:01.000001Z",
+                }, false)
+            end)
+            test.it_skip("orders nanosecond dates across fractions and offsets (SQLite only: PostgreSQL keeps microseconds and drops offsets)", function() end)
+        else
+            it("orders historical dates exactly across fractions, offsets, ties and every cursor direction", function()
+                check_historical_order({
+                    "2099-01-01T00:00:00Z", "2099-01-01T00:00:00.000000001Z",
+                    "2099-01-01T00:00:00.1Z", "2099-01-01T00:00:00.100000000Z",
+                    "2098-12-31T19:00:00.100000001-05:00", "2099-01-01T01:00:00.11+01:00",
+                    "2099-01-01T00:00:00.9Z", "2099-01-01T00:00:00.999999999Z",
+                    "2099-01-01T00:00:01Z", "2099-01-01T00:00:01.000Z", "2099-01-01T00:00:01.000000001Z",
+                }, true)
+            end)
+        end
 
         it("should count messages in a session", function()
             local count, err = message_repo.count_by_session(test_data.session_id)
@@ -1082,6 +1143,23 @@ local function define_tests()
             test.is_true(earlier < later)
         end)
 
+        it("dates a new row with the current instant", function()
+            local context_id = uuid.v7()
+            local session_id = uuid.v7()
+            context_repo.create(context_id, "primary", "{}")
+            session_repo.create(session_id, test_data.user_id, context_id, "Row date stamp", "test")
+            local message_id = uuid.v7()
+            local created, create_err = message_repo.create(message_id, session_id, consts.MSG_TYPE.USER, "stamp")
+            test.is_nil(create_err)
+            local returned = (created :: any).date
+            local stored = message_repo.get(message_id)
+            message_repo.delete(message_id)
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+            test.is_true(is_current_instant(returned), "returned date: " .. tostring(returned))
+            test.is_true(is_current_instant((stored :: any).date), "stored date: " .. tostring((stored :: any).date))
+        end)
+
         it("keeps 100 rapid create() calls in one session in strict insertion order", function()
             local context_id = uuid.v7()
             local session_id = uuid.v7()
@@ -1108,7 +1186,7 @@ local function define_tests()
             -- Dates must be strictly increasing, not just tied and saved by
             -- message_id ordering.
             for i = 2, #listed.messages do
-                test.is_true(listed.messages[i].date > listed.messages[i - 1].date)
+                test.is_true(later_than(listed.messages[i].date, listed.messages[i - 1].date))
             end
 
             for _, id in ipairs(ids) do message_repo.delete(id) end
@@ -1148,7 +1226,7 @@ local function define_tests()
                 test.eq(listed.messages[i + 1].message_id, id)
             end
             for i = 2, #listed.messages do
-                test.is_true(listed.messages[i].date > listed.messages[i - 1].date)
+                test.is_true(later_than(listed.messages[i].date, listed.messages[i - 1].date))
             end
 
             message_repo.delete(first_id)
@@ -1295,12 +1373,15 @@ local function define_tests()
             -- and numeric offsets, and one tie that only message_id breaks.
             it("ranks mixed date layouts the same in a reload, in message_order.sort and for the next date", function()
                 local session_id = new_session("One key for every order")
+                -- A timestamp column drops an offset and keeps microseconds, so on
+                -- PostgreSQL the offset rows are written as their UTC instants and
+                -- the nanosecond row one microsecond later.
                 local rows = {
                     { id = "m-trim", date = "2031-03-04T10:00:00.15Z" },
-                    { id = "m-pad", date = "2031-03-04T10:00:00.150000001Z" },
-                    { id = "m-offset", date = "2031-03-04T12:00:00.1+02:00" },
+                    { id = "m-pad", date = postgres and "2031-03-04T10:00:00.150001Z" or "2031-03-04T10:00:00.150000001Z" },
+                    { id = "m-offset", date = postgres and "2031-03-04T10:00:00.1Z" or "2031-03-04T12:00:00.1+02:00" },
                     { id = "m-whole", date = "2031-03-04T10:00:00Z" },
-                    { id = "m-tie-b", date = "2031-03-04T11:00:00.15+01:00" },
+                    { id = "m-tie-b", date = postgres and "2031-03-04T10:00:00.15Z" or "2031-03-04T11:00:00.15+01:00" },
                     { id = "m-tie-a", date = "2031-03-04T10:00:00.150000000Z" },
                     { id = "m-late", date = "2031-03-04T10:00:01Z" },
                 }
@@ -1339,11 +1420,23 @@ local function define_tests()
                 test.eq(message_order.date("sqlite", "date"), message_order.SQLITE_DATE)
                 test.eq(message_order.date("postgres", "m.date"), "m.date")
                 test.eq(message_order.date("postgres"), "date")
+                -- The date a read returns: the column as is on SQLite, the
+                -- microsecond text on PostgreSQL, whose driver would cut a
+                -- timestamp to whole seconds.
+                test.eq(message_order.select_date("sqlite"), "date")
+                test.eq(message_order.select_date("sqlite", "m.date"), "m.date")
+                test.contains(message_order.select_date("postgres"), "to_char(date, ")
+                test.contains(message_order.select_date("postgres", "m.date"), "to_char(m.date, ")
+                test.contains(message_order.select_date("postgres"), "AS date")
                 -- The compared value: the SQLite key text for the same instant, the
                 -- date itself where PostgreSQL compares timestamps.
                 test.eq(message_order.bind("sqlite", "2031-03-04T12:00:00.1+02:00"), "2031-03-04T10:00:00.100000000")
                 test.eq(message_order.bind("sqlite", "2031-03-04T10:00:00Z"), "2031-03-04T10:00:00.000000000")
-                test.eq(message_order.bind("postgres", "2031-03-04T12:00:00.1+02:00"), "2031-03-04T12:00:00.1+02:00")
+                test.eq(message_order.bind("postgres", "2031-03-04T12:00:00.1+02:00"), "2031-03-04T10:00:00.100000000",
+                    "a timestamp column drops an offset, so the bound text is UTC")
+                test.eq(message_order.bind("postgres", "2001-03-01 10:00:00 +0000 UTC"), "2001-03-01T10:00:00.000000000",
+                    "the layout a timestamp may come back in")
+                test.eq(message_order.bind("postgres", "not a date"), "not a date")
             end)
 
             it("refuses steering writes inside tx.run that do not pass the transaction", function()

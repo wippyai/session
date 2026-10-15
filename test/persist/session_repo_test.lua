@@ -10,6 +10,15 @@ local tx = require("tx")
 local json = require("json")
 local wait_for_boot = require("wait_for_boot")
 
+-- A stored date is the current instant: within minutes of now when read with
+-- its own offset. A host-offset string that a timestamp column keeps as wall
+-- clock reads hours off on a host that is not in UTC.
+local function is_current_instant(value)
+    local parsed = type(value) == "string" and time.parse(time.RFC3339NANO, value) or nil
+    if not parsed then return false end
+    return math.abs(parsed:unix() - os.time()) < 300
+end
+
 local function define_tests()
     describe("Session Repository", function()
         -- Test data
@@ -361,6 +370,22 @@ local function define_tests()
             test.eq(session.title, "Updated Session Title")
         end)
 
+        it("stamps start and last message dates with the current instant", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Date stamp", "test")
+            test.is_nil(create_err)
+            local stored = session_repo.get(session_id)
+            test.is_true(is_current_instant(stored.start_date), "start_date: " .. tostring(stored.start_date))
+            test.is_true(is_current_instant(stored.last_message_date),
+                "last_message_date: " .. tostring(stored.last_message_date))
+            local updated = session_repo.update_session_meta(session_id, { title = "Date stamp 2" })
+            test.is_true(is_current_instant(updated.last_message_date),
+                "updated last_message_date: " .. tostring(updated.last_message_date))
+            session_repo.delete(session_id)
+            test.not_nil(created)
+        end)
+
         it("should update last message date", function()
             local timestamp = os.time() - 3600
             local result, err = session_repo.update_session_meta(
@@ -371,12 +396,12 @@ local function define_tests()
             test.is_nil(err)
             test.not_nil(result)
             test.eq(result.session_id, test_data.session_id)
-            test.eq(result.last_message_date, time.unix(timestamp, 0):format(time.RFC3339))
+            test.eq(result.last_message_date, time.unix(timestamp, 0):utc():format(time.RFC3339))
             test.is_true(result.updated)
 
             -- Verify the update
             local session, err = session_repo.get(test_data.session_id)
-            test.eq(session.last_message_date, time.unix(timestamp, 0):format(time.RFC3339))
+            test.eq(session.last_message_date, time.unix(timestamp, 0):utc():format(time.RFC3339))
         end)
 
         it("should update multiple session fields at once", function()
@@ -545,24 +570,23 @@ local function define_tests()
 
         -- session_repo.delete removes the session's artifacts, session
         -- contexts and messages, then the session row, in one tx.run. The
-        -- helpers below write those rows directly, so a test can also place
-        -- them under a session id that has no session row (the SQLite test
-        -- database does not enforce the foreign keys).
+        -- helpers below write those rows directly. Every row has a session:
+        -- PostgreSQL enforces the foreign keys, and a date is the RFC3339
+        -- text a timestamp column accepts.
         local function add_dependents(session_id)
             local db, db_err = sql.get(consts.get_db_resource())
             test.is_nil(db_err)
-            local now = os.time()
-            local stamp = time.now():format(time.RFC3339)
+            local stamp = time.now():utc():format(time.RFC3339)
             local _, artifact_err = db:execute(
                 "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at)"
                     .. " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 { uuid.v7(), session_id, test_data.user_id, "static", "Delete test", "content", nil, stamp, stamp })
             local _, context_err = db:execute(
                 "INSERT INTO session_contexts (id, session_id, type, text, time) VALUES ($1, $2, $3, $4, $5)",
-                { uuid.v7(), session_id, "note", "Delete test", now })
+                { uuid.v7(), session_id, "note", "Delete test", stamp })
             local _, message_err = db:execute(
                 "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
-                { uuid.v7(), session_id, now, "user", "Delete test", "{}" })
+                { uuid.v7(), session_id, stamp, "user", "Delete test", "{}" })
             db:release()
             test.is_nil(artifact_err)
             test.is_nil(context_err)
@@ -610,12 +634,47 @@ local function define_tests()
             test.eq(after.sessions, 0)
         end)
 
-        it("rolls back the dependent deletes when the session row is missing", function()
+        -- Makes the delete of one session row affect no row, the way a delete
+        -- that lost a race for the row does. The foreign keys forbid dependents
+        -- without a session, so a trigger stands in for the vanished row.
+        -- Returns a function that removes the trigger.
+        local function keep_session_row(session_id)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local name = "session_test_keep_" .. string.gsub(session_id, "[^%w]", "_")
+            local statements = {}
+            if db:type() == "postgres" then
+                statements = {
+                    "CREATE OR REPLACE FUNCTION session_test_skip_delete() RETURNS trigger AS $body$ BEGIN RETURN NULL; END; $body$ LANGUAGE plpgsql",
+                    string.format("CREATE TRIGGER %s BEFORE DELETE ON sessions FOR EACH ROW WHEN (OLD.session_id = '%s') EXECUTE FUNCTION session_test_skip_delete()", name, session_id),
+                }
+            else
+                statements = {
+                    string.format("CREATE TRIGGER %s BEFORE DELETE ON sessions WHEN old.session_id = '%s' BEGIN SELECT RAISE(IGNORE); END", name, session_id),
+                }
+            end
+            for _, statement in ipairs(statements) do
+                local _, trigger_err = db:execute(statement)
+                test.is_nil(trigger_err)
+            end
+            db:release()
+            return function()
+                local cleanup_db = assert(sql.get(consts.get_db_resource()))
+                cleanup_db:execute("DROP TRIGGER IF EXISTS " .. name .. " ON sessions")
+                cleanup_db:release()
+            end
+        end
+
+        it("rolls back the dependent deletes when the session row delete affects no row", function()
             local session_id = uuid.v7()
+            test.is_nil(select(2, session_repo.create(session_id, test_data.user_id, test_data.context_id,
+                "Delete without a row", "test")))
             add_dependents(session_id)
+            local drop_trigger = keep_session_row(session_id)
 
             local result, err = session_repo.delete(session_id)
             local after = rows_of(session_id)
+            drop_trigger()
             remove_rows(session_id)
 
             test.is_nil(result)
@@ -623,6 +682,7 @@ local function define_tests()
             test.eq(after.artifacts, 1, "the artifact delete was rolled back")
             test.eq(after.session_contexts, 1, "the session context delete was rolled back")
             test.eq(after.messages, 1, "the message delete was rolled back")
+            test.eq(after.sessions, 1, "the session row is still there")
         end)
 
         it("refuses to run inside another transaction and deletes nothing", function()

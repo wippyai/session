@@ -154,7 +154,7 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
         return nil, err
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local query = sql.builder.insert("sessions")
         :set_map({
@@ -410,7 +410,7 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
         return current_state
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
     local next_revision = current_revision + 1
     local update = sql.builder.update('sessions'):set_map({
         attention_enabled = enabled,
@@ -422,8 +422,21 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     local result, update_err = update:run_with(dbtx):exec()
     if update_err or not result or result.rows_affected ~= 1 then
         dbtx:rollback()
+        if update_err then
+            db:release()
+            return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE', current_state
+        end
+        -- Another writer committed between the read above and this update. On
+        -- PostgreSQL the update waits for that writer, and the state read
+        -- before it is out of date, so the caller gets the committed state.
+        local committed_rows = current_query:limit(1):run_with(db):query()
         db:release()
-        return nil, update_err and 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' or 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+        local committed = committed_rows and committed_rows[1]
+        if committed then
+            current_state = attention_context(committed.attention_enabled, tonumber(committed.attention_revision) or 0,
+                committed.attention_updated_at, committed.attention_updated_by)
+        end
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
     end
 
     local commit_ok, commit_err = dbtx:commit()
@@ -505,9 +518,9 @@ function session_repo.update_session_meta(session_id, updates)
     -- Always update last_message_date if any field is updated
     local date
     if updates.last_message_date ~= nil then
-        date = time.unix(updates.last_message_date, 0):format(time.RFC3339)
+        date = time.unix(updates.last_message_date, 0):utc():format(time.RFC3339)
     else
-        date = time.now():format(time.RFC3339)
+        date = time.now():utc():format(time.RFC3339)
     end
     update_query = update_query:set("last_message_date", date)
     result.last_message_date = date
