@@ -551,7 +551,25 @@ function session_repo.delete(session_id)
     end
 
     local result, err = tx.run(function(dbtx)
-        -- Delete artifacts first
+        -- Lock order: the staging guard, then the session row, then the
+        -- rows that belong to the session. Every other path that locks a
+        -- session takes the session row before it touches an artifact (a form
+        -- answer, a form creation) and a receipt takes the guard before the
+        -- session row, so no pair of transactions can wait on each other.
+        -- Deleting the artifacts first made a delete that raced a form answer
+        -- for the same form a deadlock on PostgreSQL.
+
+        -- Serialize deletion against stage creation/cancellation and release private bytes atomically.
+        local _, stage_lock_err = dbtx:execute('UPDATE context_stage_guard SET serial = serial WHERE id = 1')
+        if stage_lock_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
+
+        local _, session_lock_err = sql.builder.update("sessions")
+            :set("last_message_date", sql.builder.expr("last_message_date"))
+            :where("session_id = ?", session_id)
+            :run_with(dbtx):exec()
+        if session_lock_err then return nil, "Failed to lock session: " .. tostring(session_lock_err) end
+
+        -- Delete artifacts
         local artifacts_delete_query = sql.builder.delete("artifacts")
             :where("session_id = ?", session_id)
 
@@ -560,9 +578,6 @@ function session_repo.delete(session_id)
             return nil, "Failed to delete session artifacts: " .. artifacts_err
         end
 
-        -- Serialize deletion against stage creation/cancellation and release private bytes atomically.
-        local _, stage_lock_err = dbtx:execute('UPDATE context_stage_guard SET serial = serial WHERE id = 1')
-        if stage_lock_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
         local _, stage_delete_err = sql.builder.delete('context_stages'):where('session_id = ?', session_id)
             :run_with(dbtx):exec()
         if stage_delete_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
