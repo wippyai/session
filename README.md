@@ -101,11 +101,18 @@ when Wippy is not on PATH. The test target clears only its own test database.
 
 ## Runtime tests and benchmarks
 
-`make test-postgres FRAMEWORK_DIR=/absolute/path/to/framework` checks the
-affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
-disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
-`PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
-supplies the application's user-table contract and runs these checks in UTC.
+`make test-postgres FRAMEWORK_DIR=/absolute/path/to/framework` runs every
+database suite of the test workspace (persistence, forms, admission, steering,
+the Attention state and the real handoffs) against PostgreSQL. It leaves out
+the SQLite bootstrap test, the benchmarks, and the migration probe, which use
+their own SQLite files; `POSTGRES_SUITES` in the Makefile lists what runs.
+Supply a fresh disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`,
+`PGUSER`, and `PGPASSWORD`; the target never drops it. CI provides PostgreSQL
+17. The harness supplies the application's user-table contract (a trigger
+registers the users that test rows name; the foreign keys stay enforced) and
+runs these checks in UTC. Dates are written in UTC, and message dates are read
+back at microsecond precision, because the PostgreSQL driver returns a
+timestamp column cut to whole seconds.
 
 On Unix, `make install test` runs the suite against the locked dependencies.
 `make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
