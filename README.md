@@ -73,12 +73,16 @@ seconds after the last client leaves before it finishes the user's sessions,
 and a client that connects again within that time cancels the wait. A running
 turn then ends the way it does without a reload, so it applies the steering
 sent during it and admits the form answers accepted during it. When no client
-returns within 10 seconds, the plugin finishes the sessions, which works like
-a Stop for a running turn. Unused steering then remains pending, and so do the
-form answers accepted during the turn. The next session start admits those
-answers and starts a turn for them. If a client connected again while the
-session was finishing, the plugin starts the session for those answers as soon
-as it exits, and steering alone starts nothing.
+returns within 10 seconds, the plugin retires the sessions (see Session
+retirement below): a running turn finishes, applies the steering sent during
+it and admits the form answers accepted during it, and the session exits when
+its accepted work is done. A Stop that arrives meanwhile still ends the turn;
+unused steering then remains pending, and so do the form answers accepted
+during the turn. The next session start admits those answers and starts a turn
+for them. If a client connects again after the 10 seconds while the session
+is still retiring, it takes the retirement back. If the session already exited,
+the plugin starts it again for form answers that are still pending, and
+steering alone starts nothing.
 
 A turn cut off by a runtime stop is settled when the user's session plugin
 starts again: pending tool calls are repaired and the session is stored idle,
