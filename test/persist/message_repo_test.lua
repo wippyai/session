@@ -1289,6 +1289,63 @@ local function define_tests()
                 test.eq(stored.meta.interaction.revision, 1)
             end)
 
+            -- Reload (SQL), the steering/prompt sort (Lua) and the date of the next
+            -- row must all rank dates through one key. Rows hold the layouts the
+            -- store has kept over time: trimmed and padded fractions, a UTC marker
+            -- and numeric offsets, and one tie that only message_id breaks.
+            it("ranks mixed date layouts the same in a reload, in message_order.sort and for the next date", function()
+                local session_id = new_session("One key for every order")
+                local rows = {
+                    { id = "m-trim", date = "2031-03-04T10:00:00.15Z" },
+                    { id = "m-pad", date = "2031-03-04T10:00:00.150000001Z" },
+                    { id = "m-offset", date = "2031-03-04T12:00:00.1+02:00" },
+                    { id = "m-whole", date = "2031-03-04T10:00:00Z" },
+                    { id = "m-tie-b", date = "2031-03-04T11:00:00.15+01:00" },
+                    { id = "m-tie-a", date = "2031-03-04T10:00:00.150000000Z" },
+                    { id = "m-late", date = "2031-03-04T10:00:01Z" },
+                }
+                for _, row in ipairs(rows) do
+                    insert_row(session_id, row.id, consts.MSG_TYPE.USER, row.date, nil)
+                end
+                local reloaded = ids_in_order(session_id)
+
+                local sorted = {}
+                for _, row in ipairs(rows) do table.insert(sorted, { message_id = row.id, date = row.date }) end
+                message_order.sort(sorted)
+                local by_sort = {}
+                for _, row in ipairs(sorted) do table.insert(by_sort, row.message_id) end
+                test.eq(table.concat(reloaded, ","), table.concat(by_sort, ","), "SQL order and Lua order agree")
+                test.eq(table.concat(by_sort, ","),
+                    "m-whole,m-offset,m-tie-a,m-tie-b,m-trim,m-pad,m-late",
+                    "chronological; three rows share one instant and fall to message_id")
+
+                -- The next date sorts after every one of them in both places.
+                local created_id = uuid.v7()
+                local _, create_err = message_repo.create(created_id, session_id, consts.MSG_TYPE.USER, "newest")
+                test.is_nil(create_err)
+                test.eq(ids_in_order(session_id)[#rows + 1], created_id)
+                local created: any = message_repo.get(created_id)
+                table.insert(sorted, { message_id = created_id, date = created.date })
+                message_order.sort(sorted)
+                test.eq(sorted[#sorted].message_id, created_id)
+            end)
+
+            it("qualifies every date reference of the SQLite key and keeps PostgreSQL native", function()
+                local qualified = message_order.date("sqlite", "m.date")
+                test.is_false(qualified:find("substr(date", 1, true) ~= nil, "no unqualified date reference is left")
+                test.is_false(qualified:find("length(date", 1, true) ~= nil)
+                test.contains(qualified, "substr(m.date, 1, 19)")
+                test.eq(message_order.date("sqlite"), message_order.SQLITE_DATE)
+                test.eq(message_order.date("sqlite", "date"), message_order.SQLITE_DATE)
+                test.eq(message_order.date("postgres", "m.date"), "m.date")
+                test.eq(message_order.date("postgres"), "date")
+                -- The compared value: the SQLite key text for the same instant, the
+                -- date itself where PostgreSQL compares timestamps.
+                test.eq(message_order.bind("sqlite", "2031-03-04T12:00:00.1+02:00"), "2031-03-04T10:00:00.100000000")
+                test.eq(message_order.bind("sqlite", "2031-03-04T10:00:00Z"), "2031-03-04T10:00:00.000000000")
+                test.eq(message_order.bind("postgres", "2031-03-04T12:00:00.1+02:00"), "2031-03-04T12:00:00.1+02:00")
+            end)
+
             it("refuses steering writes inside tx.run that do not pass the transaction", function()
                 local session_id = new_session("Steering under a transaction")
                 local _, run_err = tx.run(function()
