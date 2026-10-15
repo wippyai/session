@@ -160,6 +160,7 @@ entries:
       session_repo: wippy.session.persist:session_repo
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
+      message_date: wippy.session.persist:message_date
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run_tests

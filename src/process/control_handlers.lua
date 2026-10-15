@@ -4,6 +4,7 @@ local consts = require("consts")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
 local tx = require("tx")
+local message_date = require("message_date")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
 local form_meta = require("form_meta")
@@ -419,6 +420,12 @@ function control_handlers.control_forms(ctx, op)
     -- form and does not make it stale.
     local held_written = nil
     local record, create_err = tx.run(function(dbtx)
+        -- The session row first, before the artifact insert takes a share lock
+        -- on it through the foreign key. A session delete holds the row's
+        -- update lock and waits for that share lock to clear, so taking the
+        -- row after the insert would make the two wait for each other.
+        local _, lock_err = message_date.lock_session(dbtx, ctx.session_id)
+        if lock_err then return nil, lock_err end
         if ctx.write_held_before_form then
             local written, held_err = ctx.write_held_before_form({ tx = dbtx })
             if not written then return nil, "Failed to store held input: " .. tostring(held_err) end

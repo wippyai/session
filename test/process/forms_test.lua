@@ -21,6 +21,7 @@ local context_repo = require("context_repo")
 local session_repo = require("session_repo")
 local reader = require("reader")
 local writer = require("writer")
+local message_date = require("message_date")
 local wait_for_boot = require("wait_for_boot")
 
 -- Session forms inside the session process, on the real database: creation
@@ -1499,6 +1500,162 @@ local function define_tests()
                 test.is_nil(admitted)
                 test.eq(message_repo.get(accepted.answer_message_id).metadata.session_form.pending, true)
             end)
+        end)
+
+        -- A form creation and a session delete meet on the session row and on
+        -- the form's artifact row. Creating a form inserts the artifact, and
+        -- the foreign key takes a share lock on the session row; a delete takes
+        -- the session row first and its exclusive lock last. If the creation
+        -- takes the session row only after the artifact insert, the two wait
+        -- for each other and PostgreSQL aborts one. The creation therefore
+        -- takes the session row before it writes anything. SQLite serializes
+        -- writers on one lock, so it has no such cycle.
+        describe("creation against a session delete", function()
+            local function database_kind()
+                local db = sql.get(consts.get_db_resource())
+                if not db then return "unknown" end
+                local kind = db:type()
+                db:release()
+                return kind
+            end
+
+            local function waiting_for_a_lock()
+                local db = assert(sql.get(consts.get_db_resource()))
+                local rows = db:query("SELECT count(*) AS n FROM pg_stat_activity"
+                    .. " WHERE wait_event_type = 'Lock' AND datname = current_database() AND pid <> pg_backend_pid()")
+                db:release()
+                return rows ~= nil and rows[1] ~= nil and tonumber(rows[1].n) > 0
+            end
+
+            -- The creation op that process_tools would hand control_forms.
+            local function creation_op(ctx: any)
+                local call_id = "call-" .. uuid.v7()
+                local _, ids: any, store_err = ctx.writer:add_response("", {}, {
+                    { id = call_id, name = "ask_user", arguments = DEFINITION, registry_id = TOOL_ID,
+                        type = consts.MSG_TYPE.FUNCTION },
+                })
+                test.is_nil(store_err)
+                return { forms = { { artifact_id = uuid.v7(), definition = DEFINITION } },
+                    turn_id = ctx.turn_state.id, call_id = call_id, tool_message_id = ids[call_id] }
+            end
+
+            local function rows_left(session_id)
+                local db = assert(sql.get(consts.get_db_resource()))
+                local left = db:query("SELECT (SELECT count(*) FROM artifacts WHERE session_id = $1) AS artifacts,"
+                    .. " (SELECT count(*) FROM messages WHERE session_id = $1) AS messages", { session_id })
+                db:release()
+                return tonumber(left[1].artifacts), tonumber(left[1].messages)
+            end
+
+            if database_kind() == "postgres" then
+                it("lets a form creation and a session delete both finish when they race for the session", function()
+                    local ctx = new_ctx()
+                    local session_id = ctx.session_id
+                    local op = creation_op(ctx)
+                    local original_lock = message_date.lock_session
+                    local reached, resume = channel.new(1), channel.new(1)
+                    local paused = false
+                    -- Holds the creation just before its first take of the
+                    -- session row, with whatever it has written until then.
+                    message_date.lock_session = function(conn, id)
+                        if not paused and id == session_id then
+                            paused = true
+                            reached:send(true)
+                            resume:receive()
+                        end
+                        return original_lock(conn, id)
+                    end
+
+                    local created, deleted = channel.new(1), channel.new(1)
+                    coroutine.spawn(function()
+                        local result, create_err = control_handlers.control_forms(ctx, op)
+                        created:send({ result = result, err = create_err })
+                    end)
+                    reached:receive()
+                    coroutine.spawn(function()
+                        local result, delete_err = session_repo.delete(session_id)
+                        deleted:send({ result = result, err = delete_err })
+                    end)
+                    -- The delete either waits for a lock or finishes at once.
+                    local outcome = {}
+                    for _ = 1, 40 do
+                        if waiting_for_a_lock() then break end
+                        local tick = time.after("50ms")
+                        local selected = channel.select({ deleted:case_receive(), tick:case_receive() })
+                        if selected.channel == deleted then outcome.delete = selected.value; break end
+                    end
+                    resume:send(true)
+
+                    local deadline = time.after("20s")
+                    while not (outcome.create and outcome.delete) do
+                        local selected = channel.select({
+                            created:case_receive(), deleted:case_receive(), deadline:case_receive(),
+                        })
+                        test.is_true(selected.channel ~= deadline, "the race settles instead of hanging")
+                        if selected.channel == created then outcome.create = selected.value
+                        elseif selected.channel == deleted then outcome.delete = selected.value end
+                    end
+                    message_date.lock_session = original_lock
+
+                    local summary = string.format("create %s, delete %s",
+                        tostring(outcome.create.err or "ok"), tostring(outcome.delete.err or "ok"))
+                    test.is_false(tostring(outcome.create.err):find("deadlock", 1, true) ~= nil, summary)
+                    test.is_nil(outcome.delete.err, summary)
+                    if outcome.create.err then
+                        test.contains(tostring(outcome.create.err), "Session not found", summary)
+                    end
+                    test.is_nil(session_repo.get(session_id), "the session is deleted")
+                    local artifacts, messages = rows_left(session_id)
+                    test.eq(artifacts, 0)
+                    test.eq(messages, 0)
+                end)
+
+                it("fails the form creation cleanly when a delete already holds the session row", function()
+                    local ctx = new_ctx()
+                    local session_id = ctx.session_id
+                    local op = creation_op(ctx)
+                    -- Stands in for a delete that got the session row first.
+                    local db = assert(sql.get(consts.get_db_resource()))
+                    local holder = assert(db:begin())
+                    local _, lock_err = holder:execute(
+                        "UPDATE sessions SET last_message_date = last_message_date WHERE session_id = $1", { session_id })
+                    test.is_nil(lock_err)
+
+                    local created = channel.new(1)
+                    coroutine.spawn(function()
+                        local result, create_err = control_handlers.control_forms(ctx, op)
+                        created:send({ result = result, err = create_err })
+                    end)
+                    for _ = 1, 100 do
+                        if waiting_for_a_lock() then break end
+                        time.sleep("50ms")
+                    end
+                    test.is_true(waiting_for_a_lock(), "the creation waits for the session row")
+                    local delete_errors = {}
+                    for _, statement in ipairs({
+                        "DELETE FROM artifacts WHERE session_id = $1",
+                        "DELETE FROM messages WHERE session_id = $1",
+                        "DELETE FROM sessions WHERE session_id = $1",
+                    }) do
+                        local _, delete_err = holder:execute(statement, { session_id })
+                        if delete_err then delete_errors[#delete_errors + 1] = tostring(delete_err) end
+                    end
+                    local _, commit_err = holder:commit()
+                    db:release()
+                    test.eq(#delete_errors, 0, table.concat(delete_errors, "; "))
+                    test.is_nil(commit_err)
+
+                    local deadline = time.after("20s")
+                    local selected = channel.select({ created:case_receive(), deadline:case_receive() })
+                    test.is_true(selected.channel ~= deadline, "the creation settles instead of hanging")
+                    test.is_nil(selected.value.result)
+                    test.contains(tostring(selected.value.err), "Session not found")
+                    test.is_false(tostring(selected.value.err):find("deadlock", 1, true) ~= nil)
+                end)
+            else
+                test.it_skip("lets a form creation and a session delete both finish when they race for the session (PostgreSQL only: SQLite serializes writers on one lock)", function() end)
+                test.it_skip("fails the form creation cleanly when a delete already holds the session row (PostgreSQL only)", function() end)
+            end
         end)
     end)
 end
