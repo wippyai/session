@@ -8,6 +8,7 @@ entries:
     modules: [json, time]
     imports:
       attention_read: wippy.agent.tools:attention_read
+      message_order: wippy.session.persist:message_order
       prompt_builder: wippy.session:prompt_builder
 
   - name: attention_action_intents

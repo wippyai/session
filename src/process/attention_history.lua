@@ -1,6 +1,7 @@
 local json = require('json')
 local time = require('time')
 local read = require('attention_read')
+local message_order = require('message_order')
 local prompt_builder = require('prompt_builder')
 
 local M = { TTL_SECONDS = 30 }
@@ -68,19 +69,13 @@ local function timestamp(value)
     return nil
 end
 
--- Message dates come back from the database. SQLite returns the text Session
--- wrote, with its zone offset. Postgres keeps them in a `timestamp` column, which
--- drops the offset, and returns the writer's local wall clock with a "Z" suffix
--- (Postgres 16: written 18:08:42+02:00, read back 18:08:42Z). A "Z" row date is
--- therefore read as server-local wall-clock time; on a UTC server both readings
--- agree.
-local WALL_CLOCK = '2006-01-02T15:04:05.999999999'
-
+-- Message dates come back from the database in the layouts message_order.parse
+-- reads. Session writes every new date as UTC with a "Z" suffix, so "Z" names
+-- the UTC instant on SQLite and on PostgreSQL, and the instant does not depend
+-- on the zone of the server.
 local function row_time(value)
-    local wall = type(value) == 'string' and value:match('^(.+)Z$') or nil
-    if not wall then return timestamp(value) end
-    local ok, parsed, err = pcall(time.parse, WALL_CLOCK, wall, time.localtz)
-    if ok and not err and parsed then return parsed:unix() end
+    local parsed = message_order.parse(value)
+    if parsed then return parsed:unix() end
     return nil
 end
 

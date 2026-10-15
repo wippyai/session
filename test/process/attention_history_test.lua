@@ -2,13 +2,20 @@ local test = require('test')
 local time = require('time')
 local history = require('attention_history')
 local message_repo = require('message_repo')
+local message_date = require('message_date')
+local session_repo = require('session_repo')
+local context_repo = require('context_repo')
+local uuid = require('uuid')
+local security = require('security')
+local wait_for_boot = require('wait_for_boot')
 local prompt_builder = require('prompt_builder')
 
 local function define_tests()
     describe('Attention observation lifetime', function()
         local now = 1789732800 -- 2026-09-18T12:00:00Z
-        -- Row dates as Session writes them: server-local time with its offset.
-        local function row_date(at) return time.unix(at, 0):format(time.RFC3339NANO) end
+        -- Row dates as Session writes them: UTC with a Z suffix and a nine digit
+        -- fraction (message_date.LAYOUT), whatever zone the server runs in.
+        local function row_date(at) return time.unix(at, 0):utc():format(message_date.LAYOUT) end
         local server_date = row_date(now)
         local function user(id, attachments)
             return { message_id = id, type = 'user', date = server_date, data = 'Keep user text', metadata = {
@@ -168,15 +175,32 @@ local function define_tests()
             test.eq(updates[1].message_id, 'ahead')
             test.eq(updates[1].stale, 'Attention observation expired.')
         end)
-        it('reads a Postgres row date, the server wall clock with a Z suffix, as server-local time', function()
-            local function postgres_date(at) return time.unix(at, 0):format('2006-01-02T15:04:05') .. 'Z' end
+        -- Literal dates, not dates built from the clock: the instant a row names
+        -- is fixed text, so the test does not depend on the zone of the host.
+        it('reads a Z row date as the UTC instant it names, in every layout a row comes back in', function()
+            test.eq(time.parse(time.RFC3339NANO, '2026-09-18T12:00:00.000000000Z'):unix(), now)
+            local layouts = {
+                '2026-09-18T11:59:59.000000000Z', -- written by Session, SQLite and PostgreSQL
+                '2026-09-18T11:59:59Z',           -- an older SQLite row without a fraction
+                '2026-09-18T11:59:59.000000Z',    -- a trimmed fraction
+            }
+            for _, date in ipairs(layouts) do
+                local fresh, old = observation('fresh'), observation('old', 1, '{"name":"Cancel"}')
+                fresh.date = date
+                old.date = '2026-09-18T11:59:29.000000000Z'
+                local _, updates = history.prepare({ user('first'), fresh, old }, now)
+                test.eq(#updates, 1, date)
+                test.eq(updates[1].message_id, 'old', date)
+                test.eq(updates[1].stale, 'Attention observation expired.')
+            end
+        end)
+        it('reads an offset row date by its instant too', function()
             local fresh, old = observation('fresh'), observation('old', 1, '{"name":"Cancel"}')
-            fresh.date = postgres_date(now - 1)
-            old.date = postgres_date(now - 31)
+            fresh.date = '2026-09-18T14:59:59.000000000+03:00'
+            old.date = '2026-09-18T05:59:29.000000000-06:00'
             local _, updates = history.prepare({ user('first'), fresh, old }, now)
             test.eq(#updates, 1)
             test.eq(updates[1].message_id, 'old')
-            test.eq(updates[1].stale, 'Attention observation expired.')
         end)
         it('times context attachments from the server row date and honors a shorter declared lifetime', function()
             local skewed = { kind = 'wippy.attention', version = 4, attachment_id = 'skewed',
@@ -197,6 +221,45 @@ local function define_tests()
             projected = history.prepare({ old }, now)
             test.eq(#projected[1].metadata.context_attachments, 0,
                 'a row older than the lifetime drops context although the client clock is ahead')
+        end)
+    end)
+
+    describe('Attention observation lifetime on stored dates', function()
+        local ids = { session = uuid.v7(), context = uuid.v7(), user = uuid.v7() }
+        before_all(function()
+            wait_for_boot.run()
+            local actor = security.actor()
+            if actor then ids.user = actor:id() end
+            local _, context_err = context_repo.create(ids.context, 'primary', 'Attention history context')
+            test.is_nil(context_err)
+            local _, session_err = session_repo.create(ids.session, ids.user, ids.context, 'Attention history', 'test')
+            test.is_nil(session_err)
+        end)
+        after_all(function()
+            session_repo.delete(ids.session)
+            context_repo.delete(ids.context)
+        end)
+
+        it('times a row written through message_repo.create from the instant its date names', function()
+            local created, create_err = message_repo.create(uuid.v7(), ids.session, 'private_function', '{"name":"Save"}', {
+                registry_id = 'wippy.agent.tools:attention_find_semantic', function_name = 'attention_find_semantic',
+                call_id = 'call-stored', status = 'success',
+                result = { schema = 'wippy.attention.model.v1', status = 'inspected', outcome = 'ok',
+                    host = 'host', revisions = { tree = 1 }, nodes = { { 'canonical-node' } } },
+            })
+            test.is_nil(create_err)
+            local stored = message_repo.get(created.message_id)
+            local start = message_date.parse_stored(stored.date)
+            test.not_nil(start, 'the stored date is a date')
+            local started = start:unix()
+            test.is_true(math.abs(started - time.now():unix()) < 300, 'the date names the current instant: ' .. stored.date)
+            local user_row = { message_id = 'user', type = 'user', date = '2000-01-01T00:00:00.000000000Z', data = 'Keep', metadata = {} }
+            local rows = { user_row, stored }
+            local _, updates = history.prepare(rows, started + 29)
+            test.eq(#updates, 0, 'a row written now is fresh 29 seconds later, in any server zone')
+            _, updates = history.prepare(rows, started + 30)
+            test.eq(#updates, 1, 'and expires at the lifetime, measured from the instant it names')
+            test.eq(updates[1].stale, 'Attention observation expired.')
         end)
     end)
 

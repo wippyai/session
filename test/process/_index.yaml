@@ -317,11 +317,17 @@ entries:
     source: file://attention_history_test.lua
     modules:
       - time
+      - uuid
+      - security
     imports:
       attention_history: wippy.session.process:attention_history
       message_repo: wippy.session.persist:message_repo
+      message_date: wippy.session.persist:message_date
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
     method: run
 
   - name: attention_action_intents_test
