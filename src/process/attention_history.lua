@@ -205,15 +205,19 @@ function M.build(context, options)
         if not saved then return nil, save_err or 'Attention observation withdrawal failed' end
     end
     local adapter = setmetatable({}, { __index = function(_, key)
-        -- A data field the prompt builder reads (the forms index needs it).
-        if key == 'session_id' then return context.reader.session_id end
         if key == 'messages' then return function()
             local query = {}
             function query:from_checkpoint() return self end
             function query:all() return projected end
             return query
         end end
-        return function(_, ...) return context.reader[key](context.reader, ...) end
+        -- A data field (session_id, which the forms index reads) is passed as
+        -- data; only a method is bound to the reader. A name the reader lacks
+        -- stays absent, so a check such as type(session.artifacts) tells the
+        -- truth.
+        local member = context.reader[key]
+        if type(member) ~= 'function' then return member end
+        return function(_, ...) return member(context.reader, ...) end
     end })
     return prompt_builder.from_session(adapter, options)
 end

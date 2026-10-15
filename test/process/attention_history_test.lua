@@ -2,6 +2,7 @@ local test = require('test')
 local time = require('time')
 local history = require('attention_history')
 local message_repo = require('message_repo')
+local prompt_builder = require('prompt_builder')
 
 local function define_tests()
     describe('Attention observation lifetime', function()
@@ -239,6 +240,36 @@ local function define_tests()
                 end
             end
             test.is_true(found, 'the forms index lists the pending answer in the prompt')
+        end)
+
+        -- The builder reads the reader's data fields (session_id for the forms
+        -- index) and calls its methods. A field the hook's stand-in turned into
+        -- a function, as it did for session_id, silently disables whatever
+        -- reads it.
+        it('hands the builder the reader data fields as data and its methods as methods', function()
+            local captured: any = nil
+            local original = prompt_builder.from_session
+            prompt_builder.from_session = function(session) captured = session; return nil, 'stop here' end
+            local function query(rows: any)
+                local result = {}
+                function result:from_checkpoint() return self end
+                function result:all() return rows, nil end
+                return result
+            end
+            local reader = {
+                session_id = 'session-1', user_id = 'user-1',
+                messages = function() return query({}) end,
+                state = function() return { meta = {} } end,
+            }
+            history.build({ reader = reader, writer = {} }, {})
+            prompt_builder.from_session = original
+            test.not_nil(captured)
+            test.eq(captured.session_id, 'session-1')
+            test.eq(captured.user_id, 'user-1')
+            test.eq(type(captured.messages), 'function')
+            test.eq(type(captured.state), 'function')
+            test.eq(captured:state().meta ~= nil, true, 'methods still run on the reader')
+            test.is_nil(captured.no_such_field, 'a name the reader lacks is absent, not a function')
         end)
 
         -- The hook hands the builder its own message list. A form answer the
