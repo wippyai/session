@@ -3,6 +3,7 @@ local session = require("session")
 
 local function fixture(write_error, rollback_error)
     local events = {}
+    local boundaries = {}
     local ctx = {
         status = "running",
         stop_requested = false,
@@ -19,9 +20,10 @@ local function fixture(write_error, rollback_error)
                 if write_error then return nil, write_error end
                 return true
             end,
-            stop_with_input_rollback = function(_, updates)
+            stop_with_input_rollback = function(_, updates, _, boundary)
                 events[#events + 1] = "stop-write"
-                if rollback_error then return nil, rollback_error end
+                if rollback_error or write_error then return nil, rollback_error or write_error end
+                boundaries[#boundaries + 1] = boundary
                 for _, update in ipairs(updates) do update.restored = true end
                 return true
             end,
@@ -45,24 +47,26 @@ local function fixture(write_error, rollback_error)
             events[#events + 1] = "session-error:" .. code
         end,
     }
-    return ctx, commands, events
+    return ctx, commands, events, boundaries
 end
 
 local function define_tests()
     describe("Stop persistence boundary", function()
         it("acknowledges only after Stop and interaction are committed", function()
-            local ctx, commands, events = fixture()
+            local ctx, commands, events, boundaries = fixture()
 
             local ok, err = session._commit_stop(ctx, commands, "stop-1")
 
             test.is_nil(err)
             test.is_true(ok)
-            test.eq(events[1], "write")
+            test.eq(events[1], "stop-write")
             test.eq(events[2], "ack:stop-1")
             test.eq(#events, 2)
             test.is_true(ctx.stop_requested)
             test.is_nil(ctx.turn_state.input_policy)
             test.is_false(ctx.interaction.can_send)
+            test.contains(boundaries[1].data, "This Stop applies only to that turn")
+            test.contains(boundaries[1].data, "Later user messages are active requests")
         end)
 
         it("restores the active turn when Stop persistence fails", function()
@@ -72,7 +76,7 @@ local function define_tests()
 
             test.is_nil(ok)
             test.eq(err, "disk failure")
-            test.eq(events[1], "write")
+            test.eq(events[1], "stop-write")
             test.eq(events[2], "error:stop-2:STORAGE_ERROR")
             test.is_false(ctx.stop_requested)
             test.eq(ctx.turn_state.input_policy.while_running, "steer")

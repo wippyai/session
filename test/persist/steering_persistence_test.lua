@@ -118,6 +118,44 @@ local function define_tests()
             test.eq(message_repo.get(id).data, "new turn")
         end)
 
+        it("commits Stop history with interaction state and rolls it back on failure", function()
+            local boundary = {
+                message_id = uuid.v7(), data = "Stop applies only to the preceding turn.",
+                metadata = { preserve_position = true, interruption = { reason = "stop" } },
+            }
+            local ok, err = message_repo.stop_with_input_rollback(session_b, {}, {
+                meta = { interaction = { can_send = false, revision = 4 } },
+            }, boundary)
+            test.is_nil(err)
+            test.is_true(ok)
+            local stored = assert(message_repo.get(boundary.message_id))
+            test.eq(stored.type, "developer")
+            test.eq(stored.metadata.interruption.reason, "stop")
+            test.is_true(stored.metadata.preserve_position)
+            local saved_session = assert(session_repo.get(session_b, user_id))
+            test.eq(saved_session.meta.interaction.revision, 4)
+            test.eq(saved_session.last_message_date, stored.date)
+
+            local failed_boundary = {
+                message_id = uuid.v7(), data = boundary.data, metadata = boundary.metadata,
+            }
+            -- Fail after the history insert, when the transaction reads session metadata.
+            local db = assert(sql.get(consts.get_db_resource()))
+            local rows = assert(db:query("SELECT meta FROM sessions WHERE session_id = $1", { session_b }))
+            assert(db:execute("UPDATE sessions SET meta = $1 WHERE session_id = $2", { "{", session_b }))
+            db:release()
+            ok, err = message_repo.stop_with_input_rollback(session_b, {}, {}, failed_boundary)
+            db = assert(sql.get(consts.get_db_resource()))
+            assert(db:execute("UPDATE sessions SET meta = $1 WHERE session_id = $2", { rows[1].meta, session_b }))
+            db:release()
+            test.is_nil(ok)
+            test.not_nil(err)
+            test.is_nil(message_repo.get(failed_boundary.message_id), "failed Stop must not leave history behind")
+            saved_session = assert(session_repo.get(session_b, user_id))
+            test.eq(saved_session.meta.interaction.revision, 4)
+            test.eq(saved_session.last_message_date, stored.date)
+        end)
+
         it("ignores legacy metadata but rejects an explicit false input", function()
             local resource = consts.get_db_resource()
             local function set_raw_metadata(id, raw_metadata)

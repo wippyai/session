@@ -57,6 +57,13 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn.
 
+Explicit Stop also commits a developer message in chronological history, in the
+same transaction as the Stop state and pending-input rollback. It applies only
+to the interrupted turn: later user requests run normally, including requests
+to continue that work. The message stays at its historical position rather
+than becoming a global model instruction. Reopening a session does not add
+another Stop message, and lifecycle retirement does not create one.
+
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
 for Stop, keep explicit false values, and ignore older revisions. Servers

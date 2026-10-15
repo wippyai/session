@@ -229,6 +229,7 @@ entries:
       benchmark_report: app.runtime:benchmark_report
       agent: wippy.agent:agent
       prompt: wippy.llm:prompt
+      response_mapper: wippy.llm.openai:mapper
 
   - name: handoff_benchmark
     kind: function.lua
@@ -251,6 +252,7 @@ entries:
       benchmark_report: app.runtime:benchmark_report
       agent: wippy.agent:agent
       prompt: wippy.llm:prompt
+      response_mapper: wippy.llm.openai:mapper
 
   - name: metadata_benchmark
     kind: function.lua

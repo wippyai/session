@@ -57,6 +57,18 @@ local function clone(value)
     return result
 end
 
+local function stop_boundary()
+    local id, err = uuid.v7()
+    if not id then return nil, err end
+    return {
+        message_id = id,
+        data = "The user stopped the preceding turn. That turn does not resume automatically. "
+            .. "This Stop applies only to that turn. Later user messages are active requests; "
+            .. "follow them normally, including requests to continue the stopped work.",
+        metadata = { preserve_position = true, interruption = { reason = "stop" } },
+    }
+end
+
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -85,18 +97,17 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
     local interaction = input_policy.snapshot(context, candidate, context.current_agent)
     local stop_gate = nil
     local stopped, stop_err
-    if context.input_apply_batch and type(context.writer.stop_with_input_rollback) == "function" then
+    if context.input_apply_batch then
         stop_gate = channel.new(1)
         context.stop_commit_channel = stop_gate
-        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch, {
+    end
+    local boundary
+    if running then boundary, stop_err = stop_boundary() end
+    if not running or boundary then
+        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch or {}, {
             status = context.status,
             meta = { interaction = interaction },
-        })
-    else
-        stopped, stop_err = context.writer:update_meta({
-            status = context.status,
-            meta = { interaction = interaction },
-        })
+        }, boundary)
     end
     if not stopped then
         local detail = tostring(stop_err or "Failed to persist Stop")

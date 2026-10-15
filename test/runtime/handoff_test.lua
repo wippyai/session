@@ -15,6 +15,7 @@ local env = require("env")
 local benchmark_report = require("benchmark_report")
 local agent = require("agent")
 local prompt = require("prompt")
+local response_mapper = require("response_mapper")
 local active_pid = nil
 local active_exit = nil
 
@@ -268,6 +269,94 @@ local function run_scenario(options)
     if not ok then error(failure) end
 end
 
+local function run_stop_history_scenario(reopen)
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("scenario", { hold_prompt = true, parent = process.pid() })
+    local actor = security.actor()
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, actor:id(), context_id, "Stop history", "test", {}, {
+        agent_id = "app.runtime:help", model = "session-runtime-help",
+    }))
+    local old_request = "Rebuild the document."
+    local followups = { "Continue rebuilding the document.", "Now answer a different question." }
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, actor:id(), true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "old-request", data = { text = old_request },
+        }))
+        local ready = receive_until(function(topic) return topic == "fixture:prompt_ready" end, "held prompt")
+        for _, request_id in ipairs({ "stop", "stop-again" }) do
+            assert(process.send(pid, consts.TOPICS.STOP, { request_id = request_id }))
+            receive_until(function(_, data) return data.request_id == request_id end, "committed Stop")
+        end
+        assert(process.send(ready.pid, "fixture:prompt_release", true))
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == "idle"
+        end, "stopped turn")
+        test.eq(#storage:get("requests"), 0, "Stop must suppress the held provider request")
+        if reopen then
+            close_process(pid, session_id)
+            pid = open_process(session_id, actor:id(), false)
+        end
+        local history = assert(message_repo.list_all_by_session(session_id))
+        local boundary, boundaries = nil, 0
+        for _, message in ipairs(history) do
+            if message.type == consts.MSG_TYPE.DEVELOPER and message.metadata.interruption then
+                boundary, boundaries = message.data, boundaries + 1
+                test.eq(message.metadata.interruption.reason, "stop")
+                test.is_true(message.metadata.preserve_position)
+            end
+        end
+        test.eq(boundaries, 1, "repeated Stop and reopen must not duplicate history")
+        test.contains(boundary, "does not resume automatically")
+        test.contains(boundary, "Later user messages are active requests")
+        test.contains(boundary, "including requests to continue the stopped work")
+        storage:set("scenario", {})
+        for index, text in ipairs(followups) do
+            assert(process.send(pid, consts.TOPICS.MESSAGE, {
+                request_id = "followup-" .. index, data = { text = text },
+            }))
+            local settled = receive_until(function(topic, data)
+                return topic == "session:" .. session_id and data.status == "idle"
+            end, "follow-up completion")
+            test.is_true(settled.interaction.can_send, "Stop must not disable later turns")
+            local requests = storage:get("requests")
+            test.eq(#requests, index, "each later request must reach the provider normally")
+            local messages = requests[index].messages
+            for _, input in ipairs({ messages, response_mapper.map_messages(messages) }) do
+                local old_position, boundary_position, current_position, count = nil, nil, nil, 0
+                for position, message in ipairs(input) do
+                    for _, part in ipairs(message.content or {}) do
+                        if part.text == old_request then old_position = position end
+                        if part.text == boundary then boundary_position, count = position, count + 1 end
+                        if part.text == text then current_position = position end
+                    end
+                end
+                test.eq(count, 1, "Stop must remain one historical event")
+                test.not_nil(old_position)
+                test.not_nil(boundary_position)
+                test.not_nil(current_position)
+                test.is_true(old_position < boundary_position and boundary_position < current_position,
+                    "Stop must precede the active request in provider input")
+            end
+            local instructions = response_mapper.extract_instructions(messages)
+            test.is_nil(instructions and instructions:find(boundary, 1, true),
+                "historical Stop must not become a global provider instruction")
+        end
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
 local function framework_stops_before_generation()
     local probe = agent.new({ id = "stop-check-probe", name = "Stop check probe",
         description = "Detects step stop_check support", prompt = "Probe." })
@@ -302,6 +391,11 @@ local function define_tests()
         test.it("commits a handoff but suppresses its continuation after Stop", function()
             run_scenario({ stop = true, reopen = true })
         end)
+        for _, reopen in ipairs({ false, true }) do
+            test.it("scopes Stop to earlier work and executes later requests" .. (reopen and " after reopen" or ""), function()
+                run_stop_history_scenario(reopen)
+            end)
+        end
         local stop_boundary = "suppresses provider generation when Stop commits while the next prompt is built"
         if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_stops_before_generation() then
             test.it("honors Stop during prompt construction even after retirement is pending", function()
