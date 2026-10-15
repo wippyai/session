@@ -232,7 +232,7 @@ local function run(args)
         base_config = base_config,
         active_sessions = {} :: {[string]: ActiveSession},
         session_count = 0,
-        shutting_down = false,
+        shutting_down = false :: boolean,
         -- session id -> { failures, wait }: a session started for its
         -- pending form answers that failed; the scan skips it `wait` times.
         resume_backoff = {} :: {[string]: any},
@@ -240,7 +240,7 @@ local function run(args)
         -- The grace period after the user's last client left, while it runs:
         -- { generation, timer, cancel } (begin_shutdown).
         shutdown_deadline = nil :: any,
-        shutdown_generation = 0,
+        shutdown_generation = 0 :: number,
     }
 
     process.set_options({ trap_links = true })
@@ -418,7 +418,7 @@ local function run(args)
         -- A repeated "shutdown" keeps the grace period it already started.
         if state.shutting_down then return end
         state.shutting_down = true
-        state.shutdown_generation = state.shutdown_generation + 1
+        state.shutdown_generation = (state.shutdown_generation :: number) + 1
         local plugin_pid = process.pid()
         local generation = state.shutdown_generation
         local timer = time.timer(consts.TIMEOUTS.SHUTDOWN_GRACE)

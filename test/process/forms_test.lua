@@ -105,7 +105,7 @@ local function define_tests()
             return ctx, events
         end
 
-        local function rows_of(ctx, msg_type)
+        local function rows_of(ctx: any, msg_type)
             local page: any = message_repo.list_by_session(ctx.session_id, 500)
             local out = {}
             for _, row in ipairs(page.messages) do
@@ -115,7 +115,7 @@ local function define_tests()
         end
 
         -- One ask_user call through the real tool and process_tools.
-        local function ask(ctx, args)
+        local function ask(ctx: any, args)
             local call_id = "call-" .. uuid.v7()
             local _, ids: any, store_err = ctx.writer:add_response("", {}, {
                 { id = call_id, name = "ask_user", arguments = args, registry_id = TOOL_ID,
@@ -777,7 +777,7 @@ local function define_tests()
                 ask(ctx, DEFINITION)
 
                 local function prompt_parts()
-                    local builder, err = prompt_builder.from_session(ctx.reader)
+                    local builder: any, err = prompt_builder.from_session(ctx.reader)
                     test.is_nil(err)
                     local messages = builder:get_messages()
                     local parts = { system = "", user = "", last = messages[#messages] }
@@ -829,7 +829,7 @@ local function define_tests()
                 ask(ctx, DEFINITION)
                 submit(form_id_of(ctx))
                 answer_admission.admit_in_order(ctx, nil)
-                local builder = prompt_builder.build(ctx.reader:messages():all(), {}, {},
+                local builder: any = prompt_builder.build(ctx.reader:messages():all(), {}, {},
                     { include_contexts = false, include_files = false, cache_markers = false })
                 local user_text = ""
                 for _, message in ipairs(builder:get_messages()) do
@@ -995,7 +995,7 @@ local function define_tests()
                 test.eq(events.received[1].id, accepted.answer_message_id)
                 test.contains(events.received[1].text, "<wippy-form-answers record=")
 
-                local builder = prompt_builder.build(ctx.reader:messages():from_checkpoint():all(), {}, {},
+                local builder: any = prompt_builder.build(ctx.reader:messages():from_checkpoint():all(), {}, {},
                     { include_contexts = false, include_files = false, cache_markers = false })
                 local prompt = builder:get_messages()
                 test.contains(tostring(prompt[#prompt].content[1].text), "<wippy-form-answers record=")
