@@ -57,6 +57,13 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn.
 
+When a checkpoint falls inside a turn, the next agent prompt retains the
+originating user-request text at user authority, followed by the checkpoint
+resume note and subsequent model/tool messages. The checkpoint summary covers
+earlier progress and attachments; restoring the request does not reload those
+attachments. A later ordinary user message starts its own turn and prevents
+restoring the previous request. Pending steering cannot replace the active task.
+
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
 for Stop, keep explicit false values, and ignore older revisions. Servers

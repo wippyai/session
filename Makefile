@@ -48,7 +48,7 @@ test-postgres:
 		-o "app:db:options.sslmode=disable" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
-		test -- app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime
+		test -- app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime
 
 bench:
 	@set -eu; run_benchmark() { \

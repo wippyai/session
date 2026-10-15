@@ -1544,12 +1544,17 @@ local function define_tests()
             -- A checkpoint taken mid-turn anchors on the agent's own message, so the window
             -- would open with an assistant turn. Providers expect the user's turn first, and
             -- the model should know why it sees tool traffic with no request above it.
-            local function mock_reader(messages, checkpoint_id)
+            local function mock_reader(messages, checkpoint_id, original, lookup_error)
                 local query = {
                     from_checkpoint = function(self) return self end,
                     all = function(_self) return messages, nil end,
                 }
                 return {
+                    get_message = function(_, id)
+                        if lookup_error then return nil, lookup_error end
+                        test.eq(id, "original-request")
+                        return original, nil
+                    end,
                     messages = function(_self) return query end,
                     contexts = function(_self) return { all = function() return {}, nil end } end,
                     state = function(_self) return { meta = {}, config = {} } end,
@@ -1573,6 +1578,92 @@ local function define_tests()
                     },
                 }
             end
+
+            it("retains the originating user text when a checkpoint drops it mid-turn", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Rebuild the Word handout and finish every edit.",
+                    metadata = { file_uuids = { "already-summarized-document" } } }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, original.data)
+                test.contains(built[2].content[1].text, "checkpoint")
+                test.eq(built[3].role, "assistant")
+                test.eq(built[#built].role, "function_result")
+                test.is_nil(window[1].metadata.file_uuids, "summarized attachments must not be reloaded")
+                test.eq(original.metadata.file_uuids[1], "already-summarized-document")
+            end)
+
+            it("does not restore an old request when a new user turn is visible", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "new-request", type = consts.MSG_TYPE.USER,
+                    data = "Answer only this new question.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", nil, "must not look up old work"), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local users = 0
+                for _, message in ipairs(assert(builder):get_messages()) do
+                    if message.role == "user" then
+                        users = users + 1
+                        test.eq(message.content[1].text, "Answer only this new question.")
+                    end
+                end
+                test.eq(users, 1)
+            end)
+
+            it("does not mistake pending steering for the active user request", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "pending", type = consts.MSG_TYPE.USER,
+                    data = "Not yet admitted to a provider prompt.", metadata = { input = { state = "pending" } } }
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Finish the existing task.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local users = 0
+                for _, message in ipairs(assert(builder):get_messages()) do
+                    if message.role == "user" then
+                        users = users + 1
+                        test.eq(message.content[1].text, original.data)
+                    end
+                end
+                test.eq(users, 1)
+            end)
+
+            it("reports a failed originating-request lookup", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", nil, "database unavailable"))
+                test.is_nil(builder)
+                test.contains(err, "database unavailable")
+            end)
+
+            it("retains the original task when re-anchored steering sorts before the checkpoint", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                table.insert(window, 1, { message_id = "steering", type = consts.MSG_TYPE.USER,
+                    data = "Also use landscape pages.", metadata = { input = { state = "applied", after_message_id = "fn-9" } } })
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Rebuild the handout.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, original.data)
+                test.eq(built[#built].role, "user")
+                test.eq(built[#built].content[1].text, "Also use landscape pages.")
+            end)
 
             it("opens with a developer note when the window anchors on an assistant message", function()
                 local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "asst-9"))

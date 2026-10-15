@@ -601,19 +601,49 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     return builder, nil
 end
 
-prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Everything before this point is "
-    .. "summarized in the session context memory above. Continue the current task from the latest messages below."
+prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Earlier progress is "
+    .. "summarized in the session context memory above. Continue the current user task using its request, "
+    .. "that summary, and the subsequent messages."
 
-local function anchors_on_agent_message(session: any, messages: any): boolean
+local function checkpoint_agent_message(session: any, messages: any): any
     if type(session.get_context) ~= "function" then
-        return false
+        return nil
     end
     local checkpoint_id = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
-    local first = messages[1]
-    if not checkpoint_id or not first or first.message_id ~= checkpoint_id then
-        return false
+    for _, message in ipairs(messages) do
+        if message.message_id == checkpoint_id then
+            if message.type ~= consts.MSG_TYPE.USER and message.type ~= consts.MSG_TYPE.DEVELOPER then
+                return message
+            end
+            return nil
+        end
+        if message.type ~= consts.MSG_TYPE.USER or type((message.metadata or {}).input) ~= "table" then
+            return nil
+        end
     end
-    return first.type ~= consts.MSG_TYPE.USER and first.type ~= consts.MSG_TYPE.DEVELOPER
+    return nil
+end
+
+local function checkpoint_request(session, messages, anchor)
+    local source_id = (anchor.metadata or {}).source_id
+    if type(source_id) ~= "string" or source_id == "" then return nil, nil end
+    for _, message in ipairs(messages) do
+        if message.message_id == source_id then return nil, nil end
+        -- A later ordinary user message starts a new turn. Steering, including
+        -- pending input, must not hide the request that owns this checkpoint.
+        if message.type == consts.MSG_TYPE.USER and (message.metadata or {}).input == nil then
+            return nil, nil
+        end
+    end
+    local request, err = session:get_message(source_id)
+    if err then return nil, err end
+    if not request or request.type ~= consts.MSG_TYPE.USER then return nil, nil end
+    -- Keep the actual user text at user authority. Uploaded content and visual
+    -- attachments before the checkpoint are represented by its summary.
+    return {
+        message_id = request.message_id, date = request.date,
+        type = consts.MSG_TYPE.USER, data = request.data, metadata = {},
+    }, nil
 end
 
 function prompt_builder.from_session(session, options)
@@ -626,13 +656,17 @@ function prompt_builder.from_session(session, options)
         return nil, "Failed to load messages: " .. err
     end
 
-    if anchors_on_agent_message(session, messages) then
+    local anchor = checkpoint_agent_message(session, messages)
+    if anchor then
+        local request, request_err = checkpoint_request(session, messages, anchor)
+        if request_err then return nil, "Failed to load checkpoint request: " .. request_err end
         table.insert(messages, 1, {
-            message_id = "checkpoint-resume:" .. tostring(messages[1].message_id),
+            message_id = "checkpoint-resume:" .. tostring(anchor.message_id),
             type = consts.MSG_TYPE.DEVELOPER,
             data = prompt_builder.CHECKPOINT_RESUME_NOTE,
-            metadata = {}
+            metadata = { preserve_position = true }
         })
+        if request then table.insert(messages, 1, request) end
     end
 
     local contexts, err = session:contexts():all()
