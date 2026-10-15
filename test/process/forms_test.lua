@@ -1037,6 +1037,43 @@ local function define_tests()
                 test.is_true((answer_at :: number) < (typed_at :: number), "the earlier answer first")
             end)
 
+            -- A wake-up can arrive more than once (the state API, the page's
+            -- nudge and the plugin scan each send one). The drain of a retiring
+            -- session and the end of any turn must admit the answer once.
+            it("holds repeated wake-ups of one answer once and admits it once at the turn end", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                local accepted = submit(form_id_of(ctx))
+                local bus: any = running_turn(ctx)
+
+                for _ = 1, 3 do
+                    session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
+                        { message_id = accepted.answer_message_id }, { finishing = false })
+                end
+                test.eq(#ctx.held, 1, "one held entry for three wake-ups")
+                test.eq(message_repo.get(accepted.answer_message_id).metadata.session_form.pending, true)
+
+                local finished = reach_boundary(ctx, bus)
+                test.is_true(finished.completed)
+                test.is_nil(message_repo.get(accepted.answer_message_id).metadata.session_form.pending)
+                local steps = 0
+                for _, op in ipairs(bus.ops) do
+                    if op.type == consts.OP_TYPE.AGENT_STEP then steps = steps + 1 end
+                end
+                test.eq(steps, 1, "one turn for the answer")
+                local occurrences = 0
+                for _, id in ipairs(history_ids(ctx)) do
+                    if id == accepted.answer_message_id then occurrences = occurrences + 1 end
+                end
+                test.eq(occurrences, 1, "the answer is in the history once")
+                local still_pending: any = message_repo.list_pending_answers(ctx.session_id, 10)
+                test.eq(#still_pending, 0)
+
+                -- Admitting it again changes nothing and starts nothing.
+                local again = answer_admission.admit_in_order(ctx, nil)
+                test.eq(#again, 0)
+            end)
+
             -- The session statuses written and announced by one turn boundary
             -- as the session inbox runs it (session.turn_boundary).
             local function boundary_statuses(ctx, events, bus)

@@ -240,6 +240,49 @@ local function define_tests()
             end
             test.is_true(found, 'the forms index lists the pending answer in the prompt')
         end)
+
+        -- The hook hands the builder its own message list. A form answer the
+        -- session has not admitted is in that list and must stay out of the
+        -- prompt, as in a session without Attention.
+        it('keeps an unadmitted form answer out of the prompt of an Attention session', function()
+            local original = message_repo.list_pending_answers
+            message_repo.list_pending_answers = function() return {} end
+            local function query(rows: any)
+                local result = {}
+                function result:from_checkpoint() return self end
+                function result:all() return rows, nil end
+                return result
+            end
+            local rows = {
+                { message_id = 'u1', type = 'user', date = '2026-09-18T12:00:00Z', data = 'Hello', metadata = {} },
+                { message_id = 'a1', type = 'user', date = '2026-09-18T12:00:01Z',
+                    data = 'Answered pick-one. SECRET-ANSWER-TEXT', metadata = {
+                        session_form = { artifact_id = 'form-1', pending = true } } },
+            }
+            local reader = {
+                session_id = 'session-with-form',
+                messages = function() return query(rows) end,
+                contexts = function() return query({}) end,
+                artifacts = function() return query({}) end,
+                state = function() return { session_id = 'session-with-form', meta = {} } end,
+                get_context = function() return nil end,
+            }
+            local ok, built, err = pcall(history.build, { reader = reader, writer = {} }, {})
+            message_repo.list_pending_answers = original
+            test.is_true(ok, tostring(built))
+            test.is_nil(err)
+            local hello, secret = false, false
+            for _, message in ipairs((built :: any):get_messages()) do
+                for _, part in ipairs(message.content or {}) do
+                    if type(part.text) == 'string' then
+                        if part.text:find('Hello', 1, true) then hello = true end
+                        if part.text:find('SECRET-ANSWER-TEXT', 1, true) then secret = true end
+                    end
+                end
+            end
+            test.is_true(hello, 'the typed message is in the prompt')
+            test.is_false(secret, 'the unadmitted answer is not')
+        end)
     end)
 end
 
