@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.6.8](https://github.com/wippyai/session/compare/v0.6.7...v0.6.8) (2026-10-14)
+
+
+### Bug Fixes
+
+* Disconnect, chat close, inactivity, and session-capacity retirement let accepted turns finish and persist their model, tool, and handoff results before exit. Reconnecting cancels pending retirement; explicit Stop remains effective. Cancelled public calls settle through a terminal error event and through the history API.
+* With Relay 0.3.17 and Session 0.6.8 installed, affected users can remove the local backend wind-down and cancellation-settlement patches after checking the published versions in their environment.
+
+* harden tool controls and persisted handoffs ([#61](https://github.com/wippyai/session/issues/61)) ([e8cce7c](https://github.com/wippyai/session/commit/e8cce7c0d2507bf897724f955f991b1dbf5caf92))
+* **session:** drain accepted work before lifecycle retirement ([#65](https://github.com/wippyai/session/issues/65)) ([7b7e2b4](https://github.com/wippyai/session/commit/7b7e2b413b0ccf34f1d5e2cd9113d57794b6d0d3))
+
+### Dependencies
+
+* Require Agent 0.5.4 and LLM 0.5.7 so Stop during prompt construction prevents another provider call and positional conversation messages retain their order.
+
+## [0.6.7](https://github.com/wippyai/session/compare/v0.6.6...v0.6.7) (2026-10-09)
+
+
+### Features
+
+* add Attention context and compatible optimistic delivery ([#60](https://github.com/wippyai/session/issues/60)) ([1eb65e7](https://github.com/wippyai/session/commit/1eb65e7e02859e0b042509832e46bddd434dba6f))
+
+## [0.6.7] (2026-10-07)
+
+Attention features require Web Host 1.0.61, Agent 0.5.3 and LLM 0.5.5. Use Relay 0.3.16 to forward the initial Attention setting through WebSocket session opening.
+
+### Features
+
+* Sessions support per-session Attention settings and authorized browser reads and actions. Fresh explicit reads remain available when automatic context attachment is off.
+* Context attachments use a kind/version envelope with strict payload validation. The receiver supports inline delivery and authenticated HTTP staging.
+* Approved PNG and WebP captures can supply image content through `wippy.attention.visual` attachments. Capture approval creates a removable Host draft, and the image is submitted only on a later explicit Send.
+
+### Bug fixes
+
+* Message admission validates and persists user text, file references and required context atomically. Committed permission and status are announced before the one existing correlated `received` response.
+* Attention inspection keeps its existing time limit and now uses fractional server receive times, avoiding deadline loss from whole-second rounding.
+* Prompt construction lists ordinary files instead of automatically inlining every image. Image content is included only through authorized visual context attachments.
+
+### Changed
+
+* Attention traits withdraw expired or superseded observations through existing message-ID metadata updates and `metadata.stale`. Prompt construction preserves matching tool calls and results while replacing stale observations with a bounded notice.
+* Authenticated capability discovery lets the Host select supported Attention features. Ordinary chat keeps its existing commands and receipts, and browser-operation terminal results remain separate from message acceptance.
+* V1 does not collect page URLs, route owners or Vue renderer details. Context kind/version handling preserves extension without adding those fields to V1.
+## [0.6.6](https://github.com/wippyai/session/compare/v0.6.5...v0.6.6) (2026-10-06)
+
+
+### Bug Fixes
+
+* continue the turn with the new agent after a tool-driven handoff ([#59](https://github.com/wippyai/session/issues/59)) ([f0219a6](https://github.com/wippyai/session/commit/f0219a628b148306a9a06f3926fef006d69c76cd))
+* preserve tool feedback chronology and failed-action loop accounting ([#55](https://github.com/wippyai/session/issues/55)) ([06464d1](https://github.com/wippyai/session/commit/06464d1c7a8b807068a10c4b1a36662ba5c4b966))
+
+
+### Performance Improvements
+
+* **process:** reuse session receive cases ([#56](https://github.com/wippyai/session/issues/56)) ([4393c3a](https://github.com/wippyai/session/commit/4393c3a04c40bd83342ad0b5935baff8849684c5))
+
+## [0.6.5](https://github.com/wippyai/session/compare/v0.6.4...v0.6.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* **process:** correlate tool events with persisted message IDs ([#52](https://github.com/wippyai/session/issues/52)) ([34652b8](https://github.com/wippyai/session/commit/34652b814e4566d987cfbb6685e4bf0462350518))
+* **process:** trigger checkpoints on the full context size ([#47](https://github.com/wippyai/session/issues/47)) ([83566b5](https://github.com/wippyai/session/commit/83566b55d66b71dc7be312d67fabccb8abb79367))
+
 ## [0.6.4](https://github.com/wippyai/session/compare/v0.6.3...v0.6.4) (2026-10-01)
 
 

@@ -1,6 +1,7 @@
 local consts = require("consts")
 local input_metadata = require("input_metadata")
 local message_repo = require("message_repo")
+local message_order = require("message_order")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
 
@@ -11,7 +12,8 @@ local artifact_events = require("artifact_events")
 local answer_admission = {}
 
 local function all_messages(ctx: any)
-    return ctx.reader:list_all_messages()
+    if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
+    return ctx.reader:messages():all()
 end
 
 -- Typed input during a turn follows the input policy: it is refused, or
@@ -29,7 +31,7 @@ end
 -- forms are stale (message_repo.has_user_input_after).
 
 -- One pass over the session's rows in store order: the pending steering
--- rows (sorted by date, then id), the anchor for applying them (the last row
+-- rows (in message_order, with their positions), the anchor for applying them (the last row
 -- that is neither steering input, a pending answer nor `start_id`), the
 -- position and row of the first pending answer, and the position of
 -- `start_id` when it is an ordinary row.
@@ -57,10 +59,14 @@ local function scan_inputs(ctx: any, start_id)
             scan.start = index
         end
     end
-    table.sort(scan.pending, function(a, b)
-        if a.row.date ~= b.row.date then return tostring(a.row.date or "") < tostring(b.row.date or "") end
-        return tostring(a.row.message_id) < tostring(b.row.message_id)
-    end)
+    local rows, positions = {}, {}
+    for _, entry in ipairs(scan.pending) do
+        table.insert(rows, entry.row)
+        positions[entry.row] = entry.index
+    end
+    message_order.sort(rows)
+    scan.pending = {}
+    for _, row in ipairs(rows) do table.insert(scan.pending, { row = row, index = positions[row] }) end
     return scan, nil
 end
 

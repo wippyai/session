@@ -5,6 +5,7 @@ local tx = require("tx")
 local message_date = require("message_date")
 local input_metadata = require("input_metadata")
 local form_meta = require("form_meta")
+local message_order = require("message_order")
 
 type Message = {
     message_id: string,
@@ -13,6 +14,8 @@ type Message = {
     type: string,
     data: string,
     metadata: {[string]: any}?,
+    request_id: string?,
+    request_hash: string?,
 }
 
 type MessageList = {
@@ -23,6 +26,18 @@ type MessageList = {
 }
 
 local message_repo = {}
+local context_staging = require('context_staging_repo')
+
+local function same_receipt(stored, incoming)
+    if type(stored) ~= 'table' or type(incoming) ~= 'table'
+        or stored.actor_id ~= incoming.actor_id
+        or not context_staging.valid_reference(stored.reference)
+        or not context_staging.valid_reference(incoming.reference) then return false end
+    for _, key in ipairs({ 'version', 'id', 'content_hash', 'content_bytes' }) do
+        if stored.reference[key] ~= incoming.reference[key] then return false end
+    end
+    return true
+end
 local get_db
 
 -- Replaces the JSON text in row.metadata with the table it decodes to. A
@@ -135,13 +150,76 @@ get_db = function()
     return tx.connect()
 end
 
--- Create a new message.
+local function validate_request(request_id, request_hash)
+    if request_id ~= nil and (type(request_id) ~= "string" or request_id == "" or #request_id > 160) then
+        return nil, "Request ID is invalid"
+    end
+    if (request_id == nil) ~= (request_hash == nil) then
+        return nil, "Request ID and hash must be provided together"
+    end
+    if request_hash ~= nil and (type(request_hash) ~= "string"
+        or string.match(request_hash, "^sha256:[a-f0-9]+$") == nil
+        or #request_hash ~= 71) then
+        return nil, "Request hash is invalid"
+    end
+    return true
+end
+
+-- Checks a staged context receipt inside the insert transaction. Returns the
+-- receipt JSON to store, or the prior message when this is an exact retry. The
+-- caller rolls back in the error case. Only receipt-bearing inserts take the
+-- global staging lock; plain messages never wait on staging.
+local function stage_receipt(conn, session_id, request_id, request_hash, context_receipt)
+    if not context_receipt then return nil end
+    if type(context_receipt) ~= 'table' or type(context_receipt.actor_id) ~= 'string'
+        or not context_staging.valid_reference(context_receipt.reference) then
+        return nil, nil, 'INVALID_CONTEXT_REFERENCE'
+    end
+    local locked, lock_err = context_staging.lock(conn)
+    if not locked then return nil, nil, lock_err end
+    local owners, owner_err = sql.builder.select('user_id'):from('sessions')
+        :where('session_id = ?', session_id):limit(1):run_with(conn):query()
+    local existing, lookup_err = sql.builder.select('message_id', 'request_hash', 'context_receipt'):from('messages')
+        :where('session_id = ?', session_id):where('request_id = ?', request_id):limit(1):run_with(conn):query()
+    if owner_err or lookup_err or not owners[1] or owners[1].user_id ~= context_receipt.actor_id then
+        return nil, nil, (owner_err or lookup_err) and 'CONTEXT_STAGING_UNAVAILABLE' or 'CONTEXT_SESSION_UNAVAILABLE'
+    end
+    if existing[1] then
+        local prior = existing[1]
+        local stored = type(prior.context_receipt) == 'string' and json.decode(prior.context_receipt) or nil
+        if prior.request_hash ~= request_hash then return nil, nil, 'Request ID conflict' end
+        if not same_receipt(stored, context_receipt) then return nil, nil, 'INVALID_CONTEXT_REFERENCE' end
+        prior.duplicate = true
+        return nil, prior
+    end
+    local stage, stage_err = context_staging.check_in_transaction(conn, context_receipt, session_id, request_id)
+    if not stage then return nil, nil, stage_err end
+    return json.encode(context_receipt)
+end
+
+-- After a failed insert, an exact retry of a stored request is a duplicate
+-- rather than an error.
+local function replay_request(session_id, request_id, request_hash, context_receipt)
+    if not request_id then return nil end
+    local existing, lookup_err = message_repo.get_by_request_id(session_id, request_id)
+    if not existing or lookup_err then return nil end
+    if existing.request_hash ~= request_hash then return nil, "Request ID conflict" end
+    if context_receipt and not same_receipt(existing.context_receipt, context_receipt) then
+        return nil, 'INVALID_CONTEXT_REFERENCE'
+    end
+    existing.duplicate = true
+    return existing
+end
+
+-- Create a new message. An exact retry of a stored request returns the prior
+-- message with duplicate = true and changes nothing.
 --
 -- opts.tx (optional): run the insert and the sessions.last_message_date
 -- update on this caller-supplied transaction; do not begin, commit or
 -- release. Lets a caller combine message creation with other writes (e.g. an
 -- artifact update) atomically.
-function message_repo.create(message_id, session_id, msg_type, data, metadata, opts)
+function message_repo.create(message_id, session_id, msg_type, data, metadata,
+    request_id, request_hash, context_receipt, opts)
     local valid, validation_err = input_metadata.validate({ type = msg_type, metadata = metadata })
     if not valid then return nil, validation_err end
     if not message_id or message_id == "" then
@@ -159,6 +237,8 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, o
     if not data then
         return nil, "Message data is required"
     end
+    local request_ok, request_err = validate_request(request_id, request_hash)
+    if not request_ok then return nil, request_err end
 
     -- Convert metadata to JSON if it's a table
     local metadata_json = nil
@@ -174,7 +254,13 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, o
         end
     end
 
+    local insert_failed = false
     local function do_create(dbtx)
+        local receipt_json, prior, receipt_err = stage_receipt(dbtx, session_id, request_id, request_hash,
+            context_receipt)
+        if prior then return prior end
+        if receipt_err then return nil, receipt_err end
+
         -- Lock the session row first, then take a date the store orders
         -- after every row of the session (see message_date).
         local _, lock_err = message_date.lock_session(dbtx, session_id)
@@ -190,12 +276,16 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, o
                 date = date,
                 type = msg_type,
                 data = data,
-                metadata = metadata_json or sql.as.null()
+                metadata = metadata_json or sql.as.null(),
+                request_id = request_id or sql.as.null(),
+                request_hash = request_hash or sql.as.null(),
+                context_receipt = receipt_json or sql.as.null(),
             })
 
         -- Execute the query within transaction
         local _, insert_err = insert_query:run_with(dbtx):exec()
         if insert_err then
+            insert_failed = true
             return nil, "Failed to create message: " .. insert_err
         end
 
@@ -219,7 +309,10 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, o
             message_id = message_id,
             session_id = session_id,
             date = date,
-            type = msg_type
+            type = msg_type,
+            request_id = request_id,
+            request_hash = request_hash,
+            duplicate = false,
         }
     end
 
@@ -227,7 +320,12 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, o
         return do_create(opts.tx)
     end
 
-    return tx.run(do_create)
+    local result, err = tx.run(do_create)
+    if err and insert_failed then
+        local existing, replay_err = replay_request(session_id, request_id, request_hash, context_receipt)
+        if existing or replay_err then return existing, replay_err end
+    end
+    return result, err
 end
 
 -- Reads and decodes the session's meta on `conn` (a transaction holding the
@@ -244,8 +342,11 @@ end
 
 -- Create the first user message of a turn together with the RUNNING session
 -- state. A failed write leaves neither half committed. The message date comes
--- from message_date under the session lock, like every other session row.
-function message_repo.admit(message_id, session_id, msg_type, data, metadata, session_updates)
+-- from message_date under the session lock, like every other session row. An
+-- exact retry of a stored request returns the prior message with
+-- duplicate = true and changes nothing.
+function message_repo.admit(message_id, session_id, msg_type, data, metadata, session_updates,
+    request_id, request_hash, context_receipt)
     local valid, validation_err = input_metadata.validate({ type = msg_type, metadata = metadata })
     if not valid then return nil, validation_err end
     if not message_id or message_id == "" then return nil, "Message ID is required" end
@@ -253,6 +354,8 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
     if not msg_type or msg_type == "" then return nil, "Message type is required" end
     if data == nil then return nil, "Message data is required" end
     if type(session_updates) ~= "table" then return nil, "Session updates are required" end
+    local request_ok, request_err = validate_request(request_id, request_hash)
+    if not request_ok then return nil, request_err end
 
     local metadata_json = nil
     if metadata ~= nil then
@@ -260,7 +363,13 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
         if not metadata_json then return nil, "Failed to encode metadata" end
     end
 
-    return tx.run(function(dbtx)
+    local insert_failed = false
+    local result, err = tx.run(function(dbtx)
+        local receipt_json, prior, receipt_err = stage_receipt(dbtx, session_id, request_id, request_hash,
+            context_receipt)
+        if prior then return prior end
+        if receipt_err then return nil, receipt_err end
+
         -- The lock also proves the session exists, without relying on
         -- rows_affected, which some drivers report as 0 for a no-op update.
         local _, lock_err = message_date.lock_session(dbtx, session_id)
@@ -275,8 +384,14 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
             type = msg_type,
             data = data,
             metadata = metadata_json or sql.as.null(),
+            request_id = request_id or sql.as.null(),
+            request_hash = request_hash or sql.as.null(),
+            context_receipt = receipt_json or sql.as.null(),
         }):run_with(dbtx):exec()
-        if insert_err then return nil, "Failed to create message: " .. tostring(insert_err) end
+        if insert_err then
+            insert_failed = true
+            return nil, "Failed to create message: " .. tostring(insert_err)
+        end
 
         local current_meta, meta_err = session_meta_of(dbtx, session_id)
         if not current_meta then return nil, meta_err end
@@ -291,8 +406,16 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
         local _, update_err = update:where("session_id = ?", session_id):run_with(dbtx):exec()
         if update_err then return nil, "Failed to update session state: " .. tostring(update_err) end
 
-        return { message_id = message_id, session_id = session_id, date = date, type = msg_type }
+        return {
+            message_id = message_id, session_id = session_id, date = date, type = msg_type,
+            request_id = request_id, request_hash = request_hash, duplicate = false,
+        }
     end)
+    if err and insert_failed then
+        local existing, replay_err = replay_request(session_id, request_id, request_hash, context_receipt)
+        if existing or replay_err then return existing, replay_err end
+    end
+    return result, err
 end
 
 -- The message `message_id` with its metadata decoded, or nil without an
@@ -341,6 +464,62 @@ function message_repo.get(message_id)
     return message
 end
 
+function message_repo.get_by_request_id(session_id, request_id)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if not request_id or request_id == "" then
+        return nil, "Request ID is required"
+    end
+
+    local db, err = get_db()
+    if err then
+        return nil, err
+    end
+    local query = sql.builder.select(
+        "message_id",
+        "session_id",
+        "date",
+        "type",
+        "data",
+        "metadata",
+        "request_id",
+        "request_hash"
+    )
+        :from("messages")
+        :where(sql.builder.and_({
+            sql.builder.expr("session_id = ?", session_id),
+            sql.builder.expr("request_id = ?", request_id),
+        }))
+        :limit(1)
+    local messages, query_err = query:run_with(db):query()
+    if not query_err and messages[1] then
+        local receipts, receipt_err = sql.builder.select('context_receipt'):from('messages')
+            :where('session_id = ?', session_id):where('request_id = ?', request_id):limit(1):run_with(db):query()
+        if receipt_err then db:release(); return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
+        if receipts[1] and type(receipts[1].context_receipt) == 'string' then
+            local decoded, decode_err = json.decode(receipts[1].context_receipt)
+            if decode_err then db:release(); return nil, 'INVALID_CONTEXT_RECEIPT' end
+            messages[1].context_receipt = decoded
+        end
+    end
+    db:release()
+    if query_err then
+        return nil, "Failed to get message by request ID: " .. query_err
+    end
+    if #messages == 0 then
+        return nil, "Message request not found"
+    end
+    local message = messages[1]
+    if message.metadata and message.metadata ~= "" then
+        local decoded, decode_err = json.decode(message.metadata :: string)
+        if not decode_err then
+            message.metadata = decoded
+        end
+    end
+    return message
+end
+
 function message_repo.list_all_by_session(session_id)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"
@@ -352,7 +531,7 @@ function message_repo.list_all_by_session(session_id)
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
-        :order_by("date ASC, message_id ASC")
+        :order_by(message_order.date(db:type()) .. " ASC, message_id ASC")
     local executor = query:run_with(db)
     local messages, query_err = executor:query()
     db:release()
@@ -488,7 +667,7 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
     end)
 end
 
-function message_repo.update_metadata(message_id, metadata)
+function message_repo.update_metadata(message_id, metadata, expected_session_id)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
@@ -499,7 +678,13 @@ function message_repo.update_metadata(message_id, metadata)
 
     local message, err = message_repo.get(message_id)
     if not message or err then
+        if expected_session_id ~= nil then
+            return nil, err and ("Failed to get message: " .. err) or "Message not found", "read"
+        end
         return nil, "Message not found"
+    end
+    if expected_session_id ~= nil and message.session_id ~= expected_session_id then
+        return nil, "Message belongs to different session", "ownership"
     end
 
     if type(message.metadata) == "table" and type(metadata) == "table" then
@@ -529,6 +714,9 @@ function message_repo.update_metadata(message_id, metadata)
     local update_query = sql.builder.update("messages")
         :set("metadata", metadata_json)
         :where("message_id = ?", message_id)
+    if expected_session_id ~= nil then
+        update_query = update_query:where("session_id = ?", expected_session_id)
+    end
 
     local update_executor = update_query:run_with(db)
     local result, err = update_executor:exec()
@@ -537,6 +725,12 @@ function message_repo.update_metadata(message_id, metadata)
 
     if err then
         return nil, "Failed to update message metadata: " .. err
+    end
+    if not result or result.rows_affected == 0 then
+        if expected_session_id ~= nil then
+            return nil, "Message not found or belongs to different session", "ownership"
+        end
+        return nil, "Message not found"
     end
 
     return {
@@ -558,16 +752,18 @@ local function anchor_exists(db, session_id, message_id)
 end
 
 -- Rows positioned after (or before) the row `anchor_id` in (date,
--- message_id) order. The anchor's date is read by a subquery, so the store
--- compares its own values and nothing depends on how a date reads back.
--- `prefix` qualifies the outer columns (e.g. "m."); `inclusive` keeps the
--- anchor row itself.
-local function position_filter(anchor_id, direction, inclusive: boolean?, prefix: string?)
+-- message_id) order, where date compares as message_order.date(db_type)
+-- does. The anchor's key is read by a subquery, so the store compares its
+-- own values and nothing depends on how a date reads back. `prefix`
+-- qualifies the outer columns (e.g. "m."); `inclusive` keeps the anchor row
+-- itself.
+local function position_filter(db_type: string, anchor_id, direction, inclusive: boolean?, prefix: string?)
     prefix = prefix or ""
     local cmp = direction == "before" and "<" or ">"
-    local anchor = "(SELECT a.date FROM messages a WHERE a.message_id = ?)"
-    return sql.builder.expr(string.format("(%sdate %s %s OR (%sdate = %s AND %smessage_id %s ?))",
-        prefix, cmp, anchor, prefix, anchor, prefix, inclusive and (cmp .. "=") or cmp),
+    local key = message_order.date(db_type, prefix .. "date")
+    local anchor = "(SELECT " .. message_order.date(db_type, "a.date") .. " FROM messages a WHERE a.message_id = ?)"
+    return sql.builder.expr(string.format("(%s %s %s OR (%s = %s AND %smessage_id %s ?))",
+        key, cmp, anchor, key, anchor, prefix, inclusive and (cmp .. "=") or cmp),
         anchor_id, anchor_id, anchor_id)
 end
 
@@ -586,6 +782,8 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         return nil, err
     end
 
+    local date_key = message_order.date(db:type())
+
     -- Default limit if not provided
     limit = limit or 500
     if limit < 1 then
@@ -603,16 +801,16 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         if anchor_err then db:release(); return nil, anchor_err end
         if direction == "after" then
             -- Get messages after the cursor (newer messages)
-            query = query:where(position_filter(cursor, "after", false))
-            query = query:order_by("date ASC, message_id ASC")
+            query = query:where(position_filter(db:type(), cursor, "after", false))
+            query = query:order_by(date_key .. " ASC, message_id ASC")
         else
             -- Default to "before" (older messages)
-            query = query:where(position_filter(cursor, "before", false))
-            query = query:order_by("date DESC, message_id DESC")
+            query = query:where(position_filter(db:type(), cursor, "before", false))
+            query = query:order_by(date_key .. " DESC, message_id DESC")
         end
     else
         -- No cursor, get latest messages
-        query = query:order_by("date DESC, message_id DESC")
+        query = query:order_by(date_key .. " DESC, message_id DESC")
     end
 
     -- Add limit
@@ -679,22 +877,23 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
 
     local _, anchor_err = anchor_exists(db, session_id, after_message_id)
     if anchor_err then db:release(); return nil, anchor_err end
+    local date_key = message_order.date(db:type())
 
     -- Build the SELECT query
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
-            position_filter(after_message_id, "after", true)
+            position_filter(db:type(), after_message_id, "after", true)
         }))
 
     local bounded = false
     if limit ~= nil and limit > 0 then
         -- Newest rows first; flipped back to chronological order below.
         bounded = true
-        query = query:order_by("date DESC, message_id DESC"):limit(limit)
+        query = query:order_by(date_key .. " DESC, message_id DESC"):limit(limit)
     else
-        query = query:order_by("date ASC, message_id ASC")
+        query = query:order_by(date_key .. " ASC, message_id ASC")
     end
 
     -- Execute the query
@@ -743,7 +942,7 @@ function message_repo.list_by_type(session_id, msg_type, limit, offset)
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("type = ?", msg_type)
         }))
-        :order_by("date DESC, message_id DESC")
+        :order_by(message_order.date(db:type()) .. " DESC, message_id DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then
@@ -789,7 +988,7 @@ function message_repo.get_latest(session_id)
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
-        :order_by("date DESC, message_id DESC")
+        :order_by(message_order.date(db:type()) .. " DESC, message_id DESC")
         :limit(1)
 
     -- Execute the query
@@ -915,12 +1114,14 @@ end
 -- rows, which the next scan finds.
 local function scan(conn, build, prefix: string?, visit)
     prefix = prefix or ""
+    local db_type = tx.type_of(conn)
+    local date_key = message_order.date(db_type, prefix .. "date")
     local last_id = nil
     while true do
         local query = build()
-        if last_id then query = query:where(position_filter(last_id, "after", false, prefix)) end
+        if last_id then query = query:where(position_filter(db_type, last_id, "after", false, prefix)) end
         local rows, err = query
-            :order_by(prefix .. "date ASC, " .. prefix .. "message_id ASC")
+            :order_by(date_key .. " ASC, " .. prefix .. "message_id ASC")
             :limit(SCAN_PAGE)
             :run_with(conn):query()
         if err then return nil, err end
@@ -1091,13 +1292,14 @@ function message_repo.has_user_input_after(session_id, after_date, exclude_artif
 
     -- Every later user row that is not a server-written form answer is typed
     -- input, whatever its client data contains.
+    local db_type = tx.type_of(conn)
     local typed, typed_err = scan(conn, function()
         return sql.builder.select("message_id", "type", "metadata")
             :from("messages")
             :where(sql.builder.and_({
                 sql.builder.expr("session_id = ?", session_id),
                 sql.builder.expr("type = ?", consts.MSG_TYPE.USER),
-                sql.builder.expr("date > ?", after_date)
+                sql.builder.expr(message_order.date(db_type) .. " > ?", message_order.bind(db_type, after_date))
             }))
     end, nil, function(row)
         return not is_form_answer(decode_metadata(row))

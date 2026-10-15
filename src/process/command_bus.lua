@@ -91,6 +91,12 @@ function command_bus:is_turn_active()
     return false
 end
 
+-- Retirement must wait for accepted control and background work as well as turns.
+function command_bus:is_quiescent()
+    return self.state == "idle" and self.current_op == nil
+        and self.pending_ops == 0 and #self.ops == 0 and #self.settle_ops == 0
+end
+
 function command_bus:request_stop(stop_request_id)
     if self.state == "closed" or self.state == "draining_finish" then return false end
     if not self:is_turn_active() then return false end
@@ -285,7 +291,7 @@ function command_bus:run_initial_ops()
     while true do
         local op = self.ops[1]
         if not op or op.init ~= true then break end
-        table.remove(self.ops, 1)
+        table.remove(self.ops :: {table}, 1)
         self.pending_ops = self.pending_ops - 1
         self.current_op = op
         local result, err = self:process_operation(op)
@@ -300,7 +306,7 @@ end
 
 function command_bus:run()
     while self.state ~= "closed" do
-        local op = table.remove(self.ops, 1)
+        local op = table.remove(self.ops :: {table}, 1)
         if op then
             self.pending_ops = self.pending_ops - 1
             if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" then

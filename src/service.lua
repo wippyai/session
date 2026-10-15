@@ -16,6 +16,7 @@ type Session = {
     public_meta: {[string]: any},
     start_date: string?,
     last_message_date: string?,
+    attention_context: {[string]: any},
 }
 
 type EnsureSessionArgs = {

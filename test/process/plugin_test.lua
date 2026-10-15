@@ -14,10 +14,11 @@ local message_repo = require("message_repo")
 local wait_for_boot = require("wait_for_boot")
 local start_tokens = require("start_tokens")
 
-local function plugin_message(topic, data)
+local function plugin_message(topic, data, sender)
     return {
         topic = function() return topic end,
-        payload = function() return { data = function() return data end } end
+        payload = function() return { data = function() return data end } end,
+        from = function() return sender end
     }
 end
 
@@ -44,13 +45,14 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
             spawned_init = init
+            local spawned_pid = options.pid_for and options.pid_for(init) or session_pid
             if options.on_spawn then options.on_spawn(init) end
             if options.confirm_start ~= false then
                 table.insert(inputs, { topic = consts.TOPICS.SESSION_OPENED,
-                    data = { session_id = init.session_id, from_pid = session_pid } })
+                    data = { session_id = init.session_id, from_pid = spawned_pid } })
                 for _, input in ipairs(options.after_open or {}) do table.insert(inputs, input) end
             end
-            return session_pid, nil
+            return spawned_pid, nil
         end }
     end)
     mock("process.send", function(pid, topic, payload)
@@ -173,7 +175,7 @@ local function run_start_through_session(actor, session_id, registry, session_pi
             if session_behavior == "finish" then
                 if session_step == 1 then
                     return { ok = true, channel = session_inbox,
-                        value = plugin_message(consts.TOPICS.FINISH_AND_EXIT, {}) }
+                        value = plugin_message(consts.TOPICS.FINISH_AND_EXIT, {}, spawned_init.parent_pid) }
                 end
                 return { ok = true, channel = bus_done, value = { error = nil } }
             end
@@ -411,9 +413,9 @@ local function run_graceful_shutdown(actor, session_id, scenario)
         last_sent_topic = topic
         table.insert(sent, { pid = pid, topic = topic, payload = payload })
         if pid == plugin_pid then
-            table.insert(plugin_inbox, plugin_message(topic, payload))
+            table.insert(plugin_inbox, plugin_message(topic, payload, current_pid))
         elseif pid == session_pid then
-            table.insert(session_inbox, plugin_message(topic, payload))
+            table.insert(session_inbox, plugin_message(topic, payload, current_pid))
         end
         return true, nil
     end)
@@ -491,7 +493,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
             end
         end
         if #scripted > 0 and scripted[1].topic == consts.PLUGIN_TOPICS.SHUTDOWN
-            and scenario ~= "idle" then
+            and scenario ~= "idle" and scenario ~= "active" then
             if scenario == "stop" and not pending_call_id then
                 pending_call_id = add_pending_call(session_id)
             end
@@ -819,11 +821,16 @@ local function input_position(run, topic, nth)
     return nil
 end
 
--- Whether a run_graceful_shutdown run told its session to finish.
+-- How many times the plugin told the session of a run_graceful_shutdown run to
+-- finish. The session also sends itself finish checks (they carry a
+-- generation, not a reason), which are not counted.
 local function finish_sent(run)
     local count = 0
     for _, sent in ipairs(run.sent) do
-        if sent.topic == consts.TOPICS.FINISH_AND_EXIT then count = count + 1 end
+        if sent.topic == consts.TOPICS.FINISH_AND_EXIT and type(sent.payload) == "table"
+            and sent.payload.reason ~= nil then
+            count = count + 1
+        end
     end
     return count
 end
@@ -837,6 +844,78 @@ local function message_with_text(session_id, text)
 end
 
 local function define_tests()
+
+    describe("reported disconnect regression", function()
+        it("exits an empty plugin on shutdown instead of retaining its tickers", function()
+            local run = run_plugin_lifecycle(security.actor(), "unused", nil, {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+            }, nil, { open = false })
+            test.is_nil(run.error)
+            test.eq(run.result.status, "shutdown")
+            test.is_nil(run.spawned_init)
+            test.eq(#run.scheduled, 0)
+        end)
+        it("counts retiring children toward capacity and still permits their reopen", function()
+            local actor = security.actor()
+            local first, first_context = create_session_fixture(actor, "Capacity active")
+            local second, second_context = create_session_fixture(actor, "Capacity refused")
+            local old_limit = consts.LIMITS.MAX_SESSIONS_PER_USER
+            consts.LIMITS.MAX_SESSIONS_PER_USER = 1
+            local ok, run = pcall(run_plugin_lifecycle, actor, first, "limit-hub", {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = {
+                    session_id = second, conn_pid = "capacity-client", request_id = "capacity-new",
+                } },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = {
+                    session_id = first, conn_pid = "capacity-client", request_id = "capacity-reopen",
+                } },
+            }, { status = "shutdown", intentional_exit = true })
+            consts.LIMITS.MAX_SESSIONS_PER_USER = old_limit
+            cleanup_session_fixture(first, first_context)
+            cleanup_session_fixture(second, second_context)
+            test.is_true(ok, tostring(run))
+            test.eq(run.spawned_init.session_id, first, "retiring child still occupies its live slot")
+            local rejected, resumed = false, false
+            for _, sent in ipairs(run.sent) do
+                if sent.payload.request_id == "capacity-new" and sent.payload.error == consts.ERROR_CODES.SESSION_LIMIT then
+                    rejected = true
+                end
+                if sent.topic == "cancel_finish" then resumed = true end
+            end
+            test.is_true(rejected)
+            test.is_true(resumed, "reopening an existing child must not need a new slot")
+        end)
+        it("completes accepted agent work when shutdown arrives before the turn drains", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Disconnect audit")
+            local run = run_graceful_shutdown(actor, session_id, "active")
+            cleanup_session_fixture(session_id, context_id)
+            test.is_nil(run.error)
+            test.is_nil(run.session_result.error)
+            test.eq(run.agent_steps, 1, "transport shutdown must complete accepted agent work")
+        end)
+
+        it("forwards Stop after reconnect while lifecycle finish is pending", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Reconnect audit")
+            local run = run_plugin_lifecycle(actor, session_id, "reconnect-hub", {},
+                { status = "shutdown", intentional_exit = true }, { after_open = {
+                    { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                    { topic = consts.PLUGIN_TOPICS.RESUME, data = {} },
+                    { topic = consts.PLUGIN_TOPICS.COMMAND, data = {
+                        session_id = session_id, conn_pid = "reconnect-client", request_id = "explicit-stop",
+                        data = { command = consts.COMMANDS.STOP },
+                    } },
+                } })
+            cleanup_session_fixture(session_id, context_id)
+            local forwarded = false
+            for _, event in ipairs(run.sent) do
+                if event.pid == run.session_pid and event.topic == consts.TOPICS.COMMAND
+                    and event.payload.request_id == "explicit-stop" then forwarded = true end
+            end
+            test.is_true(forwarded, "reconnect must not leave Stop blocked by terminating=true")
+        end)
+    end)
     describe("plugin on_session_end hook", function()
         it("schedules the hook with provenance params when configured", function()
             local spawned = nil
@@ -1296,7 +1375,7 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
-        it("sends the initial idle update before receipt and running", function()
+        it("announces idle then committed running state before receipt", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Startup order")
             local hub_pid = "startup-order-hub"
@@ -1348,6 +1427,7 @@ local function define_tests()
             mock("channel.select", original_channel_select)
             mock("coroutine.spawn", original_spawn)
 
+            cleanup_session_fixture(session_id, context_id)
             test.is_true(ok, tostring(result))
             test.eq(result.status, "shutdown")
             local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
@@ -1359,8 +1439,7 @@ local function define_tests()
                     table.insert(order, "received")
                 end
             end
-            test.eq(table.concat(order, ","), "idle,received,running")
-            cleanup_session_fixture(session_id, context_id)
+            test.eq(table.concat(order, ","), "idle,running,received")
         end)
 
         it("forwards the first input after creating a new session", function()
@@ -2338,10 +2417,9 @@ local function define_tests()
             test.is_false(run.finished, "the session process keeps running")
         end)
 
-        it("leaves steering pending when no client returns within the grace period", function()
-            -- The turn ended by the plugin finishing the session is stopped
-            -- (README: unused steering remains pending after Stop or
-            -- recovery); the user's next message includes the steering.
+        it("lets the turn drain, steering included, before it finishes the session when no client returns", function()
+            -- Retirement lets accepted work finish: the turn the plugin
+            -- finishes applies the steering sent during it, then the session exits.
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Disconnect steering", consts.STATUS.IDLE)
             local run = run_graceful_shutdown(actor, session_id, "disconnect")
@@ -2353,12 +2431,12 @@ local function define_tests()
             test.eq(finish_sent(run), 1)
             test.is_true(run.finished)
             test.is_true(run.session_result.intentional_exit)
-            test.eq(run.agent_steps, 1)
-            test.eq(steer.metadata.input.state, "pending")
+            test.eq(run.agent_steps, 2, "the turn continues for the steering")
+            test.eq(steer.metadata.input.state, "applied")
             test.eq(stored.status, consts.STATUS.IDLE)
         end)
 
-        it("leaves a form answer pending when no client returns within the grace period", function()
+        it("admits a form answer accepted during the turn before it finishes the session when no client returns", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Disconnect answer", consts.STATUS.IDLE)
             local run = run_graceful_shutdown(actor, session_id, "disconnect_answer")
@@ -2369,11 +2447,41 @@ local function define_tests()
             test.is_nil(run.error)
             test.eq(finish_sent(run), 1)
             test.is_true(run.finished)
-            test.eq(run.agent_steps, 1, "no turn starts for the answer")
-            test.is_true(answer.metadata.session_form.pending, "the next session start admits it")
-            test.eq(#pending_answers, 1)
+            test.eq(run.agent_steps, 2, "a turn answers the answer before the session exits")
+            test.is_nil(answer.metadata.session_form.pending, "the answer is admitted")
+            test.eq(#pending_answers, 0)
         end)
 
+        -- A disconnect that outlasts the grace period finishes the session; a
+        -- client that returns afterwards takes the finish back, and a session
+        -- opened after the resume is not finished.
+        it("finishes sessions on shutdown but not a session opened after resume", function()
+            local actor = security.actor()
+            local first_id, first_context = create_session_fixture(actor, "Before shutdown")
+            local second_id, second_context = create_session_fixture(actor, "After resume")
+            local pids = { [first_id] = "pre-shutdown-session", [second_id] = "post-resume-session" }
+            local run = run_plugin_lifecycle(actor, first_id, nil, {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE, data = { generation = 1 } },
+                { topic = consts.PLUGIN_TOPICS.RESUME, data = {} },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = second_id } },
+            }, nil, {
+                cancel_plugin = true,
+                pid_for = function(init) return pids[init.session_id] end,
+            })
+            test.is_nil(run.error)
+            test.eq((run.spawned_init :: any).session_id, second_id)
+            local finished = {} :: {[string]: number}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.TOPICS.FINISH_AND_EXIT then
+                    finished[sent.pid] = (finished[sent.pid] or 0) + 1
+                end
+            end
+            test.eq(finished["pre-shutdown-session"], 1)
+            test.is_nil(finished["post-resume-session"])
+            cleanup_session_fixture(first_id, first_context)
+            cleanup_session_fixture(second_id, second_context)
+        end)
     end)
     describe("plugin on_session_end hook", function()
         it("schedules the hook with provenance params when configured", function()

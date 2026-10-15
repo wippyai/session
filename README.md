@@ -38,6 +38,14 @@ The tool is bound to its calling session. The session validates and persists a
 change before reporting tool success. Temporary overrides clear on completion,
 Stop, failure, recovery, and agent handoff.
 
+A tool that returns `_control.config.agent` while a turn is running hands that
+turn to the new agent. The session commits the switch, and the next agent step
+in the same turn is taken by the new agent with the conversation so far, so a
+router agent whose only action is a handoff still produces the answer. The
+session re-publishes `interaction` for the new agent at that step, and pending
+steering is applied there. Stop still ends the turn at the operation boundary,
+and the committed switch stays in place.
+
 The server generates the canonical message ID. A request ID correlates the
 command response. The session saves a message before acknowledging it. There
 is no automatic retry or client message deduplication. If acknowledgement is
@@ -86,6 +94,108 @@ session is stored idle with `can_send` true. Clients get no error.
 
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
+
+## Runtime tests and benchmarks
+
+`make test-postgres FRAMEWORK_DIR=/absolute/path/to/framework` checks the
+affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
+disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
+`PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
+supplies the application's user-table contract and runs these checks in UTC.
+
+On Unix, `make install test` runs the suite against the locked dependencies.
+`make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
+registered tools, agent compilation, the Session
+process, and SQLite persistence with deterministic model responses. It covers
+handoff history, persisted control operations, mixed tool results, and Stop.
+The Framework checkout supplies local agent, LLM, and test sources. Required
+runtime checks need the candidate runner so missing or empty suites fail.
+CI runs both locked compatibility and candidate tests.
+
+`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes local JSON reports
+with median, p95, throughput, samples, allocation counters, and revision
+metadata. Defaults are 100 warmups and 100 measured batches at
+sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
+(comma-separated). Each operation checks the complete persisted handoff.
+Normal garbage collection remains enabled for latency samples. A separate
+256-operation pass measures allocated bytes, exact allocation counts, heap
+growth, and retained heap. Override `BENCH_MEMORY_OPERATIONS` for its size.
+The metadata-write workload checks real persisted patches while retaining
+128-byte and 4096-byte payloads. It uses 32 writes per sample and 2048 writes
+for memory measurement; override `BENCH_METADATA_SIZES` and
+`BENCH_METADATA_MEMORY_OPERATIONS` as needed. Session creation and deletion
+are outside that workload's measured loops.
+Exact counters use the local runtime profiler; `BENCH_EXACT_ALLOCATIONS=0`
+records tracked heap objects instead. Reports include measurement overhead.
+Run one benchmark process at a time with port 6060 free for its profiler.
+CI runs correctness checks; performance comparisons run locally.
+Set `BENCH_REVISION` and `BENCH_FRAMEWORK_REVISION` when comparing external
+source snapshots without Git metadata.
+
+Dependencies, the database, environment file, backups, and benchmark reports
+stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
+backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
+location or `TEST_CONFIG` for an external runtime configuration. These targets
+require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+
+## Session retirement
+
+Disconnect, chat close, inactivity cleanup, and session-capacity retirement let
+accepted turns and queued writes finish before the process exits. Reconnect or
+reopen cancels pending retirement. Explicit Stop still cancels the turn; normal
+provider and turn limits continue to apply. Relay inactivity collection must
+also wait for the session plugin to exit instead of cancelling its parent hub.
+
+Retiring children occupy their live session slots until EXIT. A new session at
+capacity receives `session_limit_reached` and can be retried after a child exits;
+reopening an existing child needs no additional slot.
+
+Cancelled public tools emit a terminal function-error event after their outcome
+is stored. History keeps `cancelled` in storage and exposes `status: error` with
+`outcome: cancelled` to existing clients, so reloads show a settled result.
+
+## Tool feedback and loop limits
+
+Settled tool failures are marked as errors in the next model prompt. Public
+function-error events carry the same error text saved in history; private and
+delegation details remain hidden from public tool events. Text-only answers end
+the turn. An explicit empty-output exhaustion is reported rather than sampled
+again; incomplete-tool and older truncation responses retain their retry behavior.
+
+Existing loop settings and defaults remain: `max_iterations` defaults to 1,000
+and `max_repeated_calls` to 50 under `agent_options.loop`. Session overrides use
+`max_turn_iterations` and `max_repeated_tool_calls`. A value of `0` disables that
+limit. There is no separate three-failure default.
+
+The repeat limit covers identical tool rounds and repeated failures of the same
+action across changing batches. Parallel duplicates count once per round.
+Changed arguments identify a different action; successful recovery clears that
+action's failure history, but unrelated successes do not. New user-started turns
+reset the counters. Stop still takes precedence, and unused steering remains
+pending for the next user-started turn.
+
+History and applied steering compare timestamps chronologically, with message
+IDs only breaking ties. Stored timestamps, IDs and pagination cursors are not
+rewritten.
+
+## Checkpoints and prompt caching
+
+When a checkpoint function or binding is configured, the session compares each
+model response's normalized `tokens.context_tokens` with
+`token_checkpoint_threshold`. It checks tool continuations too, and schedules
+the checkpoint before the next tool round and model step. The existing strict
+`>` threshold is unchanged; reaching the threshold exactly does not trigger it.
+
+This is the current prompt size, not cumulative usage across the turn. Cached
+input still occupies context even when `prompt_tokens` reports only a small
+uncached suffix. The LLM module normalizes provider accounting; the session does
+not add cache counters again.
+
+The conversation carries rolling cache markers so a provider can reuse the
+stable history prefix on later requests. Caching is provider-dependent, can
+expire or miss, and cached reads still have a cost. Checkpointing shortens the
+active prompt after a successful summary; neither mechanism is a hard spending
+limit or a preflight guarantee against one oversized tool result.
 
 ## Artifacts
 

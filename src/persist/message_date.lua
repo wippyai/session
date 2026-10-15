@@ -1,13 +1,17 @@
 local time = require("time")
 local sql = require("sql")
+local tx = require("tx")
+local message_order = require("message_order")
 
 -- Message dates. Rows order by (date, message_id), so a new or re-dated row
 -- needs a date the store orders after every row of its session. next()
 -- proposes the current time and asks the store, in the writing transaction
 -- and after lock_session, whether any row sorts at or after it. If one does,
 -- it steps just past the latest stored date. Dates are never chosen by
--- comparing stored values with the clock in Lua, because the store orders by
--- text on SQLite and by timestamp on PostgreSQL, which rounds to microseconds.
+-- comparing stored values with the clock in Lua: the store compares them
+-- as message_order.date does (a chronological key on SQLite, whose text
+-- does not sort by time, and the timestamp on PostgreSQL, which rounds to
+-- microseconds).
 
 -- The layout of every new date: RFC3339 in the host's offset, with the
 -- fraction padded to 9 digits.
@@ -74,11 +78,12 @@ end
 
 -- Whether the store orders `candidate` after every message of the session.
 local function after_all_rows(conn, session_id, candidate)
+    local db_type = tx.type_of(conn)
     local rows, err = sql.builder.select("message_id")
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
-            sql.builder.expr("date >= ?", candidate),
+            sql.builder.expr(message_order.date(db_type) .. " >= ?", message_order.bind(db_type, candidate)),
         }))
         :limit(1):run_with(conn):query()
     if err then
@@ -91,7 +96,7 @@ local function latest_date(conn, session_id)
     local rows, err = sql.builder.select("date")
         :from("messages")
         :where("session_id = ?", session_id)
-        :order_by("date DESC")
+        :order_by(message_order.date(tx.type_of(conn)) .. " DESC")
         :limit(1):run_with(conn):query()
     if err then
         return nil, "Failed to read the latest message date: " .. tostring(err)

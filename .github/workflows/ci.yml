@@ -10,18 +10,38 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  FRAMEWORK_REF: 198680d57aaf3fc6fe97a1e24ca4f123231aa3db
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: session
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wippy
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
         run: |
-          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
-          . /tmp/wippy-install.sh
-          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-lint" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: make install
@@ -43,14 +63,28 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: session
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wippy
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
         run: |
-          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
-          . /tmp/wippy-install.sh
-          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-compatibility" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: make install
@@ -65,3 +99,78 @@ jobs:
 
       - name: Test UI packages
         run: make test-ui
+
+  runtime:
+    name: Required runtime handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: session
+    env:
+      FRAMEWORK_DIR: ${{ github.workspace }}/framework
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
+        run: |
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-runtime" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
+      - name: Install candidate dependencies
+        run: make install
+      - name: Lint candidate
+        run: make lint
+      - name: Verify runtime handoff
+        run: make test-runtime
+
+  postgres:
+    name: PostgreSQL persistence and handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: session
+    env:
+      FRAMEWORK_DIR: ${{ github.workspace }}/framework
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: session_test
+          POSTGRES_USER: kickside
+          POSTGRES_PASSWORD: kickside
+        ports: [5433:5432]
+        options: >-
+          --health-cmd "pg_isready -U kickside -d session_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
+        run: echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-postgres" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
+      - name: Verify PostgreSQL persistence and handoff
+        run: make test-postgres

@@ -68,7 +68,7 @@ local function mock_ctx()
             state = function()
                 return { config = {} }
             end,
-            reset = function() end
+            reset = function() return true end
         },
         writer = {
             update_meta = function(self, meta)
@@ -101,7 +101,7 @@ local function define_tests()
             }) do
                 local ctx = {
                     reader = { state = function() return { public_meta = {} } end,
-                        reset = function() end },
+                        reset = function() return true end },
                     writer = {},
                     upstream = { update_session = function() end }
                 }
@@ -429,7 +429,7 @@ local function define_tests()
             test.is_nil(err)
             test.not_nil(result)
             test.is_true((ctx.turn_state :: any).handoff)
-            test.is_true((ctx.turn_state :: any).failed)
+            test.is_nil((ctx.turn_state :: any).failed)
             test.is_nil(ctx.turn_state.input_policy)
             test.eq(captured.persist_calls, 1)
             test.is_false((captured.persisted_update or {}).meta.interaction.can_send)

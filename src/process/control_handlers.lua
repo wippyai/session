@@ -79,7 +79,8 @@ function control_handlers.context_write(ctx, op)
         return nil, consts.ERR.CONTEXT_UPDATE_FAILED .. ": " .. (err or "unknown error")
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     local context_data, get_err = ctx.reader:get_full_context()
     if get_err then
@@ -112,7 +113,8 @@ function control_handlers.context_delete(ctx, op)
         return nil, consts.ERR.CONTEXT_UPDATE_FAILED .. ": " .. (err or "unknown error")
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     local context_data, get_err = ctx.reader:get_full_context()
     if get_err then
@@ -229,8 +231,8 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
     -- reply (see the instructions block above). Emitting an artifact
     -- message here for the inline case too would render it TWICE.
     if artifact_data.instructions == false then
-        local message_id, message_err, stored_row: any = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT,
-            artifact_data.title, { artifact_id = artifact_id }, write_opts)
+        local message_id, message_err, _, stored_row: any = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT,
+            artifact_data.title, { artifact_id = artifact_id }, nil, nil, nil, write_opts)
         if message_err then
             return nil, "Failed to store standalone artifact message: " .. message_err
         end
@@ -241,7 +243,7 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
     local _, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
         system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
         artifact_id = artifact_id
-    }, write_opts)
+    }, nil, nil, nil, write_opts)
     -- Atomic with the other rows on a caller's transaction; best effort otherwise.
     if system_err and opts.tx then
         return nil, "Failed to store artifact created message: " .. tostring(system_err)
@@ -540,7 +542,8 @@ function control_handlers.control_context(ctx, op)
         end
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     return { completed = true }
 end
@@ -758,10 +761,7 @@ function control_handlers.control_config(ctx, op)
         local candidate_state = clone(ctx.turn_state)
         if agent_changed and candidate_state then
             candidate_state.input_policy = nil
-            if candidate_state.active then
-                candidate_state.handoff = true
-                candidate_state.failed = true
-            end
+            if candidate_state.active then candidate_state.handoff = true end
         end
         local candidate = {
             config = current_config,
@@ -790,7 +790,7 @@ function control_handlers.control_config(ctx, op)
         ctx.config = current_config
         ctx.turn_state = candidate_state
         ctx.current_agent = next_agent
-        ctx.reader:reset()
+        local refreshed, refresh_err = ctx.reader:reset()
         input_policy.accept_committed(ctx, interaction)
         if agent_changed or model_changed then
             ctx.upstream:update_session({
@@ -819,6 +819,7 @@ function control_handlers.control_config(ctx, op)
             })
             ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, change_message)
         end
+        if not refreshed then return nil, refresh_err end
     end
 
     return { completed = true }

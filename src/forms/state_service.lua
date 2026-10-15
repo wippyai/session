@@ -418,7 +418,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
                 artifact_id = current.artifact_id,
                 pending = true,
             },
-        }, { tx = dbtx })
+        }, nil, nil, nil, { tx = dbtx })
         if message_err then return nil, tostring(message_err) end
 
         local content, content_err = form_artifact.content_with_state(current_form, consts.ARTIFACT_STATUS.IDLE)

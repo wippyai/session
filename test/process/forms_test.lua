@@ -592,9 +592,9 @@ local function define_tests()
                 -- The artifact insert succeeds; the artifact message fails inside the
                 -- same transaction, so both roll back.
                 ctx.writer = setmetatable({
-                    add_message = function(_self, msg_type, content, metadata, opts)
+                    add_message = function(_self, msg_type, ...)
                         if msg_type == consts.MSG_TYPE.ARTIFACT then return nil, "message disk full" end
-                        return real_writer:add_message(msg_type, content, metadata, opts)
+                        return real_writer:add_message(msg_type, ...)
                     end,
                 }, { __index = real_writer })
                 local result, err, call_id, ids = ask(ctx, DEFINITION)
@@ -640,9 +640,9 @@ local function define_tests()
                 local ctx = new_ctx()
                 local real_writer = ctx.writer
                 ctx.writer = setmetatable({
-                    add_message = function(_self, msg_type, content, metadata, opts)
+                    add_message = function(_self, msg_type, ...)
                         if msg_type == consts.MSG_TYPE.SYSTEM then return nil, "system row failed" end
-                        return real_writer:add_message(msg_type, content, metadata, opts)
+                        return real_writer:add_message(msg_type, ...)
                     end,
                 }, { __index = real_writer })
                 local result, err = ask(ctx, DEFINITION)
@@ -1370,27 +1370,37 @@ local function define_tests()
                 test.eq(message_repo.get(steps[1].message_id).data, "Typed meanwhile")
             end)
 
-            it("stores a message's attachments as the client sent them, and a client value that looks like an answer marker stays attachment data", function()
+            it("stores a message's authorized attachments as the client sent them and refuses a value that looks like an answer marker", function()
                 local attachment = uuid.v7()
+                local original_authorize = message_handlers._authorize_file
+                message_handlers._authorize_file = function() return true end
+
+                -- An idle session: the message id is the server's.
+                local ctx = new_ctx()
+                local stored: any, stored_err = message_handlers.handle_message(ctx,
+                    { data = { text = "with files", file_uuids = { attachment } } })
+
+                -- Not a list of file ids: refused before anything is stored.
+                local lookalike_ctx = new_ctx()
                 local lookalike = { session_form = { artifact_id = uuid.v7(), pending = true } }
-                local cases = {
-                    { label = "a list of ids", value = { attachment },
-                        check = function(stored) test.eq(stored[1], attachment) end },
-                    { label = "a lookalike marker", value = lookalike,
-                        check = function(stored) test.eq(stored.session_form.artifact_id, lookalike.session_form.artifact_id) end },
-                }
-                for _, case in ipairs(cases) do
-                    -- Each on an idle session: the message id is the server's.
-                    local ctx = new_ctx()
-                    local result: any, err = message_handlers.handle_message(ctx,
-                        { data = { text = "with files", file_uuids = case.value } })
-                    test.is_nil(err, case.label)
-                    local row: any = message_repo.get(result.message_id)
-                    case.check(row.metadata.file_uuids)
-                    test.is_false(message_repo.is_form_answer(row), case.label .. ": not an answer row")
-                    test.eq(#message_repo.list_pending_answers(ctx.session_id, 50), 0,
-                        case.label .. ": not a pending answer")
+                local refused: any, refused_err = message_handlers.handle_message(lookalike_ctx,
+                    { data = { text = "with a marker", file_uuids = lookalike } })
+                message_handlers._authorize_file = original_authorize
+
+                test.is_nil(stored_err)
+                local row: any = message_repo.get(stored.message_id)
+                test.eq(row.metadata.file_uuids[1], attachment)
+                test.is_false(message_repo.is_form_answer(row), "not an answer row")
+                test.eq(#message_repo.list_pending_answers(ctx.session_id, 50), 0, "not a pending answer")
+
+                test.is_nil(refused_err)
+                test.is_true(refused.rejected)
+                test.is_nil(refused.message_id)
+                local history: any = message_repo.list_by_session(lookalike_ctx.session_id, 50)
+                for _, message in ipairs(history.messages) do
+                    test.is_false(message.type == consts.MSG_TYPE.USER, "no user row is stored for the refused value")
                 end
+                test.eq(#message_repo.list_pending_answers(lookalike_ctx.session_id, 50), 0, "not a pending answer")
             end)
 
             it("admits pending answers from the scan exactly once, in acceptance order", function()

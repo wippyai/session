@@ -209,9 +209,12 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
     local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
-    if checkpoint_available and tokens.prompt_tokens and token_threshold and token_threshold > 0 then
+    -- context_tokens is the full prompt size (uncached input plus cache reads
+    -- and writes); prompt_tokens alone counts only the uncached input.
+    local context_tokens = tokens.context_tokens
+    if checkpoint_available and context_tokens and token_threshold and token_threshold > 0 then
 
-        if tokens.prompt_tokens > token_threshold then
+        if context_tokens > token_threshold then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
@@ -219,7 +222,7 @@ function session_handlers.check_background_triggers(ctx, op)
                 checkpoint_bindings = op.checkpoint_bindings,
                 checkpoint_id = anchor_id,
                 message_id = anchor_id,
-                trigger_tokens = tokens.prompt_tokens,
+                trigger_tokens = context_tokens,
                 agent = op.agent,
                 agent_options = op.agent_options,
                 run_context_binding = op.run_context_binding
@@ -282,9 +285,10 @@ local function generate_title_now(ctx)
         return nil, err
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     ctx.upstream:update_session({ title = result.title })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -440,7 +444,7 @@ function session_handlers.create_checkpoint(ctx, op)
         return nil, err1
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     ctx.writer:delete_session_contexts_by_type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY)
 
@@ -457,6 +461,7 @@ function session_handlers.create_checkpoint(ctx, op)
             current_checkpoint_id = op.checkpoint_id
         })
     end
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -488,6 +493,10 @@ function session_handlers.agent_change(ctx, op)
     local new_model = ctx.agent_ctx.current_model
     current_config.model = new_model
 
+    if previous_agent ~= op.agent_id and type(ctx.invalidate_attention_control) == "function" then
+        ctx.invalidate_attention_control()
+    end
+
     local next_agent = nil
     if type(ctx.agent_ctx.get_current_agent) == "function" then
         next_agent = ctx.agent_ctx:get_current_agent()
@@ -496,10 +505,7 @@ function session_handlers.agent_change(ctx, op)
     local candidate_state = clone(ctx.turn_state)
     if candidate_state then
         candidate_state.input_policy = nil
-        if candidate_state.active then
-            candidate_state.handoff = true
-            candidate_state.failed = true
-        end
+        if candidate_state.active then candidate_state.handoff = true end
     end
     local candidate = {
         config = current_config,
@@ -528,7 +534,7 @@ function session_handlers.agent_change(ctx, op)
     ctx.config = current_config
     ctx.turn_state = candidate_state
     ctx.current_agent = next_agent
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
     input_policy.accept_committed(ctx, interaction)
 
     local switch_message = string.format("Agent changed to: %s (model: %s)", op.agent_id, new_model)
@@ -547,6 +553,7 @@ function session_handlers.agent_change(ctx, op)
         agent = op.agent_id,
         model = new_model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -583,7 +590,7 @@ function session_handlers.model_change(ctx, op)
     end
 
     ctx.config = staged_config
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     local change_message = string.format("Model changed to: %s", op.model)
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, change_message, {
@@ -598,6 +605,7 @@ function session_handlers.model_change(ctx, op)
     ctx.upstream:update_session({
         model = op.model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
