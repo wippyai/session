@@ -1,0 +1,25 @@
+organization: wippy
+module: session
+description: User sessions and conversation management
+license: Apache-2.0
+repository: https://github.com/wippyai/framework
+homepage: https://wippy.ai
+keywords:
+  - session
+  - conversation
+  - messaging
+  - artifacts
+exclude_meta:
+  type:
+    - test
+  scope:
+    - dev
+exclude:
+  - "app:**"
+# `wippy publish --config <checkout>/src` packs from this directory, and a
+# `base: module` fs.directory resolves against it. A pack keeps the files of an
+# fs.directory entry only when it is listed here; scripts/check-ui.mjs fails
+# when an entry is missing or a name matches no entry.
+embed:
+  - "wippy.session.forms.ui:ui_fs"
+  - "wippy.session.forms.ui:ui_fs_answers"
