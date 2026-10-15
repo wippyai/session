@@ -577,13 +577,7 @@ local function run(args: SessionArgs)
     -- Work that must not hold up the turn (the session title).
     context.run_in_background = run_in_background
     -- The session status is kept by the turn boundary (message_handlers.
-    -- finish_turn). An empty queue only publishes answers admitted without a
-    -- turn (after a stop), which read as delivered now that it is idle.
-    context.queue_empty_callback = function()
-        answer_admission.publish_deferred(context)
-        return true
-    end
-
+    -- finish_turn). The queue-empty callback is set below, after the finish check exists.
     context.turn_boundary_callback = function()
         local sent, send_err = process.send(self_pid, boundary_topic, { generation = context.turn_generation })
         if not sent then return nil, send_err or "Failed to request turn completion" end
@@ -752,7 +746,14 @@ local function run(args: SessionArgs)
         end
         return true
     end
-    context.queue_empty_callback = schedule_finish_check
+    -- An empty queue announces the answers admitted without a turn (after a
+    -- stop), which read as delivered now that the session is idle, and then
+    -- checks whether a pending retirement can proceed. One callback does both:
+    -- the command bus calls only one.
+    context.queue_empty_callback = function()
+        answer_admission.publish_deferred(context)
+        return schedule_finish_check()
+    end
     context.on_turn_end = function(turn_id, stop_requested, stop_request_id)
         if stop_requested and args.parent_pid then
             process.send(args.parent_pid :: string, consts.TOPICS.STOP_RESOLVED, {

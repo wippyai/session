@@ -375,3 +375,21 @@ entries:
       ui_action_broker: wippy.session.process:ui_action_broker
       test: wippy.test:test
     method: run
+
+  - name: session_queue_empty_test
+    kind: function.lua
+    meta:
+      name: Session queue-empty callback
+      type: test
+      suite: session
+    source: file://session_queue_empty_test.lua
+    modules: [security, uuid]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session: wippy.session.process:session
+      command_bus: wippy.session.process:command_bus
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
