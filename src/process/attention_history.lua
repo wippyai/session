@@ -205,6 +205,8 @@ function M.build(context, options)
         if not saved then return nil, save_err or 'Attention observation withdrawal failed' end
     end
     local adapter = setmetatable({}, { __index = function(_, key)
+        -- A data field the prompt builder reads (the forms index needs it).
+        if key == 'session_id' then return context.reader.session_id end
         if key == 'messages' then return function()
             local query = {}
             function query:from_checkpoint() return self end

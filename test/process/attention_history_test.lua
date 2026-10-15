@@ -1,6 +1,7 @@
 local test = require('test')
 local time = require('time')
 local history = require('attention_history')
+local message_repo = require('message_repo')
 
 local function define_tests()
     describe('Attention observation lifetime', function()
@@ -195,6 +196,49 @@ local function define_tests()
             projected = history.prepare({ old }, now)
             test.eq(#projected[1].metadata.context_attachments, 0,
                 'a row older than the lifetime drops context although the client clock is ahead')
+        end)
+    end)
+
+    describe('Attention prompt build', function()
+        it('keeps the forms index, with its pending answers, in the prompt of an Attention session', function()
+            local form = {
+                artifact_id = 'form-1', title = 'Pick one',
+                meta = { session_form = { version = 1, origin = { created_cursor = '2026-09-18T10:00' },
+                    submission = { submitted_at = '2026-09-18T11:00', late = false, message_id = 'answer-1' } } },
+            }
+            local original = message_repo.list_pending_answers
+            local asked_for = nil
+            message_repo.list_pending_answers = function(session_id)
+                asked_for = session_id
+                return { { type = 'user', metadata = { session_form = { artifact_id = 'form-1', pending = true } } } }
+            end
+            local function query(rows: any)
+                local result = {}
+                function result:from_checkpoint() return self end
+                function result:all() return rows, nil end
+                return result
+            end
+            local reader = {
+                session_id = 'session-with-form',
+                messages = function() return query({ { message_id = 'u1', type = 'user', date = '2026-09-18T12:00:00Z', data = 'Hello', metadata = {} } }) end,
+                contexts = function() return query({}) end,
+                artifacts = function() return query({ form }) end,
+                state = function() return { session_id = 'session-with-form', meta = {} } end,
+                get_context = function() return nil end,
+            }
+            local ok, built, err = pcall(history.build, { reader = reader, writer = {} }, {})
+            message_repo.list_pending_answers = original
+            test.is_true(ok, tostring(built))
+            test.is_nil(err)
+            test.eq(asked_for, 'session-with-form', 'the pending answers of the session are read')
+            local found = false
+            for _, message in ipairs((built :: any):get_messages()) do
+                for _, part in ipairs(message.content or {}) do
+                    if type(part.text) == 'string' and part.text:find('answer pending', 1, true)
+                        and part.text:find('form_id=form-1', 1, true) then found = true end
+                end
+            end
+            test.is_true(found, 'the forms index lists the pending answer in the prompt')
         end)
     end)
 end
