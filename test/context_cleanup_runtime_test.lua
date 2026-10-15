@@ -110,7 +110,13 @@ local function define_tests()
             test.eq(removed, 104)
             test.eq(remaining(), 0)
             stages(1); expire()
+            -- The worker sweeps every 20ms, so sweeps that ran before the row
+            -- was staged are queued ahead of the one that removes it.
             local result = sweep_result()
+            for _ = 1, 100 do
+                if result.count ~= 0 then break end
+                result = sweep_result()
+            end
             test.is_false(result.unavailable)
             test.eq(result.count, 1)
             test.eq(remaining(), 0)
