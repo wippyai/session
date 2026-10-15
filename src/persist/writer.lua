@@ -96,6 +96,13 @@ function session_writer:update_title(title)
     return self:update_meta({ title = title })
 end
 
+function session_writer:update_initial_title(title)
+    self._meta_lock:receive()
+    local updated, err = session_writer._session_repo.update_initial_title(self.session_id, title)
+    self._meta_lock:send(true)
+    return updated, err
+end
+
 function session_writer:update_status(status, error_message)
     local updates = { status = status, last_message_date = os.time() }
 
