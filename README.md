@@ -51,6 +51,15 @@ command response. The session saves a message before acknowledging it. There
 is no automatic retry or client message deduplication. If acknowledgement is
 lost, a manual resend can create a duplicate.
 
+Stop cancels the turn's in-flight model and tool calls. The session hands the
+running turn a cancel channel (`runtime_options.cancel` for the agent step, the
+third argument of `tool_caller:execute`) and closes it on Stop. A cancelled model
+call stores the text streamed so far as the assistant message with
+`metadata.stopped = true`; a cancelled tool call is stored with status
+`cancelled`. The turn then ends idle. A Framework agent without this channel
+keeps the earlier behavior: Stop takes effect at the next operation boundary,
+and the session plugin escalates a turn that does not finish.
+
 Accepted steering is pending until the current response and its tool batch
 finish. The next model request includes it after those results in persisted
 message order, within the same turn. Stop prevents the next continuation at

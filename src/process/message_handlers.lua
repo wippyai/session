@@ -34,6 +34,7 @@ type SessionContext = {
     turn_generation: number?,
     interaction: any?,
     stop_commit_channel: any?,
+    coordinator: any?,
     input_apply_batch: any?,
     activate_attention_turn: any?,
     prepare_attention_prompt: any?,
@@ -469,8 +470,8 @@ local function is_turn_stopped(ctx: any): boolean
         or (state and state.failed) or false)
 end
 
-local function settle_cancelled_call(ctx, call, message_id, call_type, validated)
-    local reason = "Session stopped before the call executed"
+local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason)
+    reason = reason or "Session stopped before the call executed"
     local _, err = ctx.writer:update_message_meta(message_id, {
         status = consts.FUNC_STATUS.CANCELLED, result = reason,
     })
@@ -1150,7 +1151,8 @@ function message_handlers.agent_step(ctx, op)
 
     local runtime_options = {
         context = session_context,
-        stop_check = step_stop_check(ctx)
+        stop_check = step_stop_check(ctx),
+        cancel = ctx.coordinator and ctx.coordinator.cancel
     }
     if ctx.stream_target then
         runtime_options.stream_target = ctx.stream_target
@@ -1170,7 +1172,21 @@ function message_handlers.agent_step(ctx, op)
             })
     end
     if result.stopped then
-        ctx.upstream:invalidate_message(response_id)
+        if type(result.result) == "string" and result.result ~= "" then
+            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+                source_id = op.message_id,
+                agent_id = ctx.config.agent_id,
+                model = ctx.config.model,
+                stopped = true
+            })
+            if store_err then return nil, store_err end
+            ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
+                content = result.result,
+                using_tools = false
+            })
+        else
+            ctx.upstream:invalidate_message(response_id)
+        end
         return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
@@ -1619,7 +1635,7 @@ function message_handlers.process_tools(ctx, op)
     session_context = with_agent_run_context(ctx, session_context, active_agent)
 
     local executed, results, execute_err = pcall(function()
-        return caller:execute(session_context, validated_tools)
+        return caller:execute(session_context, validated_tools, ctx.coordinator and ctx.coordinator.cancel)
     end)
     if not executed then
         execute_err = tostring(results)
@@ -1666,6 +1682,14 @@ function message_handlers.process_tools(ctx, op)
         local is_delegation = ctx.config.delegation_func_id
             and result_data.tool_call.registry_id == ctx.config.delegation_func_id
         local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
+
+        if result_data.cancelled then
+            local _, cancel_err = settle_cancelled_call(ctx, call, message_id,
+                op.call_message_types and op.call_message_types[call_id],
+                validated_tools and validated_tools[call_id], "Session stopped while the call was running")
+            if cancel_err then return fail_remaining(index, cancel_err) end
+            goto continue_call
+        end
 
         local policy_result = result_data.result
         if not result_data.error and not is_delegation and type(policy_result) == "table" then
@@ -1768,6 +1792,7 @@ function message_handlers.process_tools(ctx, op)
                 })
             end
         end
+        ::continue_call::
     end
 
     message_handlers.note_tool_round(ctx, results)
