@@ -268,6 +268,82 @@ local function run_scenario(options)
     if not ok then error(failure) end
 end
 
+local function run_checkpoint_scenario()
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("checkpoints", 0)
+    storage:set("edits", 0)
+    storage:set("scenario", { checkpoint = true })
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local actor = security.actor()
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, actor:id(), context_id, "Checkpoint task", "test", {}, {
+        agent_id = "app.runtime:checkpoint_agent", model = "session-runtime-help",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 300000,
+    }))
+    local request = "Rebuild the Word handout. Finish every edit before giving the final answer."
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, actor:id(), true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "checkpoint-task", data = { text = request },
+        }))
+        receive_until(function(_, data)
+            return data.type == consts.UPSTREAM_TYPES.RECEIVED and data.request_id == "checkpoint-task"
+        end, "accepted checkpoint task")
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == "idle"
+        end, "checkpointed task completion")
+        local requests = storage:get("requests")
+        local history = assert(message_repo.list_all_by_session(session_id))
+        for _, message in ipairs(history) do
+            test.is_false(message.type == consts.MSG_TYPE.SYSTEM and message.metadata.system_action == consts.SYSTEM_ACTIONS.TURN_FAILED,
+                tostring(message.data))
+        end
+        test.eq(#requests, 5)
+        test.eq(storage:get("checkpoints"), 2, "the real token-threshold checkpoint must run twice mid-turn")
+        for _, index in ipairs({ 3, 5 }) do
+            local users, recalls, latest_result = 0, 0, false
+            for _, message in ipairs(requests[index].messages) do
+                for _, part in ipairs(message.content or {}) do
+                    if message.role == "user" and part.text == request then users = users + 1 end
+                    if message.role == "developer" and message.metadata and message.metadata.memory_ids then
+                        recalls = recalls + 1
+                        test.contains(part.text, "Use the usual handout style.")
+                    end
+                    if message.role == "function_result" and part.text == "Handout edit " .. (index - 1) .. " stored." then
+                        latest_result = true
+                    end
+                end
+            end
+            test.eq(users, 1, "each post-checkpoint provider request must retain the exact user task once: "
+                .. tostring(json.encode(requests[index].messages)))
+            test.eq(recalls, 1, "per-step memory recall is present alongside the active request")
+            test.is_true(latest_result, "the newest tool result must survive each checkpoint")
+        end
+        local edits, answer = 0, false
+        for _, message in ipairs(history) do
+            if message.type == consts.MSG_TYPE.FUNCTION then
+                edits = edits + 1
+                test.eq(message.metadata.status, consts.FUNC_STATUS.SUCCESS)
+            end
+            if message.type == consts.MSG_TYPE.ASSISTANT and message.data == "Finished rebuilding the handout." then
+                answer = true
+            end
+        end
+        test.eq(edits, 4)
+        test.is_true(answer)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
 local function framework_stops_before_generation()
     local probe = agent.new({ id = "stop-check-probe", name = "Stop check probe",
         description = "Detects step stop_check support", prompt = "Probe." })
@@ -280,6 +356,27 @@ local function framework_stops_before_generation()
     local ok, result = pcall(probe.step, probe, prompt.new(), { stop_check = function() return true end })
     agent._llm = previous
     return ok and type(result) == "table" and result.stopped == true and not seen.generated
+end
+
+local function define_checkpoint_tests()
+    test.describe("Session checkpoint continuity through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("retains the user task through repeated mid-turn checkpoints with per-step recall", run_checkpoint_scenario)
+        test.it("rejects checkpoint source messages from another session", function()
+            local context_id, first, second, message_id = uuid.v7(), uuid.v7(), uuid.v7(), uuid.v7()
+            local owner = assert(security.actor()):id()
+            assert(context_repo.create(context_id, "primary", "{}"))
+            assert(session_repo.create(first, owner, context_id, "First", "test"))
+            assert(session_repo.create(second, owner, context_id, "Second", "test"))
+            assert(message_repo.create(message_id, second, "user", "Private to the second session.", {}))
+            local message, err = assert(reader.open(first)):get_message(message_id)
+            session_repo.delete(first)
+            session_repo.delete(second)
+            context_repo.delete(context_id)
+            test.is_nil(message)
+            test.eq(err, "Message not found in session")
+        end)
+    end)
 end
 
 local function define_tests()
@@ -372,4 +469,5 @@ local function define_benchmark()
     end)
 end
 
-return { run = test.run_cases(define_tests), benchmark = test.run_cases(define_benchmark) }
+return { run = test.run_cases(define_tests), checkpoint = test.run_cases(define_checkpoint_tests),
+    benchmark = test.run_cases(define_benchmark) }
