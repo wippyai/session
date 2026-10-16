@@ -208,6 +208,33 @@ entries:
     method: malformed_effects
     modules: [store, json, time]
 
+  - name: framework_capabilities
+    kind: library.lua
+    source: file://framework_capabilities.lua
+    imports:
+      agent: wippy.agent:agent
+      prompt: wippy.llm:prompt
+
+  - name: stream_model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-runtime-stream
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.runtime:provider
+        provider_model: stream
+
+  - name: streamer
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Session runtime streamer
+    model: session-runtime-stream
+    prompt: Answer the question.
+
   - name: handoff_runtime
     kind: function.lua
     meta:
@@ -227,8 +254,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       wait_for_boot: app:wait_for_boot
       benchmark_report: app.runtime:benchmark_report
-      agent: wippy.agent:agent
-      prompt: wippy.llm:prompt
+      framework_capabilities: app.runtime:framework_capabilities
 
   - name: handoff_benchmark
     kind: function.lua
@@ -249,8 +275,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       wait_for_boot: app:wait_for_boot
       benchmark_report: app.runtime:benchmark_report
-      agent: wippy.agent:agent
-      prompt: wippy.llm:prompt
+      framework_capabilities: app.runtime:framework_capabilities
 
   - name: metadata_benchmark
     kind: function.lua

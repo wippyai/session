@@ -424,6 +424,32 @@ local function define_tests()
             test.eq(steps, 0)
         end)
 
+        it("closes the turn cancel channel on Stop and opens a fresh one for the next turn", function()
+            local ctx = {}
+            local bus = command_bus.new(ctx)
+            local cancelled = {}
+            ctx.queue_empty_callback = function()
+                if #cancelled == 1 then
+                    bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "second" })
+                else
+                    bus:stop()
+                end
+                return true
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                if #cancelled == 0 then bus:request_stop() end
+                local selected = channel.select({ bus.cancel:case_receive(), default = true })
+                table.insert(cancelled, selected.default ~= true)
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(#cancelled, 2)
+            test.is_true(cancelled[1], "Stop must cancel the running turn")
+            test.is_false(cancelled[2], "The next turn must start with an open cancel channel")
+        end)
+
         it("applies tool outcomes and control before draining STOP", function()
             local order = {}
             local ctx = { held = { "held" } }

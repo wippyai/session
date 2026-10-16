@@ -55,8 +55,13 @@ local function run_session(arrivals)
         return true
     end)
     mock("coroutine.spawn", function() end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if capacity == nil then return fixture.done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return fixture.done
+        end
         if capacity == 16 then return fixture.policy end
         return original_new(capacity)
     end)
