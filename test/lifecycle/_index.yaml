@@ -65,9 +65,10 @@ entries:
       timeout: 60s
     source: file://lifecycle_runtime_test.lua
     method: run_tests
-    modules: [store, security, uuid, time, sql]
+    modules: [store, security, uuid, time, sql, env]
     imports:
       test: wippy.test:test
+      framework_capabilities: app.runtime:framework_capabilities
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo

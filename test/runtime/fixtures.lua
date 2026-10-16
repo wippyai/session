@@ -13,6 +13,24 @@ local function generate(args)
     requests[#requests + 1] = { model = args.model, messages = args.messages }
     storage:set("requests", requests)
     local scenario = storage:get("scenario")
+    if args.model == "stream" then
+        for _, text in ipairs({ "Partial ", "answer" }) do
+            process.send(args.stream.reply_to, args.stream.topic, { type = "chunk", content = text })
+        end
+        local release = process.listen("fixture:stream_release")
+        process.send(scenario.parent, "fixture:stream_ready", { pid = process.pid() })
+        local timer = time.timer("10s")
+        channel.select({ release:case_receive(), timer:channel():case_receive() })
+        timer:stop()
+        process.unlisten(release)
+        storage:set("stream_released", true)
+        return {
+            success = true,
+            result = { content = "Partial answer completed.", tool_calls = {} },
+            tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+            finish_reason = "stop",
+        }
+    end
     local calls = {}
     local content = "The help agent completed the handoff."
     if args.model == "router" then
