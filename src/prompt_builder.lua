@@ -321,7 +321,7 @@ end
 prompt_builder._authorize_visual = authorize_visual_via_contract
 prompt_builder._resolve_visual = resolve_visual_via_contract
 
-function prompt_builder.build(messages, contexts, session_meta, options)
+function prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
     if not messages then
         return nil, "Messages are required"
     end
@@ -571,6 +571,12 @@ function prompt_builder.build(messages, contexts, session_meta, options)
 
     -- add_message returns an error when required context cannot be rendered;
     -- the whole prompt fails closed rather than dropping that context.
+    -- The restored request predates all retained steering, including applied
+    -- corrections whose original anchor is no longer in the history window.
+    for _, msg in ipairs(checkpoint_prefix or {}) do
+        local _, render_err = add_message(msg)
+        if render_err then return nil, render_err end
+    end
     local anchored_err = add_anchored("")
     if anchored_err then return nil, anchored_err end
     for _, msg in ipairs(messages) do
@@ -601,9 +607,28 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     return builder, nil
 end
 
-prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Earlier progress is "
-    .. "summarized in the session context memory above. Continue the current user task using its request, "
-    .. "that summary, and the subsequent messages."
+prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Earlier progress and task revisions "
+    .. "are summarized in the session context memory above. Any original user request shown again is historical "
+    .. "context, not a new turn, and may be excerpted. Use that request, the summary, and subsequent messages "
+    .. "to continue the current task. Honor later corrections and do not repeat completed work."
+
+local CHECKPOINT_REQUEST_MAX_BYTES = 6000
+local CHECKPOINT_REQUEST_OMISSION = "\n\n[Middle of the original request omitted; see the checkpoint summary for the full task.]\n\n"
+
+local function continuation_byte(byte)
+    return byte ~= nil and byte >= 128 and byte < 192
+end
+
+local function checkpoint_request_excerpt(text)
+    if #text <= CHECKPOINT_REQUEST_MAX_BYTES then return text end
+    -- Keep the task at the start and restrictions often placed at the end.
+    -- The budget includes the omission marker, and neither cut splits UTF-8.
+    local edge_bytes = math.floor((CHECKPOINT_REQUEST_MAX_BYTES - #CHECKPOINT_REQUEST_OMISSION) / 2)
+    local head_end, tail_start = edge_bytes, #text - edge_bytes + 1
+    while continuation_byte(text:byte(head_end + 1)) do head_end = head_end - 1 end
+    while continuation_byte(text:byte(tail_start)) do tail_start = tail_start + 1 end
+    return text:sub(1, head_end) .. CHECKPOINT_REQUEST_OMISSION .. text:sub(tail_start)
+end
 
 local function checkpoint_agent_message(session: any, messages: any): any
     if type(session.get_context) ~= "function" then
@@ -642,7 +667,7 @@ local function checkpoint_request(session, messages, anchor)
     -- attachments before the checkpoint are represented by its summary.
     return {
         message_id = request.message_id, date = request.date,
-        type = consts.MSG_TYPE.USER, data = request.data, metadata = {},
+        type = consts.MSG_TYPE.USER, data = checkpoint_request_excerpt(request.data), metadata = {},
     }, nil
 end
 
@@ -656,17 +681,18 @@ function prompt_builder.from_session(session, options)
         return nil, "Failed to load messages: " .. err
     end
 
+    local checkpoint_prefix = {}
     local anchor = checkpoint_agent_message(session, messages)
     if anchor then
         local request, request_err = checkpoint_request(session, messages, anchor)
         if request_err then return nil, "Failed to load checkpoint request: " .. request_err end
-        table.insert(messages, 1, {
+        if request then table.insert(checkpoint_prefix, request) end
+        table.insert(checkpoint_prefix, {
             message_id = "checkpoint-resume:" .. tostring(anchor.message_id),
             type = consts.MSG_TYPE.DEVELOPER,
             data = prompt_builder.CHECKPOINT_RESUME_NOTE,
             metadata = { preserve_position = true }
         })
-        if request then table.insert(messages, 1, request) end
     end
 
     local contexts, err = session:contexts():all()
@@ -676,7 +702,7 @@ function prompt_builder.from_session(session, options)
 
     local session_meta = session:state()
 
-    return prompt_builder.build(messages, contexts, session_meta, options)
+    return prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
 end
 
 return prompt_builder

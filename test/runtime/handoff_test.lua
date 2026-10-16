@@ -272,6 +272,7 @@ local function run_checkpoint_scenario()
     local storage = assert(store.get("app.runtime:state"))
     storage:set("requests", {})
     storage:set("checkpoints", 0)
+    storage:set("edits", 0)
     storage:set("scenario", { checkpoint = true })
     local session_id, context_id = uuid.v7(), uuid.v7()
     local actor = security.actor()
@@ -298,23 +299,27 @@ local function run_checkpoint_scenario()
             test.is_false(message.type == consts.MSG_TYPE.SYSTEM and message.metadata.system_action == consts.SYSTEM_ACTIONS.TURN_FAILED,
                 tostring(message.data))
         end
-        test.eq(#requests, 3)
-        test.eq(storage:get("checkpoints"), 1, "the real token-threshold checkpoint must run mid-turn")
-        local users, recalls, latest_result = 0, 0, false
-        for _, message in ipairs(requests[3].messages) do
-            for _, part in ipairs(message.content or {}) do
-                if message.role == "user" and part.text == request then users = users + 1 end
-                if message.role == "developer" and message.metadata and message.metadata.memory_ids then
-                    recalls = recalls + 1
-                    test.contains(part.text, "Use the usual handout style.")
+        test.eq(#requests, 5)
+        test.eq(storage:get("checkpoints"), 2, "the real token-threshold checkpoint must run twice mid-turn")
+        for _, index in ipairs({ 3, 5 }) do
+            local users, recalls, latest_result = 0, 0, false
+            for _, message in ipairs(requests[index].messages) do
+                for _, part in ipairs(message.content or {}) do
+                    if message.role == "user" and part.text == request then users = users + 1 end
+                    if message.role == "developer" and message.metadata and message.metadata.memory_ids then
+                        recalls = recalls + 1
+                        test.contains(part.text, "Use the usual handout style.")
+                    end
+                    if message.role == "function_result" and part.text == "Handout edit " .. (index - 1) .. " stored." then
+                        latest_result = true
+                    end
                 end
-                if message.role == "function_result" and part.text == "Handout edit stored." then latest_result = true end
             end
+            test.eq(users, 1, "each post-checkpoint provider request must retain the exact user task once: "
+                .. tostring(json.encode(requests[index].messages)))
+            test.eq(recalls, 1, "per-step memory recall is present alongside the active request")
+            test.is_true(latest_result, "the newest tool result must survive each checkpoint")
         end
-        test.eq(users, 1, "the post-checkpoint provider request must retain the exact user task once: "
-            .. tostring(json.encode(requests[3].messages)))
-        test.eq(recalls, 1, "per-step memory recall is present alongside the active request")
-        test.is_true(latest_result, "the newest tool result must survive the checkpoint")
         local edits, answer = 0, false
         for _, message in ipairs(history) do
             if message.type == consts.MSG_TYPE.FUNCTION then
@@ -325,7 +330,7 @@ local function run_checkpoint_scenario()
                 answer = true
             end
         end
-        test.eq(edits, 2)
+        test.eq(edits, 4)
         test.is_true(answer)
         close_process(pid, session_id)
     end)
@@ -356,7 +361,7 @@ end
 local function define_checkpoint_tests()
     test.describe("Session checkpoint continuity through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
-        test.it("retains the user task through a mid-turn checkpoint with per-step recall", run_checkpoint_scenario)
+        test.it("retains the user task through repeated mid-turn checkpoints with per-step recall", run_checkpoint_scenario)
         test.it("rejects checkpoint source messages from another session", function()
             local context_id, first, second, message_id = uuid.v7(), uuid.v7(), uuid.v7(), uuid.v7()
             local owner = assert(security.actor()):id()
