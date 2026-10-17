@@ -16,6 +16,20 @@ function session_upstream.new(session_id, conn_pid, parent_pid)
     return self
 end
 
+function session_upstream.notify_external(session_id, changes)
+    if type(session_id) ~= "string" or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if type(changes) ~= "table" then
+        return nil, "Session changes are required"
+    end
+
+    local session_pid = process.registry.lookup("session." .. session_id)
+    if not session_pid then return true end
+
+    return process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
+end
+
 -- Topic generation methods --
 
 -- Get session-level topic

@@ -10,6 +10,7 @@ local messages = require('message_repo')
 local attachments = require('context_attachments')
 local staging = require('context_staging_repo')
 local consts = require('consts')
+local upstream = require('upstream')
 local boot = require('wait_for_boot')
 
 local function define_tests()
@@ -31,7 +32,8 @@ local function define_tests()
             end
         end
         local function fixture()
-            local actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+            local actor = assert(security.actor()):id()
+            local context_id, session = uuid.v7(), uuid.v7()
             assert(contexts.create(context_id, 'primary', 'Context transport lifecycle'))
             assert(sessions.create(session, actor, context_id, 'Transport lifecycle', 'test'))
             table.insert(fixtures, { session = session, context_id = context_id })
@@ -136,6 +138,19 @@ local function define_tests()
             test.is_nil(initial.dispatch_protocol)
             test.is_nil(initial.dispatch_snapshot)
             test.eq(#assert(messages.list_by_session(session)).messages, 0)
+        end)
+        it('relays a persisted external session mutation through the mounted session', function()
+            local actor, session = fixture()
+            local pid = worker(actor, session, 'wippy.session.process:session')
+            local topic = consts.TOPIC_PREFIXES.SESSION .. session
+            receive(topic, pid)
+
+            assert(upstream.notify_external(session, { title = 'Renamed externally' }))
+
+            local update = receive(topic, pid)
+            test.eq(update.type, consts.UPSTREAM_TYPES.UPDATE)
+            test.eq(update.session_id, session)
+            test.eq(update.title, 'Renamed externally')
         end)
         it('hydrates once and acknowledges the original server message after worker restart and stage cleanup', function()
             for _, referenced in ipairs({ false, true }) do
