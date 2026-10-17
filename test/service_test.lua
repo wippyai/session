@@ -12,10 +12,13 @@ local wait_for_boot = require("wait_for_boot")
 
 local CONTRACT_ID = "wippy.session:session_service"
 local BINDING_ID = "wippy.session:service_binding"
-local TEST_ACTOR_ID = "session-service-test@wippy.local"
 
 local tracked_sessions = {}
 local tracked_contexts = {}
+
+local function test_actor_id()
+    return assert(security.actor()):id()
+end
 
 local function track_session(id)
     tracked_sessions[#tracked_sessions + 1] = id
@@ -70,7 +73,7 @@ local function open_binding()
     test.is_nil(def_err, "contract.get: " .. tostring(def_err))
     test.not_nil(def)
 
-    local actor = security.new_actor(TEST_ACTOR_ID, { source = "session_service_test" })
+    local actor = security.new_actor(test_actor_id(), { source = "session_service_test" })
     local scope, scope_err = security.named_scope("app:test_group")
     test.is_nil(scope_err, "security.named_scope: " .. tostring(scope_err))
     test.not_nil(scope)
@@ -104,7 +107,7 @@ local function define_tests()
 
             local result, err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id,
                 title = "Service session",
                 kind = "channel",
@@ -138,7 +141,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -153,7 +156,7 @@ local function define_tests()
 
             local result, err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = uuid.v7()
             })
 
@@ -163,7 +166,7 @@ local function define_tests()
             test.eq(result.primary_context_id, context_id)
             test.eq(result.session.status, consts.STATUS.IDLE)
 
-            local row, get_err = session_repo.get(session_id, TEST_ACTOR_ID)
+            local row, get_err = session_repo.get(session_id, test_actor_id())
             test.is_nil(get_err, "session get: " .. tostring(get_err))
             test.eq(row.status, consts.STATUS.IDLE)
         end)
@@ -172,7 +175,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -186,7 +189,7 @@ local function define_tests()
 
             local result, err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 reset_status = false
             })
 
@@ -199,7 +202,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id,
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -230,7 +233,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -238,7 +241,7 @@ local function define_tests()
 
             local deleted, delete_err = service.delete({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(delete_err, "delete: " .. tostring(delete_err))
             test.is_true(deleted.deleted)
@@ -246,7 +249,7 @@ local function define_tests()
 
             local missing_session, session_err = service.get({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(missing_session)
             test.contains(tostring(session_err), "Session not found")
@@ -260,7 +263,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id,
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -269,7 +272,7 @@ local function define_tests()
             local event = nil
             service._upstream = {
                 notify_external = function(id, changes)
-                    local session, get_err = session_repo.get(id, TEST_ACTOR_ID)
+                    local session, get_err = session_repo.get(id, test_actor_id())
                     test.is_nil(session)
                     test.contains(tostring(get_err), "Session not found")
                     event = { session_id = id, changes = changes }
@@ -279,7 +282,7 @@ local function define_tests()
 
             local deleted, delete_err = service.delete({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
             })
 
             test.is_nil(delete_err, "delete: " .. tostring(delete_err))
@@ -295,7 +298,7 @@ local function define_tests()
 
             local result, err = binding:ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id,
                 title = "Contract session"
             })
@@ -311,7 +314,7 @@ local function define_tests()
 
             local row, get_err = binding:get({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(get_err, "binding get: " .. tostring(get_err))
             test.eq(row.title, "Updated by binding")
@@ -319,7 +322,7 @@ local function define_tests()
 
             local deleted, delete_err = binding:delete({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(delete_err, "binding delete: " .. tostring(delete_err))
             test.is_true(deleted.deleted)
@@ -332,7 +335,7 @@ local function define_tests()
 
             result, err = service.ensure({
                 session_id = uuid.v7(),
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_data = 42
             })
             test.is_nil(result)
