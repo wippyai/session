@@ -759,6 +759,11 @@ local function run(args: SessionArgs)
                 if type(notification.attention_context) == 'table' then
                     emit_attention_context(notification.attention_context)
                 end
+            elseif topic == consts.TOPICS.SESSION_UPDATED then
+                local changes = msg:payload():data()
+                if type(changes) == "table" then
+                    session_upstream:update_session(changes)
+                end
             else
                 local payload_data = msg:payload():data()
                 local attention_handled = false

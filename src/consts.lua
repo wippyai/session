@@ -145,6 +145,7 @@ local consts = {
         ERROR = "error",
         SESSION_OPENED = "session.opened",
         SESSION_CLOSED = "session.closed",
+        SESSION_UPDATED = "session.updated",
         FINISH_AND_EXIT = "finish_and_exit",
         STOP_ESCALATION = "session.stop_escalation",
         STOP_RESOLVED = "session.stop_resolved",

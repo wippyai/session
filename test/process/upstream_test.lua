@@ -61,6 +61,59 @@ local function define_tests()
             test.eq(events[1].data.request_id, "artifact-request")
             test.eq(events[1].data.session_id, "s1")
         end)
+
+        it("notifies a mounted session after an external mutation", function()
+            local sent = {} :: {any}
+            mock("process.registry", {
+                lookup = function(name)
+                    test.eq(name, "session.s1")
+                    return "mounted-session"
+                end,
+            })
+            mock("process.send", function(pid, topic, payload)
+                sent[#sent + 1] = { pid = pid, topic = topic, payload = payload }
+                return true
+            end)
+
+            local published, publish_err = upstream.notify_external("s1", { title = "Renamed" })
+
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.is_true(published)
+            test.is_nil(publish_err)
+            test.eq(#sent, 1)
+            test.eq(sent[1].pid, "mounted-session")
+            test.eq(sent[1].topic, "session.updated")
+            test.eq(sent[1].payload.title, "Renamed")
+        end)
+
+        it("does not publish an external mutation when the session is not mounted", function()
+            local sends = 0
+            mock("process.registry", { lookup = function() return nil end })
+            mock("process.send", function() sends = sends + 1; return true end)
+
+            local published, publish_err = upstream.notify_external("s1", { deleted = true })
+
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.is_true(published)
+            test.is_nil(publish_err)
+            test.eq(sends, 0)
+        end)
+
+        it("returns a registry lookup error without sending an external mutation", function()
+            local sends = 0
+            mock("process.registry", { lookup = function() return nil, "lookup failed" end })
+            mock("process.send", function() sends = sends + 1; return true end)
+
+            local published, publish_err = upstream.notify_external("s1", { deleted = true })
+
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.is_nil(published)
+            test.eq(publish_err, "lookup failed")
+            test.eq(sends, 0)
+        end)
     end)
 end
 
