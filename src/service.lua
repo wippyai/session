@@ -298,20 +298,20 @@ function M.delete(args: DeleteSessionArgs)
         return nil, delete_err
     end
 
-    local published, publish_err = M._upstream.notify_external(session_id, { deleted = true })
-    if not published then
-        return nil, publish_err
-    end
-
     local context_id = session.primary_context_id
     if type(context_id) == "string" and context_id ~= "" then
         local _, context_err = context_repo.delete(context_id)
         if context_err and context_err ~= "Context not found" then
             result.primary_context_deleted = false
             result.primary_context_error = context_err
-            return result, nil
+        else
+            result.primary_context_deleted = true
         end
-        result.primary_context_deleted = true
+    end
+
+    local published, publish_err = M._upstream.notify_external(session_id, { deleted = true })
+    if not published then
+        return nil, publish_err
     end
 
     return result, nil
