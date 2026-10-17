@@ -8,6 +8,10 @@ type UpstreamPayload = {
 local session_upstream = {}
 session_upstream.__index = session_upstream
 
+local function is_not_found(err)
+    return type(err) == "userdata" and err:kind() == "NotFound"
+end
+
 function session_upstream.new(session_id, conn_pid, parent_pid)
     local self = setmetatable({}, session_upstream)
     self.session_id = session_id
@@ -24,7 +28,8 @@ function session_upstream.notify_external(session_id, changes)
         return nil, "Session changes are required"
     end
 
-    local session_pid = process.registry.lookup("session." .. session_id)
+    local session_pid, lookup_err = process.registry.lookup("session." .. session_id)
+    if lookup_err and not is_not_found(lookup_err) then return nil, lookup_err end
     if not session_pid then return true end
 
     return process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)

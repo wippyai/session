@@ -100,6 +100,20 @@ local function define_tests()
             test.is_nil(publish_err)
             test.eq(sends, 0)
         end)
+
+        it("returns a registry lookup error without sending an external mutation", function()
+            local sends = 0
+            mock("process.registry", { lookup = function() return nil, "lookup failed" end })
+            mock("process.send", function() sends = sends + 1; return true end)
+
+            local published, publish_err = upstream.notify_external("s1", { deleted = true })
+
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.is_nil(published)
+            test.eq(publish_err, "lookup failed")
+            test.eq(sends, 0)
+        end)
     end)
 end
 

@@ -86,6 +86,12 @@ end
 
 local function define_tests()
     test.describe("session service", function()
+        local original_upstream = service._upstream
+
+        after_each(function()
+            service._upstream = original_upstream
+        end)
+
         before_all(function()
             wait_for_boot.run()
             cleanup()
@@ -189,6 +195,37 @@ local function define_tests()
             test.eq(result.session.status, consts.STATUS.RUNNING)
         end)
 
+        test.it("publishes a persisted service update to a mounted session", function()
+            local session_id, context_id = next_pair()
+            local created, create_err = service.ensure({
+                session_id = session_id,
+                user_id = TEST_ACTOR_ID,
+                primary_context_id = context_id,
+            })
+            test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
+            test.is_true(created.created)
+
+            local event = nil
+            service._upstream = {
+                notify_external = function(id, changes)
+                    event = { session_id = id, changes = changes }
+                    return true
+                end,
+            }
+
+            local updated, update_err = service.update({
+                session_id = session_id,
+                updates = { title = "Updated by service" },
+            })
+
+            test.is_nil(update_err, "update: " .. tostring(update_err))
+            test.eq(updated.title, "Updated by service")
+            test.not_nil(event)
+            test.eq(event.session_id, session_id)
+            test.eq(event.changes.title, "Updated by service")
+            test.eq(event.changes.last_message_date, updated.last_message_date)
+        end)
+
         test.it("deletes the session and its service-owned primary context", function()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
@@ -217,6 +254,39 @@ local function define_tests()
             local missing_context, context_err = context_repo.get(context_id)
             test.is_nil(missing_context)
             test.contains(tostring(context_err), "Context not found")
+        end)
+
+        test.it("publishes a service deletion after session persistence", function()
+            local session_id, context_id = next_pair()
+            local created, create_err = service.ensure({
+                session_id = session_id,
+                user_id = TEST_ACTOR_ID,
+                primary_context_id = context_id,
+            })
+            test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
+            test.is_true(created.created)
+
+            local event = nil
+            service._upstream = {
+                notify_external = function(id, changes)
+                    local session, get_err = session_repo.get(id, TEST_ACTOR_ID)
+                    test.is_nil(session)
+                    test.contains(tostring(get_err), "Session not found")
+                    event = { session_id = id, changes = changes }
+                    return true
+                end,
+            }
+
+            local deleted, delete_err = service.delete({
+                session_id = session_id,
+                user_id = TEST_ACTOR_ID,
+            })
+
+            test.is_nil(delete_err, "delete: " .. tostring(delete_err))
+            test.is_true(deleted.deleted)
+            test.not_nil(event)
+            test.eq(event.session_id, session_id)
+            test.is_true(event.changes.deleted)
         end)
 
         test.it("routes service methods through the contract binding", function()

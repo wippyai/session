@@ -53,7 +53,9 @@ type DeleteSessionArgs = {
     user_id: any?,
 }
 
-local M = {}
+local M = {
+    _upstream = require("upstream"),
+}
 
 local function required_string(value, name)
     if type(value) ~= "string" or value == "" then
@@ -254,7 +256,17 @@ function M.update(args: UpdateSessionArgs)
         return nil, "updates table is required"
     end
 
-    return session_repo.update_session_meta(session_id, args.updates)
+    local updated, update_err = session_repo.update_session_meta(session_id, args.updates)
+    if update_err then
+        return nil, update_err
+    end
+
+    local published, publish_err = M._upstream.notify_external(session_id, updated)
+    if not published then
+        return nil, publish_err
+    end
+
+    return updated
 end
 
 function M.delete(args: DeleteSessionArgs)
@@ -284,6 +296,11 @@ function M.delete(args: DeleteSessionArgs)
     local result, delete_err = session_repo.delete(session_id)
     if delete_err then
         return nil, delete_err
+    end
+
+    local published, publish_err = M._upstream.notify_external(session_id, { deleted = true })
+    if not published then
+        return nil, publish_err
     end
 
     local context_id = session.primary_context_id
