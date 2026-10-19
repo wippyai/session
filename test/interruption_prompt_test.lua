@@ -16,11 +16,12 @@ local function define_tests(blocked_only, lifecycle_only)
     describe('Persisted interruption in the provider prompt', function()
         local session_id, context_id, plugin_pid, actor_id, label, hub_pid
         local exited = {}
-        local function receive(predicate, timeout): any
+        local function receive(predicate, timeout, description): any
             local inbox, events, deadline = process.inbox(), process.events(), time.after(timeout)
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
-                assert(selected.ok and selected.channel ~= deadline, 'interruption event deadline')
+                assert(selected.ok and selected.channel ~= deadline,
+                    'interruption event deadline: ' .. tostring(description or label))
                 if selected.channel == events then
                     exited[selected.value.from] = selected.value
                     if selected.value.from == hub_pid and selected.value.result and selected.value.result.error then
@@ -41,7 +42,7 @@ local function define_tests(blocked_only, lifecycle_only)
         end
         local function shutdown()
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.SHUTDOWN, {}))
-            receive(function(topic, event) return topic == 'exit' and event.from == plugin_pid end, '3s')
+            receive(function(topic, event) return topic == 'exit' and event.from == plugin_pid end, '3s', 'plugin shutdown')
         end
         local function start(interrupt)
             local actor = security.new_actor(actor_id, {})
@@ -53,13 +54,13 @@ local function define_tests(blocked_only, lifecycle_only)
                         cancel_before_tools = label == 'cancelled-call-settlement' },
                 }))
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.OPEN, { session_id = session_id, conn_pid = process.pid() }))
-            receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s')
+            receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s', 'session opened')
         end
         local function send(text, request_id)
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.MESSAGE, {
                 session_id = session_id, conn_pid = process.pid(), data = { text = text }, request_id = request_id,
             }))
-            local request = receive(function(topic) return topic == 'provider_prompt' end, '3s')
+            local request = receive(function(topic) return topic == 'provider_prompt' end, '3s', 'provider prompt')
             local db = assert(sql.get('app:db'))
             local _, err = db:execute('INSERT INTO interruption_prompt_captures (label, request_id, payload) VALUES ($1, $2, $3)',
                 {label, request_id, assert(json.encode(request))})
@@ -96,7 +97,10 @@ local function define_tests(blocked_only, lifecycle_only)
         local function continuation(interrupt, restart)
             label = interrupt .. (restart and '-restart' or '-continue')
             start(interrupt)
-            send('Perform the earlier request.', 'earlier')
+            local first_request = send('Perform the earlier request.', 'earlier')
+            if interrupt == 'crash' then
+                assert(process.terminate(first_request.worker_pid))
+            end
             if interrupt ~= 'crash' then
                 assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.COMMAND, {
                     session_id = session_id, conn_pid = process.pid(),
@@ -104,9 +108,9 @@ local function define_tests(blocked_only, lifecycle_only)
                 }))
                 receive(function(_, data) return data.request_id == 'stop' end, '3s')
             end
-            if interrupt == 'blocked' or interrupt == 'crash' then
+            if interrupt == 'crash' then
                 receive(function(topic, event) return topic == 'exit' and event.from == plugin_pid end,
-                    interrupt == 'blocked' and '23s' or '3s')
+                    '3s', 'plugin exit after owner crash')
                 start(nil)
             else
                 idle()
@@ -254,7 +258,7 @@ local function define_tests(blocked_only, lifecycle_only)
         elseif not blocked_only then
         it('preserves Stop on continuation without restarting', function() continuation('cooperative', false) end)
         it('preserves Stop when the plugin reopens the session', function() continuation('cooperative', true) end)
-        it('persists recovery when interruption precedes an assistant row', function() continuation('crash', true) end)
+        it('persists recovery after the owner exits during a provider call', function() continuation('crash', true) end)
         it('keeps a completed turn when a finished session reopens', function()
             label = 'completed-reopen'
             start(nil)
@@ -271,7 +275,7 @@ local function define_tests(blocked_only, lifecycle_only)
             end
         end)
         else
-            it('preserves Stop when termination precedes an assistant row', function() continuation('blocked', true) end)
+            it('cancels a blocked provider and preserves Stop after reopening', function() continuation('blocked', true) end)
         end
     end)
 end

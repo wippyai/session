@@ -13,8 +13,7 @@ local time = require("time")
 local json = require("json")
 local env = require("env")
 local benchmark_report = require("benchmark_report")
-local agent = require("agent")
-local prompt = require("prompt")
+local framework_capabilities = require("framework_capabilities")
 local active_pid = nil
 local active_exit = nil
 
@@ -48,9 +47,10 @@ local function receive_until(predicate, description)
     end
 end
 
-local function open_process(session_id, user_id, create)
+local function open_process(session_id, user_id, create, conn_pid)
     local pid, err = process.spawn_monitored(consts.PROCESS.SESSION_ID, "app:processes", {
         session_id = session_id, user_id = user_id, parent_pid = process.pid(), create = create,
+        conn_pid = conn_pid,
     })
     test.is_nil(err)
     test.not_nil(pid)
@@ -134,6 +134,8 @@ local function run_scenario(options)
         hold_handoff = options.retire_at == "handoff",
         hold_prompt = options.hold_prompt == true or options.retire_at == "prompt", parent = process.pid() })
     local stopped = options.stop or (options.hold_prompt and not options.retire_at) or options.stop_after_retire
+    -- Stop cancels the in-flight handoff instead of waiting for its result.
+    local handoff_cancelled = options.stop and options.cancels_in_flight
     local actor = security.actor()
     local session_id, context_id = uuid.v7(), uuid.v7()
     local _, context_err = context_repo.create(context_id, "primary", "{}")
@@ -186,7 +188,7 @@ local function run_scenario(options)
                 process.send(pid, consts.TOPICS.STOP, { request_id = "runtime-stop" })
                 receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
             end
-            process.send(ready.pid, "fixture:release", true)
+            if not handoff_cancelled then process.send(ready.pid, "fixture:release", true) end
         end
         if options.hold_prompt or options.retire_at == "prompt" then
             local ready = receive_until(function(topic) return topic == "fixture:prompt_ready" end, "prompt barrier")
@@ -218,19 +220,31 @@ local function run_scenario(options)
         local reopened, reopen_err = reader.open(session_id)
         test.is_nil(reopen_err)
         test.not_nil(reopened)
-        test.eq(reopened:state().config.agent_id, "app.runtime:help")
-        test.eq(reopened:state().config.model, "session-runtime-help")
-        test.eq(reopened:get_context("handoff_note"), "Keep the earlier conversation.")
+        if handoff_cancelled then
+            test.eq(reopened:state().config.agent_id, "app.runtime:router")
+            test.eq(reopened:state().config.model, "session-runtime-router")
+            test.is_nil(reopened:get_context("handoff_note"))
+        else
+            test.eq(reopened:state().config.agent_id, "app.runtime:help")
+            test.eq(reopened:state().config.model, "session-runtime-help")
+            test.eq(reopened:get_context("handoff_note"), "Keep the earlier conversation.")
+        end
         local messages, history_err = message_repo.list_all_by_session(session_id)
         test.is_nil(history_err)
         local handoffs, failures, answers, malformed = 0, 0, 0, 0
         for _, message in ipairs(messages) do
             if message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-handoff" then
                 handoffs = handoffs + 1
-                test.eq(message.metadata.status, consts.FUNC_STATUS.SUCCESS)
-                test.eq(message.metadata.control_operations.config.agent, "app.runtime:help")
-                test.eq(message.metadata.result.message, "Handoff accepted.")
-                test.is_nil(message.metadata.result._control)
+                if handoff_cancelled then
+                    test.eq(message.metadata.status, consts.FUNC_STATUS.CANCELLED)
+                    test.eq(message.metadata.result, "Session stopped while the call was running")
+                    test.is_nil(message.metadata.control_operations)
+                else
+                    test.eq(message.metadata.status, consts.FUNC_STATUS.SUCCESS)
+                    test.eq(message.metadata.control_operations.config.agent, "app.runtime:help")
+                    test.eq(message.metadata.result.message, "Handoff accepted.")
+                    test.is_nil(message.metadata.result._control)
+                end
             elseif message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-failure" then
                 failures = failures + 1
                 test.eq(message.metadata.status, consts.FUNC_STATUS.ERROR)
@@ -425,18 +439,62 @@ local function run_checkpoint_stop_scenario(followup)
     if not ok then error(failure) end
 end
 
-local function framework_stops_before_generation()
-    local probe = agent.new({ id = "stop-check-probe", name = "Stop check probe",
-        description = "Detects step stop_check support", prompt = "Probe." })
-    local previous = agent._llm
-    local seen = { generated = false }
-    agent._llm = { generate = function()
-        seen.generated = true
-        return { result = "", tokens = {} }
-    end }
-    local ok, result = pcall(probe.step, probe, prompt.new(), { stop_check = function() return true end })
-    agent._llm = previous
-    return ok and type(result) == "table" and result.stopped == true and not seen.generated
+-- Stop during a streaming model call ends the turn idle with the streamed text kept.
+local function run_stream_stop()
+    local storage = store.get("app.runtime:state")
+    storage:set("requests", {})
+    storage:set("stream_released", false)
+    storage:set("scenario", { parent = process.pid() })
+    local actor = security.actor()
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local _, context_err = context_repo.create(context_id, "primary", "{}")
+    test.is_nil(context_err)
+    local _, create_err = session_repo.create(session_id, actor:id(), context_id, "Runtime stream Stop", "test", {}, {
+        agent_id = "app.runtime:streamer", model = "session-runtime-stream",
+    })
+    test.is_nil(create_err)
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, actor:id(), true, process.pid())
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "stream-input", data = { text = "Tell me something." },
+        }))
+        local streamed, model_ready = {}, false
+        receive_until(function(topic, payload)
+            if topic == "fixture:stream_ready" then model_ready = true end
+            if payload.type == "chunk" then streamed[#streamed + 1] = payload.content end
+            return model_ready and #streamed == 2
+        end, "streamed chunks of the in-flight model call")
+        test.eq(table.concat(streamed), "Partial answer")
+
+        local started = time.now()
+        assert(process.send(pid, consts.TOPICS.STOP, { request_id = "stream-stop" }))
+        local resolved, idle = false, false
+        receive_until(function(topic, payload)
+            if topic == consts.TOPICS.STOP_RESOLVED then resolved = true end
+            if topic == "session:" .. session_id and payload.status == "idle" then idle = true end
+            return resolved and idle
+        end, "idle session after Stop")
+        test.is_true(time.now():sub(started):seconds() < 2, "Stop must end the in-flight turn promptly")
+        test.is_false((storage:get("stream_released")), "Stop must not wait for the model call")
+        test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
+
+        local messages, history_err = message_repo.list_all_by_session(session_id)
+        test.is_nil(history_err)
+        local answer = nil :: any
+        for _, message in ipairs(messages) do
+            if message.type == consts.MSG_TYPE.ASSISTANT then answer = message end
+        end
+        test.not_nil(answer, "The streamed text must be stored")
+        test.eq(answer.data, "Partial answer")
+        test.is_true(answer.metadata.stopped)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    session_repo.delete(session_id)
+    context_repo.delete(context_id)
+    storage:release()
+    if not ok then error(failure) end
+    if cleanup_err then error(cleanup_err) end
 end
 
 local function define_checkpoint_tests()
@@ -483,11 +541,19 @@ local function define_tests()
         test.it("cancels pending retirement during prompt construction and keeps the same session", function()
             run_scenario({retire_at = "prompt", cancel_retire = true, reopen = true})
         end)
-        test.it("commits a handoff but suppresses its continuation after Stop", function()
-            run_scenario({ stop = true, reopen = true })
-        end)
+        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_capabilities.cancels_in_flight() then
+            test.it("cancels the in-flight handoff and its continuation on Stop", function()
+                run_scenario({ stop = true, cancels_in_flight = true, reopen = true })
+            end)
+            test.it("cancels a streaming model call on Stop and keeps the streamed text", run_stream_stop)
+        else
+            test.it("commits a handoff but suppresses its continuation after Stop", function()
+                run_scenario({ stop = true, reopen = true })
+            end)
+            test.it_skip("Stop cancels in-flight model calls (requires Framework cancellation)", function() end)
+        end
         local stop_boundary = "suppresses provider generation when Stop commits while the next prompt is built"
-        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_stops_before_generation() then
+        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_capabilities.stops_before_generation() then
             test.it("honors Stop during prompt construction even after retirement is pending", function()
                 run_scenario({retire_at = "prompt", stop_after_retire = true, reopen = true})
             end)

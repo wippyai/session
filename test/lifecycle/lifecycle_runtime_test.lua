@@ -9,9 +9,13 @@ local security = require("security")
 local store = require("store")
 local sql = require("sql")
 local boot = require("boot")
+local framework_capabilities = require("framework_capabilities")
+local env = require("env")
 
-local function scenario(reason: string, reconnect: boolean?)
+local function scenario(reason: string, reconnect: boolean?, cancels_in_flight: boolean?)
     local explicit_stop = reason == "stop"
+    -- Stop cancels the in-flight provider call, so no tool intent is produced.
+    local cancelled = explicit_stop and cancels_in_flight == true
     local finish_after_turn = reconnect or reason == "foreign_finish"
     boot.run()
     local id, context_id = uuid.v7(), uuid.v7()
@@ -92,9 +96,13 @@ local function scenario(reason: string, reconnect: boolean?)
             request_id = "native-barrier",
         }))
         receive_until(function(_, data) return data.request_id == "native-barrier" end)
-        assert(process.send(generating.pid, "lifecycle:release", {}))
+        if not cancelled then assert(process.send(generating.pid, "lifecycle:release", {})) end
         if explicit_stop or finish_after_turn then
+            local started = time.now()
             receive_until(function(_, data) return data.status == "idle" end)
+            if cancelled then
+                test.is_true(time.now():sub(started):seconds() < 2, "Stop must cancel the provider call promptly")
+            end
             assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {}))
         end
         local completion = receive_until(function(topic) return topic == "exit" end)
@@ -104,10 +112,19 @@ local function scenario(reason: string, reconnect: boolean?)
         for _, message in ipairs(page.messages) do
             if message.type == consts.MSG_TYPE.FUNCTION then call = message end
         end
-        test.not_nil(call, "provider tool intent must be stored")
         local check_db = assert(sql.get("app:db"))
         local rows = assert(check_db:query("SELECT COUNT(*) AS count FROM session_lifecycle_effects WHERE id = $1", {id}))
         check_db:release()
+        if cancelled then
+            test.is_nil(call, "a cancelled provider call stores no tool intent")
+            test.eq(rows[1].count, 0)
+            test.eq(#terminal, 0)
+            local state = assert(store.get("app.lifecycle:state"))
+            test.eq(state:get("count"), 1, "the cancelled provider call must not be repeated")
+            state:release()
+            return
+        end
+        test.not_nil(call, "provider tool intent must be stored")
         if explicit_stop then
             test.eq(rows[1].count, 0)
             test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
@@ -137,7 +154,11 @@ local function define_tests()
         it("invalidates a pending finish on reconnect and stays usable", function() scenario("shutdown", true) end)
         it("ignores retirement requested by a foreign process", function() scenario("foreign_finish") end)
         it("ignores cancellation of retirement by a foreign process", function() scenario("foreign_cancel") end)
-        it("cancels explicitly stopped work and settles its live event", function() scenario("stop") end)
+        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_capabilities.cancels_in_flight() then
+            it("cancels the in-flight provider call on Stop", function() scenario("stop", false, true) end)
+        else
+            it("cancels explicitly stopped work and settles its live event", function() scenario("stop") end)
+        end
     end)
 end
 

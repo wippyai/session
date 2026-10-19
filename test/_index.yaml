@@ -138,6 +138,41 @@ entries:
       consts: wippy.session:consts
     method: run
 
+  - name: interruption_generate
+    kind: function.lua
+    source: file://interruption_generate.lua
+    method: run
+    modules: [ctx, time]
+    imports:
+      response_mapper: wippy.llm.openai:mapper
+
+  - name: interruption_driver
+    kind: contract.binding
+    contracts:
+      - contract: wippy.llm:generator
+        methods:
+          generate: app:interruption_generate
+      - contract: wippy.llm:provider
+        methods:
+          status: app:interruption_status
+
+  - name: interruption_status
+    kind: function.lua
+    source: file://interruption_generate.lua
+    method: status
+    modules: [ctx, time]
+    imports:
+      response_mapper: wippy.llm.openai:mapper
+
+  - name: interruption_provider
+    kind: registry.entry
+    meta:
+      type: llm.provider
+      name: interruption-fixture
+    driver:
+      id: app:interruption_driver
+      options: {}
+
   - name: interruption_session_worker
     kind: process.lua
     source: file://interruption_session_worker.lua
@@ -146,7 +181,6 @@ entries:
       writer: wippy.session.persist:writer
       session: wippy.session.process:session
       llm: wippy.llm:llm
-      response_mapper: wippy.llm.openai:mapper
     method: run
 
   - name: interruption_prompt_test

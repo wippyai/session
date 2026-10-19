@@ -51,6 +51,15 @@ command response. The session saves a message before acknowledging it. There
 is no automatic retry or client message deduplication. If acknowledgement is
 lost, a manual resend can create a duplicate.
 
+Stop cancels the turn's in-flight model and tool calls. The session hands the
+running turn a cancel channel (`runtime_options.cancel` for the agent step, the
+third argument of `tool_caller:execute`) and closes it on Stop. A cancelled model
+call stores the text streamed so far as the assistant message with
+`metadata.stopped = true`; a cancelled tool call is stored with status
+`cancelled`. The turn then ends idle. A Framework agent without this channel
+keeps the earlier behavior: Stop takes effect at the next operation boundary,
+and the session plugin escalates a turn that does not finish.
+
 Accepted steering is pending until the current response and its tool batch
 finish. The next model request includes it after those results in persisted
 message order, within the same turn. Stop prevents the next continuation at
@@ -188,6 +197,16 @@ IDs only breaking ties. Stored timestamps, IDs and pagination cursors are not
 rewritten.
 
 ## Checkpoints and prompt caching
+
+The complete checkpoint continuation fix requires Agent 0.5.5 or later. Publish
+Agent 0.5.5 before publishing the Session release that carries this requirement:
+the session keeps the user's task across mid-turn checkpoints, while Agent labels
+per-step memory recall as background context. PostgreSQL installations also need
+Runtime v0.3.50a or later to preserve message timestamp precision when choosing
+checkpoint boundaries.
+
+Agent 0.5.5 requires LLM 0.5.8 or later, so publish LLM before Agent and refresh
+Session's dependency lock from those published packages before release.
 
 When a checkpoint function or binding is configured, the session compares each
 model response's normalized `tokens.context_tokens` with

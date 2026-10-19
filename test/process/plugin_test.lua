@@ -153,8 +153,13 @@ local function run_start_through_session(actor, session_id, registry, session_pi
     })
     mock("process.inbox", function() return in_session and session_inbox or plugin_inbox end)
     mock("process.events", function() return in_session and session_events or plugin_events end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if capacity == nil then return bus_done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
         return original_channel_new(capacity)
     end)
     mock("coroutine.spawn", function(fn)
@@ -362,8 +367,13 @@ local function run_graceful_shutdown(actor, session_id, scenario)
             return session_pid, nil
         end }
     end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if current_pid == session_pid and capacity == nil then return bus_done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if current_pid == session_pid and capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
         if current_pid == session_pid and capacity == 1 then
             local fifo = { values = {} }
             function fifo:send(value)
@@ -517,8 +527,13 @@ local function run_live_owner_through_plugin(actor, session_id, owner_pid)
             return owner_pid, nil
         end }
     end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if capacity == nil then return bus_done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
         return original_channel_new(capacity)
     end)
     mock("coroutine.spawn", function() end)
@@ -1194,8 +1209,13 @@ local function define_tests()
 
             mock("process.inbox", function() return inbox end)
             mock("process.events", function() return events end)
+            local bus_done_issued = false
             mock("channel.new", function(capacity)
-                if capacity == nil then return bus_done end
+                -- session.run creates bus_done once; a running turn creates its cancel channel.
+                if capacity == nil and not bus_done_issued then
+                    bus_done_issued = true
+                    return bus_done
+                end
                 return original_channel_new(capacity)
             end)
             mock("coroutine.spawn", function(_fn) end)
@@ -1511,8 +1531,13 @@ local function define_tests()
 
             cancel_events:send({ kind = process.event.CANCEL })
             mock("process.events", function() return cancel_events end)
+            local bus_done_issued = false
             mock("channel.new", function(capacity)
-                if capacity == nil then return bus_done end
+                -- session.run creates bus_done once; a running turn creates its cancel channel.
+                if capacity == nil and not bus_done_issued then
+                    bus_done_issued = true
+                    return bus_done
+                end
                 return original_channel_new(capacity)
             end)
             mock("coroutine.spawn", function() end)
