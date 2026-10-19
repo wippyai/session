@@ -1,6 +1,7 @@
 {
   "name": "@wippy-session/wippy-form",
   "version": "1.0.0",
+  "private": true,
   "specification": "wippy-component-1.0",
   "title": "Session Form",
   "description": "Renders a session ask_user form (single/multiple choice with Other) and submits the answer back to the owning session.",

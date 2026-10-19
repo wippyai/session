@@ -1,6 +1,7 @@
 {
   "name": "@wippy-session/wippy-form-answers",
   "version": "1.0.0",
+  "private": true,
   "specification": "wippy-component-1.0",
   "title": "Session Form Answers",
   "description": "Invisible carrier element the Session server writes into a user's chat message after they answer a form, so the raw JSON answer record stays readable to the agent without ever being shown to the user.",
