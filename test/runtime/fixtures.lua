@@ -24,6 +24,15 @@ local function generate(args)
             content = "Finished rebuilding the handout."
         end
         if #requests == 2 or #requests == 4 then prompt_tokens = 300001 end
+        if scenario.hold_checkpoint and #requests == 3 then
+            local release = process.listen("fixture:checkpoint_release")
+            assert(process.send(scenario.parent, "fixture:checkpoint_ready", { pid = process.pid() }))
+            local timer = time.timer("5s")
+            local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
+            timer:stop()
+            process.unlisten(release)
+            if selected.channel ~= release then error("checkpoint release deadline exceeded") end
+        end
     end
     if args.model == "router" then
         content = "Transferring the request."
