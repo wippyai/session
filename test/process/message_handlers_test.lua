@@ -1629,8 +1629,9 @@ local function define_tests()
             ctx.config.agent_id = second.id
 
             local result, err = user_step(ctx)
-            test.is_nil(result)
-            test.not_nil(err)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.not_nil(result.failed)
             test.eq(#transitions, 1, "wrong agent receives neither lifecycle phase")
             test.eq(ctx.lifecycle_state.active_agent_id, first.id, "missing old state is not silently cleared")
 
@@ -1689,8 +1690,9 @@ local function define_tests()
             ctx.config.agent_id = second.id
 
             local result, err = user_step(ctx)
-            test.is_nil(result)
-            test.eq(err, "strict lifecycle failure")
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(result.failed, "strict lifecycle failure")
             test.eq(#transitions, 2)
             test.eq(ctx.lifecycle_state.active_agent_id, first.id)
             test.eq(ctx.lifecycle_state.active_agent, first)

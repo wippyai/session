@@ -350,7 +350,7 @@ local function define_tests()
             for _, event in ipairs(events) do test.is_false(event == "model" or event == "control") end
         end)
 
-        it("preserves accepted steering and compact across agent handoff until the next user turn", function()
+        it("preserves accepted steering and compact across agent handoff into the new agent continuation", function()
             local ctx, rows, _, _, op, context = tool_boundary_fixture()
             op.behavior_controls[1].config = { agent = "agent:next" }
             ctx.agent_ctx.switch_to_agent = function(_, id)
@@ -362,18 +362,14 @@ local function define_tests()
             end
             local processed, err = handlers.process_tools(ctx, op)
             test.is_nil(err)
-            test.eq(#processed.next_ops, 0, "handoff must not continue the old agent turn")
+            local continuation
+            for _, next_op in ipairs(processed.next_ops) do
+                if next_op.type == consts.OP_TYPE.AGENT_CONTINUE then continuation = next_op end
+            end
+            test.not_nil(continuation, "handoff continues through the canonical continuation path")
             test.eq(rows[5].metadata.input.state, "pending")
             test.is_true(context[consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED])
-            local finished, finish_err = handlers.finish_turn(ctx)
-            test.is_nil(finish_err)
-            test.eq(#finished.next_ops, 0)
-            test.eq(ctx.status, "idle")
-            local admitted, admit_err = handlers.handle_message(ctx, {
-                data = { text = "resume" }, request_id = "next-turn",
-            })
-            test.is_nil(admit_err)
-            local stepped, step_err = handlers.agent_step(ctx, admitted.next_ops[1])
+            local stepped, step_err = handlers.agent_step(ctx, continuation)
             test.is_nil(step_err)
             test.not_nil(stepped)
             test.eq(ctx.config.agent_id, "agent:next")
