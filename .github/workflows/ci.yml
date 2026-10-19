@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  FRAMEWORK_REF: 198680d57aaf3fc6fe97a1e24ca4f123231aa3db
+  FRAMEWORK_REF: 0ee3843e7a5b4afcca6f5d7d7e1a61894c6142c6
 
 jobs:
   lint:
