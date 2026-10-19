@@ -69,8 +69,8 @@ Shutdown, user close, inactivity and session-limit eviction finish at the active
 turn boundary. They preserve the in-flight model step, tools and continuation;
 only explicit Stop interrupts the turn. Reconnection cancels a pending disconnect
 finish. Cancelled public calls persist their cancelled status before emitting a
-`function_error` update with `status = cancelled`; private and delegation calls
-remain private.
+`function_error` update with `outcome = cancelled` and the deprecated
+`status = cancelled`; private and delegation calls remain private.
 
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
@@ -138,9 +138,14 @@ Retiring children occupy their live session slots until EXIT. A new session at
 capacity receives `session_limit_reached` and can be retried after a child exits;
 reopening an existing child needs no additional slot.
 
-Cancelled public tools emit a terminal function-error event after their outcome
-is stored. History keeps `cancelled` in storage and exposes `status: error` with
-`outcome: cancelled` to existing clients, so reloads show a settled result.
+Cancelled public tools emit a terminal `function_error` event after their
+outcome is stored. The event carries `outcome: cancelled`, the same field that
+history uses, so clients read one field in both places. It also keeps the
+0.6.8 field `status: cancelled` for clients that already read it; that field is
+deprecated. History keeps `cancelled` in storage and exposes `status: error`
+with `outcome: cancelled`, so old and new clients show a settled result after a
+reload. Stop, a failed turn, an agent handoff and a command-bus failure cancel
+calls this way. Private and delegation calls send no event.
 
 ## Tool feedback and loop limits
 

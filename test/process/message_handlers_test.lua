@@ -21,6 +21,8 @@ type PublicToolEvent = {
         call_id: string?,
         function_name: string?,
         error: string?,
+        outcome: string?,
+        status: string?,
     },
 }
 
@@ -217,6 +219,8 @@ local function define_tests()
             test.eq(#terminal, 1)
             test.eq(terminal[1].call_id, "cancel-1")
             test.eq(terminal[1].message_id, ids["cancel-1"])
+            test.eq(terminal[1].outcome, consts.FUNC_STATUS.CANCELLED, "live event uses the history field")
+            test.eq(terminal[1].status, consts.FUNC_STATUS.CANCELLED, "0.6.8 clients keep their field")
         end)
         it("emits no terminal cancellation event when durable settlement fails", function()
             local ctx = mock_ctx(fake_agent(nil))
@@ -1194,6 +1198,7 @@ local function define_tests()
             for index, update in ipairs(captured.message_updates) do
                 test.eq(update.type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
                 test.eq(update.payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(update.payload.outcome, consts.FUNC_STATUS.CANCELLED)
                 test.eq(update.payload.message_id, calls[index].id)
                 test.eq(update.payload.call_id, calls[index].metadata.call_id)
                 test.eq(update.id, calls[index].metadata.call_id)
@@ -1210,6 +1215,7 @@ local function define_tests()
                 test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
                 test.eq(payload.message_id, row.id)
                 test.eq(payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(payload.outcome, consts.FUNC_STATUS.CANCELLED)
                 table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
             end
             local settled, err = message_handlers.process_tools(ctx, op)
@@ -1597,6 +1603,8 @@ local function define_tests()
             end
             test.eq(events[2].payload.call_id, "function")
             test.eq(events[2].payload.error, "tool failed")
+            test.is_nil(events[2].payload.outcome, "an ordinary error is not a cancellation")
+            test.is_nil(events[2].payload.status)
             for _, row in ipairs(captured.stored) do
                 test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
             end

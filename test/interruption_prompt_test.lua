@@ -160,6 +160,7 @@ local function define_tests(blocked_only, lifecycle_only)
                     return data.type == consts.UPSTREAM_TYPES.FUNCTION_ERROR and data.status == consts.FUNC_STATUS.CANCELLED
                 end, '3s')
                 idle()
+                test.eq(event.outcome, consts.FUNC_STATUS.CANCELLED, 'the live event uses the history field')
                 local row = assert(messages.get(event.message_id))
                 test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
                 test.eq(row.metadata.call_id, event.call_id)
