@@ -146,6 +146,7 @@ local REASON = {
     CONTEXT_LIMIT_REACHED = "context_limit_reached",
     MAX_ITERATIONS_REACHED = "max_iterations_reached",
     HOST_FAILED = "host_failed",
+    STOP_REQUESTED = "stop_requested",
     AGENT_SWITCH = "agent_switch",
     SESSION_FINISHED = "session_finished",
 }
@@ -1182,6 +1183,18 @@ function message_handlers.agent_step(ctx, op)
             })
     end
     if result.stopped then
+        local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+            reason = REASON.STOP_REQUESTED,
+            refs = {
+                message_id = op.message_id,
+                response_id = response_id,
+                request_id = op.request_id
+            },
+            outcome = { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+        })
+        if after_err then
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
+        end
         if type(result.result) == "string" and result.result ~= "" then
             local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
