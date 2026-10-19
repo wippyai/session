@@ -1544,12 +1544,17 @@ local function define_tests()
             -- A checkpoint taken mid-turn anchors on the agent's own message, so the window
             -- would open with an assistant turn. Providers expect the user's turn first, and
             -- the model should know why it sees tool traffic with no request above it.
-            local function mock_reader(messages, checkpoint_id)
+            local function mock_reader(messages, checkpoint_id, original, lookup_error)
                 local query = {
                     from_checkpoint = function(self) return self end,
                     all = function(_self) return messages, nil end,
                 }
                 return {
+                    get_message = function(_, id)
+                        if lookup_error then return nil, lookup_error end
+                        test.eq(id, "original-request")
+                        return original, nil
+                    end,
                     messages = function(_self) return query end,
                     contexts = function(_self) return { all = function() return {}, nil end } end,
                     state = function(_self) return { meta = {}, config = {} } end,
@@ -1573,6 +1578,208 @@ local function define_tests()
                     },
                 }
             end
+
+            it("restores the request exactly once across repeated assistant checkpoints", function()
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Complete the document task.", metadata = {} }
+                for i = 1, 3 do
+                    local window = assistant_anchor_window()
+                    window[1].message_id = "asst-" .. i
+                    window[1].metadata.source_id = original.message_id
+                    local built = assert(prompt_builder.from_session(mock_reader(window, "asst-" .. i, original), {
+                        include_files = false, cache_markers = false,
+                    })):get_messages()
+                    local count = 0
+                    for _, message in ipairs(built) do
+                        if message.role == "user" and message.content[1].text == original.data then count = count + 1 end
+                    end
+                    test.eq(count, 1)
+                end
+            end)
+
+            it("does not reload summarized file or required context attachments", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Finish the task.", metadata = {
+                        file_uuids = { "old-file" },
+                        context_attachments = {{ kind = "wippy.attention", version = 2, attachment_id = "old-context" }},
+                    } }
+                local previous_file = prompt_builder._resolve_file
+                local previous_context = prompt_builder._context_attachments
+                local reads = 0
+                prompt_builder._resolve_file = function() reads = reads + 1; error("must not reload file") end
+                prompt_builder._context_attachments = { supports = function() reads = reads + 1; return false end,
+                    render = function() reads = reads + 1; error("must not render old context") end }
+                local ok, builder, err = pcall(prompt_builder.from_session, mock_reader(window, "asst-9", original), {
+                    include_files = true, include_context_attachments = true, cache_markers = false,
+                })
+                prompt_builder._resolve_file = previous_file
+                prompt_builder._context_attachments = previous_context
+                test.is_true(ok)
+                test.is_nil(err)
+                test.not_nil(builder)
+                test.eq(reads, 0)
+            end)
+
+            it("keeps a later applied correction after the restored request when its anchor is absent", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                table.insert(window, 1, { message_id = "orphan-steering", type = consts.MSG_TYPE.USER,
+                    data = "Keep the appendix; do not delete it.", metadata = {
+                        input = { state = "applied", after_message_id = "unavailable-anchor" }
+                    } })
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Delete the appendix.", metadata = {} }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                local task_at, correction_at
+                for index, message in ipairs(built) do
+                    for _, part in ipairs(message.content or {}) do
+                        if part.text and part.text:find(original.data, 1, true) then task_at = index end
+                        if part.text and part.text:find("Keep the appendix", 1, true) then correction_at = index end
+                    end
+                end
+                test.not_nil(task_at)
+                test.not_nil(correction_at)
+                test.is_true(task_at <= correction_at, "restored task must precede its later correction: " .. json.encode(built))
+                if task_at == correction_at then
+                    test.is_true(built[task_at].content[1].text:find("Delete the appendix", 1, true)
+                        < built[task_at].content[1].text:find("Keep the appendix", 1, true))
+                end
+            end)
+
+            it("bounds restored requests while preserving both ends and UTF-8 boundaries", function()
+                for _, character in ipairs({ "x", "é", "界", "🙂" }) do
+                    local window = assistant_anchor_window()
+                    window[1].metadata.source_id = "original-request"
+                    local text = "Initial task.\n" .. string.rep(character, 7000) .. "\nFinal restriction."
+                    local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                        data = text, metadata = {} }
+                    local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                        include_files = false, cache_markers = false,
+                    })):get_messages()
+                    local excerpt = built[1].content[1].text
+                    test.ok(#excerpt <= 6000, "restored request exceeds its 6000-byte budget")
+                    test.contains(excerpt, "Initial task.")
+                    test.contains(excerpt, "Final restriction.")
+                    test.contains(excerpt, "omitted")
+                    test.eq(json.decode(assert(json.encode(excerpt))), excerpt, "excerpt must remain valid UTF-8")
+                    test.eq(original.data, text, "the stored request must remain unchanged")
+                end
+            end)
+
+            it("retains a request at the excerpt budget unchanged", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = string.rep("x", 6000), metadata = {} }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                test.eq(built[1].content[1].text, original.data)
+            end)
+
+            it("preserves Stop feedback and a new request without resurrecting the old task", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "stop", type = consts.MSG_TYPE.DEVELOPER,
+                    data = "The previous turn was stopped. Do not resume it.", metadata = {} }
+                window[#window + 1] = { message_id = "new", type = consts.MSG_TYPE.USER,
+                    data = "Start a different task.", metadata = {} }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", nil, "must not load old task"), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                test.eq(built[#built].role, "user")
+                test.eq(built[#built].content[1].text, "Start a different task.")
+            end)
+
+            it("retains the originating user text when a checkpoint drops it mid-turn", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Rebuild the Word handout and finish every edit.",
+                    metadata = { file_uuids = { "already-summarized-document" } } }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, original.data)
+                test.contains(built[2].content[1].text, "checkpoint")
+                test.eq(built[3].role, "assistant")
+                test.eq(built[#built].role, "function_result")
+                test.is_nil(window[1].metadata.file_uuids, "summarized attachments must not be reloaded")
+                test.eq(original.metadata.file_uuids[1], "already-summarized-document")
+            end)
+
+            it("does not restore an old request when a new user turn is visible", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "new-request", type = consts.MSG_TYPE.USER,
+                    data = "Answer only this new question.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", nil, "must not look up old work"), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local users = 0
+                for _, message in ipairs(assert(builder):get_messages()) do
+                    if message.role == "user" then
+                        users = users + 1
+                        test.eq(message.content[1].text, "Answer only this new question.")
+                    end
+                end
+                test.eq(users, 1)
+            end)
+
+            it("does not mistake pending steering for the active user request", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "pending", type = consts.MSG_TYPE.USER,
+                    data = "Not yet admitted to a provider prompt.", metadata = { input = { state = "pending" } } }
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Finish the existing task.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local users = 0
+                for _, message in ipairs(assert(builder):get_messages()) do
+                    if message.role == "user" then
+                        users = users + 1
+                        test.eq(message.content[1].text, original.data)
+                    end
+                end
+                test.eq(users, 1)
+            end)
+
+            it("reports a failed originating-request lookup", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", nil, "database unavailable"))
+                test.is_nil(builder)
+                test.contains(err, "database unavailable")
+            end)
+
+            it("retains the original task when re-anchored steering sorts before the checkpoint", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                table.insert(window, 1, { message_id = "steering", type = consts.MSG_TYPE.USER,
+                    data = "Also use landscape pages.", metadata = { input = { state = "applied", after_message_id = "fn-9" } } })
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Rebuild the handout.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, original.data)
+                test.eq(built[#built].role, "user")
+                test.eq(built[#built].content[1].text, "Also use landscape pages.")
+            end)
 
             it("opens with a developer note when the window anchors on an assistant message", function()
                 local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "asst-9"))

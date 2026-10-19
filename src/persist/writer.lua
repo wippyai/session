@@ -210,10 +210,10 @@ function session_writer:apply_inputs(updates, expected_revision)
     return result, err
 end
 
-function session_writer:stop_with_input_rollback(updates, session_updates)
+function session_writer:stop_with_input_rollback(updates, session_updates, boundary)
     self._meta_lock:receive()
     local result, err = session_writer._message_repo.stop_with_input_rollback(
-        self.session_id, updates, session_updates)
+        self.session_id, updates, session_updates, boundary)
     self._meta_lock:send(true)
     return result, err
 end
