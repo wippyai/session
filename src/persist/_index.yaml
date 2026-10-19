@@ -2,6 +2,50 @@ version: "1.0"
 namespace: wippy.session.persist
 
 entries:
+  # wippy.session.persist:tx
+  - name: tx
+    kind: library.lua
+    meta:
+      comment: Shared transaction helper for the persist layer (begin/pcall/commit-or-rollback/release); refuses nested tx.run and repository connections inside it
+    source: file://tx.lua
+    modules:
+      - sql
+    imports:
+      consts: wippy.session:consts
+
+  # wippy.session.persist:message_date
+  - name: message_date
+    kind: library.lua
+    meta:
+      comment: Locks a session row and produces message dates the store orders after every row of the session
+    source: file://message_date.lua
+    modules:
+      - time
+      - sql
+    imports:
+      tx: wippy.session.persist:tx
+      message_order: wippy.session.persist:message_order
+
+  # wippy.session.persist:artifact_projection
+  - name: artifact_projection
+    kind: library.lua
+    meta:
+      comment: Shapes the metadata-response view of an artifact row, shared by the GET endpoint and the event publisher
+    source: file://artifact_projection.lua
+    modules:
+      - json
+    imports:
+      consts: wippy.session:consts
+
+  # wippy.session.persist:artifact_events
+  - name: artifact_events
+    kind: library.lua
+    meta:
+      comment: Publishes artifact-updated events to the owning user's relay hub
+    source: file://artifact_events.lua
+    imports:
+      artifact_projection: wippy.session.persist:artifact_projection
+
   - name: context_staging_repo
     kind: library.lua
     source: file://context_staging_repo.lua
@@ -38,7 +82,7 @@ entries:
       - security
       - time
     imports:
-      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
 
   # wippy.session.persist:context_repo
   - name: context_repo
@@ -68,11 +112,13 @@ entries:
     modules:
       - sql
       - json
-      - time
     imports:
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      message_date: wippy.session.persist:message_date
       input_metadata: wippy.session:input_metadata
+      form_meta: wippy.session.forms:form_meta
       message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:session_contexts_repo
@@ -99,7 +145,7 @@ entries:
       - json
       - time
     imports:
-      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
 
   # wippy.session.persist:reader
   - name: reader

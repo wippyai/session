@@ -7,11 +7,16 @@ local context_repo = require("context_repo")
 local start_tokens = require("start_tokens")
 local consts = require("consts")
 local input_policy = require("input_policy")
+local session_status = require("session_status")
+local form_recovery = require("form_recovery")
 local funcs = require("funcs")
 local ui_action_broker = require("ui_action_broker")
 local prompt_builder = require("prompt_builder")
 local message_repo = require("message_repo")
+local answer_admission = require("answer_admission")
 local reader = require("reader")
+local writer = require("writer")
+local upstream = require("upstream")
 
 type PluginArgs = {
     user_id: string,
@@ -27,10 +32,24 @@ type ActiveSession = {
     last_activity: time.Time?,
     terminating: boolean,
     terminate_reason: string?,
+    -- Told to finish because the grace period after the last client left ran
+    -- out. Stays set when a returning client takes the finish back.
+    finished_for_shutdown: boolean?,
     stop_escalation: number?,
     stop_request_id: string?,
     stop_deadline: any?,
+    -- Started to admit pending form answers (wake-up or scan), not by a client.
+    answer_start: boolean?,
 }
+
+-- Bounds of the periodic scan for sessions that hold pending form answers
+-- (resume_pending_answer_sessions): sessions listed per scan, sessions started
+-- per scan, the longest wait in scans before a session whose start failed is
+-- tried again, and the page size of the stale running session scan.
+local RESUME_SCAN_LIMIT = 20
+local RESUME_STARTS_PER_SCAN = 3
+local MAX_RESUME_WAIT = 32
+local STALE_PAGE_SIZE = 50
 
 local function clear_stop_deadline(session_info)
     local deadline = session_info.stop_deadline
@@ -59,8 +78,10 @@ local function deadline_matches(session_info, deadline)
         and active.level == deadline.level
 end
 
-local function exit_error_payload(session_id, status, reason)
-    if status ~= consts.STATUS.FAILED then return nil end
+-- The notice that a turn did not complete: after a failed exit, and for a
+-- turn the runtime interrupted (`interrupted`, stored idle).
+local function exit_error_payload(session_id, status, reason, interrupted)
+    if status ~= consts.STATUS.FAILED and not interrupted then return nil end
     return {
         type = consts.UPSTREAM_TYPES.ERROR,
         session_id = session_id,
@@ -103,19 +124,53 @@ local function recover_session_calls(session_id)
     local session_reader, open_err = reader.open(session_id)
     if open_err then return nil, open_err end
     local anchor = session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
-    return message_repo.recover_pending(session_id, anchor)
+    return message_repo.recover_pending(session_id, anchor, form_recovery.settle_call)
 end
 
-local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
-    local target_status = status_after_exit(session_info, result, exit_error)
+-- Admits, with no turn, the form answers a stopped turn left pending: the
+-- same admission a Stop the session honours runs when it settles
+-- (session.flush_held, phase "stop"), in acceptance order and each after
+-- the steering accepted before it (answer_admission.admit_in_order). The
+-- user's clients (`hub_pid`) are told each answer was received. Returns the
+-- admitted rows, to publish once the idle status is out. A row whose
+-- admission fails stays pending, and the next session start admits it with
+-- a turn.
+local function admit_stopped_answers(session_id: string, user_id: string, hub_pid: any)
+    local pending, list_err = message_repo.list_pending_answers(session_id, 1)
+    if not pending then return {}, list_err end
+    if #pending == 0 then return {}, nil end
+    local stored, read_err = session_repo.get(session_id, user_id)
+    if not stored then return {}, read_err or "Session was not found" end
+    local session_writer, writer_err = writer.new(session_id)
+    if not session_writer then return {}, writer_err end
+    return answer_admission.admit_stopped(session_id, session_writer, upstream.new(session_id, nil, hub_pid),
+        stored.meta and stored.meta.interaction)
+end
+
+-- Stores `target_status` with the interaction recovery gives it. Before
+-- that, `opts.recover_calls` repairs the calls an interrupted turn left
+-- pending, and `opts.admit_stopped` admits its pending form answers with no
+-- turn (admit_stopped_answers, clients told through `opts.hub_pid`).
+-- Returns the status, whether it was stored, the storage error, the call
+-- repair error, the interaction and the admitted answer rows.
+local function settle_session(session_id: string, user_id: string, target_status: string, opts: any?)
+    opts = opts or {}
     local recovery_err = nil
-    if target_status == consts.STATUS.FAILED then
+    if opts.recover_calls then
         local _, err = recover_session_calls(session_id)
         recovery_err = err
     end
+    local admitted = {}
+    if opts.admit_stopped then
+        local admit_err
+        admitted, admit_err = admit_stopped_answers(session_id, user_id, opts.hub_pid)
+        if admit_err then
+            logger:warn("form answer admission failed", { session_id = session_id, error = tostring(admit_err) })
+        end
+    end
     local stored, read_err = session_repo.get(session_id, user_id)
     if not stored then
-        return target_status, false, read_err or "Session was not found", recovery_err, nil
+        return target_status, false, read_err or "Session was not found", recovery_err, nil, admitted
     end
     local meta = stored.meta or {}
     local interaction = input_policy.recovery_snapshot(stored, target_status)
@@ -123,7 +178,44 @@ local function finalize_exit(session_id: string, user_id: string, session_info: 
     local success, status_err = session_repo.update_session_meta(session_id, {
         status = target_status, meta = meta
     })
-    return target_status, success, status_err, recovery_err, interaction
+    return target_status, success, status_err, recovery_err, interaction, admitted
+end
+
+-- Settles a session whose turn was cut off from outside, either by a runtime
+-- stop or by the plugin enforcing the user's Stop (stop_enforced). It is
+-- stored idle with an interaction that takes input, because nothing in the
+-- session failed and a failed status would keep Send disabled. Pending calls
+-- are repaired first. After an enforced Stop the pending form answers are
+-- admitted with no turn (`admit_stopped`), and after a runtime stop they stay
+-- pending for the next session start. Clients get the recovery notice only
+-- when the runtime stopped (settle_stale_running).
+local function settle_interrupted(session_id: string, user_id: string, opts: any?)
+    opts = opts or {}
+    return settle_session(session_id, user_id, consts.STATUS.IDLE,
+        { recover_calls = true, admit_stopped = opts.admit_stopped, hub_pid = opts.hub_pid })
+end
+
+-- Whether the plugin cancelled or terminated the session process to enforce
+-- the user's Stop: the turn did not stop within the stop deadline (a model
+-- call Stop cannot interrupt, for example), so the exit that follows is that
+-- Stop, not a failure of the session.
+local function stop_enforced(session_info: any): boolean
+    return type(session_info) == "table" and (tonumber(session_info.stop_escalation) or 0) >= 2
+end
+
+-- Settles a session process that exited while the runtime keeps running. A
+-- process that exits with an error, or is cancelled for any other reason, is
+-- stored failed. After an enforced Stop the answers accepted during the
+-- stopped turn are admitted with no turn, so they never start one later;
+-- `hub_pid` receives their announcements.
+local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any,
+    exit_error: any, hub_pid: any?)
+    if stop_enforced(session_info) then
+        return settle_interrupted(session_id, user_id, { admit_stopped = true, hub_pid = hub_pid })
+    end
+    local target_status = status_after_exit(session_info, result, exit_error)
+    return settle_session(session_id, user_id, target_status,
+        { recover_calls = target_status == consts.STATUS.FAILED })
 end
 
 local function run(args)
@@ -140,10 +232,28 @@ local function run(args)
         base_config = base_config,
         active_sessions = {} :: {[string]: ActiveSession},
         session_count = 0,
-        shutting_down = false,
+        shutting_down = false :: boolean,
+        -- session id -> { failures, wait }: a session started for its
+        -- pending form answers that failed; the scan skips it `wait` times.
+        resume_backoff = {} :: {[string]: any},
+        stale_checked = false,
+        -- The grace period after the user's last client left, while it runs:
+        -- { generation, timer, cancel } (begin_shutdown).
+        shutdown_deadline = nil :: any,
+        shutdown_generation = 0 :: number,
     }
 
     process.set_options({ trap_links = true })
+
+    -- Named so the form state API can wake a stopped session without going
+    -- through the relay hub, which would make the HTTP handler the session's
+    -- client connection. Without the name a wake is lost and the answer is
+    -- admitted on the next session start.
+    local plugin_name = consts.REGISTRY.PLUGIN .. state.user_id
+    local named, name_err = process.registry.register(plugin_name)
+    if not named then
+        logger:warn("session plugin registry name unavailable", { user_id = state.user_id, error = tostring(name_err) })
+    end
 
     local broker: any = ui_action_broker.new({
         ttl_seconds = base_config.ui_action_ttl_seconds,
@@ -275,6 +385,7 @@ local function run(args)
 
         session_info.terminating = true
         session_info.terminate_reason = reason
+        if reason == "shutdown" then session_info.finished_for_shutdown = true end
         broker:cancel_session(session_id, "unavailable", "session is terminating")
 
         logger:info("initiating graceful session termination", {
@@ -284,6 +395,70 @@ local function run(args)
         })
 
         process.send(session_info.pid :: string, consts.TOPICS.FINISH_AND_EXIT, { reason = reason })
+    end
+
+    -- The user hub tells this plugin "shutdown" when the user's last client
+    -- disconnects and "resume" when a client connects again. A page reload is
+    -- both, a fraction of a second apart: the old socket closes before the
+    -- new one opens. Finishing a session is a Stop for its turn (the turn
+    -- ends at its next boundary, steering still unused stays pending and
+    -- form answers wait for the next session start), so the sessions are not
+    -- finished at the first "shutdown". A client has the grace period to
+    -- return; "resume" ends it, and only a grace period that runs out
+    -- finishes them (finish_sessions_for_shutdown).
+    local function clear_shutdown_deadline()
+        local deadline = state.shutdown_deadline
+        if not deadline then return end
+        state.shutdown_deadline = nil
+        deadline.timer:stop()
+        deadline.cancel:send(true)
+    end
+
+    local function begin_shutdown()
+        -- A repeated "shutdown" keeps the grace period it already started.
+        if state.shutting_down then return end
+        state.shutting_down = true
+        state.shutdown_generation = (state.shutdown_generation :: number) + 1
+        local plugin_pid = process.pid()
+        local generation = state.shutdown_generation
+        local timer = time.timer(consts.TIMEOUTS.SHUTDOWN_GRACE)
+        local cancel = channel.new(1)
+        state.shutdown_deadline = { generation = generation, timer = timer, cancel = cancel }
+        coroutine.spawn(function()
+            local selected = channel.select({ timer:channel():case_receive(), cancel:case_receive() })
+            if selected.channel == timer:channel() then
+                process.send(plugin_pid, consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE, { generation = generation })
+            end
+        end)
+        logger:info("last client disconnected - sessions finish unless one reconnects", {
+            user_id = state.user_id,
+            grace = consts.TIMEOUTS.SHUTDOWN_GRACE,
+        })
+    end
+
+    -- A client connected again ("resume"): the grace period ends and nothing
+    -- is finished. Sessions the grace period already finished keep finishing.
+    local function cancel_shutdown()
+        if not state.shutting_down then return end
+        state.shutting_down = false
+        clear_shutdown_deadline()
+        logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
+    end
+
+    -- The grace period ran out. The deadline message carries the generation
+    -- of the grace period that sent it, which a message from a client never
+    -- does, and one that belongs to a cancelled or an older grace period is
+    -- ignored.
+    local function finish_sessions_for_shutdown(deadline_data: any)
+        local deadline = state.shutdown_deadline
+        if not deadline or type(deadline_data) ~= "table" or deadline_data.generation ~= deadline.generation then
+            return
+        end
+        state.shutdown_deadline = nil
+        logger:info("no client returned - notifying sessions to finish", { user_id = state.user_id })
+        for session_id, session_info in pairs(state.active_sessions) do
+            graceful_terminate_session(session_id, session_info, "shutdown")
+        end
     end
 
     local function get_oldest_session()
@@ -810,6 +985,146 @@ local function run(args)
         end
     end
 
+    -- A form answer was accepted for one of this user's sessions. A running
+    -- session gets the answer id (without one it looks for pending answers
+    -- itself); a stopped one is started with no client connection and admits
+    -- its pending answers on start. An unknown or foreign session is
+    -- ignored: create_session only reopens sessions this user owns and never
+    -- creates one without a start token.
+    local function handle_wake(payload_data: any)
+        if type(payload_data) ~= "table" or type(payload_data.session_id) ~= "string"
+            or payload_data.session_id == "" then
+            return
+        end
+        local session_id: string = payload_data.session_id
+        local session_info = state.active_sessions[session_id]
+        -- A session that is running (not finishing) takes its wake-up also
+        -- while the grace period after the last client's disconnect runs.
+        if session_info then
+            if not session_info.terminating then
+                local message_id = type(payload_data.message_id) == "string" and payload_data.message_id or nil
+                process.send(session_info.pid :: string, consts.TOPICS.FORM_ANSWER, { message_id = message_id })
+            end
+            return
+        end
+        if state.shutting_down then return end
+        local started_id, err = create_session({ session_id = session_id })
+        if err then
+            logger:warn("form answer wake could not start the session",
+                { user_id = state.user_id, session_id = session_id, error = tostring(err) })
+            return
+        end
+        local started = state.active_sessions[started_id :: string]
+        if started then started.answer_start = true end
+    end
+
+    -- Scans for this user's sessions that hold form answers nobody admitted.
+    -- A stopped session is started (the wake-up was lost, e.g. the runtime
+    -- restarted while no client was connected); a running one is asked to
+    -- look again (its admission failed, or its wake-up was lost). Bounded:
+    -- a few starts per scan, never at the cost of evicting a session the
+    -- user may be using, and a session whose start failed waits a growing
+    -- number of scans, so it neither restarts on every tick nor keeps the
+    -- others from their turn.
+    local function resume_pending_answer_sessions()
+        if state.shutting_down then return end
+        local waiting = {}
+        for session_id, entry in pairs(state.resume_backoff) do
+            if entry.wait > 0 then
+                entry.wait = entry.wait - 1
+                waiting[session_id] = true
+            end
+        end
+        local exclude = {}
+        for session_id in pairs(waiting) do table.insert(exclude, session_id) end
+        table.sort(exclude)
+        local ids, err = message_repo.list_sessions_with_pending_answers(state.user_id, RESUME_SCAN_LIMIT,
+            { exclude = exclude })
+        if err then
+            logger:warn("pending form answer scan failed", { user_id = state.user_id, error = tostring(err) })
+            return
+        end
+        local starts = 0
+        for _, session_id in ipairs(ids or {}) do
+            if state.active_sessions[session_id] then
+                handle_wake({ session_id = session_id })
+            elseif not waiting[session_id] and starts < RESUME_STARTS_PER_SCAN
+                and state.session_count < consts.LIMITS.MAX_SESSIONS_PER_USER - 1 then
+                starts = starts + 1
+                handle_wake({ session_id = session_id })
+            end
+        end
+    end
+
+    -- A session started for its pending answers that exits with a failure
+    -- waits longer before the next try; a clean exit clears that.
+    local function note_resume_exit(session_id, session_info, target_status)
+        if target_status ~= consts.STATUS.FAILED then
+            state.resume_backoff[session_id] = nil
+            return
+        end
+        if not session_info.answer_start then return end
+        local entry = state.resume_backoff[session_id] or { failures = 0, wait = 0 }
+        entry.failures = entry.failures + 1
+        entry.wait = math.min(2 ^ (entry.failures - 1), MAX_RESUME_WAIT)
+        state.resume_backoff[session_id] = entry
+    end
+
+    -- Tells the user's clients how a session ended: the stored status and
+    -- interaction, once they are committed.
+    local function report_final_status(session_id, target_status, stored, reason, interaction, interrupted)
+        if not state.user_hub_pid then return end
+        local error_update = exit_error_payload(session_id, target_status, reason, interrupted)
+        if error_update then
+            publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
+        end
+        if stored then
+            publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, {
+                type = consts.UPSTREAM_TYPES.UPDATE,
+                session_id = session_id,
+                status = target_status,
+                interaction = interaction,
+            })
+        end
+    end
+
+    -- Sessions left "running" when the whole runtime stopped: no plugin saw
+    -- their process exit, so the stored status still says running, and the
+    -- Host shows Stop and blocks Send until something reopens the session.
+    -- Once, at start, each such session of this user that no live process
+    -- holds is settled as interrupted (settle_interrupted: pending calls
+    -- repaired, status idle with an interaction that takes input, clients
+    -- told with the recovery notice). Its form answers read as interrupted.
+    -- All of the user's running sessions are read, a page at a time; the
+    -- pages follow session ids, so settling a session does not move the rows
+    -- of later pages.
+    local function settle_stale_running()
+        local after = nil :: string?
+        repeat
+            local page, err = session_repo.list_by_user_status(state.user_id, consts.STATUS.RUNNING,
+                STALE_PAGE_SIZE, { after = after })
+            if not page then
+                logger:warn("stale session status scan failed", { user_id = state.user_id, error = tostring(err) })
+                return
+            end
+            for _, session in ipairs(page.sessions or {}) do
+                local session_id = tostring(session.session_id)
+                if not state.active_sessions[session_id] and session_status.is_stale_running(session) then
+                    local target_status, stored, status_err, recovery_err, interaction =
+                        settle_interrupted(session_id, state.user_id :: string)
+                    if recovery_err or status_err then
+                        logger:warn("stale session status could not be settled", { session_id = session_id,
+                            error = tostring(status_err or recovery_err) })
+                    end
+                    report_final_status(session_id, target_status, stored, "runtime stopped", interaction, true)
+                end
+            end
+            -- A cursor that does not move would read the same page forever.
+            if page.next_cursor == after then return end
+            after = page.next_cursor
+        until not after
+    end
+
     local function check_inactive_sessions()
         local now = time.now()
         local inactivity_duration, _ = time.parse_duration(consts.TIMEOUTS.SESSION_INACTIVITY)
@@ -836,6 +1151,9 @@ local function run(args)
             end
         end
     end
+
+    -- First pending-answer scan as an ordinary inbox message, after start-up.
+    process.send(process.pid(), consts.PLUGIN_TOPICS.SCAN_ANSWERS, {})
 
     while true do
         local result = channel.select({
@@ -877,24 +1195,32 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.COMMAND then
                 handle_message_or_command(payload:data(), consts.HANDLER_TYPES.COMMAND)
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN then
-                logger:info("received shutdown signal - notifying sessions to finish", { user_id = state.user_id })
-                state.shutting_down = true
-
-                for session_id, session_info in pairs(state.active_sessions) do
+                -- The client transport is gone, so UI actions waiting on it end
+                -- now, whatever the grace period does with the sessions.
+                for session_id, _ in pairs(state.active_sessions) do
                     if type(session_id) == "string" then
                         broker:cancel_session(session_id, "disconnected", "client transport disconnected")
-                        graceful_terminate_session(session_id, session_info, "shutdown")
                     end
                 end
                 -- An auto-started plugin may never have opened a session.
                 -- Leave through normal ticker/broker cleanup instead of
-                -- waiting forever for an EXIT that cannot arrive.
+                -- waiting out a grace period that has nothing to finish.
                 if state.session_count == 0 then break end
-            elseif topic == consts.PLUGIN_TOPICS.RESUME then
-                if state.shutting_down then
-                    state.shutting_down = false
-                    logger:info("cancelled shutdown - client reconnected", { user_id = state.user_id })
+                begin_shutdown()
+            elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE then
+                finish_sessions_for_shutdown(payload:data())
+            elseif topic == consts.PLUGIN_TOPICS.WAKE then
+                handle_wake(payload:data())
+            elseif topic == consts.PLUGIN_TOPICS.SCAN_ANSWERS then
+                if not state.stale_checked then
+                    state.stale_checked = true
+                    settle_stale_running()
                 end
+                resume_pending_answer_sessions()
+            elseif topic == consts.PLUGIN_TOPICS.RESUME then
+                cancel_shutdown()
+                -- Sessions a lapsed grace period already started to finish
+                -- go back to normal when a client returns.
                 for _, session_info in pairs(state.active_sessions) do
                     if session_info.terminating and session_info.terminate_reason == "shutdown" then
                         session_info.terminating = false
@@ -1019,6 +1345,7 @@ local function run(args)
                                     "Failed to create session: " ..
                                     tostring(exit_result.error or "Session start refused"))
                                 gc_ticker:stop()
+                                clear_shutdown_deadline()
                                 ui_action_ticker:stop()
                                 return { status = "shutdown", user_id = state.user_id,
                                     reason = "no_active_sessions" }
@@ -1046,8 +1373,9 @@ local function run(args)
                         end
 
                         -- Update session status in database based on termination reason
-                        local target_status, success, status_err, recovery_err, interaction =
-                            finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error)
+                        local target_status, success, status_err, recovery_err, interaction, admitted =
+                            finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error,
+                                state.user_hub_pid)
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err
@@ -1060,6 +1388,7 @@ local function run(args)
                                 error = status_err
                             })
                         end
+                        note_resume_exit(session_id, session_info, target_status)
 
                         -- Invoke on_session_end hook if configured (non-blocking)
                         fire_session_end_hook(state.base_config.on_session_end_func_id, {
@@ -1080,23 +1409,14 @@ local function run(args)
                             active_sessions = state.session_count
                         })
 
+                        -- Session status update first, then the closed notification.
+                        -- An enforced Stop is what the user asked for, so it
+                        -- publishes the idle status without the recovery error.
+                        report_final_status(session_id, target_status, success, err, interaction, false)
+                        -- Open views of the forms answered during an enforced
+                        -- Stop reload their delivery state once it says idle.
+                        answer_admission.publish_admitted(admitted)
                         if state.user_hub_pid then
-                            local error_update = exit_error_payload(session_id, target_status, err)
-                            if error_update then
-                                process.send(state.user_hub_pid :: string,
-                                    consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
-                            end
-                            -- Send session status update first
-                            if success then
-                                publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, {
-                                    type = consts.UPSTREAM_TYPES.UPDATE,
-                                    session_id = session_id,
-                                    status = target_status,
-                                    interaction = interaction,
-                                })
-                            end
-
-                            -- Then send session closed notification
                             publish_after_commit(state.user_hub_pid, consts.TOPICS.SESSION_CLOSED, {
                                 session_id = session_id,
                                 reason = err,
@@ -1104,10 +1424,21 @@ local function run(args)
                             })
                         end
 
+                        -- Finished for a disconnect whose grace period ran
+                        -- out, and a client connected again meanwhile: the
+                        -- form answers it left pending are not left for the
+                        -- next periodic scan, or for the plugin to start
+                        -- again. Steering alone starts nothing: unused
+                        -- steering stays pending, as after any Stop.
+                        if session_info.finished_for_shutdown and not state.shutting_down then
+                            resume_pending_answer_sessions()
+                        end
+
                         if state.session_count == 0 then
                             fail_inbox_requests(consts.ERROR_CODES.SESSION_NOT_FOUND,
                                 "Session exited: " .. err)
                             gc_ticker:stop()
+                            clear_shutdown_deadline()
                             ui_action_ticker:stop()
                             logger:info("plugin shutting down - no active sessions", { user_id = state.user_id })
                             return { status = "shutdown", user_id = state.user_id, reason = "no_active_sessions" }
@@ -1122,6 +1453,7 @@ local function run(args)
             local _, context_cleanup_err = require('context_staging_repo').cleanup()
             if context_cleanup_err then logger:warn('Context staging cleanup unavailable') end
             check_inactive_sessions()
+            resume_pending_answer_sessions()
         elseif result.channel == ui_action_ticker:channel() then
             broker:expire()
         end
@@ -1131,6 +1463,7 @@ local function run(args)
         broker:cancel_session(session_id, "disconnected", "session plugin stopped")
     end
     gc_ticker:stop()
+    clear_shutdown_deadline()
     ui_action_ticker:stop()
     logger:info("plugin shutting down", { user_id = state.user_id, active_sessions = state.session_count })
     return { status = "shutdown", user_id = state.user_id }

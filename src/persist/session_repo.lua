@@ -1,7 +1,7 @@
 local sql = require("sql")
 local json = require("json")
 local time = require("time")
-local consts = require("consts")
+local tx = require("tx")
 
 type Session = {
     session_id: string,
@@ -41,7 +41,7 @@ local function attention_context(enabled, revision, updated_at, updated_by)
     }
 end
 
-local function attention_context_from_row(session)
+local function attention_context_from_row(session: any): any
     session.attention_context = attention_context(
         session.attention_enabled,
         tonumber(session.attention_revision) or 0,
@@ -55,14 +55,24 @@ local function attention_context_from_row(session)
     return session
 end
 
--- Get a database connection
+-- Get a database connection (refused inside tx.run; see tx.connect)
 local function get_db()
-    local db_resource = consts.get_db_resource()
-    local db, err = sql.get(db_resource)
-    if err then
-        return nil, "Failed to connect to database: " .. err
+    return tx.connect()
+end
+
+-- Decodes a session row's JSON fields in place; a missing or malformed value
+-- reads as an empty table.
+local function decode_json_fields(session: any): any
+    for _, field in ipairs({ "meta", "config", "public_meta" }) do
+        local value = session[field]
+        local decoded = nil
+        if type(value) == "string" and value ~= "" then
+            local parsed, decode_err = json.decode(value)
+            if not decode_err then decoded = parsed end
+        end
+        session[field] = decoded or {}
     end
-    return db
+    return session
 end
 
 -- Count sessions by user ID
@@ -144,7 +154,7 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
         return nil, err
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local query = sql.builder.insert("sessions")
         :set_map({
@@ -227,41 +237,7 @@ function session_repo.get(session_id, user_id)
         return nil, "Session not found"
     end
 
-    -- Parse JSON fields
-    if session.meta and session.meta ~= "" then
-        local decoded, err = json.decode(session.meta :: string)
-        if not err then
-            session.meta = decoded
-        else
-            session.meta = {}
-        end
-    else
-        session.meta = {}
-    end
-
-    if session.config and session.config ~= "" then
-        local decoded, err = json.decode(session.config :: string)
-        if not err then
-            session.config = decoded
-        else
-            session.config = {}
-        end
-    else
-        session.config = {}
-    end
-
-    if session.public_meta and session.public_meta ~= "" then
-        local decoded, err = json.decode(session.public_meta :: string)
-        if not err then
-            session.public_meta = decoded
-        else
-            session.public_meta = {}
-        end
-    else
-        session.public_meta = {}
-    end
-
-    return attention_context_from_row(session)
+    return attention_context_from_row(decode_json_fields(session))
 end
 
 -- List sessions by user ID
@@ -302,43 +278,78 @@ function session_repo.list_by_user(user_id, limit, offset)
 
     -- Parse JSON fields for each session
     for i, session in ipairs(sessions) do
-        if session.meta and session.meta ~= "" then
-            local decoded, err = json.decode(session.meta :: string)
-            if not err then
-                session.meta = decoded
-            else
-                session.meta = {}
-            end
-        else
-            session.meta = {}
-        end
-
-        if session.config and session.config ~= "" then
-            local decoded, err = json.decode(session.config :: string)
-            if not err then
-                session.config = decoded
-            else
-                session.config = {}
-            end
-        else
-            session.config = {}
-        end
-
-        if session.public_meta and session.public_meta ~= "" then
-            local decoded, err = json.decode(session.public_meta :: string)
-            if not err then
-                session.public_meta = decoded
-            else
-                session.public_meta = {}
-            end
-        else
-            session.public_meta = {}
-        end
-
+        decode_json_fields(session)
         attention_context_from_row(session)
     end
 
     return sessions
+end
+
+-- One page of a user's sessions whose status equals `status`, in session_id
+-- order. Lets a caller visit every session in a state (for example every
+-- stale "running" one after a restart), not only the most recently active.
+--
+-- limit: page size, default 50. opts.after: the next_cursor of the previous
+-- page. Returns { sessions, has_more, next_cursor }; next_cursor is nil on
+-- the last page. Sessions have meta, config and public_meta decoded, as in
+-- list_by_user.
+function session_repo.list_by_user_status(user_id, status, limit, opts)
+    if not user_id or user_id == "" then
+        return nil, "User ID is required"
+    end
+    if not status or status == "" then
+        return nil, "Status is required"
+    end
+    limit = limit or 50
+    if limit < 1 then
+        limit = 1
+    end
+
+    local db, err = get_db()
+    if err then
+        return nil, err
+    end
+
+    local filters = {
+        sql.builder.expr("user_id = ?", user_id),
+        sql.builder.expr("status = ?", status),
+    }
+    local after = opts and opts.after
+    if type(after) == "string" and after ~= "" then
+        -- Keyset on the primary key: rows that change status or are added
+        -- between pages do not shift the rows of later pages.
+        table.insert(filters, sql.builder.expr("session_id > ?", after))
+    end
+
+    local sessions, query_err = sql.builder.select(
+            "session_id", "user_id", "status", "primary_context_id",
+            "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+        )
+        :from("sessions")
+        :where(sql.builder.and_(filters))
+        :order_by("session_id ASC")
+        :limit(limit + 1)
+        :run_with(db):query()
+
+    db:release()
+
+    if query_err then
+        return nil, "Failed to list sessions by status: " .. query_err
+    end
+
+    local has_more = #sessions > limit
+    if has_more then
+        table.remove(sessions)
+    end
+    for _, session in ipairs(sessions) do
+        decode_json_fields(session)
+    end
+
+    return {
+        sessions = sessions,
+        has_more = has_more,
+        next_cursor = has_more and sessions[#sessions].session_id or nil,
+    }
 end
 
 -- owner_id, when given, limits the change to that user's session; another
@@ -362,7 +373,7 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
 
     local db, err = get_db()
     if err then return nil, err end
-    local tx, tx_err = db:begin()
+    local dbtx, tx_err = db:begin()
     if tx_err then
         db:release()
         return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
@@ -372,14 +383,14 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
         'attention_enabled', 'attention_revision', 'attention_updated_at', 'attention_updated_by'
     ):from('sessions'):where('session_id = ?', session_id)
     if owner_id then current_query = current_query:where('user_id = ?', owner_id) end
-    local current_rows, read_err = current_query:limit(1):run_with(tx):query()
+    local current_rows, read_err = current_query:limit(1):run_with(dbtx):query()
     if read_err then
-        tx:rollback()
+        dbtx:rollback()
         db:release()
         return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
     end
     if #current_rows == 0 then
-        tx:rollback()
+        dbtx:rollback()
         db:release()
         return nil, 'SESSION_NOT_FOUND'
     end
@@ -389,17 +400,17 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     local current_state = attention_context(current.attention_enabled, current_revision,
         current.attention_updated_at, current.attention_updated_by)
     if expected_revision ~= nil and expected_revision ~= current_revision then
-        tx:rollback()
+        dbtx:rollback()
         db:release()
         return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
     end
     if current_state.enabled == enabled then
-        tx:rollback()
+        dbtx:rollback()
         db:release()
         return current_state
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
     local next_revision = current_revision + 1
     local update = sql.builder.update('sessions'):set_map({
         attention_enabled = enabled,
@@ -408,16 +419,29 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
         attention_updated_by = updated_by,
     }):where('session_id = ?', session_id):where('attention_revision = ?', current_revision)
     if owner_id then update = update:where('user_id = ?', owner_id) end
-    local result, update_err = update:run_with(tx):exec()
+    local result, update_err = update:run_with(dbtx):exec()
     if update_err or not result or result.rows_affected ~= 1 then
-        tx:rollback()
+        dbtx:rollback()
+        if update_err then
+            db:release()
+            return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE', current_state
+        end
+        -- Another writer committed between the read above and this update. On
+        -- PostgreSQL the update waits for that writer, and the state read
+        -- before it is out of date, so the caller gets the committed state.
+        local committed_rows = current_query:limit(1):run_with(db):query()
         db:release()
-        return nil, update_err and 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' or 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+        local committed = committed_rows and committed_rows[1]
+        if committed then
+            current_state = attention_context(committed.attention_enabled, tonumber(committed.attention_revision) or 0,
+                committed.attention_updated_at, committed.attention_updated_by)
+        end
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
     end
 
-    local commit_ok, commit_err = tx:commit()
+    local commit_ok, commit_err = dbtx:commit()
     if commit_err then
-        tx:rollback()
+        dbtx:rollback()
         db:release()
         return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
     end
@@ -494,9 +518,9 @@ function session_repo.update_session_meta(session_id, updates)
     -- Always update last_message_date if any field is updated
     local date
     if updates.last_message_date ~= nil then
-        date = time.unix(updates.last_message_date, 0):format(time.RFC3339)
+        date = time.unix(updates.last_message_date, 0):utc():format(time.RFC3339)
     else
-        date = time.now():format(time.RFC3339)
+        date = time.now():utc():format(time.RFC3339)
     end
     update_query = update_query:set("last_message_date", date)
     result.last_message_date = date
@@ -526,93 +550,74 @@ function session_repo.delete(session_id)
         return nil, "Session ID is required"
     end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
+    local result, err = tx.run(function(dbtx)
+        -- Lock order: the staging guard, then the session row, then the
+        -- rows that belong to the session. Every other path that locks a
+        -- session takes the session row before it touches an artifact (a form
+        -- answer, a form creation) and a receipt takes the guard before the
+        -- session row, so no pair of transactions can wait on each other.
+        -- Deleting the artifacts first made a delete that raced a form answer
+        -- for the same form a deadlock on PostgreSQL.
 
-    -- Begin transaction
-    local tx, err = db:begin()
-    if err then
-        db:release()
-        return nil, "Failed to begin transaction: " .. err
-    end
+        -- Serialize deletion against stage creation/cancellation and release private bytes atomically.
+        local _, stage_lock_err = dbtx:execute('UPDATE context_stage_guard SET serial = serial WHERE id = 1')
+        if stage_lock_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
 
-    -- Serialize deletion against stage creation/cancellation and release private bytes atomically.
-    local _, stage_lock_err = tx:execute('UPDATE context_stage_guard SET serial = serial WHERE id = 1')
-    if stage_lock_err then tx:rollback(); db:release(); return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
-    local _, stage_delete_err = sql.builder.delete('context_stages'):where('session_id = ?', session_id):run_with(tx):exec()
-    if stage_delete_err then tx:rollback(); db:release(); return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
+        local _, session_lock_err = sql.builder.update("sessions")
+            :set("last_message_date", sql.builder.expr("last_message_date"))
+            :where("session_id = ?", session_id)
+            :run_with(dbtx):exec()
+        if session_lock_err then return nil, "Failed to lock session: " .. tostring(session_lock_err) end
 
-    -- Delete artifacts first
-    local artifacts_delete_query = sql.builder.delete("artifacts")
-        :where("session_id = ?", session_id)
+        -- Delete artifacts
+        local artifacts_delete_query = sql.builder.delete("artifacts")
+            :where("session_id = ?", session_id)
 
-    local artifacts_delete_executor = artifacts_delete_query:run_with(tx)
-    local result, err = artifacts_delete_executor:exec()
+        local _, artifacts_err = artifacts_delete_query:run_with(dbtx):exec()
+        if artifacts_err then
+            return nil, "Failed to delete session artifacts: " .. artifacts_err
+        end
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session artifacts: " .. err
-    end
+        local _, stage_delete_err = sql.builder.delete('context_stages'):where('session_id = ?', session_id)
+            :run_with(dbtx):exec()
+        if stage_delete_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
 
-    -- Delete session contexts
-    local contexts_delete_query = sql.builder.delete("session_contexts")
-        :where("session_id = ?", session_id)
+        -- Delete session contexts
+        local contexts_delete_query = sql.builder.delete("session_contexts")
+            :where("session_id = ?", session_id)
 
-    local contexts_delete_executor = contexts_delete_query:run_with(tx)
-    result, err = contexts_delete_executor:exec()
+        local _, contexts_err = contexts_delete_query:run_with(dbtx):exec()
+        if contexts_err then
+            return nil, "Failed to delete session contexts: " .. contexts_err
+        end
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session contexts: " .. err
-    end
+        -- Delete messages
+        local msg_delete_query = sql.builder.delete("messages")
+            :where("session_id = ?", session_id)
 
-    -- Delete messages
-    local msg_delete_query = sql.builder.delete("messages")
-        :where("session_id = ?", session_id)
+        local _, msg_err = msg_delete_query:run_with(dbtx):exec()
+        if msg_err then
+            return nil, "Failed to delete session messages: " .. msg_err
+        end
 
-    local msg_delete_executor = msg_delete_query:run_with(tx)
-    result, err = msg_delete_executor:exec()
+        -- Delete the session
+        local session_delete_query = sql.builder.delete("sessions")
+            :where("session_id = ?", session_id)
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session messages: " .. err
-    end
+        local session_result, session_err = session_delete_query:run_with(dbtx):exec()
+        if session_err then
+            return nil, "Failed to delete session: " .. session_err
+        end
 
-    -- Delete the session
-    local session_delete_query = sql.builder.delete("sessions")
-        :where("session_id = ?", session_id)
+        if session_result.rows_affected == 0 then
+            return nil, "Session not found"
+        end
 
-    local session_delete_executor = session_delete_query:run_with(tx)
-    result, err = session_delete_executor:exec()
+        return { deleted = true }
+    end)
 
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to delete session: " .. err
-    end
-
-    if result.rows_affected == 0 then
-        tx:rollback()
-        db:release()
-        return nil, "Session not found"
-    end
-
-    -- Commit transaction
-    local success, err = tx:commit()
-    if err then
-        tx:rollback()
-        db:release()
-        return nil, "Failed to commit transaction: " .. err
-    end
-
-    db:release()
-
-    return { deleted = true }
+    if err then return nil, err end
+    return result
 end
 
 return session_repo

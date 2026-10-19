@@ -20,7 +20,7 @@ jq -n --arg repository "$repository" --arg workspace "$workspace" --arg framewor
   {version: "1.0", logger: {level: "error"},
    registry: {dependency_vendor_dir: ($workspace + "/modules/vendor"),
               dependency_lock_path: ($workspace + "/wippy.lock")},
-   workspace: {replacements: ({"wippy/session": $repository} +
+   workspace: {replacements: ({"wippy/session": ($repository + "/src")} +
      if $framework == "" then {} else {
        "wippy/agent": ($framework + "/src/agent/src"),
        "wippy/llm": ($framework + "/src/llm/src"),

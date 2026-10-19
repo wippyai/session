@@ -27,6 +27,24 @@ local function insert_artifact(db, artifact_id, session_id, user_id, kind, title
     )
 end
 
+-- A stored date is the current instant: within minutes of now when read with
+-- its own offset. A host-offset string that a timestamp column keeps as wall
+-- clock reads hours off on a host that is not in UTC.
+local function is_current_instant(value)
+    local parsed = type(value) == "string" and time.parse(time.RFC3339NANO, value) or nil
+    if not parsed then return false end
+    return math.abs(parsed:unix() - os.time()) < 300
+end
+
+-- "sqlite" or "postgres", read when the cases are defined.
+local function database_kind()
+    local db = sql.get(consts.get_db_resource())
+    if not db then return "unknown" end
+    local kind = db:type()
+    db:release()
+    return kind
+end
+
 local function define_tests()
     describe("Artifact Repository", function()
         -- Test data
@@ -135,6 +153,24 @@ local function define_tests()
                 test.is_nil(artifact)
                 test.contains(tostring(err), "No authenticated user found")
             end
+        end)
+
+        it("stamps created_at and updated_at with the current instant", function()
+            if security.actor() == nil then return end
+            local artifact_id = uuid.v7()
+            local created, create_err = artifact_repo.create(artifact_id, test_data.session_id, "static",
+                "Date stamp", "content")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local stored = artifact_repo.get(artifact_id)
+            local _, update_err = artifact_repo.update(artifact_id, { title = "Date stamp 2" })
+            local changed = artifact_repo.get(artifact_id)
+            -- The other cases count the session's artifacts, so remove this one first.
+            artifact_repo.delete(artifact_id)
+            test.is_nil(update_err)
+            test.is_true(is_current_instant(stored.created_at), "created_at: " .. tostring(stored.created_at))
+            test.is_true(is_current_instant(stored.updated_at), "updated_at: " .. tostring(stored.updated_at))
+            test.is_true(is_current_instant(changed.updated_at), "changed updated_at: " .. tostring(changed.updated_at))
         end)
 
         it("should get an artifact by ID", function()
@@ -316,6 +352,12 @@ local function define_tests()
             local third_id = uuid.v7()
             local foreign_id = uuid.v7()
 
+            -- The sessions exist: PostgreSQL enforces the artifact foreign key.
+            for _, session_id in ipairs({ session_a, session_b }) do
+                test.is_nil(select(2, session_repo.create(session_id, owner_id, test_data.context_id,
+                    "Catalog session", "test")))
+            end
+
             local db_resource, _ = consts.get_db_resource()
             local db, db_err = sql.get(db_resource)
             if db_err then
@@ -399,7 +441,447 @@ local function define_tests()
             db:execute("DELETE FROM artifacts WHERE session_id = $1 OR session_id = $2",
                 { session_a, session_b })
             db:release()
+            session_repo.delete(session_a)
+            session_repo.delete(session_b)
         end)
+
+        describe("get_owned", function()
+            it("gives the owner the artifact and reads every other case as NOT_FOUND", function()
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local other_user = "other-" .. uuid.v7()
+                local other_context, other_session = uuid.v7(), uuid.v7()
+                context_repo.create(other_context, "primary", "{}")
+                session_repo.create(other_session, other_user, other_context, "Other", "test")
+                local sessionless = uuid.v7()
+                local foreign = uuid.v7()
+                local in_foreign_session = uuid.v7()
+                insert_artifact(db, sessionless, nil, test_data.user_id, "static", "No session", "x", nil)
+                insert_artifact(db, foreign, other_session, other_user, "static", "Foreign", "x", nil)
+                -- Owned by this user, but in another user's session.
+                insert_artifact(db, in_foreign_session, other_session, test_data.user_id, "static", "Moved", "x", nil)
+                db:release()
+
+                local owned: any, owned_err = artifact_repo.get_owned(test_data.user_id, test_data.artifact_id2)
+                test.is_nil(owned_err)
+                test.eq(owned.artifact_id, test_data.artifact_id2)
+                test.eq(owned.meta.content_type, "text/markdown", "meta decoded as by get")
+                local alone: any = artifact_repo.get_owned(test_data.user_id, sessionless)
+                test.eq(alone.artifact_id, sessionless)
+
+                for _, case in ipairs({
+                    { user = test_data.user_id, id = uuid.v7(), what = "missing" },
+                    { user = test_data.user_id, id = foreign, what = "another user's artifact" },
+                    { user = test_data.user_id, id = in_foreign_session, what = "another user's session" },
+                    { user = other_user, id = test_data.artifact_id2, what = "read by another user" },
+                }) do
+                    local artifact, err = artifact_repo.get_owned(case.user, case.id)
+                    test.is_nil(artifact, case.what)
+                    test.is_true(artifact_repo.is_not_found(err), case.what)
+                end
+                test.is_false(artifact_repo.is_not_found("Failed to get artifact: database is locked"))
+                test.is_false(artifact_repo.is_not_found(nil))
+
+                local cleanup, cleanup_err = sql.get(consts.get_db_resource())
+                if not cleanup then error(cleanup_err) end
+                cleanup:execute("DELETE FROM artifacts WHERE artifact_id IN ($1, $2, $3)",
+                    { sessionless, foreign, in_foreign_session })
+                cleanup:release()
+                session_repo.delete(other_session)
+                context_repo.delete(other_context)
+            end)
+        end)
+
+        describe("update: meta_patch, expected_version, content_version", function()
+            local function fresh_artifact(kind: string?, meta: {[string]: any}?)
+                local id = uuid.v7()
+                local db_resource, _ = consts.get_db_resource()
+                local db, db_err = sql.get(db_resource)
+                if db_err then error("Failed to connect to database: " .. db_err) end
+                insert_artifact(db, id, test_data.session_id, test_data.user_id,
+                    kind or "static", "Patch Target", "v1", meta)
+                db:release()
+                return id
+            end
+
+            it("meta_patch sets keys without wiping unrelated ones", function()
+                local id = fresh_artifact("static", {
+                    display_type = "standalone",
+                    page_id = "page-1",
+                    preview = "a preview",
+                })
+
+                local result, err = artifact_repo.update(id, {
+                    meta_patch = { status = "active", icon = "star" }
+                })
+                test.is_nil(err)
+                test.not_nil(result)
+                assert(result)
+                test.is_true(result.updated)
+
+                local artifact, get_err = artifact_repo.get(id)
+                test.is_nil(get_err)
+                test.eq(artifact.meta.status, "active")
+                test.eq(artifact.meta.icon, "star")
+                -- Untouched by this patch - must survive.
+                test.eq(artifact.meta.display_type, "standalone")
+                test.eq(artifact.meta.page_id, "page-1")
+                test.eq(artifact.meta.preview, "a preview")
+            end)
+
+            it("rejects meta combined with meta_patch", function()
+                local id = fresh_artifact("static", {})
+
+                local result, err = artifact_repo.update(id, {
+                    meta = { status = "active" },
+                    meta_patch = { icon = "star" }
+                })
+                test.is_nil(result)
+                test.contains(tostring(err), "Cannot combine meta")
+            end)
+
+            it("bumps content_version only when content changes", function()
+                local id = fresh_artifact("static", { status = "idle" })
+
+                local title_result, title_err = artifact_repo.update(id, { title = "Renamed" })
+                test.is_nil(title_err)
+                assert(title_result)
+                test.eq(title_result.content_version, 1)
+
+                local meta_result, meta_err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                test.is_nil(meta_err)
+                assert(meta_result)
+                test.eq(meta_result.content_version, 1)
+
+                local content_result, content_err = artifact_repo.update(id, { content = "v2" })
+                test.is_nil(content_err)
+                assert(content_result)
+                test.eq(content_result.content_version, 2)
+
+                local artifact, get_err = artifact_repo.get(id)
+                test.is_nil(get_err)
+                test.eq(artifact.content_version, 2)
+                test.eq(artifact.title, "Renamed")
+                test.eq(artifact.meta.status, "active")
+            end)
+
+            it("a stale expected_version is reported as CONFLICT with current_version", function()
+                local id = fresh_artifact("static", {})
+
+                -- Advances content_version to 2.
+                local bumped, bump_err = artifact_repo.update(id, { content = "v2" })
+                test.is_nil(bump_err)
+                assert(bumped)
+                test.eq(bumped.content_version, 2)
+
+                -- Still claims version 1 - stale.
+                local result, err = artifact_repo.update(id, { content = "v3" }, { expected_version = 1 })
+                test.is_nil(result)
+                test.not_nil(err)
+                local conflict_err = err :: any
+                test.eq(conflict_err:kind(), errors.CONFLICT)
+                local details = conflict_err:details()
+                test.eq(details.current_version, 2)
+
+                -- The right version succeeds.
+                local ok, ok_err = artifact_repo.update(id, { content = "v3" }, { expected_version = 2 })
+                test.is_nil(ok_err)
+                assert(ok)
+                test.eq(ok.content_version, 3)
+            end)
+
+            it("a missing artifact is reported as NOT_FOUND", function()
+                local result, err = artifact_repo.update(uuid.v7(), { title = "x" })
+                test.is_nil(result)
+                test.not_nil(err)
+                local not_found_err = err :: any
+                test.eq(not_found_err:kind(), errors.NOT_FOUND)
+            end)
+
+            it("list_by_session, list_by_kind, and list_by_user all surface content_version", function()
+                local id = fresh_artifact("static", {})
+                local bumped, bump_err = artifact_repo.update(id, { content = "v2" })
+                test.is_nil(bump_err)
+                assert(bumped)
+
+                local by_session, session_err = artifact_repo.list_by_session(test_data.session_id)
+                test.is_nil(session_err)
+                local found_session = nil
+                for _, artifact in ipairs(by_session) do
+                    if artifact.artifact_id == id then found_session = artifact end
+                end
+                test.not_nil(found_session)
+                assert(found_session)
+                test.eq(found_session.content_version, 2)
+
+                local by_kind, kind_err = artifact_repo.list_by_kind(test_data.session_id, "static")
+                test.is_nil(kind_err)
+                local found_kind = nil
+                for _, artifact in ipairs(by_kind) do
+                    if artifact.artifact_id == id then found_kind = artifact end
+                end
+                test.not_nil(found_kind)
+                assert(found_kind)
+                test.eq(found_kind.content_version, 2)
+
+                local by_user, user_err = artifact_repo.list_by_user(test_data.user_id, test_data.session_id, 50, nil)
+                test.is_nil(user_err)
+                assert(by_user)
+                local found_user = nil
+                for _, artifact in ipairs(by_user.artifacts) do
+                    if artifact.artifact_id == id then found_user = artifact end
+                end
+                test.not_nil(found_user)
+                assert(found_user)
+                test.eq(found_user.content_version, 2)
+            end)
+
+            local function raw_meta(id)
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local rows, query_err = db:query("SELECT meta FROM artifacts WHERE artifact_id = $1", { id })
+                db:release()
+                test.is_nil(query_err)
+                return rows[1] and rows[1].meta
+            end
+
+            local function set_raw_meta(id, meta)
+                local db, db_err = sql.get(consts.get_db_resource())
+                if not db then error(db_err) end
+                local _, exec_err = db:execute("UPDATE artifacts SET meta = $1 WHERE artifact_id = $2", { meta, id })
+                db:release()
+                test.is_nil(exec_err)
+            end
+
+            it("keeps a key another writer set between the meta read and the write", function()
+                local id = fresh_artifact("static", { display_type = "inline" })
+                local interleaved = 0
+                local original = artifact_repo._on_meta_read
+                -- Runs on the same connection, after update() read the meta
+                -- and before it writes: stands in for a concurrent writer
+                -- that commits in that window.
+                artifact_repo._on_meta_read = function(conn, artifact_id)
+                    if artifact_id ~= id or interleaved > 0 then return end
+                    interleaved = interleaved + 1
+                    local _, exec_err = sql.builder.update("artifacts")
+                        :set("meta", '{"display_type":"inline","other":"kept"}')
+                        :where("artifact_id = ?", artifact_id)
+                        :run_with(conn):exec()
+                    test.is_nil(exec_err)
+                end
+                local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                artifact_repo._on_meta_read = original
+
+                test.is_nil(err)
+                test.not_nil(result)
+                test.eq(interleaved, 1)
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta.status, "active")
+                test.eq(artifact.meta.other, "kept")
+                test.eq(artifact.meta.display_type, "inline")
+            end)
+
+            it("refuses to patch stored meta that is not valid JSON and leaves it unchanged", function()
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, "{broken")
+
+                local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                test.is_nil(result)
+                test.contains(tostring(err), "meta")
+                test.eq(raw_meta(id), "{broken")
+            end)
+
+            it("keeps empty objects in untouched keys and stores an empty patch of a missing meta as an object", function()
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, '{"keep":{},"list":[],"session_form":{"submission":{"answers":{}}}}')
+                local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
+                test.is_nil(err)
+                local stored = tostring(raw_meta(id))
+                test.contains(stored, '"keep":{}')
+                test.contains(stored, '"list":[]')
+                test.contains(stored, '"answers":{}')
+
+                local was_null = fresh_artifact("static", nil)
+                local _, null_err = artifact_repo.update(was_null, { meta_patch = {} })
+                test.is_nil(null_err)
+                test.eq(raw_meta(was_null), "{}")
+            end)
+
+            it("keeps every key the patch does not name, nested objects and empty lists included", function()
+                -- Another owner's keys: an empty list, an empty object and a
+                -- nested object. Their values survive; the key order inside a
+                -- stored object is not kept, and nothing reads it.
+                local id = fresh_artifact("static", nil)
+                set_raw_meta(id, '{"owner":{"list":[],"empty":{},"nested":{"deep":{"items":[1,2],"flag":true},'
+                    .. '"name":"x"}},"note":"kept"}')
+                local _, err = artifact_repo.update(id, { meta_patch = { status = "idle" } })
+                test.is_nil(err)
+
+                local stored = tostring(raw_meta(id))
+                test.contains(stored, '"list":[]')
+                test.contains(stored, '"empty":{}')
+                test.contains(stored, '"items":[1,2]')
+                local artifact: any = artifact_repo.get(id)
+                test.eq(artifact.meta.status, "idle")
+                test.eq(artifact.meta.note, "kept")
+                test.eq(artifact.meta.owner.nested.name, "x")
+                test.eq(artifact.meta.owner.nested.deep.flag, true)
+                test.eq(artifact.meta.owner.nested.deep.items[2], 2)
+                test.eq(#artifact.meta.owner.list, 0)
+
+                -- A later patch of another key leaves them as they are.
+                local _, patch_err = artifact_repo.update(id, { meta_patch = { icon = "star" } })
+                test.is_nil(patch_err)
+                local after = tostring(raw_meta(id))
+                test.contains(after, '"list":[]')
+                test.contains(after, '"empty":{}')
+                test.contains(after, '"icon":"star"')
+                local reread: any = artifact_repo.get(id)
+                test.eq(reread.meta.note, "kept")
+                test.eq(reread.meta.owner.nested.deep.items[1], 1)
+                test.eq(reread.meta.owner.nested.deep.flag, true)
+
+                -- An empty meta stored as "[]" is patched as an empty object.
+                local legacy = fresh_artifact("static", nil)
+                set_raw_meta(legacy, "[]")
+                local _, legacy_err = artifact_repo.update(legacy, { meta_patch = { status = "idle" } })
+                test.is_nil(legacy_err)
+                test.eq(raw_meta(legacy), '{"status":"idle"}')
+            end)
+
+            it("meta_patch keeps working for inline and view_ref artifacts", function()
+                local inline_id = fresh_artifact("inline", { display_type = "inline" })
+                local inline_result, inline_err = artifact_repo.update(inline_id, {
+                    meta_patch = { status = "active" }
+                })
+                test.is_nil(inline_err)
+                assert(inline_result)
+                local inline_artifact, inline_get_err = artifact_repo.get(inline_id)
+                test.is_nil(inline_get_err)
+                test.eq(inline_artifact.meta.status, "active")
+                test.eq(inline_artifact.meta.display_type, "inline")
+
+                local view_ref_id = fresh_artifact("view_ref", {
+                    page_id = "page-42", display_type = "standalone"
+                })
+                local view_ref_result, view_ref_err = artifact_repo.update(view_ref_id, {
+                    meta_patch = { preview = "a preview" }
+                })
+                test.is_nil(view_ref_err)
+                assert(view_ref_result)
+                local view_ref_artifact, view_ref_get_err = artifact_repo.get(view_ref_id)
+                test.is_nil(view_ref_get_err)
+                test.eq(view_ref_artifact.meta.preview, "a preview")
+                test.eq(view_ref_artifact.meta.page_id, "page-42")
+                test.eq(view_ref_artifact.meta.display_type, "standalone")
+            end)
+        end)
+
+        -- The runtime opens one SQLite connection per database resource, so
+        -- two writers in one runtime never overlap. The case that matters
+        -- for a patch is a second connection to the same file (another
+        -- runtime, or a second resource): this test stands one in with two
+        -- resources on one probe database file, and points the repository at
+        -- one of them. A patch that read first held only a snapshot there,
+        -- the other connection committed, and the patch failed with
+        -- "database is locked"; a patch that writes first holds the lock.
+        if database_kind() == "sqlite" then
+            describe("update: meta_patch with a second SQLite connection", function()
+                local PATCH_DB = "app:migration_probe_db"
+                local PEER_DB = "app:migration_probe_peer_db"
+                local original_resource = consts.get_db_resource
+
+                local function probe(resource, fn)
+                    local db, db_err = sql.get(resource)
+                    if not db then error(tostring(db_err)) end
+                    local ok, result = pcall(fn, db)
+                    db:release()
+                    if not ok then error(result, 0) end
+                    return result
+                end
+
+                before_all(function()
+                    probe(PATCH_DB, function(db)
+                        assert(db:execute("DROP TABLE IF EXISTS artifacts"))
+                        assert(db:execute("CREATE TABLE artifacts (artifact_id TEXT PRIMARY KEY, kind TEXT, title TEXT,"
+                            .. " content TEXT, meta TEXT, content_version INTEGER NOT NULL DEFAULT 1, updated_at TEXT)"))
+                        assert(db:execute("INSERT INTO artifacts (artifact_id, kind, title, content, meta) VALUES ($1, $2, $3, $4, $5)",
+                            { "locked-patch", "static", "Original", "v1", '{"display_type":"inline"}' }))
+                    end)
+                    consts.get_db_resource = function() return PATCH_DB end
+                end)
+
+                after_all(function()
+                    consts.get_db_resource = original_resource
+                    probe(PATCH_DB, function(db) assert(db:execute("DROP TABLE IF EXISTS artifacts")) end)
+                end)
+
+                it("takes the write lock with its first statement, so another connection cannot commit between its read and its write", function()
+                    local id = "locked-patch"
+                    local reached, resume, patched, other = channel.new(1), channel.new(1), channel.new(1), channel.new(1)
+                    local original = artifact_repo._on_meta_read
+                    local paused = false
+                    -- Runs inside the patch's transaction after the meta read.
+                    artifact_repo._on_meta_read = function(_conn, artifact_id)
+                        if artifact_id ~= id or paused then return end
+                        paused = true
+                        reached:send(true)
+                        resume:receive()
+                    end
+                    coroutine.spawn(function()
+                        local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                        patched:send({ result = result, err = err and tostring(err) or nil })
+                    end)
+                    reached:receive()
+
+                    coroutine.spawn(function()
+                        local err = nil
+                        local ok, thrown = pcall(function()
+                            probe(PEER_DB, function(db)
+                                local _, exec_err = db:execute("UPDATE artifacts SET title = $1 WHERE artifact_id = $2", { "Other writer", id })
+                                if exec_err then err = tostring(exec_err) end
+                            end)
+                        end)
+                        if not ok then err = tostring(thrown) end
+                        other:send({ err = err })
+                    end)
+                    time.sleep("500ms")
+                    -- Whether the other write has already finished while the
+                    -- patch is paused.
+                    local early = channel.select({ other:case_receive(), default = true })
+                    resume:send(true)
+                    local deadline = time.after("20s")
+                    local patched_selected = channel.select({ patched:case_receive(), deadline:case_receive() })
+                    artifact_repo._on_meta_read = original
+                    test.is_true(patched_selected.channel ~= deadline, "the patch settles instead of hanging")
+                    local other_outcome = early.value
+                    if early.default then
+                        local other_selected = channel.select({ other:case_receive(), deadline:case_receive() })
+                        test.is_true(other_selected.channel ~= deadline, "the other write settles once the patch has committed")
+                        other_outcome = other_selected.value
+                    end
+
+                    test.is_true(paused)
+                    test.is_nil(patched_selected.value.err, "the patch is not failed by the other connection")
+                    test.not_nil(patched_selected.value.result)
+                    test.is_true(early.default == true or early.value.err ~= nil,
+                        "the other connection did not commit while the patch held the lock")
+                    local stored = probe(PATCH_DB, function(db)
+                        return db:query("SELECT title, meta FROM artifacts WHERE artifact_id = $1", { id })
+                    end)
+                    local meta = json.decode(stored[1].meta)
+                    test.eq(meta.status, "active")
+                    test.eq(meta.display_type, "inline")
+                    -- The other write either waited for the patch and then
+                    -- committed, or gave up while the lock was held.
+                    if other_outcome.err == nil then
+                        test.eq(stored[1].title, "Other writer")
+                    end
+                end)
+            end)
+        else
+            test.it_skip("update: meta_patch with a second SQLite connection (SQLite only)", function() end)
+        end
     end)
 end
 

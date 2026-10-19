@@ -1,0 +1,144 @@
+version: "1.0"
+namespace: wippy.session.forms.ui
+
+# Serves the built wippy-form and wippy-form-answers web components as view.component
+# entries. `directory` is relative to the module root (`src/`), not to this file.
+# The `meta` title, description and props of each entry copy that package's
+# package.json, and the dist directories come from `make build-ui`.
+# `scripts/check-ui.mjs` fails when either differs from its source.
+
+entries:
+  # wippy.session.forms.ui:ui_server
+  - name: ui_server
+    kind: ns.requirement
+    meta:
+      description: HTTP server the wippy-form and wippy-form-answers web component bundles are served from.
+    default: "app:gateway"
+    targets:
+      - entry: wippy.session.forms.ui:ui_static
+        path: .meta.server
+      - entry: wippy.session.forms.ui:ui_static_answers
+        path: .meta.server
+
+  # wippy.session.forms.ui:ui_fs
+  - name: ui_fs
+    kind: fs.directory
+    meta:
+      comment: Built wippy-form bundle (frontend/wippy-form/, built into src/forms/ui/dist/ by `make build-ui`).
+    base: module
+    directory: forms/ui/dist
+
+  # wippy.session.forms.ui:ui_static
+  - name: ui_static
+    kind: http.static
+    meta:
+      comment: Serves the wippy-form bundle at /wippy-session-forms.
+      server: app:gateway
+    fs: wippy.session.forms.ui:ui_fs
+    options:
+      mime_types:
+        .css: text/css
+        .js: application/javascript
+        .map: application/json
+    path: /wippy-session-forms
+
+  # wippy.session.forms.ui:wippy_form_view
+  - name: wippy_form_view
+    kind: registry.entry
+    meta:
+      type: view.component
+      title: Session Form
+      description: >-
+        Renders one Session `ask_user` form as a question card and sends the answer back to the
+        owning session through the Host's artifact-state API. Each question supports per-answer
+        notes and, when the definition allows it, an Other free-text row. A form with several
+        questions shows one at a time, with a counter and a review step before sending. Once the
+        answer is accepted, the card becomes a read-only summary. The inputs are `definition` (the
+        questions and options), `form-version` (a version other than 1 disables submission), and
+        `state` (`active` while the form can be answered, `idle` after it was answered). The
+        component loads and submits by itself, so the tag only needs these attributes. Agents must
+        never write the `<wippy-form>` tag, because it is created only through the Session
+        `ask_user` tool.
+      tag_name: wippy-form
+      auto_register: true
+      announced: true
+      base_path: wippy-session-forms
+      entry_point: index.js
+      props:
+        type: object
+        properties:
+          form-version:
+            type: number
+            default: 1
+            description: >-
+              Form definition schema version (currently 1). A value other than 1, from this prop or
+              from the loaded state's own `form_version`, disables the interactive form and shows
+              the notice "This form needs a newer version of the app." instead.
+          definition:
+            type: object
+            default: null
+            description: >-
+              The questions to ask: `title`, optional `description`, and `fields`, a list of choice
+              questions, each `{ id, type: "choice", label, description?, required, options:
+              [{value, label, description?}], multiple, allow_other }`. Optional `submit_label` and
+              `answered_message` are accepted and not shown. A definition with no fields shows an
+              error message.
+          state:
+            type: string
+            default: active
+            description: >-
+              Package-tag lifecycle state mirrored from the artifact: "active" (still answerable) or
+              "idle" (already answered, shown read-only). Changing this prop triggers a reload of
+              the canonical form state from the Host.
+
+  # wippy.session.forms.ui:ui_fs_answers
+  - name: ui_fs_answers
+    kind: fs.directory
+    meta:
+      comment: Built wippy-form-answers bundle (frontend/wippy-form-answers/, built into src/forms/ui/answers-dist/ by `make build-ui`).
+    base: module
+    directory: forms/ui/answers-dist
+
+  # wippy.session.forms.ui:ui_static_answers
+  - name: ui_static_answers
+    kind: http.static
+    meta:
+      comment: Serves the wippy-form-answers bundle at /wippy-session-form-answers.
+      server: app:gateway
+    fs: wippy.session.forms.ui:ui_fs_answers
+    options:
+      mime_types:
+        .css: text/css
+        .js: application/javascript
+        .map: application/json
+    path: /wippy-session-form-answers
+
+  # wippy.session.forms.ui:wippy_form_answers_view
+  - name: wippy_form_answers_view
+    kind: registry.entry
+    meta:
+      type: view.component
+      title: Session Form Answers
+      description: >-
+        Invisible carrier element. The Session server writes it into a user's chat message after a
+        form is answered, with the JSON answer record (`form_id`, `form_version`, `title`, `late`,
+        `answers`) in the `record` attribute. It renders nothing, so the record stays in the raw
+        message text for the agent. `record` is declared as a prop so the Host's sanitizer keeps the
+        attribute. Agents must never write this tag.
+      tag_name: wippy-form-answers
+      auto_register: true
+      announced: true
+      base_path: wippy-session-form-answers
+      entry_point: index.js
+      props:
+        type: object
+        properties:
+          record:
+            type: string
+            default: ""
+            description: >-
+              The self-contained JSON answer record (form_id, form_version, title, late, answers) as
+              a single-line string, written into this attribute by the Session server immediately
+              after a form is answered. The server escapes `'`, `<`, `>`, and `&` inside the JSON so
+              the attribute value round-trips through HTML parsing intact; getAttribute('record')
+              returns it already unescaped. Agents never write this attribute themselves.

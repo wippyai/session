@@ -3,6 +3,60 @@ namespace: app.api
 
 # Suites for src/api/.
 entries:
+  - name: request_body_test
+    kind: function.lua
+    meta:
+      name: JSON request bodies
+      type: test
+      suite: session
+      comment: Content-Type gate and capped stream read of the form state POST endpoint
+    source: file://request_body_test.lua
+    imports:
+      request_body: wippy.session.api:request_body
+      test: wippy.test:test
+    method: run
+
+  - name: artifact_state_access_test
+    kind: function.lua
+    meta:
+      name: Form state endpoints request handling
+      type: test
+      suite: session
+      comment: The form state endpoints' refusals before the state service (no actor, wrong Content-Type, a body over the cap, an unreadable body) and the hand-over to it
+    source: file://artifact_state_access_test.lua
+    modules:
+      - json
+      - uuid
+      - security
+    imports:
+      artifact_state_access: wippy.session.api:artifact_state_access
+      state_service: wippy.session.forms:state_service
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run
+
+  - name: artifact_endpoints_test
+    kind: function.lua
+    meta:
+      name: Artifact endpoints access
+      type: test
+      suite: session
+      comment: GET /artifact/{id} and /artifact/{id}/content answer a foreign id like a missing one (404, same body) and still serve the owner
+    source: file://artifact_endpoints_test.lua
+    modules:
+      - sql
+      - json
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      artifact_access: wippy.session.api:artifact_access
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run
 
   - name: get_capabilities_test
     kind: function.lua

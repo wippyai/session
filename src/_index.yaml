@@ -43,6 +43,14 @@ entries:
         path: .meta.router
       - entry: wippy.session.api:get_artifact_content.endpoint
         path: .meta.router
+      - entry: wippy.session.api:get_artifact_state
+        path: .meta.router
+      - entry: wippy.session.api:get_artifact_state.endpoint
+        path: .meta.router
+      - entry: wippy.session.api:submit_artifact_state
+        path: .meta.router
+      - entry: wippy.session.api:submit_artifact_state.endpoint
+        path: .meta.router
       - entry: wippy.session.api:get_session
         path: .meta.router
       - entry: wippy.session.api:get_session.endpoint
@@ -533,6 +541,8 @@ entries:
     imports:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
+      form_index: wippy.session.forms:form_index
+      answer_text: wippy.session.forms:answer_text
       context_attachments: wippy.llm:context_attachments
       input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order

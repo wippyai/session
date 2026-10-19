@@ -120,7 +120,10 @@ function session_writer:get_message_by_request_id(request_id)
     return message, err
 end
 
-function session_writer:add_message(msg_type, content, metadata, request_id, request_hash, context_receipt)
+-- Returns the message id, nil, whether the request was a duplicate of a stored
+-- one, and the stored row ({ message_id, date, ... }) for callers that need
+-- its date. opts.tx (optional) writes on a caller-supplied transaction.
+function session_writer:add_message(msg_type, content, metadata, request_id, request_hash, context_receipt, opts)
     if not msg_type or msg_type == "" then
         return nil, "Message type is required"
     end
@@ -157,7 +160,8 @@ function session_writer:add_message(msg_type, content, metadata, request_id, req
         metadata,
         request_id,
         request_hash,
-        context_receipt
+        context_receipt,
+        opts
     )
     if err or not result then
         if err == 'CONTEXT_REFERENCE_UNAVAILABLE' or err == 'INVALID_CONTEXT_REFERENCE'
@@ -170,7 +174,7 @@ function session_writer:add_message(msg_type, content, metadata, request_id, req
         return nil, "Failed to create message: " .. tostring(err or "No result")
     end
 
-    return result.message_id, nil, result.duplicate == true
+    return result.message_id, nil, result.duplicate == true, result
 end
 
 function session_writer:admit_message(msg_type, content, metadata, session_updates,
@@ -254,9 +258,11 @@ function session_writer:add_response(content, metadata, calls)
             }
         })
     end
-    local _, err = session_writer._message_repo.create_batch(self.session_id, rows)
+    local _, err, dates: any = session_writer._message_repo.create_batch(self.session_id, rows)
     if err then return nil, nil, err end
-    return assistant_id, call_ids, nil
+    -- The fourth value is the assistant row's stored date: a live update of
+    -- the reply carries it, so the chat shows the time the history keeps.
+    return assistant_id, call_ids, nil, type(dates) == "table" and dates[assistant_id] or nil
 end
 
 function session_writer:update_message_meta(message_id, metadata)
@@ -319,7 +325,8 @@ end
 
 -- ARTIFACT OPERATIONS
 
-function session_writer:create_artifact(artifact_id, kind, title, content, meta)
+-- opts.tx (optional): write on a caller-supplied transaction.
+function session_writer:create_artifact(artifact_id, kind, title, content, meta, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
     end
@@ -328,7 +335,7 @@ function session_writer:create_artifact(artifact_id, kind, title, content, meta)
         return nil, "Artifact kind is required"
     end
 
-    local result, err = session_writer._artifact_repo.create(artifact_id, self.session_id, kind, title, content, meta)
+    local result, err = session_writer._artifact_repo.create(artifact_id, self.session_id, kind, title, content, meta, opts)
     if err then
         return nil, "Failed to create artifact: " .. err
     end
@@ -336,7 +343,13 @@ function session_writer:create_artifact(artifact_id, kind, title, content, meta)
     return artifact_id
 end
 
-function session_writer:update_artifact(artifact_id, updates)
+-- Returns artifact_repo.update's result table ({ artifact_id, updated,
+-- content_version }). opts (optional) is passed on to artifact_repo:
+-- opts.tx runs the ownership check and the update on that transaction,
+-- opts.expected_version makes the update conditional. A CONFLICT or
+-- NOT_FOUND error from the update is returned as it is, so callers can check
+-- err:kind().
+function session_writer:update_artifact(artifact_id, updates, opts)
     if not artifact_id or artifact_id == "" then
         return nil, "Artifact ID is required"
     end
@@ -345,7 +358,11 @@ function session_writer:update_artifact(artifact_id, updates)
         return nil, "Updates must be a table"
     end
 
-    local artifact, err = session_writer._artifact_repo.get(artifact_id)
+    -- Session ownership check stays unconditional, even when opts carries a
+    -- caller-supplied transaction: this ensures a writer can only ever touch
+    -- artifacts belonging to its own session. It reads on that same
+    -- transaction, so it sees the caller's uncommitted rows.
+    local artifact, err = session_writer._artifact_repo.get(artifact_id, opts)
     if err then
         return nil, "Failed to get artifact: " .. err
     end
@@ -358,12 +375,15 @@ function session_writer:update_artifact(artifact_id, updates)
         return nil, "Artifact belongs to different session"
     end
 
-    local result, err = session_writer._artifact_repo.update(artifact_id, updates)
-    if err then
-        return nil, "Failed to update artifact: " .. err
+    local result, update_err = session_writer._artifact_repo.update(artifact_id, updates, opts)
+    if update_err then
+        if type(update_err) ~= "string" then
+            return nil, update_err
+        end
+        return nil, "Failed to update artifact: " .. update_err
     end
 
-    return true
+    return result
 end
 
 -- PRIMARY CONTEXT OPERATIONS (JSON key-value storage)

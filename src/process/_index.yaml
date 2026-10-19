@@ -8,6 +8,8 @@ entries:
     modules: [json, time]
     imports:
       attention_read: wippy.agent.tools:attention_read
+      message_order: wippy.session.persist:message_order
+      message_repo: wippy.session.persist:message_repo
       prompt_builder: wippy.session:prompt_builder
 
   - name: attention_action_intents
@@ -101,6 +103,7 @@ entries:
     source: file://session_handlers.lua
     modules:
       - funcs
+      - logger
       - time
     imports:
       consts: wippy.session:consts
@@ -120,7 +123,28 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
+      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_events: wippy.session.persist:artifact_events
+      tx: wippy.session.persist:tx
+      message_date: wippy.session.persist:message_date
+      definition: wippy.session.forms:definition
+      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
       input_policy: wippy.session.process:input_policy
+
+  # wippy.session.process:answer_admission
+  - name: answer_admission
+    kind: library.lua
+    meta:
+      comment: Applying steering input and admitting pending form answers in the order the user sent them
+    source: file://answer_admission.lua
+    imports:
+      consts: wippy.session:consts
+      input_metadata: wippy.session:input_metadata
+      message_repo: wippy.session.persist:message_repo
+      message_order: wippy.session.persist:message_order
+      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_events: wippy.session.persist:artifact_events
 
   # wippy.session.process:message_handlers
   - name: message_handlers
@@ -135,20 +159,21 @@ entries:
       - uuid
       - funcs
       - time
+      - logger
     imports:
       consts: wippy.session:consts
       agent_context: wippy.agent:context
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
-      input_metadata: wippy.session:input_metadata
-      message_order: wippy.session.persist:message_order
       tool_caller: wippy.agent.tools:caller
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
       input_policy: wippy.session.process:input_policy
       control_handlers: wippy.session.process:control_handlers
+      answer_admission: wippy.session.process:answer_admission
+      message_repo: wippy.session.persist:message_repo
 
   - name: input_policy
     kind: library.lua
@@ -156,6 +181,16 @@ entries:
       comment: Session-owned input admission and interaction policy resolver
     source: file://input_policy.lua
     modules: [json]
+
+  # wippy.session.process:session_status
+  - name: session_status
+    kind: library.lua
+    meta:
+      comment: Status and interaction clients see for a session; a stored running status with no live process reads as idle
+    source: file://session_status.lua
+    imports:
+      consts: wippy.session:consts
+      input_policy: wippy.session.process:input_policy
 
   # wippy.session.process:ui_action_broker
   - name: ui_action_broker
@@ -191,6 +226,7 @@ entries:
       upstream: wippy.session.process:upstream
       command_bus: wippy.session.process:command_bus
       message_handlers: wippy.session.process:message_handlers
+      answer_admission: wippy.session.process:answer_admission
       control_handlers: wippy.session.process:control_handlers
       session_handlers: wippy.session.process:session_handlers
       session_repo: wippy.session.persist:session_repo
@@ -200,6 +236,7 @@ entries:
       tools: wippy.agent.discovery:tools
       input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
+      form_recovery: wippy.session.forms:form_recovery
     method: run
 
   # wippy.session.process:plugin
@@ -230,5 +267,10 @@ entries:
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
       input_policy: wippy.session.process:input_policy
+      session_status: wippy.session.process:session_status
+      form_recovery: wippy.session.forms:form_recovery
       reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      upstream: wippy.session.process:upstream
+      answer_admission: wippy.session.process:answer_admission
     method: run

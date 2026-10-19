@@ -2,6 +2,13 @@ local test = require("test")
 local control_handlers = require("control_handlers")
 local command_bus = require("command_bus")
 local consts = require("consts")
+local uuid = require("uuid")
+local security = require("security")
+local context_repo = require("context_repo")
+local session_repo = require("session_repo")
+local artifact_repo = require("artifact_repo")
+local writer = require("writer")
+local wait_for_boot = require("wait_for_boot")
 
 -- Builds a ctx whose agent_ctx records the declarative overlay calls. control_config
 -- reads session state for the agent/model path; a traits/tools-only directive leaves
@@ -467,6 +474,113 @@ local function define_tests()
             test.contains(err, "runtime rollback failed")
             test.eq(ctx.status, "failed")
             test.eq(captured.session_errors, 1)
+        end)
+    end)
+
+    describe("artifact update: meta_patch survival and event publish (real writer + DB)", function()
+        local test_data = {
+            user_id = uuid.v7(),
+            context_id = uuid.v7(),
+            session_id = uuid.v7(),
+        }
+
+        before_all(function()
+            wait_for_boot.run()
+
+            local actor = security.actor()
+            if actor then
+                test_data.user_id = actor:id()
+            end
+
+            local _, context_err = context_repo.create(test_data.context_id, "primary", "Control handler context")
+            test.is_nil(context_err)
+
+            local _, session_err = session_repo.create(
+                test_data.session_id, test_data.user_id, test_data.context_id, "Control handler session", "test"
+            )
+            test.is_nil(session_err)
+        end)
+
+        after_all(function()
+            session_repo.delete(test_data.session_id)
+            context_repo.delete(test_data.context_id)
+        end)
+
+        after_each(function()
+            restore_mock("process.registry")
+            restore_mock("process.send")
+        end)
+
+        local function real_ctx()
+            local session_writer, writer_err = writer.new(test_data.session_id)
+            test.is_nil(writer_err)
+            return { writer = session_writer, upstream = { update_session = function() end } }
+        end
+
+        it("meta_patch through the control handler preserves display_type/page_id/preview and publishes the update", function()
+            local artifact_id, create_id_err = uuid.v7()
+            test.is_nil(create_id_err)
+
+            local ctx = real_ctx()
+            local created_id, create_err = ctx.writer:create_artifact(artifact_id, consts.ARTIFACT_TYPES.VIEW_REF,
+                "Form", "{}", {
+                    page_id = "page-form-1",
+                    display_type = consts.ARTIFACT_DISPLAY.STANDALONE,
+                    preview = "fill out this form",
+                    status = consts.ARTIFACT_STATUS.IDLE,
+                })
+            test.is_nil(create_err)
+            test.eq(created_id, artifact_id)
+
+            local published = nil
+            mock("process.registry", {
+                lookup = function(name)
+                    if name == "user." .. test_data.user_id then
+                        return "hub-pid"
+                    end
+                    return nil
+                end
+            })
+            mock("process.send", function(pid, topic, payload)
+                published = { pid = pid, topic = topic, payload = payload }
+            end)
+
+            local result, err = control_handlers.control_artifacts(ctx, {
+                artifacts = {{ id = artifact_id, status = consts.ARTIFACT_STATUS.ACTIVE }}
+            })
+            test.is_nil(err)
+            test.not_nil(result)
+
+            local artifact, get_err = artifact_repo.get(artifact_id)
+            test.is_nil(get_err)
+            -- The four-key control op only touched status - everything else must survive.
+            test.eq(artifact.meta.status, consts.ARTIFACT_STATUS.ACTIVE)
+            test.eq(artifact.meta.page_id, "page-form-1")
+            test.eq(artifact.meta.display_type, consts.ARTIFACT_DISPLAY.STANDALONE)
+            test.eq(artifact.meta.preview, "fill out this form")
+
+            test.not_nil(published)
+            assert(published)
+            test.eq(published.pid, "hub-pid")
+            test.eq(published.topic, "artifact:" .. artifact_id)
+            test.eq(published.payload.uuid, artifact_id)
+            test.eq(published.payload.content_version, artifact.content_version)
+            test.eq(type(published.payload.content_version), "number")
+        end)
+
+        it("does not publish when the artifact update fails", function()
+            local send_calls = 0
+            mock("process.registry", { lookup = function() return "hub-pid" end })
+            mock("process.send", function() send_calls = send_calls + 1 end)
+
+            local ctx = { writer = { update_artifact = function() return nil, "disk unavailable" end } }
+            local result, err = control_handlers.control_artifacts(ctx, {
+                artifacts = {{ id = uuid.v7(), status = "active" }}
+            })
+
+            test.is_nil(result)
+            test.contains(tostring(err), "disk unavailable")
+            test.eq(send_calls, 0)
         end)
     end)
 end

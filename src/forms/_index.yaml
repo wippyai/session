@@ -1,0 +1,297 @@
+version: "1.0"
+namespace: wippy.session.forms
+
+# Session forms (V1: choice questions). The ask_user trait lets an agent ask
+# the user a structured question; the answer comes back as an ordinary user
+# message. State logic is state_service, creation is
+# control_handlers.control_forms, and answer admission is answer_admission.
+entries:
+  # wippy.session.forms:ordered_json
+  - name: ordered_json
+    kind: library.lua
+    meta:
+      comment: JSON objects with a fixed key order and explicit nulls, for the answer record, replay key, read_form result and state API bodies
+    source: file://ordered_json.lua
+    modules:
+      - json
+
+  # wippy.session.forms:form_meta
+  - name: form_meta
+    kind: library.lua
+    meta:
+      comment: Accessors for the form record in artifact meta (meta.session_form); imports nothing, so persistence can use it
+    source: file://form_meta.lua
+
+  # wippy.session.forms:definition
+  - name: definition
+    kind: library.lua
+    meta:
+      comment: Form definition normalizer and per-field answer validator (V1 choice fields) with stable error codes
+    source: file://definition.lua
+    modules:
+      - json
+    imports:
+      ordered_json: wippy.session.forms:ordered_json
+
+  # wippy.session.forms:form_artifact
+  - name: form_artifact
+    kind: library.lua
+    meta:
+      comment: Stored form representation - the wippy-form component package content and meta.session_form
+    source: file://form_artifact.lua
+    modules:
+      - json
+    imports:
+      definition: wippy.session.forms:definition
+      form_meta: wippy.session.forms:form_meta
+
+  # wippy.session.forms:answer_text
+  - name: answer_text
+    kind: library.lua
+    meta:
+      comment: Server-built text of the user message that carries an accepted form answer
+    source: file://answer_text.lua
+    imports:
+      definition: wippy.session.forms:definition
+      ordered_json: wippy.session.forms:ordered_json
+      message_repo: wippy.session.persist:message_repo
+
+  # wippy.session.forms:state_service
+  - name: state_service
+    kind: library.lua
+    meta:
+      comment: Form state read and atomic answer acceptance behind GET/POST /artifact/{id}/state
+    source: file://state_service.lua
+    modules:
+      - json
+      - uuid
+      - security
+      - logger
+    imports:
+      consts: wippy.session:consts
+      definition: wippy.session.forms:definition
+      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
+      answer_text: wippy.session.forms:answer_text
+      ordered_json: wippy.session.forms:ordered_json
+      tx: wippy.session.persist:tx
+      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_events: wippy.session.persist:artifact_events
+      message_repo: wippy.session.persist:message_repo
+      message_date: wippy.session.persist:message_date
+      session_repo: wippy.session.persist:session_repo
+      session_status: wippy.session.process:session_status
+
+  # wippy.session.forms:ask_user_tool
+  - name: ask_user_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Ask User
+      comment: Validates a form definition and asks the session to show it to the user
+      llm_alias: ask_user
+      llm_description: |
+        Show the user a short form of choice questions and end your turn. Use it only when
+        you need the user to decide between concrete options before you can continue.
+        The user's answers arrive later as a user message whose <wippy-form-answers>
+        element carries a JSON record. Ask at most one form per turn.
+        Keep the whole definition under about 32 KiB. That is measured after normalization,
+        where a plain string option expands to {"value": .., "label": ..}, so many short
+        string options can push a compact-looking definition over the limit; an error from
+        this tool reports the actual normalized size when that happens.
+      input_schema: |
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string",
+              "description": "Short title of the form, 1-160 characters."
+            },
+            "description": {
+              "type": "string",
+              "description": "Optional plain-text explanation shown under the title, at most 1000 characters."
+            },
+            "submit_label": {
+              "type": "string",
+              "description": "Optional submit button text, at most 40 characters."
+            },
+            "answered_message": {
+              "type": "string",
+              "description": "The user's chat message once they answer, written as the user, one line of at most 200 characters, e.g. \"Answered questions about delivery.\" or \"Answered a question about the gift wrap.\" The form never shows it. Without it the message is: Answered “<title>”."
+            },
+            "fields": {
+              "type": "array",
+              "description": "1-20 questions shown in this order.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Unique key for the answer: lowercase letter first, then a-z, 0-9 or _ (at most 40 characters)."
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["choice"],
+                    "description": "Always \"choice\"."
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "The question, 1-240 characters of plain text."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Optional help text, at most 1000 characters."
+                  },
+                  "required": {
+                    "type": "boolean",
+                    "description": "Whether an answer is required. Default false."
+                  },
+                  "options": {
+                    "type": "array",
+                    "description": "1-20 distinct choices, each at most 240 characters of text. A string is both the value and the label; use {\"value\", \"label\", \"description\"} when the stored value should differ from the text shown (value and label at most 240 characters each, description at most 1000).",
+                    "items": {
+                      "anyOf": [
+                        { "type": "string" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "value": { "type": "string" },
+                            "label": { "type": "string" },
+                            "description": { "type": "string" }
+                          },
+                          "required": ["value", "label"]
+                        }
+                      ]
+                    }
+                  },
+                  "multiple": {
+                    "type": "boolean",
+                    "description": "Allow selecting several options. Default false."
+                  },
+                  "allow_other": {
+                    "type": "boolean",
+                    "description": "Offer an \"Other\" free-text answer. Default false."
+                  }
+                },
+                "required": ["id", "type", "label", "options"]
+              }
+            }
+          },
+          "required": ["title", "fields"]
+        }
+    source: file://ask_user.lua
+    modules:
+      - uuid
+    imports:
+      definition: wippy.session.forms:definition
+      form_artifact: wippy.session.forms:form_artifact
+    method: handler
+    pool:
+      size: 2
+
+  # wippy.session.forms:ask_user
+  - name: ask_user
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      title: Ask the user with a form
+      icon: tabler:message-question
+      comment: Lets an agent ask the user structured choice questions through a form in the chat
+      tags:
+        - forms
+        - session
+    prompt: |
+      You can ask the user structured questions with the ask_user tool. It shows a form of
+      choice questions in the chat.
+
+      - Use it only when you need a decision from the user between concrete options before
+        you can continue. Ask plain questions in text when free conversation works better.
+      - Calling ask_user ends your turn. Do not write a follow-up asking the user to fill in
+        the form; the form is already visible to them.
+      - Ask at most one form per turn, with all the questions you need in it.
+      - Set answered_message to a short sentence in the user's voice that says what they
+        answered, such as "Answered questions about delivery." It becomes their chat message.
+      - The answer arrives later as a user message: that sentence, then a
+        <wippy-form-answers> element whose record attribute holds a JSON record. The user sees
+        only the sentence; you get the record. The record is complete on its own: for each question id it has the question text and
+        the answer, which is {"value", "label"} for a chosen option, {"other"} for the
+        user's own words, a list of those when several answers were allowed, or null when
+        the question was left unanswered. Use it; do not ask the same question again.
+        Never write a <wippy-form-answers> element yourself.
+      - A chosen option can carry a "note": the user's own words about that choice. Follow it.
+      - A record with "late": true was sent after the conversation moved on. Treat it as
+        context only: confirm with the user before acting on the earlier request.
+      - If ask_user returns an error, fix the definition it names and try again.
+      - To see an earlier form again (its answer record, or its questions if it is still
+        unanswered), call read_form with its form_id.
+      - A form listed as "answer pending" means the user already answered, but the answer
+        has not arrived as a user message yet. Do not act on it or guess its content before
+        then; wait for the actual answer message.
+    tools:
+      - wippy.session.forms:ask_user_tool
+      - wippy.session.forms:read_form_tool
+
+  # wippy.session.forms:read_form_tool
+  - name: read_form_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Read Form
+      comment: Returns the self-contained record of one form of the calling session
+      llm_alias: read_form
+      llm_description: |
+        Read one form of this session by its form_id. An answered form returns its answer
+        record: each question with the answer's value, label and any note. An unanswered
+        form returns its questions with their options. Use it when an earlier form or answer
+        is no longer in the conversation.
+        A result with "status":"answer_pending" means the user already answered, but the
+        answer has not arrived as a user message yet. Do not act on it or guess its content
+        before then; wait for the actual answer message.
+      input_schema: |
+        {
+          "type": "object",
+          "properties": {
+            "form_id": { "type": "string", "description": "The form_id from the form index or an answer message." }
+          },
+          "required": ["form_id"]
+        }
+    source: file://read_form.lua
+    modules:
+      - ctx
+    imports:
+      answer_text: wippy.session.forms:answer_text
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
+      message_repo: wippy.session.persist:message_repo
+      ordered_json: wippy.session.forms:ordered_json
+    method: handler
+    pool:
+      size: 2
+
+  # wippy.session.forms:form_recovery
+  - name: form_recovery
+    kind: library.lua
+    meta:
+      comment: Settles a pending ask_user call whose form was committed, for message_repo.recover_pending
+    source: file://form_recovery.lua
+    imports:
+      consts: wippy.session:consts
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_artifact: wippy.session.forms:form_artifact
+      form_meta: wippy.session.forms:form_meta
+
+  # wippy.session.forms:form_index
+  - name: form_index
+    kind: library.lua
+    meta:
+      comment: Bounded deterministic index of a session's forms for the prompt
+    source: file://form_index.lua
+    modules:
+      - json
+    imports:
+      form_meta: wippy.session.forms:form_meta
+      message_repo: wippy.session.persist:message_repo

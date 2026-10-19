@@ -2,7 +2,6 @@ local json = require("json")
 local uuid = require("uuid")
 local hash = require("hash")
 local consts = require("consts")
-local input_metadata = require("input_metadata")
 local input_policy = require("input_policy")
 local prompt_builder = require("prompt_builder")
 local context_attachments = require("context_attachments")
@@ -11,8 +10,9 @@ local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
-local message_order = require("message_order")
-local hash = require("hash")
+local answer_admission = require("answer_admission")
+local message_repo = require("message_repo")
+local logger = require("logger"):named("session.messages")
 
 type SessionContext = {
     session_id: string,
@@ -149,10 +149,10 @@ local REASON = {
     SESSION_FINISHED = "session_finished",
 }
 
-local function copy_context(context: any): table
+local function copy_table(value: any): table
     local copied = {}
-    if type(context) == "table" then
-        for k, v in pairs(context) do
+    if type(value) == "table" then
+        for k, v in pairs(value) do
             copied[k] = v
         end
     end
@@ -160,7 +160,7 @@ local function copy_context(context: any): table
 end
 
 local function with_agent_run_context(ctx: SessionContext, context: any, agent_ref: ToolWrapperAgentRef?): table
-    local next_context = copy_context(context)
+    local next_context = copy_table(context)
     local host = {
         kind = "session",
         session_id = ctx.session_id
@@ -514,95 +514,42 @@ local function take_over_handoff(ctx: any): boolean
     return true
 end
 
-local function all_messages(ctx)
-    if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
-    return ctx.reader:messages():all()
-end
-
-local function prepare_pending_inputs(ctx, new_user_id)
-    local messages, read_err = all_messages(ctx)
-    if not messages then return nil, read_err or "Failed to read pending inputs" end
-    local pending, anchor_id = {}, nil
-    for _, message in ipairs(messages) do
-        local metadata = type(message.metadata) == "table" and message.metadata or nil
-        local input = metadata and metadata.input
-        if input ~= nil then
-            if not input_metadata.validate(message) then
-                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
-            end
-            if input.state == "pending" then pending[#pending + 1] = message end
-        elseif message.message_id ~= new_user_id then
-            anchor_id = message.message_id
-        end
-    end
-    message_order.sort(pending)
-    local updates = {}
-    for _, message in ipairs(pending) do
-        updates[#updates + 1] = {
-            message_id = message.message_id,
-            metadata = { input = { state = "applied", after_message_id = anchor_id } },
-        }
-    end
-    return updates
-end
-
-local function persist_pending_inputs(ctx, updates, expected_revision)
-    if #updates == 0 then return 0 end
-    if type(ctx.writer.apply_inputs) ~= "function" then
-        return nil, "Session writer does not support atomic input application"
-    end
-    local ok, err = ctx.writer:apply_inputs(updates, expected_revision)
-    if not ok then return nil, err end
-    return #updates
-end
-
-local function publish_applied_inputs(ctx, updates)
-    for _, update in ipairs(updates) do
-        ctx.upstream:send_message_update(update.message_id, consts.UPSTREAM_TYPES.UPDATE, {
-            message_id = update.message_id, input = update.metadata.input,
-        })
-    end
-    return #updates
-end
-
-local function commit_pending_inputs(ctx, updates)
-    local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
-    local count, err = persist_pending_inputs(ctx, updates, expected_revision)
-    if not count then return nil, err end
-    publish_applied_inputs(ctx, updates)
-    return count
-end
-
-function message_handlers.apply_pending_inputs(ctx, new_user_id)
-    local updates, err = prepare_pending_inputs(ctx, new_user_id)
-    if not updates then return nil, err end
-    return commit_pending_inputs(ctx, updates)
-end
-
--- Called only by the session inbox after its command bus becomes empty.
-function message_handlers.finish_turn(ctx)
+-- Whether the current turn ended by creating a form (control_forms keys its
+-- one-form-per-turn marker by the same turn id). Such a turn takes no
+-- further step; steering that is still pending starts the next turn instead
+-- (session.flush_held).
+function message_handlers.ended_by_form(ctx): boolean
     local state = ctx.turn_state
-    if state and state.active and not is_turn_blocked(ctx) then
-        local pending, err = ctx.reader:list_pending_inputs()
-        if not pending then return nil, err or "Failed to read pending input" end
-        if #pending > 0 then
-            return { completed = false, next_ops = { {
-                type = consts.OP_TYPE.AGENT_STEP, message_id = state.message_id,
-                request_id = state.request_id, from_user = false,
-                ui_action_runtime = state.ui_action_runtime,
-            } } }
-        end
-    end
+    if type(state) ~= "table" or ctx.form_turn_id == nil then return false end
+    return ctx.form_turn_id == (state.id or state.message_id)
+end
+
+-- The interaction a turn start or end persists, resolved against the state
+-- it is about to commit.
+local function interaction_for(ctx: any, turn_state: any, status: any, stop_requested: any)
+    local agent = current_agent(ctx :: AttentionToolContext)
+    return input_policy.snapshot(ctx, {
+        config = ctx.config,
+        turn_state = turn_state,
+        status = status,
+        stop_requested = stop_requested,
+        current_agent = agent,
+        input_policy_revision = ctx.input_policy_revision,
+        interaction = ctx.interaction,
+    }, agent)
+end
+
+-- Completes the current turn: the turn state goes inactive and the session
+-- idle (failed and finishing stay as they are), persisted with the new
+-- interaction before it is announced. Returns true, or nil and an error.
+function message_handlers.complete_turn(ctx)
+    local state = ctx.turn_state
     local candidate_state = nil
     if state then
-        candidate_state = {}
-        for key, value in pairs(state) do candidate_state[key] = value end
+        candidate_state = copy_table(state)
         candidate_state.active = false
         candidate_state.input_policy = nil
-        -- A failed runtime must remain failed at the queue-empty boundary. The
-        -- previous code cleared this marker and persisted idle, allowing a
-        -- failed control operation to look recoverable without an explicit
-        -- recovery path.
+        -- A failed runtime stays failed at the queue-empty boundary.
         local failed = ctx.status == consts.STATUS.FAILED
         candidate_state.failed = failed and true or nil
         candidate_state.handoff = nil
@@ -614,16 +561,7 @@ function message_handlers.finish_turn(ctx)
     else
         target_status = ctx.status ~= "finishing" and consts.STATUS.IDLE or ctx.status
     end
-    local candidate = {
-        config = ctx.config,
-        turn_state = candidate_state,
-        status = target_status,
-        stop_requested = ctx.stop_requested,
-        current_agent = current_agent(ctx),
-        input_policy_revision = ctx.input_policy_revision,
-        interaction = ctx.interaction,
-    }
-    local interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
+    local interaction = interaction_for(ctx, candidate_state, target_status, ctx.stop_requested)
     local ok, err = ctx.writer:update_meta({ status = target_status, meta = { interaction = interaction } })
     if not ok then
         return nil, err or "Failed to persist turn completion"
@@ -631,7 +569,59 @@ function message_handlers.finish_turn(ctx)
     ctx.turn_state = candidate_state
     ctx.status = target_status
     input_policy.accept_committed(ctx, interaction)
+    return true
+end
+
+-- Called only by the session inbox after its command bus becomes empty. The
+-- turn continues while steering is due (accepted before any pending form
+-- answer), unless it ended by creating a form.
+--
+-- opts.defer_completion: a turn that ends normally (not stopped, failed or
+-- finishing) is left running, with ctx.completion_deferred set, and the end
+-- of the turn completes it (session.flush_held): idle when nothing follows,
+-- or straight into the next turn when admitted answers or steering left
+-- after a form start one. Completing it here first wrote idle and then
+-- running again, two status changes the clients saw as a flicker.
+function message_handlers.finish_turn(ctx, opts)
+    local state = ctx.turn_state
+    local ends_normally = state and state.active and not is_turn_blocked(ctx)
+    if ends_normally and not message_handlers.ended_by_form(ctx) then
+        local updates, err = answer_admission.prepare_pending_inputs(ctx, nil)
+        if not updates then return nil, err or "Failed to read pending input" end
+        if #updates > 0 then
+            return { completed = false, next_ops = { {
+                type = consts.OP_TYPE.AGENT_STEP, message_id = state.message_id,
+                request_id = state.request_id, from_user = false,
+                ui_action_runtime = state.ui_action_runtime,
+            } } }
+        end
+    end
+    local coordinator = type(ctx.coordinator) == "table" and ctx.coordinator or nil
+    if opts and opts.defer_completion and ends_normally and ctx.status == consts.STATUS.RUNNING
+        and coordinator and coordinator.state == "running" then
+        ctx.completion_deferred = true
+        return { completed = true, next_ops = {} }
+    end
+    local completed, complete_err = message_handlers.complete_turn(ctx)
+    if not completed then return nil, complete_err end
     return { completed = true, next_ops = {} }
+end
+
+-- Starts a turn at `message_id` (a row that is already stored) the way an
+-- idle typed message does in handle_message: the running status and the
+-- new interaction are persisted first, then the turn state follows. Used for
+-- turns that answer form answers or steering left after a form.
+function message_handlers.start_turn(ctx, message_id: any)
+    local next_turn = { active = true, steps = 0, repeated_calls = 0, message_id = message_id }
+    local interaction = interaction_for(ctx, next_turn, consts.STATUS.RUNNING, false)
+    local ok, err = ctx.writer:update_meta({ status = consts.STATUS.RUNNING, meta = { interaction = interaction } })
+    if not ok then return nil, err or "Failed to persist turn start" end
+    ctx.turn_generation = (tonumber(ctx.turn_generation) or 0) + 1
+    ctx.turn_state = next_turn
+    ctx.stop_requested = false
+    ctx.status = consts.STATUS.RUNNING
+    input_policy.accept_committed(ctx, interaction)
+    return true
 end
 
 -- Deterministic rendering of a tool call's arguments, so two rounds compare equal regardless
@@ -821,25 +811,38 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     }
 end
 
--- Persists one input message and announces a user message as received once it is stored.
-function message_handlers.write_input(ctx, item)
+-- The data of an input item and its text, "" when it has none.
+local function input_data(item: any): (table, string)
     local data = type(item.data) == "table" and item.data or {}
+    return data, type(data.text) == "string" and data.text or ""
+end
+
+-- Persists one input message and announces a user message as received once it is stored.
+-- opts.tx writes on a caller's transaction; opts.announce = false leaves the
+-- announcement to the caller (after its commit).
+function message_handlers.write_input(ctx, item, opts)
+    opts = opts or {}
+    local data, text = input_data(item)
     local msg_type = data.type
     if msg_type ~= consts.MSG_TYPE.DEVELOPER and msg_type ~= consts.MSG_TYPE.SYSTEM then
         msg_type = consts.MSG_TYPE.USER
     end
-    local message_id, err = ctx.writer:add_message(msg_type, data.text or "", {
+    local message_id, err = ctx.writer:add_message(msg_type, text, {
         message_id = item.message_id, file_uuids = data.file_uuids
-    })
+    }, nil, nil, nil, opts.tx and { tx = opts.tx } or nil)
     if err then return nil, err end
-    if msg_type == consts.MSG_TYPE.USER and ctx.upstream then
-        ctx.upstream:message_received(message_id, data.text or "", data.file_uuids)
-    end
+    if opts.announce ~= false then message_handlers.announce_input(ctx, message_id, msg_type, item) end
     return message_id, msg_type
 end
 
+function message_handlers.announce_input(ctx, message_id, msg_type, item)
+    if msg_type ~= consts.MSG_TYPE.USER or not ctx.upstream then return end
+    local data, text = input_data(item)
+    ctx.upstream:message_received(message_id, text, data.file_uuids)
+end
+
 function message_handlers.handle_message(ctx, op)
-    local data = type(op.data) == "table" and op.data or {}
+    local data, text = input_data(op)
     if data.type == consts.MSG_TYPE.DEVELOPER or data.type == consts.MSG_TYPE.SYSTEM then
         local message_id, write_err = message_handlers.write_input(ctx, op)
         if not message_id then return nil, write_err end
@@ -947,7 +950,7 @@ function message_handlers.handle_message(ctx, op)
     -- input policy would block a new message now.
     local function acknowledge_duplicate(message_id, stored)
         local stored_metadata = type(stored) == "table" and type(stored.metadata) == "table" and stored.metadata or nil
-        ctx.upstream:message_received(message_id, data.text or "", data.file_uuids,
+        ctx.upstream:message_received(message_id, text, data.file_uuids,
             stored_metadata and stored_metadata.input, op.request_id, attachments)
         return { completed = true, duplicate = true, message_id = message_id }
     end
@@ -966,6 +969,21 @@ function message_handlers.handle_message(ctx, op)
         return reject_file_references(ctx, op)
     end
 
+    local answers: {any} = {}
+    if not active and not op.exiting and not answer_admission.finishing(ctx) then
+        -- Form answers accepted before this message go first: a lost wake-up
+        -- must not let a later typed message overtake them in the history.
+        -- No turn starts for them here; the turn this message starts sees
+        -- them ahead of it. A finishing or exiting session leaves them
+        -- pending for its next start.
+        local admit_err
+        answers, admit_err = answer_admission.admit_in_order(ctx, nil)
+        if admit_err then
+            logger:warn("form answer admission before a message failed",
+                { session_id = ctx.session_id, error = tostring(admit_err) })
+        end
+    end
+
     local input = active and { state = "pending" } or nil
     local metadata = { file_uuids = data.file_uuids, context_attachments = attachments }
     if input then metadata.input = input end
@@ -973,24 +991,15 @@ function message_handlers.handle_message(ctx, op)
     local committed_interaction
     local next_turn = nil
     if active then
-        message_id, err, duplicate = ctx.writer:add_message(consts.MSG_TYPE.USER, data.text or "", metadata,
+        message_id, err, duplicate = ctx.writer:add_message(consts.MSG_TYPE.USER, text, metadata,
             op.request_id, request_hash, receipt)
     else
         if type(ctx.writer.admit_message) ~= "function" then
             return nil, "Session writer does not support atomic admission"
         end
         next_turn = { active = true, steps = 0, repeated_calls = 0 }
-        local candidate = {
-            config = ctx.config,
-            turn_state = next_turn,
-            status = consts.STATUS.RUNNING,
-            stop_requested = false,
-            current_agent = current_agent(ctx),
-            input_policy_revision = ctx.input_policy_revision,
-            interaction = ctx.interaction,
-        }
-        local next_interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
-        message_id, err, duplicate = ctx.writer:admit_message(consts.MSG_TYPE.USER, data.text or "", metadata, {
+        local next_interaction = interaction_for(ctx, next_turn, consts.STATUS.RUNNING, false)
+        message_id, err, duplicate = ctx.writer:admit_message(consts.MSG_TYPE.USER, text, metadata, {
             status = consts.STATUS.RUNNING,
             meta = { interaction = next_interaction },
         }, op.request_id, request_hash, receipt)
@@ -998,6 +1007,8 @@ function message_handlers.handle_message(ctx, op)
     end
     -- Storage failures return to the session inbox, which reports them once.
     if err then
+        -- The answers are admitted but no turn starts for them.
+        answer_admission.publish_admitted(answers)
         if receipt and (err == 'CONTEXT_REFERENCE_UNAVAILABLE' or err == 'INVALID_CONTEXT_REFERENCE'
             or err == 'CONTEXT_SESSION_UNAVAILABLE') then
             return reject_transport(ctx, op, err)
@@ -1005,9 +1016,12 @@ function message_handlers.handle_message(ctx, op)
         return nil, err
     end
     if not message_id then
+        -- The answers are admitted but no turn starts for them.
+        answer_admission.publish_admitted(answers)
         return nil, "Failed to persist input"
     end
     if duplicate then
+        answer_admission.publish_admitted(answers)
         return acknowledge_duplicate(message_id, nil)
     end
 
@@ -1019,12 +1033,79 @@ function message_handlers.handle_message(ctx, op)
         ctx.status = consts.STATUS.RUNNING
     end
     if committed_interaction then input_policy.accept_committed(ctx, committed_interaction) end
-    ctx.upstream:message_received(message_id, data.text or "", data.file_uuids, input, op.request_id, attachments)
+    ctx.upstream:message_received(message_id, text, data.file_uuids, input, op.request_id, attachments)
+    -- After the running status, so their forms read as being answered.
+    answer_admission.publish_admitted(answers)
     return {
         message_id = message_id, completed = active,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
             request_id = op.request_id, from_user = true, ui_action_runtime = op.ui_action_runtime } },
     }
+end
+
+-- A form answer arrived (or the plugin asks the session to look for pending
+-- ones) while no turn is active. Runs from the session inbox, like an idle
+-- typed message, so a message cannot start a second turn meanwhile. Admits
+-- the pending answers and starts one turn for the latest; answers of a
+-- stopped turn start none. The running status is persisted before anything
+-- is admitted, so a failed status write leaves the rows pending for the next
+-- scan. A storage failure is logged and leaves the rows pending; the
+-- plugin's periodic scan asks again.
+function message_handlers.admit_answer(ctx)
+    if answer_admission.finishing(ctx) or answer_admission.bus_state(ctx) == "closed" then
+        return { completed = true }
+    end
+    local pending, list_err = message_repo.list_pending_answers(ctx.session_id, answer_admission.SCAN_LIMIT)
+    if not pending then
+        logger:warn("pending form answer scan failed", { session_id = ctx.session_id, error = tostring(list_err) })
+        return { completed = true }
+    end
+    if #pending == 0 then return { completed = true } end
+
+    local wants_turn = false
+    local stopped = answer_admission.stopped_answers(ctx)
+    for _, row in ipairs(pending) do
+        if not stopped[row.message_id] then wants_turn = true end
+    end
+    wants_turn = wants_turn and not answer_admission.no_turn_follows(ctx)
+    if wants_turn then
+        local started, start_err = message_handlers.start_turn(ctx, nil)
+        if not started then
+            logger:warn("session status update failed", { session_id = ctx.session_id, error = tostring(start_err) })
+            return { completed = true }
+        end
+    end
+
+    local admitted, admit_err = answer_admission.admit_in_order(ctx, nil)
+    if admit_err then
+        logger:warn("form answer admission failed", { session_id = ctx.session_id, error = tostring(admit_err) })
+    end
+    local start_id = nil
+    if wants_turn then
+        local start_err
+        start_id, start_err = answer_admission.turn_start_after(ctx, admitted, false)
+        if start_err then
+            logger:warn("pending input scan failed", { session_id = ctx.session_id, error = tostring(start_err) })
+        end
+    end
+    if not start_id or answer_admission.no_turn_follows(ctx) then
+        -- Nothing admitted for a turn (already admitted, a failed write, or
+        -- only answers of a stopped turn): back to idle.
+        if wants_turn then
+            local _, complete_err = message_handlers.complete_turn(ctx)
+            if complete_err then
+                logger:warn("session status update failed",
+                    { session_id = ctx.session_id, error = tostring(complete_err) })
+            end
+        end
+        answer_admission.defer_publish(ctx, admitted)
+        return { completed = true }
+    end
+    ctx.turn_state.message_id = start_id
+    answer_admission.publish_admitted(admitted)
+    return { message_id = start_id, next_ops = {{
+        type = consts.OP_TYPE.AGENT_STEP, message_id = start_id, from_user = true
+    }} }
 end
 
 -- Agent, provider, and configuration failures end the turn through fail_turn and keep
@@ -1040,7 +1121,8 @@ function message_handlers.agent_step(ctx, op)
     if op.from_user and type(ctx.activate_attention_turn) == "function" then
         op.ui_action_runtime = ctx.activate_attention_turn(op)
     end
-    local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
+    local input_updates, input_err = answer_admission.prepare_pending_inputs(ctx,
+        op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
     local prompt_options = { input_overrides = input_updates }
     local builder, err
@@ -1133,7 +1215,7 @@ function message_handlers.agent_step(ctx, op)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     ctx.input_apply_batch = input_updates
     local expected_revision = tonumber(ctx.interaction and ctx.interaction.revision) or 0
-    local _, input_apply_err = persist_pending_inputs(ctx, input_updates, expected_revision)
+    local _, input_apply_err = answer_admission.persist_pending_inputs(ctx, input_updates, expected_revision)
     local stop_gate = ctx.stop_commit_channel
     if stop_gate then
         stop_gate:receive()
@@ -1145,7 +1227,7 @@ function message_handlers.agent_step(ctx, op)
         return nil, input_apply_err
     end
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
-    publish_applied_inputs(ctx, input_updates)
+    answer_admission.publish_applied_inputs(ctx, input_updates)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
@@ -1201,7 +1283,7 @@ function message_handlers.agent_step(ctx, op)
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
         if result.result and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local _, store_err, _, stored: any = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
@@ -1214,7 +1296,8 @@ function message_handlers.agent_step(ctx, op)
 
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
-                using_tools = false
+                using_tools = false,
+                date = type(stored) == "table" and stored.date or nil
             })
         end
 
@@ -1356,7 +1439,8 @@ function message_handlers.agent_step(ctx, op)
             })
             call_message_types[call.id] = call_type
         end
-        local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
+        local stored_id, call_message_ids, store_err, stored_date = ctx.writer:add_response(
+            result.result or "", metadata, intents)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
@@ -1376,10 +1460,13 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
+        -- Sent after Stop too: a reply to a model call already in flight is
+        -- stored, so clients must see it. It carries the stored row's date.
         if result.result and result.result ~= "" then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
-                using_tools = (#unified_tool_calls > 0)
+                using_tools = (#unified_tool_calls > 0),
+                date = stored_date
             })
         end
     else
@@ -1636,6 +1723,9 @@ function message_handlers.process_tools(ctx, op)
     end
 
     local next_ops = {}
+    -- Set by an effect that finishes the turn (a created form): the calls are
+    -- settled as usual, but no continuation step is queued.
+    local end_turn = false
     local function fail_remaining(start_index, reason)
         local failure = tostring(reason)
         for index = start_index, #op.tool_calls do
@@ -1647,6 +1737,14 @@ function message_handlers.process_tools(ctx, op)
             if mark_err then failure = failure .. "; settlement failed: " .. tostring(mark_err) end
         end
         return nil, failure
+    end
+    local function announce_function_error(call_id, message_id, function_name, error_text)
+        ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+            message_id = message_id,
+            call_id = call_id,
+            function_name = function_name,
+            error = error_text
+        })
     end
 
     for index, call in ipairs(op.tool_calls) do
@@ -1704,12 +1802,7 @@ function message_handlers.process_tools(ctx, op)
             if update_err then return fail_remaining(index, update_err) end
 
             if not is_delegation and not is_private then
-                ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
-                    message_id = message_id,
-                    call_id = call_id,
-                    function_name = result_data.tool_call.name,
-                    error = tostring(result_data.error)
-                })
+                announce_function_error(call_id, message_id, result_data.tool_call.name, tostring(result_data.error))
             end
         else
             local tool_result = result_data.result
@@ -1724,20 +1817,47 @@ function message_handlers.process_tools(ctx, op)
                 tool_result._control = nil
             end
 
-            local _, update_err = ctx.writer:update_message_meta(message_id, {
+            local settled = {
                 result = tool_result,
                 status = consts.FUNC_STATUS.SUCCESS,
                 function_name = result_data.tool_call.name,
                 call_id = call_id,
                 registry_id = result_data.tool_call.registry_id
-            })
-            if update_err then return fail_remaining(index, update_err) end
+            }
+            -- A call with control effects is settled only after its
+            -- effects commit, so a crash in between leaves the call
+            -- pending for recovery instead of claiming work that never
+            -- happened (e.g. "form created" with no form stored).
+            if not control then
+                local _, update_err = ctx.writer:update_message_meta(message_id, settled)
+                if update_err then return fail_remaining(index, update_err) end
+            end
 
+            local rejected = nil
+            -- Set once this call's form is committed. The form names the
+            -- call as its origin, so from then on a failure leaves the call
+            -- pending: recovery (form_recovery.settle_call) settles it as
+            -- created. Marking it an error would make the agent ask again
+            -- and leave two forms.
+            local form_committed = false
+            local function fail_from(reason)
+                return fail_remaining(form_committed and index + 1 or index, reason)
+            end
             if control then
                 local effects = {}
                 if control.artifacts and #control.artifacts > 0 then
                     table.insert(effects, { control_handlers.control_artifacts,
                         { artifacts = control.artifacts } })
+                end
+                if type(control.forms) == "table" and #control.forms > 0 then
+                    -- Trusted bindings come from the session, not the tool.
+                    local turn = ctx.turn_state
+                    table.insert(effects, { control_handlers.control_forms, {
+                        forms = control.forms,
+                        turn_id = (type(turn) == "table" and turn.id) or op.message_id,
+                        call_id = call_id,
+                        tool_message_id = message_id,
+                    } })
                 end
                 if control.context then
                     table.insert(effects, { control_handlers.control_context,
@@ -1755,12 +1875,34 @@ function message_handlers.process_tools(ctx, op)
                     local ran, applied, effect_err = pcall(effect[1], ctx, effect[2])
                     if not ran or effect_err or not applied then
                         local reason = ran and (effect_err or "Control effect failed") or applied
-                        return fail_remaining(index, reason)
+                        return fail_from(reason)
+                    end
+                    if type(applied) == "table" and type(applied.rejected) == "string" then
+                        -- The effect refused the request without writing anything (e.g. a
+                        -- second form in one turn). Only this call becomes a tool error; the
+                        -- round and the turn go on so the agent can react to it.
+                        rejected = applied.rejected
+                    elseif type(applied) == "table" and applied.end_turn then
+                        end_turn = true
+                        if effect[1] == control_handlers.control_forms then form_committed = true end
                     end
                 end
             end
 
-            if not is_delegation and not is_private then
+            if rejected then
+                settled.result = rejected
+                settled.status = consts.FUNC_STATUS.ERROR
+            end
+            if control then
+                local _, settle_err = ctx.writer:update_message_meta(message_id, settled)
+                if settle_err then return fail_from(settle_err) end
+            end
+
+            if rejected then
+                if not is_delegation and not is_private then
+                    announce_function_error(call_id, message_id, result_data.tool_call.name, rejected)
+                end
+            elseif not is_delegation and not is_private then
                 ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS, {
                     message_id = message_id,
                     call_id = call_id,
@@ -1772,7 +1914,9 @@ function message_handlers.process_tools(ctx, op)
 
     message_handlers.note_tool_round(ctx, results)
 
-    if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
+    -- A turn that ended by creating a form queues no continuation step; a
+    -- handoff does, so the new agent continues the turn.
+    if #op.tool_calls > 0 and not end_turn and not is_turn_stopped(ctx) then
         table.insert(next_ops, {
             type = consts.OP_TYPE.AGENT_CONTINUE,
             message_id = op.message_id,

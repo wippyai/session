@@ -93,6 +93,7 @@ entries:
     modules: [time]
     imports:
       writer: wippy.session.persist:writer
+      reader: wippy.session.persist:reader
       message_handlers: wippy.session.process:message_handlers
       context_staging_repo: wippy.session.persist:context_staging_repo
       session_repo: wippy.session.persist:session_repo
@@ -126,6 +127,12 @@ entries:
     kind: db.sql.sqlite
     meta:
       comment: Disposable database for migration tests; each test recreates the tables it needs.
+    file: ./.wippy/migration-probe.db
+
+  - name: migration_probe_peer_db
+    kind: db.sql.sqlite
+    meta:
+      comment: A second connection pool on the migration probe database file, so a test can run two connections against one SQLite file.
     file: ./.wippy/migration-probe.db
 
   - name: env_storage

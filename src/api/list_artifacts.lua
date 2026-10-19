@@ -31,6 +31,7 @@ local function public_artifact(row)
         title = row.title,
         created_at = row.created_at,
         updated_at = row.updated_at,
+        content_version = row.content_version or 1,
         display_type = meta.display_type,
         content_type = meta.content_type,
         description = meta.description,

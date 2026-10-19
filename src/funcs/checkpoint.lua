@@ -1,4 +1,5 @@
 local json = require("json")
+local answer_text = require("answer_text")
 local session = require("session")
 local llm = require("llm")
 local prompt = require("prompt")
@@ -181,12 +182,18 @@ local function handle(args)
 
     for _, msg in ipairs(range_messages) do
         if msg.type == "user" then
-            table.insert(conversation_parts, "[USER]: " .. (msg.data or ""))
+            -- nil for a form answer accepted during the running turn:
+            -- summarizing it would put it into the session context the
+            -- active turn reads.
+            local text = answer_text.model_text(msg)
+            if text ~= nil then
+                table.insert(conversation_parts, "[USER]: " .. text)
 
-            local metadata = msg.metadata or {}
-            if metadata.file_uuids and #metadata.file_uuids > 0 then
-                for _, file_uuid in ipairs(metadata.file_uuids) do
-                    table.insert(file_references, "file_uuid:" .. file_uuid)
+                local metadata = msg.metadata or {}
+                if metadata.file_uuids and #metadata.file_uuids > 0 then
+                    for _, file_uuid in ipairs(metadata.file_uuids) do
+                        table.insert(file_references, "file_uuid:" .. file_uuid)
+                    end
                 end
             end
         elseif msg.type == "assistant" and msg.data ~= "" then

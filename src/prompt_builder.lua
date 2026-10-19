@@ -1,6 +1,8 @@
 local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
+local form_index = require("form_index")
+local answer_text = require("answer_text")
 local fs = require("fs")
 local hash = require("hash")
 local time = require("time")
@@ -401,7 +403,12 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- for internal use only, use developer role for ongoing system messages
         elseif msg.type == consts.MSG_TYPE.USER then
-            local user_parts = { prompt_builder._prompt.text(msg.data :: string) }
+            -- nil for a form answer accepted while a turn was running: the
+            -- session admits it after the turn ends (moving it to the end of
+            -- the history), so it stays out until then.
+            local text = answer_text.model_text(msg)
+            if text == nil then return end
+            local user_parts = { prompt_builder._prompt.text(text) }
             if include_context_attachments and metadata.context_attachments then
                 local required, required_count, required_versions = {}, 0, {}
                 for _, attachment in ipairs(metadata.context_attachments) do
@@ -616,6 +623,29 @@ local function anchors_on_agent_message(session: any, messages: any): boolean
     return first.type ~= consts.MSG_TYPE.USER and first.type ~= consts.MSG_TYPE.DEVELOPER
 end
 
+-- The session's form index (form identity and state survive checkpoints
+-- through it, not through the free-text summary). Answers accepted during the
+-- running turn are listed as pending, without their values. Returns
+-- (text or nil, error).
+local function forms_index_of(session: any): (string?, string?)
+    if type(session.artifacts) ~= "function" then
+        return nil, nil
+    end
+    local artifacts, err = session:artifacts():all()
+    if err then
+        return nil, "Failed to load forms: " .. tostring(err)
+    end
+    local pending = {}
+    if type(session.session_id) == "string" then
+        local pending_err
+        pending, pending_err = form_index.pending_answers(session.session_id, artifacts)
+        if not pending then
+            return nil, "Failed to load pending form answers: " .. tostring(pending_err)
+        end
+    end
+    return form_index.build(artifacts, { pending_answers = pending }), nil
+end
+
 function prompt_builder.from_session(session, options)
     if not session then
         return nil, "Session reader is required"
@@ -640,9 +670,24 @@ function prompt_builder.from_session(session, options)
         return nil, "Failed to load contexts: " .. err
     end
 
+    local index, index_err = forms_index_of(session)
+    if index_err then
+        return nil, index_err
+    end
+
     local session_meta = session:state()
 
-    return prompt_builder.build(messages, contexts, session_meta, options)
+    local builder, build_err = prompt_builder.build(messages, contexts, session_meta, options)
+    if not builder then
+        return nil, build_err
+    end
+    -- After the history and its cache marker: the index changes whenever a
+    -- form is asked, answered or admitted, and anywhere earlier it would make
+    -- the provider re-read the cached history behind it on the next step.
+    if index then
+        builder:add_developer(index)
+    end
+    return builder, nil
 end
 
 return prompt_builder

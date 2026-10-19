@@ -48,6 +48,17 @@ local consts = {
         SESSION_ID = "wippy.session.process:session",
     },
 
+    -- A whole string in the canonical UUID text form (8-4-4-4-12 hex digits),
+    -- for ids the session mints or accepts from a client or a tool.
+    UUID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$",
+
+    -- Process registry name prefixes: "session.<session_id>" for a running
+    -- session, "session_plugin.<user_id>" for the user's session plugin.
+    REGISTRY = {
+        SESSION = "session.",
+        PLUGIN = "session_plugin.",
+    },
+
     -- Plugin Topics
     PLUGIN_TOPICS = {
         OPEN = "open",
@@ -56,6 +67,12 @@ local consts = {
         COMMAND = "command",
         SHUTDOWN = "shutdown",
         RESUME = "resume",
+        -- Internal: the grace period after SHUTDOWN ended with no client back.
+        SHUTDOWN_DEADLINE = "shutdown_deadline",
+        -- Server-side: start a stopped session so it admits a pending form answer.
+        WAKE = "wake",
+        -- Internal: start sessions that still hold unadmitted form answers.
+        SCAN_ANSWERS = "scan_answers",
         UI_ACTION_RESULT = "ui_action_result",
         UI_ACTION_REQUEST = "session_ui_action_request",
         UI_ACTION_CANCEL = "session_ui_action_cancel"
@@ -148,7 +165,9 @@ local consts = {
         FINISH_AND_EXIT = "finish_and_exit",
         STOP_ESCALATION = "session.stop_escalation",
         STOP_RESOLVED = "session.stop_resolved",
-        STOP_DEADLINE = "session.stop_deadline"
+        STOP_DEADLINE = "session.stop_deadline",
+        -- Wake-up from the form state API: { message_id } of a committed answer
+        FORM_ANSWER = "form_answer"
     },
 
     -- Upstream Update Types

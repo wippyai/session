@@ -64,6 +64,10 @@ entries:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      form_recovery: wippy.session.forms:form_recovery
+      message_date: wippy.session.persist:message_date
+      tx: wippy.session.persist:tx
       message_order: wippy.session.persist:message_order
       writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
@@ -109,6 +113,65 @@ entries:
       - security
     imports:
       consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      tx: wippy.session.persist:tx
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: artifact_events_test
+    kind: function.lua
+    meta:
+      name: Artifact event publisher
+      type: test
+      suite: session
+      comment: Publisher addresses the owner's hub (never the caller), drops silently without one, and is a no-op for a nil/ownerless artifact
+    source: file://artifact_events_test.lua
+    imports:
+      artifact_events: wippy.session.persist:artifact_events
+      test: wippy.test:test
+    method: run
+
+  - name: shared_transaction_test
+    kind: function.lua
+    meta:
+      name: Shared transaction (artifact update + message create)
+      type: test
+      suite: session
+      comment: Commit, rollback, and mid-transaction failure across a caller-supplied tx; tx.run on a raise, nested, and with repository calls that omit opts.tx
+    source: file://shared_transaction_test.lua
+    modules:
+      - sql
+      - uuid
+      - time
+      - security
+    imports:
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      message_repo: wippy.session.persist:message_repo
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: writer_test
+    kind: function.lua
+    meta:
+      name: Session writer (artifact updates)
+      type: test
+      suite: session
+      comment: update_artifact checks ownership on the caller's transaction and keeps structured update errors
+    source: file://writer_test.lua
+    modules:
+      - uuid
+      - security
+    imports:
+      tx: wippy.session.persist:tx
+      writer: wippy.session.persist:writer
+      artifact_repo: wippy.session.persist:artifact_repo
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test

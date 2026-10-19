@@ -118,6 +118,39 @@ entries:
     func: delete_session
     path: /sessions/delete
 
+  # wippy.session.api:artifact_access
+  - name: artifact_access
+    kind: library.lua
+    meta:
+      comment: Request handling of the artifact endpoints; a foreign or missing artifact is one generic 404
+    source: file://artifact_access.lua
+    modules:
+      - http
+      - json
+    imports:
+      artifact_repo: wippy.session.persist:artifact_repo
+      artifact_projection: wippy.session.persist:artifact_projection
+      renderer: wippy.views:renderer
+
+  # wippy.session.api:request_body
+  - name: request_body
+    kind: library.lua
+    meta:
+      comment: JSON request bodies of the API endpoints (Content-Type gate, capped body read)
+    source: file://request_body.lua
+
+  # wippy.session.api:artifact_state_access
+  - name: artifact_state_access
+    kind: library.lua
+    meta:
+      comment: Request handling of the form state endpoints (GET and POST /artifact/{id}/state) once the caller is authenticated
+    source: file://artifact_state_access.lua
+    modules:
+      - http
+    imports:
+      request_body: wippy.session.api:request_body
+      state_service: wippy.session.forms:state_service
+
   # wippy.session.api:get_artifact
   - name: get_artifact
     kind: function.lua
@@ -127,11 +160,9 @@ entries:
     source: file://get_artifact.lua
     modules:
       - http
-      - json
       - security
     imports:
-      artifact_repo: wippy.session.persist:artifact_repo
-      session_repo: wippy.session.persist:session_repo
+      artifact_access: wippy.session.api:artifact_access
     method: handler
     pool:
       size: 4
@@ -155,12 +186,9 @@ entries:
     source: file://get_artifact_content.lua
     modules:
       - http
-      - json
       - security
     imports:
-      artifact_repo: wippy.session.persist:artifact_repo
-      renderer: wippy.views:renderer
-      session_repo: wippy.session.persist:session_repo
+      artifact_access: wippy.session.api:artifact_access
     method: handler
     pool:
       size: 4
@@ -175,6 +203,58 @@ entries:
     func: get_artifact_content
     path: /artifact/{id}/content
 
+  # wippy.session.api:get_artifact_state
+  - name: get_artifact_state
+    kind: function.lua
+    meta:
+      comment: Returns the state of a session form artifact (definition, status, staleness, accepted answer, delivery)
+      router: app:api
+    source: file://artifact_state.lua
+    modules:
+      - http
+      - security
+    imports:
+      artifact_state_access: wippy.session.api:artifact_state_access
+    method: get
+    pool:
+      size: 4
+
+  # wippy.session.api:get_artifact_state.endpoint
+  - name: get_artifact_state.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Session form state endpoint
+      router: app:api
+    method: GET
+    func: get_artifact_state
+    path: /artifact/{id}/state
+
+  # wippy.session.api:submit_artifact_state
+  - name: submit_artifact_state
+    kind: function.lua
+    meta:
+      comment: Accepts a session form answer atomically (artifact becomes idle, answer stored as a user message)
+      router: app:api
+    source: file://artifact_state.lua
+    modules:
+      - http
+      - security
+    imports:
+      artifact_state_access: wippy.session.api:artifact_state_access
+    method: post
+    pool:
+      size: 4
+
+  # wippy.session.api:submit_artifact_state.endpoint
+  - name: submit_artifact_state.endpoint
+    kind: http.endpoint
+    meta:
+      comment: Session form answer submission endpoint
+      router: app:api
+    method: POST
+    func: submit_artifact_state
+    path: /artifact/{id}/state
+
   # wippy.session.api:get_session
   - name: get_session
     kind: function.lua
@@ -188,6 +268,7 @@ entries:
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
+      session_status: wippy.session.process:session_status
     method: handler
     pool:
       size: 4
@@ -240,6 +321,7 @@ entries:
       - security
     imports:
       session_repo: wippy.session.persist:session_repo
+      session_status: wippy.session.process:session_status
     method: handler
     pool:
       size: 4

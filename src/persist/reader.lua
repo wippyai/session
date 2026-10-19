@@ -193,10 +193,6 @@ function session_reader:messages()
     return query
 end
 
-function session_reader:list_pending_inputs()
-    return session._message_repo.list_pending_inputs(self.session_id)
-end
-
 function session_reader:list_all_messages()
     return session._message_repo.list_all_by_session(self.session_id)
 end

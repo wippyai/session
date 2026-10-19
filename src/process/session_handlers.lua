@@ -1,4 +1,5 @@
 local funcs = require("funcs")
+local logger = require("logger"):named("session.process")
 local consts = require("consts")
 local tool_caller = require("tool_caller")
 local time = require("time")
@@ -229,7 +230,11 @@ function session_handlers.check_background_triggers(ctx, op)
         end
     end
 
-    if ctx.config.title_function_id and not checkpoint_needed then
+    -- A title already being generated in the background (generate_title)
+    -- has not reached the session row yet; the steps meanwhile do not start
+    -- another one.
+    local title_in_flight = (tonumber(ctx.titles_in_flight) or 0) > 0
+    if ctx.config.title_function_id and not checkpoint_needed and not title_in_flight then
         local has_title = session_data.title and session_data.title ~= ""
 
         if not has_title then
@@ -257,11 +262,7 @@ function session_handlers.check_background_triggers(ctx, op)
     }
 end
 
-function session_handlers.generate_title(ctx, op)
-    if not ctx.config.title_function_id then
-        return nil, "No title function ID configured"
-    end
-
+local function generate_title_now(ctx)
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         session_context = {}
@@ -294,6 +295,30 @@ function session_handlers.generate_title(ctx, op)
         title = result.title,
         tokens = result.tokens
     }
+end
+
+-- Runs the title call in ctx.run_in_background so it does not hold up the
+-- operations queued behind it; without a background runner it runs in place.
+function session_handlers.generate_title(ctx, op)
+    if not ctx.config.title_function_id then
+        return nil, "No title function ID configured"
+    end
+    if type(ctx.run_in_background) ~= "function" then
+        return generate_title_now(ctx)
+    end
+
+    ctx.titles_in_flight = (tonumber(ctx.titles_in_flight) or 0) + 1
+    ctx.run_in_background(function()
+        local ran, result, err = pcall(generate_title_now, ctx)
+        ctx.titles_in_flight = math.max((tonumber(ctx.titles_in_flight) or 1) - 1, 0)
+        if not ran or not result then
+            logger:warn("session title generation failed", {
+                session_id = ctx.session_id,
+                error = tostring(ran and err or result),
+            })
+        end
+    end)
+    return { completed = true, background = true }
 end
 
 function session_handlers.create_checkpoint(ctx, op)

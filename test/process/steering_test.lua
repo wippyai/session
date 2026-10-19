@@ -1,6 +1,7 @@
 local test = require("test")
 local consts = require("consts")
 local handlers = require("message_handlers")
+local answer_admission = require("answer_admission")
 local prompt_builder = require("prompt_builder")
 
 type FixtureMessage = {
@@ -37,14 +38,6 @@ local function fixture(initial_rows: {FixtureMessage}?, while_running: string?):
         config = { agent_id = agent.id, model = agent.model }, lifecycle_state = {},
         reader = {
             list_all_messages = function() return rows end,
-            list_pending_inputs = function()
-                local result = {}
-                for _, row in ipairs(rows) do
-                    local input = row.metadata and row.metadata.input
-                    if input and input.state == "pending" then result[#result + 1] = row end
-                end
-                return result
-            end,
             messages = function() return query end,
             contexts = function() return { all = function() return {} end } end,
             state = function() return { meta = {}, config = ctx.config } end,
@@ -236,7 +229,7 @@ local function define_tests()
                 { message_id = "anchor", date = "2026-01-03T00:00:00Z", type = consts.MSG_TYPE.ASSISTANT,
                     data = "done", metadata = {} },
             })
-            local count, err = handlers.apply_pending_inputs(ctx)
+            local count, err = answer_admission.apply_pending_inputs(ctx)
             test.is_nil(err)
             test.eq(count, 3)
             test.eq(applied[1], "a-first")
@@ -248,7 +241,7 @@ local function define_tests()
         it("leaves the complete pending batch unchanged after transaction failure", function()
             local ctx, rows, events = fixture({ pending("p1"), pending("p2") })
             ctx.apply_error = "transaction failure"
-            local count, err = handlers.apply_pending_inputs(ctx)
+            local count, err = answer_admission.apply_pending_inputs(ctx)
             test.is_nil(count)
             test.eq(err, "transaction failure")
             test.eq(rows[1].metadata.input.state, "pending")
@@ -260,7 +253,7 @@ local function define_tests()
             local bad = { message_id = "bad", date = "2026-01-01", type = consts.MSG_TYPE.USER,
                 data = "bad", metadata = { input = { state = "unknown" } } }
             local ctx, rows = fixture({ bad } :: {FixtureMessage})
-            local count, err = handlers.apply_pending_inputs(ctx)
+            local count, err = answer_admission.apply_pending_inputs(ctx)
             test.is_nil(count)
             test.not_nil(err)
             test.contains(err, "Malformed steering metadata")

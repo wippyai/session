@@ -1,6 +1,8 @@
 local json = require('json')
 local time = require('time')
 local read = require('attention_read')
+local message_order = require('message_order')
+local message_repo = require('message_repo')
 local prompt_builder = require('prompt_builder')
 
 local M = { TTL_SECONDS = 30 }
@@ -68,19 +70,13 @@ local function timestamp(value)
     return nil
 end
 
--- Message dates come back from the database. SQLite returns the text Session
--- wrote, with its zone offset. Postgres keeps them in a `timestamp` column, which
--- drops the offset, and returns the writer's local wall clock with a "Z" suffix
--- (Postgres 16: written 18:08:42+02:00, read back 18:08:42Z). A "Z" row date is
--- therefore read as server-local wall-clock time; on a UTC server both readings
--- agree.
-local WALL_CLOCK = '2006-01-02T15:04:05.999999999'
-
+-- Message dates come back from the database in the layouts message_order.parse
+-- reads. Session writes every new date as UTC with a "Z" suffix, so "Z" names
+-- the UTC instant on SQLite and on PostgreSQL, and the instant does not depend
+-- on the zone of the server.
 local function row_time(value)
-    local wall = type(value) == 'string' and value:match('^(.+)Z$') or nil
-    if not wall then return timestamp(value) end
-    local ok, parsed, err = pcall(time.parse, WALL_CLOCK, wall, time.localtz)
-    if ok and not err and parsed then return parsed:unix() end
+    local parsed = message_order.parse(value)
+    if parsed then return parsed:unix() end
     return nil
 end
 
@@ -127,7 +123,10 @@ end
 function M.prepare(messages, now)
     local latest_user, fresh_read = 0, false
     for index, message in ipairs(messages) do
-        if message.type == 'user' then latest_user = index end
+        -- A form answer the session has not admitted yet is not part of the
+        -- model's view (the prompt builder skips it), so it does not start a
+        -- turn: the real user message before it keeps its Attention context.
+        if message.type == 'user' and not message_repo.is_pending_answer(message) then latest_user = index end
     end
     local latest_query, latest_revision, observations, latest_action = {}, {}, {}, 0
     for index, message in ipairs(messages) do
@@ -211,7 +210,13 @@ function M.build(context, options)
             function query:all() return projected end
             return query
         end end
-        return function(_, ...) return context.reader[key](context.reader, ...) end
+        -- A data field (session_id, which the forms index reads) is passed as
+        -- data; only a method is bound to the reader. A name the reader lacks
+        -- stays absent, so a check such as type(session.artifacts) tells the
+        -- truth.
+        local member = context.reader[key]
+        if type(member) ~= 'function' then return member end
+        return function(_, ...) return member(context.reader, ...) end
     end })
     return prompt_builder.from_session(adapter, options)
 end

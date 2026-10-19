@@ -134,6 +134,7 @@ local function define_tests()
             local steps = 0
             local function context(current_writer)
                 local ctx = { session_id = session_id, writer = current_writer, held = {},
+                    reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
                     status = consts.STATUS.IDLE,
                     config = { input_policy = { while_running = "steer" } },
                     upstream = {

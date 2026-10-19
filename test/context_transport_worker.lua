@@ -1,4 +1,5 @@
 local writer = require('writer')
+local reader = require('reader')
 local handlers = require('message_handlers')
 local staging = require('context_staging_repo')
 local sessions = require('session_repo')
@@ -8,6 +9,7 @@ local function run(args)
     local sent, send_err = process.send(reply_pid, 'context_worker_started', {})
     if not sent then error('context worker send failed') end
     local session_writer, writer_err = writer.new(args.session_id)
+    local session_reader = reader.open(args.session_id)
     assert(process.send(reply_pid, 'context_worker_ready', { authorized = session_writer ~= nil, reason = writer_err }))
     local inbox = process.inbox()
     while true do
@@ -51,7 +53,7 @@ local function run(args)
                 message_received = function(_, message_id, text, files, _input, request_id, context) table.insert(echoes, { message_id = message_id, attachments = context, request_id = request_id }) end,
             }
             local outcome, err = handlers.handle_message({ session_id = args.session_id, user_id = args.user_id,
-                writer = session_writer, upstream = upstream }, { request_id = request.request_id, data = request.data })
+                reader = session_reader, writer = session_writer, upstream = upstream }, { request_id = request.request_id, data = request.data })
             result.value, result.error = outcome, err
             session_writer.add_message = add_message
             session_writer.admit_message = admit_message
