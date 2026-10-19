@@ -76,6 +76,7 @@ entries:
     source: file://interruption_session_worker.lua
     modules: [time]
     imports:
+      writer: wippy.session.persist:writer
       session: wippy.session.process:session
       llm: wippy.llm:llm
       response_mapper: wippy.llm.openai:mapper

@@ -48,7 +48,8 @@ local function define_tests(blocked_only, lifecycle_only)
             plugin_pid = assert(process.with_context({}):with_actor(actor):with_scope(scope)
                 :spawn_monitored('app:interruption_plugin_worker', 'app:processes', {
                     user_id = actor_id, user_hub_pid = process.pid(),
-                    user_metadata = { reply_pid = process.pid(), interrupt = interrupt, lifecycle = lifecycle_only },
+                    user_metadata = { reply_pid = process.pid(), interrupt = interrupt, lifecycle = lifecycle_only,
+                        cancel_before_tools = label == 'cancelled-call-settlement' },
                 }))
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.OPEN, { session_id = session_id, conn_pid = process.pid() }))
             receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s')
@@ -114,7 +115,7 @@ local function define_tests(blocked_only, lifecycle_only)
                 for _, part in ipairs(message.content or {}) do
                     if part.text == 'Perform the earlier request.' then earlier = index end
                     if part.text == 'Perform only the new request.' then followup = index end
-                    if message.role == 'developer' and part.text and part.text:find('Do not resume', 1, true) then
+                    if message.role == 'developer' and part.text and part.text:find('Do not automatically resume', 1, true) then
                         boundary = index
                         boundaries = boundaries + 1
                     end
@@ -130,7 +131,7 @@ local function define_tests(blocked_only, lifecycle_only)
                 for _, part in ipairs(message.content or {}) do
                     if part.text == 'Perform the earlier request.' then wire_earlier = index end
                     if part.text == 'Perform only the new request.' then wire_followup = index end
-                    if message.role == 'developer' and part.text and part.text:find('Do not resume', 1, true) then
+                    if message.role == 'developer' and part.text and part.text:find('Do not automatically resume', 1, true) then
                         wire_boundary = index
                     end
                 end
@@ -149,6 +150,7 @@ local function define_tests(blocked_only, lifecycle_only)
                 label = 'cancelled-call-settlement'
                 start(nil)
                 send('Perform the tool.', 'work')
+                receive(function(topic) return topic == 'tool_intent_persisted' end, '3s')
                 assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.COMMAND, {
                     session_id = session_id, conn_pid = process.pid(),
                     data = { command = consts.COMMANDS.STOP }, request_id = 'stop',

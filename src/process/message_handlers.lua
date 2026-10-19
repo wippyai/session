@@ -470,6 +470,7 @@ local function is_turn_stopped(ctx: any): boolean
 end
 
 local function settle_cancelled_call(ctx, call, message_id, call_type, validated)
+    call_type = call_type or call.type
     local reason = "Session stopped before the call executed"
     local _, err = ctx.writer:update_message_meta(message_id, {
         status = consts.FUNC_STATUS.CANCELLED, result = reason,
