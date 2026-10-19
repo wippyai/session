@@ -11,6 +11,20 @@ local state_service = require("state_service")
 
 local artifact_state_access = {}
 
+-- The options both endpoints open their request with (http.request): a read
+-- deadline in milliseconds and a body cap in bytes. They apply before the
+-- owner check, so a stranger or a slow client cannot hold a worker. The cap
+-- is twice the documented answer limit on purpose: read_capped stops at
+-- state_service.MAX_BODY_BYTES and answers 413, and the transport cap must
+-- not cut a body off first (that would read as a 500 instead).
+artifact_state_access.REQUEST_TIMEOUT_MS = 5000
+function artifact_state_access.request_options()
+    return {
+        timeout = artifact_state_access.REQUEST_TIMEOUT_MS,
+        max_body = state_service.MAX_BODY_BYTES * 2,
+    }
+end
+
 local function respond(res: any, status: number?, body: string?)
     res:set_status(status or http.STATUS.INTERNAL_ERROR)
     res:set_content_type(http.CONTENT.JSON)

@@ -62,6 +62,17 @@ local function define_tests()
             test.eq(body.code, "unauthorized")
         end)
 
+        it("opens the request with a short deadline and a body cap that fit the answer limit", function()
+            local options = artifact_state_access.request_options()
+            test.eq(options.timeout, artifact_state_access.REQUEST_TIMEOUT_MS)
+            test.is_true(options.timeout <= 5000, "the default is 5 minutes; a slow upload must not hold a worker that long")
+            test.is_true(options.max_body < 120 * 1024 * 1024, "the default is 120 MB")
+            -- read_capped answers 413 for a body over the cap; the transport
+            -- cap must sit above the largest body it can read before that.
+            test.is_true(options.max_body >= state_service.MAX_BODY_BYTES * 2)
+            test.is_true(options.max_body <= 1024 * 1024)
+        end)
+
         it("refuses a body that is not JSON before reading it", function()
             local req, res = fake_exchange({ content_type = "text/plain", chunks = { "{}" },
                 stream_error = "the body must not be read" })
