@@ -24,7 +24,6 @@ local function fixture(): (any, any, {any}, {any}, {any}, {any})
                 return self:add_message(msg_type, content, metadata)
             end,
             update_meta = function() return true end,
-            stop_with_input_rollback = function() return true end,
             update_status = function() return true end
         },
         upstream = {
@@ -178,7 +177,7 @@ local function define_tests()
             ctx.status = consts.STATUS.RUNNING
             ctx.turn_state.active = true
             bus.state = "running"
-            ctx.writer.stop_with_input_rollback = function() return nil, "stop disk failure" end
+            ctx.writer.update_meta = function() return nil, "stop disk failure" end
             session.route_input(ctx, bus, consts.TOPICS.STOP, { request_id = "stop" }, {})
             test.eq((bus :: any).state, "running")
             test.is_nil(ctx.stop_requested)
@@ -191,7 +190,7 @@ local function define_tests()
             ctx.status = consts.STATUS.RUNNING
             ctx.turn_state.active = true
             bus.state = "running"
-            ctx.writer.stop_with_input_rollback = function() return nil end
+            ctx.writer.update_meta = function() return nil end
 
             local stopped, err = session._commit_stop(ctx, ctx.upstream, "stop")
 
@@ -215,10 +214,10 @@ local function define_tests()
                 signals[#signals + 1] = { topic = topic, payload = payload }
                 return true
             end)
-            ctx.writer.stop_with_input_rollback = function() return nil, "disk failure" end
+            ctx.writer.update_meta = function() return nil, "disk failure" end
             session.route_input(ctx, bus, consts.TOPICS.STOP,
                 { request_id = "first", stop_request_id = "shared", stop_supervised = true }, {})
-            ctx.writer.stop_with_input_rollback = function() return true end
+            ctx.writer.update_meta = function() return true end
             session.route_input(ctx, bus, consts.TOPICS.STOP,
                 { request_id = "second", stop_request_id = "shared", stop_supervised = true }, {})
             restore_mock("process.send")
@@ -247,7 +246,7 @@ local function define_tests()
 
         it("writes held input without an agent step on finish", function()
             local ctx, bus, saved = fixture()
-            bus:finish()
+            bus.state = "draining_finish"
             ctx.held = {{ message_id = "held-user", data = { text = "later" } }}
             local last_id, err = session.flush_held(ctx, false)
             test.is_nil(err)

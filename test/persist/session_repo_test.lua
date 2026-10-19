@@ -486,6 +486,32 @@ local function define_tests()
             test.contains(tostring(err_count), "User ID is required")
         end)
 
+        it("rejects a metadata update when the session disappears before the write", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "Disappearing session", "test"))
+            local db_resource = consts.get_db_resource()
+            local db = assert(sql.get(db_resource))
+            local trigger = "delete_before_update_" .. id:gsub("-", "")
+            local postgres = db:type() == "postgres"
+            if postgres then
+                assert(db:execute("CREATE FUNCTION " .. trigger .. "() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN " ..
+                    "IF OLD.session_id = '" .. id .. "' THEN DELETE FROM sessions WHERE session_id = OLD.session_id; " ..
+                    "RETURN NULL; END IF; RETURN NEW; END $$"))
+                assert(db:execute("CREATE TRIGGER " .. trigger .. " BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION " .. trigger .. "()"))
+            else
+                assert(db:execute("CREATE TRIGGER " .. trigger .. " BEFORE UPDATE ON sessions WHEN OLD.session_id = '" .. id ..
+                    "' BEGIN DELETE FROM sessions WHERE session_id = OLD.session_id; SELECT RAISE(IGNORE); END"))
+            end
+            local ok, result, err = pcall(session_repo.update_session_meta, id, {title = "Not persisted"})
+            assert(db:execute("DROP TRIGGER " .. trigger .. (postgres and " ON sessions" or "")))
+            if postgres then assert(db:execute("DROP FUNCTION " .. trigger .. "()")) end
+            db:release()
+            session_repo.delete(id)
+            test.is_true(ok)
+            test.is_nil(result)
+            test.eq(err, "Session not found")
+        end)
+
         it("should delete a session", function()
             -- Create a session to delete
             local temp_session_id = uuid.v7()

@@ -6,6 +6,19 @@ local migration_bootloader = require("migration_bootloader")
 
 local bootloaders_started = false
 
+-- Newer Bootloader releases run migrations before the test entrypoint.
+-- Supply the external user-table contract before Session's PostgreSQL DDL.
+local function prepare_postgres_dependencies()
+    local db = assert(sql.get("app:db"))
+    local _, err
+    if db:type() == "postgres" then
+        _, err = db:execute("CREATE TABLE IF NOT EXISTS app_users (user_id TEXT PRIMARY KEY)")
+    end
+    db:release()
+    if err then error(err) end
+    return {status = "success", message = "Session test user-table contract is ready"}
+end
+
 local function call_bootloader(module, options)
     if type(module) == "function" then
         return module(options)
@@ -20,7 +33,18 @@ local function run_setup_bootloaders()
     if bootloaders_started then
         return
     end
-    bootloaders_started = true
+
+    -- Session references the application's user table. Supply only that
+    -- external contract in the disposable PostgreSQL harness.
+    local db = assert(sql.get("app:db"))
+    if db:type() == "postgres" then
+        local _, create_err = db:execute("CREATE TABLE IF NOT EXISTS app_users (user_id TEXT PRIMARY KEY)")
+        if create_err then db:release(); error(create_err) end
+        local _, seed_err = db:execute("INSERT INTO app_users (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            {security.actor():id()})
+        if seed_err then db:release(); error(seed_err) end
+    end
+    db:release()
 
     local key_result = call_bootloader(encryption_key_bootloader, {})
     if type(key_result) ~= "table" or key_result.status == "error" then
@@ -31,6 +55,7 @@ local function run_setup_bootloaders()
     if type(migration_result) ~= "table" or migration_result.status == "error" then
         error("migration bootloader failed: " .. tostring(migration_result and migration_result.message or migration_result))
     end
+    bootloaders_started = true
 end
 
 local function ensure_user(user_id)
@@ -67,4 +92,4 @@ local function run()
     error("bootloader did not complete within " .. (max_attempts * sleep_ms) .. "ms")
 end
 
-return { run = run, ensure_user = ensure_user }
+return { run = run, ensure_user = ensure_user, prepare_postgres_dependencies = prepare_postgres_dependencies }

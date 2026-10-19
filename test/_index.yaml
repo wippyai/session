@@ -51,11 +51,6 @@ entries:
       wait_for_boot: app:wait_for_boot
     method: run_lifecycle
 
-  - name: dep.wippy.test
-    kind: ns.dependency
-    component: wippy/test
-    version: ">=0.4.18"
-
   - name: users_fixture_migration
     kind: function.lua
     meta:
@@ -119,6 +114,23 @@ entries:
       relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run_blocked
+  - name: dep.wippy.test
+    kind: ns.dependency
+    component: wippy/test
+    version: ">=v0.4.22"
+
+  - name: prepare_postgres_dependencies
+    kind: function.lua
+    meta:
+      type: bootloader
+      order: 19
+      requires: [app:db]
+    source: file://wait_for_boot.lua
+    modules: [sql, time, security]
+    imports:
+      encryption_key_bootloader: wippy.bootloader.bootloaders:encryption_key
+      migration_bootloader: wippy.migration:migration_bootloader
+    method: prepare_postgres_dependencies
 
   - name: context_cleanup_worker
     kind: process.lua

@@ -27,6 +27,7 @@ type SessionContext = {
     lifecycle_state: table?,
     turn_state: table?,
     stop_requested: boolean?,
+    step_stop_check: (() -> boolean)?,
     status: string?,
     current_agent: any?,
     request_input_policy: any?,
@@ -447,6 +448,20 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     return state
 end
 
+local CONTROL_TABLE_FIELDS = { "artifacts", "context", "memory", "config" }
+
+local function control_shape_error(control: any): string?
+    if control == nil then return nil end
+    if type(control) ~= "table" then return "Invalid tool control: expected a table" end
+    for _, field in ipairs(CONTROL_TABLE_FIELDS) do
+        local value = control[field]
+        if value ~= nil and type(value) ~= "table" then
+            return "Invalid tool control: " .. field .. " must be a table"
+        end
+    end
+    return nil
+end
+
 local function is_turn_stopped(ctx: any): boolean
     local state = ctx.turn_state
     return not not (ctx.stop_requested == true
@@ -454,41 +469,42 @@ local function is_turn_stopped(ctx: any): boolean
         or (state and state.failed) or false)
 end
 
+local function settle_cancelled_call(ctx, call, message_id, call_type, validated)
+    local reason = "Session stopped before the call executed"
+    local _, err = ctx.writer:update_message_meta(message_id, {
+        status = consts.FUNC_STATUS.CANCELLED, result = reason,
+    })
+    if err then return nil, err end
+    local private = call_type == consts.MSG_TYPE.PRIVATE_FUNCTION
+        or (call.meta and call.meta.private)
+        or (validated and validated.meta and validated.meta.private)
+    local delegation = call_type == consts.MSG_TYPE.DELEGATION
+        or (ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id)
+    if not call_type and type(call.registry_id) == "string" then
+        local schema = tools.get_tool_schema(call.registry_id)
+        private = private or (schema and schema.meta and schema.meta.private)
+    end
+    if not private and not delegation then
+        ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
+            message_id = message_id, call_id = call.id, function_name = call.name,
+            error = reason, status = consts.FUNC_STATUS.CANCELLED,
+        })
+    end
+    return true
+end
+
+local function step_stop_check(ctx: any): () -> boolean
+    local check = ctx.step_stop_check
+    if not check then
+        check = function() return is_turn_stopped(ctx) end
+        ctx.step_stop_check = check
+    end
+    return check
+end
+
 local function is_turn_blocked(ctx: any): boolean
     local state = ctx.turn_state
     return is_turn_stopped(ctx) or (state and state.handoff) or false
-end
-
-local function call_type(ctx: any, call: any, validated: any): string
-    if call.type == consts.MSG_TYPE.DELEGATION
-        or (ctx.config.delegation_func_id and call.registry_id == ctx.config.delegation_func_id) then
-        return consts.MSG_TYPE.DELEGATION
-    end
-    local schema = type(call.registry_id) == "string" and tools.get_tool_schema(call.registry_id) or nil
-    if call.type == consts.MSG_TYPE.PRIVATE_FUNCTION
-        or (call.meta and call.meta.private) or (validated and validated.meta and validated.meta.private)
-        or (schema and schema.meta and schema.meta.private) then
-        return consts.MSG_TYPE.PRIVATE_FUNCTION
-    end
-    return consts.MSG_TYPE.FUNCTION
-end
-
-local function cancel_calls(ctx: any, calls: any, message_ids: any, validated_tools: any): (boolean?, string?)
-    local reason = "Session stopped before the call executed"
-    for _, call in ipairs(calls) do
-        local message_id = message_ids[call.id]
-        local _, err = ctx.writer:update_message_meta(message_id, {
-            status = consts.FUNC_STATUS.CANCELLED, result = reason,
-        })
-        if err then return nil, err end
-        if call_type(ctx, call, validated_tools and validated_tools[call.id]) == consts.MSG_TYPE.FUNCTION then
-            ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
-                message_id = message_id, call_id = call.id, function_name = call.name,
-                registry_id = call.registry_id, status = consts.FUNC_STATUS.CANCELLED, error = reason,
-            })
-        end
-    end
-    return true
 end
 
 local function take_over_handoff(ctx: any): boolean
@@ -1133,7 +1149,8 @@ function message_handlers.agent_step(ctx, op)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
-        context = session_context
+        context = session_context,
+        stop_check = step_stop_check(ctx)
     }
     if ctx.stream_target then
         runtime_options.stream_target = ctx.stream_target
@@ -1151,6 +1168,10 @@ function message_handlers.agent_step(ctx, op)
                 after_step = true,
                 tokens = type(result) == "table" and result.tokens or nil
             })
+    end
+    if result.stopped then
+        ctx.upstream:invalidate_message(response_id)
+        return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
     local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
@@ -1313,12 +1334,27 @@ function message_handlers.agent_step(ctx, op)
         -- fail_turn must not be used from add_response on: the stored tool intents are
         -- settled only by the fatal path.
         local intents = {}
+        local call_message_types = {}
         for _, call in ipairs(unified_tool_calls) do
+            local call_type = consts.MSG_TYPE.FUNCTION
+            if ctx.config.delegation_func_id
+                and call.registry_id == ctx.config.delegation_func_id then
+                call_type = consts.MSG_TYPE.DELEGATION
+            elseif type(call.registry_id) == "string" then
+                local validated = validated_tools and validated_tools[call.id]
+                local schema = tools.get_tool_schema(call.registry_id :: string)
+                if (call.meta and call.meta.private)
+                    or (validated and validated.meta and validated.meta.private)
+                    or (schema and schema.meta and schema.meta.private) then
+                    call_type = consts.MSG_TYPE.PRIVATE_FUNCTION
+                end
+            end
             table.insert(intents, {
                 id = call.id, name = call.name, arguments = call.arguments,
                 registry_id = call.registry_id, provider_metadata = call.provider_metadata,
-                type = call_type(ctx, call, validated_tools and validated_tools[call.id])
+                type = call_type
             })
+            call_message_types[call.id] = call_type
         end
         local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
         if store_err then
@@ -1327,10 +1363,17 @@ function message_handlers.agent_step(ctx, op)
         end
         assistant_message_id = stored_id
         result.call_message_ids = call_message_ids
+        result.call_message_types = call_message_types
 
         if is_turn_blocked(ctx) then
-            local _, cancel_err = cancel_calls(ctx, unified_tool_calls, call_message_ids, validated_tools)
-            if cancel_err then return nil, cancel_err end
+            for index, call in ipairs(unified_tool_calls) do
+                local intent = intents[index]
+                if not intent then return nil, "Tool intent missing before cancellation" end
+                local _, cancel_err = settle_cancelled_call(ctx, call,
+                    (call_message_ids :: table)[call.id], intent.type,
+                    validated_tools and validated_tools[call.id])
+                if cancel_err then return nil, cancel_err end
+            end
         end
 
         if result.result and result.result ~= "" then
@@ -1364,6 +1407,7 @@ function message_handlers.agent_step(ctx, op)
             type = consts.OP_TYPE.PROCESS_TOOLS,
             tool_calls = unified_tool_calls,
             call_message_ids = result.call_message_ids,
+            call_message_types = result.call_message_types,
             tool_wrappers = agent.tool_wrappers or {},
             caller = prepared_caller,
             validated_tools = validated_tools,
@@ -1505,8 +1549,12 @@ function message_handlers.process_tools(ctx, op)
     end
 
     if op.cancel_only or is_turn_blocked(ctx) then
-        local _, err = cancel_calls(ctx, op.tool_calls, op.call_message_ids, op.validated_tools)
-        if err then return nil, err end
+        for _, call in ipairs(op.tool_calls) do
+            local _, err = settle_cancelled_call(ctx, call, op.call_message_ids[call.id],
+                op.call_message_types and op.call_message_types[call.id],
+                op.validated_tools and op.validated_tools[call.id])
+            if err then return nil, err end
+        end
         return { completed = true, next_ops = {} }
     end
 
@@ -1620,6 +1668,9 @@ function message_handlers.process_tools(ctx, op)
         local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
 
         local policy_result = result_data.result
+        if not result_data.error and not is_delegation and type(policy_result) == "table" then
+            result_data.error = control_shape_error(policy_result._control)
+        end
         if not result_data.error and not is_delegation and type(policy_result) == "table"
             and type(policy_result._control) == "table" then
             local control = policy_result._control

@@ -64,8 +64,8 @@ local function interruption_boundary(reason)
         or "The preceding turn is interrupted before completion; its outcome may be unknown."
     return {
         message_id = id,
-        data = detail .. " Do not resume that turn or carry out its remaining instructions. "
-            .. "Treat subsequent user messages as new requests.",
+        data = detail .. " Do not automatically resume that turn or carry out its remaining instructions. "
+            .. "Follow subsequent user messages as new requests, including an explicit request to continue.",
         metadata = { preserve_position = true, interruption = { reason = reason } },
     }
 end
@@ -146,7 +146,7 @@ end
 
 local function queue_error_code(bus)
     if bus.state == "closed" then return "SESSION_FINISHING" end
-    if bus.finishing then return "SESSION_FINISHING" end
+    if bus.state == "draining_finish" then return "SESSION_FINISHING" end
     return "SESSION_BUSY"
 end
 
@@ -211,7 +211,7 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         local is_user = data.type ~= consts.MSG_TYPE.DEVELOPER
             and data.type ~= consts.MSG_TYPE.SYSTEM
         if is_user then
-            if bus.state == "closed" or bus.finishing or bus.state == "draining_stop" then
+            if bus.state == "closed" or bus.state == "draining_finish" or bus.state == "draining_stop" then
                 ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus),
                     "Session is not accepting messages")
                 return true
@@ -551,7 +551,26 @@ local function run(args: SessionArgs)
         return false
     end
 
+    local session_state = {
+        stopping = false,
+        finishing = false,
+        interrupted = false,
+        bus_done_received = false
+    }
+    local finish_generation = 0
+    local pending_finish = false
+    local finish_check_sent = false
     local bus = command_bus.new(context)
+    local function schedule_finish_check()
+        if pending_finish and not finish_check_sent then
+            finish_check_sent = true
+            process.send(process.pid(), consts.TOPICS.FINISH_AND_EXIT, {
+                finish_generation = finish_generation,
+            })
+        end
+        return true
+    end
+    context.queue_empty_callback = schedule_finish_check
     context.on_turn_end = function(turn_id, stop_requested, stop_request_id)
         if stop_requested and args.parent_pid then
             process.send(args.parent_pid :: string, consts.TOPICS.STOP_RESOLVED, {
@@ -559,6 +578,7 @@ local function run(args: SessionArgs)
                 stop_request_id = stop_request_id, from_pid = process.pid()
             })
         end
+        schedule_finish_check()
     end
 
     -- Mount all operation handlers
@@ -615,12 +635,6 @@ local function run(args: SessionArgs)
         end
     end
 
-    local session_state = {
-        stopping = false,
-        finishing = false,
-        interrupted = false,
-        bus_done_received = false
-    }
     local bus_done = channel.new()
 
 
@@ -720,11 +734,32 @@ local function run(args: SessionArgs)
                     end
                 end
                 boundary_reply:send({ value = not boundary_err, error = boundary_err })
+            elseif topic == "cancel_finish" then
+                if msg:from() == args.parent_pid and not session_state.finishing then
+                    finish_generation = finish_generation + 1
+                    pending_finish = false
+                    finish_check_sent = false
+                end
             elseif topic == consts.TOPICS.FINISH_AND_EXIT then
-                session_state.finishing = true
-                bus:finish()
-            elseif topic == consts.PLUGIN_TOPICS.RESUME then
-                if bus:cancel_finish() then session_state.finishing = false end
+                local request = msg:payload():data() or {}
+                local internal = msg:from() == process.pid()
+                local current = (internal and pending_finish
+                    and request.finish_generation == finish_generation)
+                    or (msg:from() == args.parent_pid and request.finish_generation == nil)
+                if current then
+                    finish_check_sent = false
+                    if request.finish_generation == nil then
+                        finish_generation = finish_generation + 1
+                    end
+                    if not bus:is_quiescent() then
+                        pending_finish = true
+                    else
+                        pending_finish = false
+                        session_state.finishing = true
+                        context.status = "finishing"
+                        bus:finish()
+                    end
+                end
             elseif topic == 'session_attention_activated' then
                 attention_turn:activated(msg:from(), msg:payload():data())
             elseif topic == ATTENTION_CONTROL_REQUEST_TOPIC then

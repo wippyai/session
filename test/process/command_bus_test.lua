@@ -12,6 +12,11 @@ local uuid = require("uuid")
 local wait_for_boot = require("wait_for_boot")
 local writer = require("writer")
 
+-- finish() closes the bus after settling admitted round effects and suppresses
+-- new agent continuations. The session defers lifecycle retirement until the
+-- bus is quiescent, so healthy turns never enter this cancellation path.
+-- Keep the low-level Stop/finish behavior bounded even for a self-feeding chain.
+
 local SAFETY_VALVE = 5
 
 local function create_persisted_fixture(): (string, string)
@@ -93,6 +98,33 @@ local function define_tests()
         end)
     end)
     describe("turn boundaries", function()
+        it("waits for queued controls and a suspended idle operation before retiring", function()
+            local ctx = {}
+            local bus = command_bus.new(ctx)
+            local release, entered, done = channel.new(1), channel.new(1), channel.new(1)
+            local calls = 0
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONTEXT, function()
+                calls = calls + 1
+                test.is_false(bus:is_quiescent(), "current work must prevent retirement even with an idle turn")
+                if calls == 1 then entered:send(true); release:receive() end
+                return { completed = true }
+            end)
+            ctx.queue_empty_callback = function()
+                test.eq(calls, 2, "accepted control work must drain before retirement")
+                test.is_true(bus:is_quiescent())
+                bus:finish()
+                return true
+            end
+            assert(bus:queue_op({ type = consts.OP_TYPE.CONTROL_CONTEXT }))
+            assert(bus:queue_op({ type = consts.OP_TYPE.CONTROL_CONTEXT }))
+            test.is_false(bus:is_quiescent(), "queued work must prevent retirement")
+            coroutine.spawn(function() local _, err = bus:run(); done:send({ error = err }) end)
+            entered:receive()
+            test.is_false(bus:is_quiescent())
+            release:send(true)
+            test.is_nil(done:receive().error)
+            test.eq(bus.state, "closed")
+        end)
         it("persists received input on a fatal storage failure before exiting and accepts input after reopen", function()
             local session_id, context_id = create_persisted_fixture()
             local session_writer, writer_err = writer.new(session_id)
@@ -426,7 +458,7 @@ local function define_tests()
             test.eq(table.concat(order, ","), "result-written,control,held-only")
         end)
 
-        it("finishes the active continuation before writing held input without starting another turn", function()
+        it("finishes after writing held input without an agent step", function()
             local order = {}
             local ctx = { held = { "held" } }
             local bus = command_bus.new(ctx)
@@ -445,7 +477,7 @@ local function define_tests()
             bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
             local _, err = bus:run()
             test.is_nil(err)
-            test.eq(table.concat(order, ","), "continued,held-only")
+            test.eq(table.concat(order, ","), "held-only")
             test.eq(bus.state, "closed")
         end)
     end)

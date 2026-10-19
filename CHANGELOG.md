@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.8](https://github.com/wippyai/session/compare/v0.6.7...v0.6.8) (2026-10-14)
+
+
+### Bug Fixes
+
+* Disconnect, chat close, inactivity, and session-capacity retirement let accepted turns finish and persist their model, tool, and handoff results before exit. Reconnecting cancels pending retirement; explicit Stop remains effective. Cancelled public calls settle through a terminal error event and through the history API.
+* With Relay 0.3.17 and Session 0.6.8 installed, affected users can remove the local backend wind-down and cancellation-settlement patches after checking the published versions in their environment.
+
+* harden tool controls and persisted handoffs ([#61](https://github.com/wippyai/session/issues/61)) ([e8cce7c](https://github.com/wippyai/session/commit/e8cce7c0d2507bf897724f955f991b1dbf5caf92))
+* **session:** drain accepted work before lifecycle retirement ([#65](https://github.com/wippyai/session/issues/65)) ([7b7e2b4](https://github.com/wippyai/session/commit/7b7e2b413b0ccf34f1d5e2cd9113d57794b6d0d3))
+
+### Dependencies
+
+* Require Agent 0.5.4 and LLM 0.5.7 so Stop during prompt construction prevents another provider call and positional conversation messages retain their order.
+
 ## [0.6.7](https://github.com/wippyai/session/compare/v0.6.6...v0.6.7) (2026-10-09)
 
 

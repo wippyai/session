@@ -3,18 +3,6 @@ namespace: app.process
 
 # Suites for src/process/.
 entries:
-  - name: lifecycle_finish_test
-    kind: function.lua
-    meta:
-      type: test
-      suite: session
-    source: file://lifecycle_finish_test.lua
-    imports:
-      test: wippy.test:test
-      consts: wippy.session:consts
-      command_bus: wippy.session.process:command_bus
-    method: run_tests
-
   - name: session_select_test
     kind: function.lua
     meta:

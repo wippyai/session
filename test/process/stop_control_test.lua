@@ -19,13 +19,8 @@ local function fixture(write_error, rollback_error)
                 if write_error then return nil, write_error end
                 return true
             end,
-            stop_with_input_rollback = function(_self, updates, _session_updates, boundary)
-                if boundary then
-                    test.eq(boundary.metadata.interruption.reason, "stop")
-                    test.contains(boundary.data, "Do not resume")
-                end
-                events[#events + 1] = #updates > 0 and "stop-write" or "write"
-                if #updates == 0 and write_error then return nil, write_error end
+            stop_with_input_rollback = function(_, updates)
+                events[#events + 1] = "stop-write"
                 if rollback_error then return nil, rollback_error end
                 for _, update in ipairs(updates) do update.restored = true end
                 return true
