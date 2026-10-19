@@ -344,6 +344,79 @@ local function run_checkpoint_scenario()
     if not ok then error(failure) end
 end
 
+local function run_checkpoint_stop_scenario(followup)
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("checkpoints", 0)
+    storage:set("edits", 0)
+    storage:set("scenario", { checkpoint = true, hold_checkpoint = true, parent = process.pid() })
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, "Checkpoint Stop", "test", {}, {
+        agent_id = "app.runtime:checkpoint_agent", model = "session-runtime-help",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 300000,
+    }))
+    local original = "Rebuild the Word handout. Finish every edit before giving the final answer."
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "checkpoint-stop-task", data = { text = original },
+        }))
+        local held = receive_until(function(topic) return topic == "fixture:checkpoint_ready" end,
+            "first post-checkpoint generation")
+        test.eq(storage:get("checkpoints"), 1)
+        assert(process.send(pid, consts.TOPICS.STOP, { request_id = "checkpoint-stop" }))
+        receive_until(function(_, data) return data.request_id == "checkpoint-stop" end, "committed Stop")
+        assert(process.send(held.pid, "fixture:checkpoint_release", true))
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == consts.STATUS.IDLE
+        end, "stopped checkpoint turn")
+        test.eq(storage:get("edits"), 2, "Stop prevents the third edit")
+        close_process(pid, session_id)
+        pid = open_process(session_id, owner, false)
+        test.eq(#storage:get("requests"), 3, "reopening never resumes the stopped turn")
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "checkpoint-followup", data = { text = followup },
+        }))
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == consts.STATUS.IDLE
+        end, "new request after Stop and reopen")
+        local requests = storage:get("requests")
+        test.eq(#requests, 5, "the later user request is allowed to complete")
+        for _, index in ipairs({ 4, 5 }) do
+            local current, stale, boundary, current_at = 0, 0, nil, nil
+            for position, message in ipairs(requests[index].messages) do
+                for _, part in ipairs(message.content or {}) do
+                    if message.role == "user" and part.text == followup then
+                        current, current_at = current + 1, position
+                    end
+                    if message.role == "user" and part.text == original then stale = stale + 1 end
+                    if message.role == "developer" and part.text
+                        and part.text:find("Do not automatically resume", 1, true) then boundary = position end
+                end
+            end
+            test.eq(current, 1, "the new user request survives the next checkpoint exactly once")
+            test.eq(stale, 0, "the old checkpoint task must not be restored over the new request")
+            if index == 4 then
+                test.not_nil(boundary, "the persisted Stop boundary survives reopening")
+                test.is_true(boundary < current_at, "the later request follows the interruption boundary")
+            end
+        end
+        test.eq(storage:get("edits"), 3, "only the newly requested edit runs after reopening")
+        test.eq(storage:get("checkpoints"), 2)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
 local function framework_stops_before_generation()
     local probe = agent.new({ id = "stop-check-probe", name = "Stop check probe",
         description = "Detects step stop_check support", prompt = "Probe." })
@@ -362,6 +435,12 @@ local function define_checkpoint_tests()
     test.describe("Session checkpoint continuity through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
         test.it("retains the user task through repeated mid-turn checkpoints with per-step recall", run_checkpoint_scenario)
+        test.it("honors a new request after checkpoint Stop and reopening", function()
+            run_checkpoint_stop_scenario("Start a different task: prepare the agenda.")
+        end)
+        test.it("allows explicit continuation after checkpoint Stop and reopening", function()
+            run_checkpoint_stop_scenario("Continue the previous handout task and finish the remaining edits.")
+        end)
         test.it("rejects checkpoint source messages from another session", function()
             local context_id, first, second, message_id = uuid.v7(), uuid.v7(), uuid.v7(), uuid.v7()
             local owner = assert(security.actor()):id()
