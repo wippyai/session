@@ -36,6 +36,7 @@ local function run(args: any)
                 generate = function(_, request)
                     calls = calls + 1
                     request.worker_pid = process.pid()
+                    request.provider_call = calls
                     request.responses_input = response_mapper.map_messages(request.messages)
                     request.responses_instructions = response_mapper.extract_instructions(request.messages)
                     assert(process.send(fixture.reply_pid :: string, 'provider_prompt', request))
