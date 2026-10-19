@@ -50,6 +50,7 @@ local function define_tests()
 
         local function fixture()
             local actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+            boot.ensure_user(actor)
             assert(contexts.create(context_id, 'primary', 'Attention state lifecycle'))
             assert(sessions.create(session, actor, context_id, 'Attention state', 'test'))
             table.insert(fixtures, { context_id = context_id, session = session })

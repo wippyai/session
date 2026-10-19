@@ -611,6 +611,9 @@ function control_handlers.control_config(ctx, op)
             next_agent = ctx.agent_ctx:get_current_agent() or next_agent
         end
         local candidate_state = clone(ctx.turn_state)
+        if (agent_changed or model_changed) and candidate_state then
+            candidate_state.route = nil
+        end
         if agent_changed and candidate_state then
             candidate_state.input_policy = nil
             if candidate_state.active then candidate_state.handoff = true end

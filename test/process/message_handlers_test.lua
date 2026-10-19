@@ -21,6 +21,8 @@ type PublicToolEvent = {
         call_id: string?,
         function_name: string?,
         error: string?,
+        outcome: string?,
+        status: string?,
     },
 }
 
@@ -64,6 +66,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         session_errors = {} :: { any },
         response_batches = {} :: { any },
         message_errors = {} :: { any },
+        message_updates = {} :: { any },
     }
 
     local empty_query = {
@@ -132,7 +135,9 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         },
         upstream = {
             response_beginning = function() end,
-            send_message_update = function() end,
+            send_message_update = function(_self, id, event_type, payload)
+                table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
+            end,
             invalidate_message = function() end,
             message_error = function(_self, id, code, message)
                 table.insert(captured.message_errors, { id = id, code = code, message = message })
@@ -214,6 +219,8 @@ local function define_tests()
             test.eq(#terminal, 1)
             test.eq(terminal[1].call_id, "cancel-1")
             test.eq(terminal[1].message_id, ids["cancel-1"])
+            test.eq(terminal[1].outcome, consts.FUNC_STATUS.CANCELLED, "live event uses the history field")
+            test.eq(terminal[1].status, consts.FUNC_STATUS.CANCELLED, "0.6.8 clients keep their field")
         end)
         it("emits no terminal cancellation event when durable settlement fails", function()
             local ctx = mock_ctx(fake_agent(nil))
@@ -1187,6 +1194,61 @@ local function define_tests()
             for _, call in ipairs(calls) do
                 test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
             end
+            test.eq(#captured.message_updates, 2)
+            for index, update in ipairs(captured.message_updates) do
+                test.eq(update.type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+                test.eq(update.payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(update.payload.outcome, consts.FUNC_STATUS.CANCELLED)
+                test.eq(update.payload.message_id, calls[index].id)
+                test.eq(update.payload.call_id, calls[index].metadata.call_id)
+                test.eq(update.id, calls[index].metadata.call_id)
+            end
+        end)
+
+        it("settles queued cancelled calls durably before public upstream events", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local result = assert(user_step(ctx))
+            local op = assert((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+            op.cancel_only = true
+            ctx.upstream.send_message_update = function(_self, id, event_type, payload)
+                local row = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1]
+                test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(payload.message_id, row.id)
+                test.eq(payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(payload.outcome, consts.FUNC_STATUS.CANCELLED)
+                table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
+            end
+            local settled, err = message_handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.is_true(settled.completed)
+            test.eq(#captured.message_updates, 1)
+            test.eq(captured.message_updates[1].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+        end)
+
+        it("keeps classified and validated private cancellations off the public upstream", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local stored = {}
+            ctx.writer.update_message_meta = function(_self, id, metadata)
+                stored[id] = metadata
+                return true
+            end
+            local calls = {
+                { id = "public", name = "public" },
+                { id = "private", name = "private", type = consts.MSG_TYPE.PRIVATE_FUNCTION },
+                { id = "delegation", name = "delegation", type = consts.MSG_TYPE.DELEGATION },
+                { id = "validated-private", name = "validated-private" },
+            }
+            local ids = {}
+            for _, call in ipairs(calls) do ids[call.id] = "stored-" .. call.id end
+            local result, err = message_handlers.process_tools(ctx, {
+                cancel_only = true, tool_calls = calls, call_message_ids = ids,
+                validated_tools = { ["validated-private"] = { meta = { private = true } } },
+            })
+            test.is_nil(err)
+            test.is_true(result.completed)
+            for _, call in ipairs(calls) do test.eq(stored[ids[call.id]].status, consts.FUNC_STATUS.CANCELLED) end
+            test.eq(#captured.message_updates, 1)
+            test.eq(captured.message_updates[1].id, "public")
         end)
 
         it("stops the turn once the agent steps exceed max_turn_iterations", function()
@@ -1541,6 +1603,8 @@ local function define_tests()
             end
             test.eq(events[2].payload.call_id, "function")
             test.eq(events[2].payload.error, "tool failed")
+            test.is_nil(events[2].payload.outcome, "an ordinary error is not a cancellation")
+            test.is_nil(events[2].payload.status)
             for _, row in ipairs(captured.stored) do
                 test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
             end
@@ -1954,6 +2018,147 @@ local function define_tests()
             test.eq(ctx.config.agent_id, "agent:help")
             local calls = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)
             test.eq(calls[1].metadata.status, consts.FUNC_STATUS.SUCCESS)
+        end)
+
+        it("does not carry the pinned route over to the agent that takes over", function()
+            local ctx, captured, bus, steps, _interactions, _announced, restore = handoff_fixture()
+            local pin = { model = "backup", provider_id = "p.b", provider_model = "b-1" }
+            local router = ctx.agent_ctx:load_agent()
+            local original_router_step = assert(router.step)
+            router.step = function(self, builder, runtime_options)
+                local response = original_router_step(self, builder, runtime_options)
+                response.route_pin = pin
+                response.metadata = { route = pin, fallbacks = { { model = "primary", error_type = "server_error" } } }
+                return response
+            end
+            local help_route = "unset"
+            local original_switch = ctx.agent_ctx.switch_to_agent
+            ctx.agent_ctx.switch_to_agent = function(self, agent_id)
+                local ok, err = original_switch(self, agent_id)
+                if ok then
+                    local help = self:get_current_agent()
+                    local original_help_step = help.step
+                    help.step = function(hself, builder, runtime_options)
+                        help_route = runtime_options.route
+                        return original_help_step(hself, builder, runtime_options)
+                    end
+                end
+                return ok, err
+            end
+
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.router, 1)
+            test.eq(steps.help, 1)
+            local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(answers[1].metadata.route.model, "backup", "the router's step was recorded with its route")
+            test.is_nil(help_route)
+            test.is_nil(ctx.turn_state.route)
+        end)
+    end)
+
+    describe("route pinning", function()
+        local pin = { model = "backup", provider_id = "p.b", provider_model = "b-1" }
+
+        -- Falls back on its first step of a turn, then keeps answering with tool calls.
+        local function pinning_agent(): (any, { any })
+            local seen = {} :: { any }
+            local agent = fake_agent(1000)
+            agent.step = function(_self, _builder, runtime_options)
+                table.insert(seen, { route = runtime_options.route })
+                local response = {
+                    result = "",
+                    tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+                    tool_calls = { { id = "call-" .. tostring(#seen), name = "pack_document",
+                        arguments = "{}", registry_id = "app:pack_document" } }
+                }
+                if runtime_options.route ~= nil then
+                    response.route_pin = runtime_options.route
+                    response.metadata = { route = runtime_options.route }
+                else
+                    response.route_pin = pin
+                    response.metadata = { route = pin, fallbacks = { { model = "primary", provider_id = "p.a",
+                        error_type = "server_error" } } }
+                end
+                return response
+            end
+            return agent, seen
+        end
+
+        it("passes the route pinned by an earlier step to the rest of the turn", function()
+            local agent, seen = pinning_agent()
+            local ctx, captured = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+
+            user_step(ctx)
+            continue_step(ctx)
+            continue_step(ctx)
+
+            test.eq(#seen, 3)
+            test.is_nil(seen[1].route)
+            test.eq(seen[2].route, pin)
+            test.eq(seen[3].route, pin)
+            test.eq(ctx.turn_state.route, pin)
+
+            local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(answers[1].metadata.route.model, "backup")
+            test.eq(answers[1].metadata.fallbacks[1].error_type, "server_error")
+        end)
+
+        it("drops the fallback pin when the selected model changes in the same turn", function()
+            local agent, seen = pinning_agent()
+            local ctx = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+            user_step(ctx)
+            ctx.agent_ctx.switch_to_model = function(_, model) agent.model = model; return true end
+            local applied, err = control_handlers.control_config(ctx, { config_changes = { model = "model:new" } })
+            test.is_nil(err)
+            test.not_nil(applied)
+            test.eq(ctx.config.model, "model:new")
+            continue_step(ctx)
+            test.is_nil(seen[2].route, "an old fallback route must not override an explicit model switch")
+        end)
+
+        it("drops the pin when a new user turn starts", function()
+            local agent, seen = pinning_agent()
+            local ctx = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+
+            user_step(ctx)
+            continue_step(ctx)
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            test.eq(ctx.turn_state.route, pin, "the finished turn keeps its state until a new turn begins")
+
+            message_handlers.agent_step(ctx, { message_id = "msg-user-2", request_id = "req-2", from_user = true })
+
+            test.eq(#seen, 3)
+            test.eq(seen[2].route, pin)
+            test.is_nil(seen[3].route)
+        end)
+
+        it("keeps the pin when a later step reports none", function()
+            local seen = {} :: { any }
+            local agent = fake_agent(1000)
+            agent.step = function(_self, _builder, runtime_options)
+                table.insert(seen, { route = runtime_options.route })
+                local response = {
+                    result = "",
+                    tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+                    tool_calls = { { id = "call-" .. tostring(#seen), name = "pack_document",
+                        arguments = "{}", registry_id = "app:pack_document" } }
+                }
+                if #seen == 1 then response.route_pin = pin end
+                return response
+            end
+            local ctx = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+
+            user_step(ctx)
+            continue_step(ctx)
+            continue_step(ctx)
+
+            test.eq(seen[2].route, pin)
+            test.eq(seen[3].route, pin)
         end)
     end)
 end

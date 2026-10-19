@@ -129,6 +129,8 @@ local function scenario(reason: string, reconnect: boolean?, cancels_in_flight: 
             test.eq(rows[1].count, 0)
             test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
             test.eq(#terminal, 1, "Stop must settle the cancelled live chip")
+            test.eq(terminal[1].outcome, consts.FUNC_STATUS.CANCELLED, "the live event uses the history field")
+            test.eq(terminal[1].status, consts.FUNC_STATUS.CANCELLED, "0.6.8 clients keep their field")
         else
             test.eq(call.metadata.status, consts.FUNC_STATUS.SUCCESS, tostring(call.metadata.result))
             test.eq(rows[1].count, 1, "disconnect finish must allow the edit to commit")

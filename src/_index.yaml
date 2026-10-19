@@ -376,6 +376,7 @@ entries:
       consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
+      upstream: wippy.session.process:upstream
 
   # wippy.session:service_binding
   - name: service_binding
@@ -463,7 +464,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.5.4"
+    version: ">=v0.5.5"
 
   - name: dep.wippy.views
     kind: ns.dependency

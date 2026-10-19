@@ -445,6 +445,7 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.last_round = nil
     state.last_round_failed = false
     state.last_round_tools = nil
+    state.route = nil
     state.active = true
     return state
 end
@@ -471,6 +472,7 @@ local function is_turn_stopped(ctx: any): boolean
 end
 
 local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason)
+    call_type = call_type or call.type
     reason = reason or "Session stopped before the call executed"
     local _, err = ctx.writer:update_message_meta(message_id, {
         status = consts.FUNC_STATUS.CANCELLED, result = reason,
@@ -486,9 +488,11 @@ local function settle_cancelled_call(ctx, call, message_id, call_type, validated
         private = private or (schema and schema.meta and schema.meta.private)
     end
     if not private and not delegation then
+        -- outcome matches the REST projection in api/session_messages.lua. status
+        -- is the deprecated 0.6.8 field, kept for clients that already read it.
         ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
             message_id = message_id, call_id = call.id, function_name = call.name,
-            error = reason, status = consts.FUNC_STATUS.CANCELLED,
+            error = reason, outcome = consts.FUNC_STATUS.CANCELLED, status = consts.FUNC_STATUS.CANCELLED,
         })
     end
     return true
@@ -1096,6 +1100,7 @@ function message_handlers.agent_step(ctx, op)
     end
 
     if handed_off then
+        state.route = nil
         local _, policy_err = input_policy.publish(ctx :: any, agent)
         if policy_err then return nil, policy_err end
     end
@@ -1154,6 +1159,11 @@ function message_handlers.agent_step(ctx, op)
         stop_check = step_stop_check(ctx),
         cancel = ctx.coordinator and ctx.coordinator.cancel
     }
+
+    if state.route ~= nil then
+        runtime_options.route = state.route
+    end
+
     if ctx.stream_target then
         runtime_options.stream_target = ctx.stream_target
     elseif ctx.upstream.conn_pid then
@@ -1188,6 +1198,10 @@ function message_handlers.agent_step(ctx, op)
             ctx.upstream:invalidate_message(response_id)
         end
         return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
+    end
+
+    if result.route_pin ~= nil then
+        state.route = result.route_pin
     end
 
     local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {

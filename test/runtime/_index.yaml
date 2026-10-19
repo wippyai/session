@@ -186,6 +186,47 @@ entries:
     method: handoff
     modules: [store, json, time]
 
+  - name: checkpoint_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-help
+    prompt: Finish the user's document task, using tool results and checkpoint progress.
+    tools: [app.runtime:checkpoint_edit]
+    memory_contract:
+      implementation_id: app.runtime:checkpoint_memory
+      options:
+        min_conversation_length: 2
+        recall_cooldown: 0
+
+  - name: checkpoint_edit
+    kind: function.lua
+    meta:
+      type: tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: checkpoint_edit
+    modules: [store, time]
+
+  - name: checkpoint_summary
+    kind: function.lua
+    source: file://fixtures.lua
+    method: checkpoint_summary
+    modules: [store, time]
+
+  - name: checkpoint_recall
+    kind: function.lua
+    source: file://fixtures.lua
+    method: checkpoint_recall
+    modules: [store, time]
+
+  - name: checkpoint_memory
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:memory
+        methods:
+          recall: app.runtime:checkpoint_recall
+
   - name: failing_tool
     kind: function.lua
     meta:
@@ -207,6 +248,29 @@ entries:
     source: file://fixtures.lua
     method: malformed_effects
     modules: [store, json, time]
+
+  - name: checkpoint_runtime
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: checkpoint
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+      framework_capabilities: app.runtime:framework_capabilities
+      agent: wippy.agent:agent
+      prompt: wippy.llm:prompt
 
   - name: framework_capabilities
     kind: library.lua

@@ -33,6 +33,25 @@ local function generate(args)
     end
     local calls = {}
     local content = "The help agent completed the handoff."
+    local prompt_tokens = 10
+    if scenario.checkpoint then
+        if #requests <= 4 then
+            content = "Editing the handout."
+            calls = {{ id = "edit-" .. #requests, name = "checkpoint_edit", arguments = "{}" }}
+        else
+            content = "Finished rebuilding the handout."
+        end
+        if #requests == 2 or #requests == 4 then prompt_tokens = 300001 end
+        if scenario.hold_checkpoint and #requests == 3 then
+            local release = process.listen("fixture:checkpoint_release")
+            assert(process.send(scenario.parent, "fixture:checkpoint_ready", { pid = process.pid() }))
+            local timer = time.timer("5s")
+            local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
+            timer:stop()
+            process.unlisten(release)
+            if selected.channel ~= release then error("checkpoint release deadline exceeded") end
+        end
+    end
     if args.model == "router" then
         content = "Transferring the request."
         calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }}
@@ -47,7 +66,7 @@ local function generate(args)
     return {
         success = true,
         result = { content = content, tool_calls = calls },
-        tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+        tokens = { prompt_tokens = prompt_tokens, completion_tokens = 5, total_tokens = prompt_tokens + 5 },
         finish_reason = #calls > 0 and "tool_call" or "stop",
     }
 end
@@ -99,5 +118,19 @@ return {
     handoff = handoff,
     malformed_effects = malformed_effects,
     held_prompt = held_prompt,
+    checkpoint_edit = function()
+        local storage = state()
+        local edits = (storage:get("edits") or 0) + 1
+        storage:set("edits", edits)
+        return "Handout edit " .. edits .. " stored."
+    end,
+    checkpoint_summary = function()
+        local storage = state()
+        storage:set("checkpoints", (storage:get("checkpoints") or 0) + 1)
+        return { summary = "The user requested a rebuilt Word handout. Edits are in progress." }
+    end,
+    checkpoint_recall = function()
+        return { memories = {{ id = "style", content = "Use the usual handout style.", metadata = {} }} }
+    end,
     fail = function() error("Expected mixed-result failure") end,
 }
