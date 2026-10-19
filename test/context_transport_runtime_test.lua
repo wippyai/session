@@ -110,6 +110,37 @@ local function define_tests()
             for _, fixture in ipairs(fixtures) do sessions.delete(fixture.session); contexts.delete(fixture.context_id) end
             fixtures = {}
         end)
+        it('preserves the previous checkpoint and summary when storing the new summary fails', function()
+            local actor, session = fixture()
+            local w = assert(writer.new(session))
+            local user = assert(w:add_message(consts.MSG_TYPE.USER, 'Complete the document task.', {}))
+            local old = assert(w:add_message(consts.MSG_TYPE.ASSISTANT, 'Earlier progress.', { source_id = user }))
+            assert(w:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, old))
+            assert(w:add_session_context(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY, 'Previous committed summary.'))
+            local next_anchor = assert(w:add_message(consts.MSG_TYPE.ASSISTANT, 'More progress.', { source_id = user }))
+            handlers._funcs = { new = function()
+                return { with_context = function(self) return self end,
+                    call = function() return { summary = 'New summary.' } end }
+            end }
+            -- Duplicate an existing non-summary primary key: the insert fails after
+            -- deleting the old summary inside the checkpoint transaction.
+            local note_id = assert(w:add_session_context('note', 'Keep this note.'))
+            local original_repo = writer._checkpoint_repo
+            w.commit_checkpoint = function(self, op, summary, metadata)
+                return original_repo.commit(self.session_id, self.user_id, op, summary, metadata, note_id)
+            end
+            local ctx = { session_id = session, config = { checkpoint_function_id = 'probe:summary' },
+                reader = assert(reader.open(session)), writer = w }
+            local result, err = handlers.create_checkpoint(ctx, { checkpoint_id = next_anchor, message_id = next_anchor })
+            test.is_nil(result)
+            test.not_nil(err)
+            local reopened = assert(reader.open(session))
+            local summaries = assert(reopened:contexts():type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY):all())
+            test.eq(reopened:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), old,
+                'failed summary insert advanced the checkpoint; retained summaries=' .. #summaries)
+            test.eq(#summaries, 1)
+            test.eq(summaries[1].text, 'Previous committed summary.')
+        end)
         it('answers capability probe from the actual Session receiver without persisting a message', function()
             local actor, session = fixture()
             local pid = worker(actor, session, 'wippy.session.process:session')

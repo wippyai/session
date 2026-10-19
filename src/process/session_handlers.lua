@@ -397,44 +397,9 @@ function session_handlers.create_checkpoint(ctx, op)
         checkpoint_binding_metadata = checkpoint_binding_metadata
     }
 
-    local success, err = ctx.writer:update_message_meta(op.message_id, checkpoint_metadata)
-    if not success then
-        return nil, err
-    end
-
-    local session_data = ctx.reader:state()
-    local current_meta = session_data.meta or {}
-
-    if not current_meta.checkpoints or type(current_meta.checkpoints) ~= "table" then
-        current_meta.checkpoints = {}
-    end
-
-    table.insert(current_meta.checkpoints, {
-        checkpoint_id = op.checkpoint_id,
-        message_id = op.message_id,
-        created_at = time.now():format(time.RFC3339),
-        trigger_tokens = op.trigger_tokens or 0,
-        checkpoint_tokens = result.tokens or {}
-    })
-
-    local meta_success, meta_err = ctx.writer:update_meta({ meta = { checkpoints = current_meta.checkpoints } })
-    if not meta_success then
-        return nil, "Failed to update checkpoint meta: " .. (meta_err or "unknown error")
-    end
-
-    local success1, err1 = ctx.writer:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, op.checkpoint_id)
-    if not success1 then
-        return nil, err1
-    end
-
+    local committed, commit_err = ctx.writer:commit_checkpoint(op, result.summary, checkpoint_metadata)
+    if not committed then return nil, commit_err end
     local refreshed, refresh_err = ctx.reader:reset()
-
-    ctx.writer:delete_session_contexts_by_type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY)
-
-    local summary_id, ctx_err = ctx.writer:add_session_context(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY, result.summary)
-    if ctx_err then
-        return nil, ctx_err
-    end
 
     local next_ops = {}
     if ctx.config.title_function_id then
