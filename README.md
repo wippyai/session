@@ -57,6 +57,11 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn.
 
+Manual renames and generated titles persist before notifying the live session.
+Title notifications publish through the existing session owner's inbox using the
+stored title. A stopped session can still be renamed without starting a process;
+its next open loads that name. Automatic generation only fills an empty title.
+
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
 for Stop, keep explicit false values, and ignore older revisions. Servers

@@ -89,7 +89,7 @@ local function define_tests()
             } end }
             upstream._session_repo = { get = function() return { title = stored_title } end }
             local owner = upstream.new("session-1")
-            owner.update_session = function(_, update) events[#events + 1] = update.title end
+            owner._send_session_update = function(_, _, update) events[#events + 1] = update.title end
             rename._upstream = { notify_external = function(_, changes)
                 -- Request A committed but was delayed before publishing. Request B
                 -- commits and publishes first; then request A resumes publishing.

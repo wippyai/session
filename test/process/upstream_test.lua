@@ -39,6 +39,53 @@ local function define_tests()
             test.eq(#events, 0)
         end)
 
+        it("routes delayed automatic titles through the same owner as external renames", function()
+            local sender, events = fixture()
+            local queued = {}
+            local stored = "Manual title"
+            upstream._session_repo = { get = function() return { title = stored } end }
+            mock("process.registry", { lookup = function() return "owner" end })
+            mock("process.send", function(_, topic, payload)
+                queued[#queued + 1] = payload
+                return true
+            end)
+            -- The generated value was computed before the manual rename. Its
+            -- reader snapshot can still contain that value when it publishes.
+            upstream.notify_external("s1", { title = stored })
+            sender:refresh_external(queued[1])
+            sender:update_session({ title = "Earlier automatic title" })
+            if queued[2] then sender:refresh_external(queued[2]) end
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.eq(#queued, 2, "both title publishers must pass through the owner's mailbox")
+            test.eq(events[#events].data.title, stored)
+        end)
+
+        it("accepts persisted title updates when the owner stops before delivery", function()
+            local lookups = 0
+            mock("process.registry", { lookup = function()
+                lookups = lookups + 1
+                if lookups == 1 then return "exited-owner" end
+                return nil, errors.new({ kind = errors.NOT_FOUND, message = "name not registered" })
+            end })
+            mock("process.send", function() return nil, "process exited" end)
+            local ok, err = upstream.notify_external("s1", { title = "Persisted" })
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.is_true(ok)
+            test.is_nil(err)
+        end)
+
+        it("does not hide a delivery failure while the owner is still mounted", function()
+            mock("process.registry", { lookup = function() return "live-owner" end })
+            mock("process.send", function() return nil, "delivery failed" end)
+            local ok, err = upstream.notify_external("s1", { title = "Persisted" })
+            restore_mock("process.send")
+            restore_mock("process.registry")
+            test.is_nil(ok)
+            test.eq(err, "delivery failed")
+        end)
+
         it("confirms a persisted message through one correlated receipt", function()
             local sender, events = fixture()
             sender:message_received("m1", "server text", { "file1" }, { state = "pending" }, "r1")

@@ -32,7 +32,13 @@ function session_upstream.notify_external(session_id, changes)
     if lookup_err and not is_not_found(lookup_err) then return nil, lookup_err end
     if not session_pid then return true end
 
-    return process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
+    local sent, send_err = process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
+    if sent then return true end
+    -- Persistence already succeeded. A normal owner exit between lookup and
+    -- delivery does not turn an offline rename into an error.
+    local current, current_err = process.registry.lookup("session." .. session_id)
+    if not current and (not current_err or is_not_found(current_err)) then return true end
+    return nil, send_err
 end
 
 -- Called only by the session owner. Notifications invalidate fields; their
@@ -51,7 +57,8 @@ function session_upstream:refresh_external(changes)
         if changes[key] ~= nil then update[key] = current[key] end
     end
     -- Never forward private metadata, config or caller-supplied row contents.
-    self:update_session(update)
+    update.session_id = self.session_id
+    self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, update)
     return true
 end
 
@@ -71,6 +78,11 @@ end
 
 -- Update session state (status, agent, model, etc.)
 function session_upstream:update_session(changes)
+    -- Title writes can originate in the command-bus coroutine or an API.
+    -- Only the owner's inbox loop publishes their authoritative stored value.
+    if changes.title ~= nil then
+        return session_upstream.notify_external(self.session_id, changes)
+    end
     changes["session_id"] = self.session_id
     self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, changes)
 end

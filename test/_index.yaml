@@ -106,6 +106,10 @@ entries:
     source: file://context_transport_runtime_test.lua
     modules: [time, uuid, hash, sql, security]
     imports:
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      session_handlers: wippy.session.process:session_handlers
+      session_service: wippy.session:service
       test: wippy.test:test
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
