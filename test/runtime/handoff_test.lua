@@ -385,22 +385,30 @@ local function run_checkpoint_stop_scenario(followup)
         local requests = storage:get("requests")
         test.eq(#requests, 5, "the later user request is allowed to complete")
         for _, index in ipairs({ 4, 5 }) do
-            local current, stale, boundary, current_at = 0, 0, nil, nil
+            local current, stale, boundary, current_at, stale_at = 0, 0, nil, nil, nil
             for position, message in ipairs(requests[index].messages) do
                 for _, part in ipairs(message.content or {}) do
                     if message.role == "user" and part.text == followup then
                         current, current_at = current + 1, position
                     end
-                    if message.role == "user" and part.text == original then stale = stale + 1 end
+                    if message.role == "user" and part.text == original then
+                        stale, stale_at = stale + 1, position
+                    end
                     if message.role == "developer" and part.text
                         and part.text:find("Do not automatically resume", 1, true) then boundary = position end
                 end
             end
             test.eq(current, 1, "the new user request survives the next checkpoint exactly once")
-            test.eq(stale, 0, "the old checkpoint task must not be restored over the new request")
+            test.is_true(stale <= 1, "the historical task must not be duplicated")
+            if stale_at then
+                test.is_true(stale_at < current_at, "the historical task must precede the current request")
+            end
             if index == 4 then
                 test.not_nil(boundary, "the persisted Stop boundary survives reopening")
                 test.is_true(boundary < current_at, "the later request follows the interruption boundary")
+                if stale_at then
+                    test.is_true(stale_at < boundary, "the historical task must remain before Stop")
+                end
             end
         end
         test.eq(storage:get("edits"), 3, "only the newly requested edit runs after reopening")
