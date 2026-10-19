@@ -8,6 +8,7 @@ type WriteResult = {
 }
 
 local session_writer = {
+    _checkpoint_repo = require("checkpoint_repo"),
     _session_repo = require("session_repo"),
     _message_repo = require("message_repo"),
     _artifact_repo = require("artifact_repo"),
@@ -94,6 +95,16 @@ function session_writer:update_title(title)
     end
 
     return self:update_meta({ title = title })
+end
+
+function session_writer:commit_checkpoint(op, summary, metadata)
+    local summary_id, id_err = uuid.v7()
+    if not summary_id then return nil, id_err end
+    self._meta_lock:receive()
+    local result, err = session_writer._checkpoint_repo.commit(self.session_id, self.user_id,
+        op, summary, metadata, summary_id)
+    self._meta_lock:send(true)
+    return result, err
 end
 
 function session_writer:update_initial_title(title)

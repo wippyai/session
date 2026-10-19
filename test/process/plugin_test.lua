@@ -1638,6 +1638,29 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
+        for _, outcome in ipairs({ { status = "shutdown", intentional_exit = true }, { error = "write after deletion" } }) do
+            it("releases a deleted owner's slot without a recovery notice after " .. (outcome.error or "finish"), function()
+                local actor = security.actor()
+                local session_id, context_id = create_session_fixture(actor, "Deleted session", "running")
+                local run = run_plugin_lifecycle(actor, session_id, "test-hub", {{
+                    topic = consts.PLUGIN_TOPICS.SHUTDOWN,
+                    data = function() assert(session_repo.delete(session_id)); return {} end,
+                }}, outcome)
+                test.is_nil(run.error)
+                test.is_nil(upstream_error(run, "test-hub"))
+                local closed
+                for _, sent in ipairs(run.sent) do
+                    if sent.topic == consts.TOPICS.SESSION_CLOSED then closed = sent.payload end
+                    test.is_true(not (sent.topic == consts.TOPIC_PREFIXES.SESSION .. session_id
+                        and sent.payload.status == consts.STATUS.IDLE), "must not announce a deleted session as idle")
+                end
+                test.not_nil(closed)
+                test.eq(closed.reason, "deleted")
+                test.eq(#closed.active_session_ids, 0)
+                cleanup_session_fixture(session_id, context_id)
+            end)
+        end
+
         it("leaves an intentional finish idle without an error", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Intentional finish", "running")

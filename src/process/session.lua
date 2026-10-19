@@ -785,15 +785,33 @@ local function run(args: SessionArgs)
             elseif topic == consts.TOPICS.SESSION_UPDATED then
                 local changes = msg:payload():data()
                 if type(changes) == "table" then
-                    local refreshed, refresh_err = session_upstream:refresh_external(changes)
+                    local refreshed, refresh_err, deleted = session_upstream:refresh_external(changes)
                     if not refreshed then
                         session_upstream:session_error("session_update_failed", tostring(refresh_err))
+                    elseif deleted then
+                        -- The row is authoritatively gone. Retire this owner;
+                        -- reconnect cannot cancel deletion. In-flight work keeps
+                        -- the same safe-boundary finish as other retirements.
+                        session_state.finishing = true
+                        finish_generation = finish_generation + 1
+                        finish_check_sent = false
+                        if bus:is_quiescent() then
+                            bus:finish()
+                        else
+                            pending_finish = true
+                        end
                     end
                 end
             else
                 local payload_data = msg:payload():data()
                 local attention_handled = false
-                if type(payload_data) == 'table'
+                if session_state.finishing then
+                    if type(payload_data) == 'table' and payload_data.request_id then
+                        session_upstream:command_error(payload_data.request_id, "SESSION_FINISHING", "Session is finishing")
+                    end
+                    attention_handled = true
+                end
+                if not attention_handled and type(payload_data) == 'table'
                     and (topic == consts.TOPICS.MESSAGE or topic == consts.TOPICS.COMMAND) then
                     if payload_data.conn_pid then
                         attention_control:set_connection(payload_data.conn_pid)

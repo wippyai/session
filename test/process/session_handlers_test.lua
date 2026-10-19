@@ -108,25 +108,12 @@ local function mock_checkpoint_ctx(config)
             end,
         },
         writer = {
-            update_message_meta = function(_, _message_id, meta)
-                captured.message_meta = meta
-                return true
-            end,
-            update_meta = function(_, payload)
-                captured.session_meta = payload.meta
-                return true
-            end,
-            set_context = function(_, key, value)
-                captured.context_key = key
-                captured.context_value = value
-                return true
-            end,
-            delete_session_contexts_by_type = function()
-                return true
-            end,
-            add_session_context = function(_, _context_type, summary)
+            commit_checkpoint = function(_, op, summary, metadata)
+                captured.message_meta = metadata
+                captured.context_key = "current_checkpoint_id"
+                captured.context_value = op.checkpoint_id
                 captured.summary = summary
-                return "summary-id"
+                return true
             end,
         },
         upstream = {

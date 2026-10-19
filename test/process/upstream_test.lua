@@ -26,8 +26,21 @@ local function define_tests()
             test.is_nil(events[1].data.meta)
             test.is_nil(events[1].data.config)
             upstream._session_repo = { get = function() return nil, "Session not found" end }
-            test.is_true(sender:refresh_external({ title = "old" }))
+            local ok, err, deleted = sender:refresh_external({ title = "old" })
+            test.is_true(ok)
+            test.is_nil(err)
+            test.is_true(deleted)
             test.is_true(events[2].data.deleted)
+        end)
+
+        it("does not trust a deletion notification when the stored row still exists", function()
+            local sender, events = fixture()
+            upstream._session_repo = { get = function() return { title = "Still here" } end }
+            local ok, err, deleted = sender:refresh_external({ deleted = true })
+            test.is_true(ok)
+            test.is_nil(err)
+            test.is_nil(deleted)
+            test.is_nil(events[1].data.deleted)
         end)
 
         it("does not publish stale values when reloading the row fails", function()
