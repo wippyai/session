@@ -5,6 +5,116 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: dep.wippy.relay
+    kind: ns.dependency
+    component: wippy/relay
+    version: '*'
+    parameters:
+      - name: application_host
+        value: app:processes
+      - name: user_security_scope
+        value: app:relay_user
+
+  - name: relay_user
+    kind: registry.entry
+
+  - name: lifecycle_tool
+    kind: function.lua
+    meta:
+      type: tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://lifecycle_tool.lua
+    method: run
+
+  - name: lifecycle_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: gpt-4o
+    prompt: Test only.
+    tools: [app:lifecycle_tool]
+
+  - name: lifecycle_disconnect_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_lifecycle
+
+  - name: users_fixture_migration
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      timestamp: '2020-01-01T00:00:00Z'
+      depends_on: [ns:wippy.migration]
+    source: file://users_fixture_migration.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
+  - name: interruption_plugin_worker
+    kind: process.lua
+    source: file://interruption_plugin_worker.lua
+    imports:
+      plugin: wippy.session.process:plugin
+      consts: wippy.session:consts
+    method: run
+
+  - name: interruption_session_worker
+    kind: process.lua
+    source: file://interruption_session_worker.lua
+    modules: [time]
+    imports:
+      writer: wippy.session.persist:writer
+      session: wippy.session.process:session
+      llm: wippy.llm:llm
+      response_mapper: wippy.llm.openai:mapper
+    method: run
+
+  - name: interruption_prompt_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
+  - name: interruption_prompt_blocked_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_blocked
   - name: dep.wippy.test
     kind: ns.dependency
     component: wippy/test
@@ -45,6 +155,7 @@ entries:
       context_staging_repo: wippy.session.persist:context_staging_repo
       context_cleanup: wippy.session.process:context_cleanup_runtime
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run
 
@@ -113,6 +224,7 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run
 

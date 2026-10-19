@@ -32,6 +32,7 @@ local function define_tests()
         end
         local function fixture()
             local actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+            boot.ensure_user(actor)
             assert(contexts.create(context_id, 'primary', 'Context transport lifecycle'))
             assert(sessions.create(session, actor, context_id, 'Transport lifecycle', 'test'))
             table.insert(fixtures, { session = session, context_id = context_id })

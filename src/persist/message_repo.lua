@@ -602,10 +602,37 @@ function message_repo.apply_inputs(session_id, updates, expected_revision)
     return true
 end
 
+local function needs_interruption_boundary(tx, session_id, date_key)
+    local offset = 0
+    while true do
+        local rows, err = sql.builder.select("type", "metadata"):from("messages")
+            :where("session_id = ?", session_id)
+            :where("type IN (?, ?)", consts.MSG_TYPE.USER, consts.MSG_TYPE.DEVELOPER)
+            :order_by(date_key .. " DESC, message_id DESC"):limit(100):offset(offset):run_with(tx):query()
+        if err then return nil, err end
+        for _, row in ipairs(rows) do
+            local metadata = {}
+            if row.metadata and row.metadata ~= "" then
+                local decoded, decode_err = json.decode(tostring(row.metadata))
+                if decode_err then return nil, decode_err end
+                if type(decoded) == "table" then metadata = decoded end
+            end
+            local valid, validation_err = input_metadata.validate({ type = row.type, metadata = metadata })
+            if not valid then return nil, validation_err end
+            if row.type == consts.MSG_TYPE.DEVELOPER and type(metadata.interruption) == "table" then return false end
+            if row.type == consts.MSG_TYPE.USER and not (metadata.input and metadata.input.state == "pending") then
+                return true
+            end
+        end
+        if #rows < 100 then return true end
+        offset = offset + #rows
+    end
+end
+
 -- Commit Stop together with restoring an in-flight input batch. This closes the
 -- interval where pending rows may already be applied but have not entered a
 -- provider prompt.
-function message_repo.stop_with_input_rollback(session_id, updates, session_updates)
+function message_repo.stop_with_input_rollback(session_id, updates, session_updates, boundary)
     if type(session_updates) ~= "table" then return nil, "Session updates are required" end
     local db, err = get_db()
     if not db then return nil, err end
@@ -644,6 +671,21 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
             end
         end
     end
+    local boundary_date = nil
+    if boundary then
+        local needed, boundary_err = needs_interruption_boundary(tx, session_id, message_order.date(db:type()))
+        if boundary_err then return abort(boundary_err) end
+        if needed then
+            local metadata, encode_err = json.encode(boundary.metadata)
+            if encode_err then return abort(encode_err) end
+            boundary_date = time.now():format(time.RFC3339NANO)
+            local _, insert_err = sql.builder.insert("messages"):set_map({
+                message_id = boundary.message_id, session_id = session_id, date = boundary_date,
+                type = consts.MSG_TYPE.DEVELOPER, data = boundary.data, metadata = metadata,
+            }):run_with(tx):exec()
+            if insert_err then return abort(insert_err) end
+        end
+    end
     local session_rows, session_err = sql.builder.select("meta"):from("sessions")
         :where("session_id = ?", session_id):run_with(tx):query()
     if session_err or not session_rows or #session_rows ~= 1 then
@@ -660,6 +702,7 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
     if meta_err then return abort(meta_err) end
     local session_update = sql.builder.update("sessions"):set("meta", encoded_meta)
     if session_updates.status ~= nil then session_update = session_update:set("status", session_updates.status) end
+    if boundary_date then session_update = session_update:set("last_message_date", boundary_date) end
     local updated, update_err = session_update:where("session_id = ?", session_id):run_with(tx):exec()
     if update_err or not updated or updated.rows_affected ~= 1 then
         return abort(update_err or "Failed to commit Stop state")
