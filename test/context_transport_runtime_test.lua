@@ -12,6 +12,7 @@ local staging = require('context_staging_repo')
 local consts = require('consts')
 local upstream = require('upstream')
 local boot = require('wait_for_boot')
+local session_service = require('session_service')
 local reader = require('reader')
 local writer = require('writer')
 local handlers = require('session_handlers')
@@ -264,6 +265,27 @@ local function define_tests()
             test.eq(receive(topic, reopened).title, 'Renamed after stop')
         end)
 
+        it('retires an idle owner after its session is deleted', function()
+            local actor, session = fixture()
+            local pid = worker(actor, session, 'wippy.session.process:session')
+            local topic = consts.TOPIC_PREFIXES.SESSION .. session
+            receive(topic, pid)
+            assert(session_service.delete({ session_id = session, user_id = actor }))
+            local event = receive(topic, pid)
+            test.is_true(event.deleted)
+            local timer = time.timer('3s')
+            local exited = false
+            while not exited do
+                local selected = channel.select({ process.events():case_receive(), timer:channel():case_receive() })
+                if selected.channel == timer:channel() then break end
+                local event = selected.value :: process.Event
+                exited = event.from == pid
+            end
+            timer:stop()
+            if exited then workers[pid] = nil end
+            test.is_true(exited, 'deleted idle session owner remains alive and registered')
+            test.is_nil((process.registry.lookup('session.' .. session)))
+        end)
         it('hydrates once and acknowledges the original server message after worker restart and stage cleanup', function()
             for _, referenced in ipairs({ false, true }) do
                 local actor, session = fixture()

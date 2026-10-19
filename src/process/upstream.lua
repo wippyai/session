@@ -48,7 +48,7 @@ function session_upstream:refresh_external(changes)
     if not current then
         if err == "Session not found" then
             self:update_session({ deleted = true })
-            return true
+            return true, nil, true
         end
         return nil, err or "Failed to reload session"
     end
