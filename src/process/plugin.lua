@@ -1071,7 +1071,9 @@ local function run(args)
                         fire_session_end_hook(state.base_config.on_session_end_func_id, {
                             session_id = session_id,
                             user_id = state.user_id,
-                            status = target_status,
+                            -- Keep the hook's existing status contract even
+                            -- when the deleted row has no status to publish.
+                            status = target_status or status_after_exit(session_info, exit_result, exit_error),
                             reason = err,
                         })
 
