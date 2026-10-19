@@ -205,6 +205,9 @@ per-step memory recall as background context. PostgreSQL installations also need
 Runtime v0.3.50a or later to preserve message timestamp precision when choosing
 checkpoint boundaries.
 
+Agent 0.5.5 requires LLM 0.5.8 or later, so publish LLM before Agent and refresh
+Session's dependency lock from those published packages before release.
+
 When a checkpoint function or binding is configured, the session compares each
 model response's normalized `tokens.context_tokens` with
 `token_checkpoint_threshold`. It checks tool continuations too, and schedules
