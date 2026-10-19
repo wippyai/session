@@ -129,6 +129,12 @@ entries:
       comment: Disposable database for migration tests; each test recreates the tables it needs.
     file: ./.wippy/migration-probe.db
 
+  - name: migration_probe_peer_db
+    kind: db.sql.sqlite
+    meta:
+      comment: A second connection pool on the migration probe database file, so a test can run two connections against one SQLite file.
+    file: ./.wippy/migration-probe.db
+
   - name: env_storage
     kind: env.storage.file
     meta:

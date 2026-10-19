@@ -463,6 +463,23 @@ function artifact_repo.update(artifact_id, updates, opts)
     end
 
     local function run_update(conn)
+        if patching then
+            -- The first statement of a patch is a write, not the meta read.
+            -- On SQLite a transaction that reads first holds a snapshot, and
+            -- when another connection commits before this one writes, the
+            -- write fails with "database is locked" (test/persist/
+            -- artifact_repo_test.lua reproduces it). Taking the write lock first makes
+            -- other writers wait for this commit, as on PostgreSQL, where it
+            -- is the row lock. The row is rewritten with its own meta, so
+            -- nothing changes if the update then fails or finds no row.
+            local _, lock_err = sql.builder.update("artifacts")
+                :set("meta", sql.builder.expr("meta"))
+                :where("artifact_id = ?", artifact_id)
+                :run_with(conn):exec()
+            if lock_err then
+                return nil, "Failed to lock artifact: " .. tostring(lock_err)
+            end
+        end
         for _ = 1, META_PATCH_ATTEMPTS do
             local result, err, retry = attempt(conn)
             if not retry then return result, err end

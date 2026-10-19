@@ -36,6 +36,15 @@ local function is_current_instant(value)
     return math.abs(parsed:unix() - os.time()) < 300
 end
 
+-- "sqlite" or "postgres", read when the cases are defined.
+local function database_kind()
+    local db = sql.get(consts.get_db_resource())
+    if not db then return "unknown" end
+    local kind = db:type()
+    db:release()
+    return kind
+end
+
 local function define_tests()
     describe("Artifact Repository", function()
         -- Test data
@@ -767,6 +776,112 @@ local function define_tests()
                 test.eq(view_ref_artifact.meta.display_type, "standalone")
             end)
         end)
+
+        -- The runtime opens one SQLite connection per database resource, so
+        -- two writers in one runtime never overlap. The case that matters
+        -- for a patch is a second connection to the same file (another
+        -- runtime, or a second resource): this test stands one in with two
+        -- resources on one probe database file, and points the repository at
+        -- one of them. A patch that read first held only a snapshot there,
+        -- the other connection committed, and the patch failed with
+        -- "database is locked"; a patch that writes first holds the lock.
+        if database_kind() == "sqlite" then
+            describe("update: meta_patch with a second SQLite connection", function()
+                local PATCH_DB = "app:migration_probe_db"
+                local PEER_DB = "app:migration_probe_peer_db"
+                local original_resource = consts.get_db_resource
+
+                local function probe(resource, fn)
+                    local db, db_err = sql.get(resource)
+                    if not db then error(tostring(db_err)) end
+                    local ok, result = pcall(fn, db)
+                    db:release()
+                    if not ok then error(result, 0) end
+                    return result
+                end
+
+                before_all(function()
+                    probe(PATCH_DB, function(db)
+                        assert(db:execute("DROP TABLE IF EXISTS artifacts"))
+                        assert(db:execute("CREATE TABLE artifacts (artifact_id TEXT PRIMARY KEY, kind TEXT, title TEXT,"
+                            .. " content TEXT, meta TEXT, content_version INTEGER NOT NULL DEFAULT 1, updated_at TEXT)"))
+                        assert(db:execute("INSERT INTO artifacts (artifact_id, kind, title, content, meta) VALUES ($1, $2, $3, $4, $5)",
+                            { "locked-patch", "static", "Original", "v1", '{"display_type":"inline"}' }))
+                    end)
+                    consts.get_db_resource = function() return PATCH_DB end
+                end)
+
+                after_all(function()
+                    consts.get_db_resource = original_resource
+                    probe(PATCH_DB, function(db) assert(db:execute("DROP TABLE IF EXISTS artifacts")) end)
+                end)
+
+                it("takes the write lock with its first statement, so another connection cannot commit between its read and its write", function()
+                    local id = "locked-patch"
+                    local reached, resume, patched, other = channel.new(1), channel.new(1), channel.new(1), channel.new(1)
+                    local original = artifact_repo._on_meta_read
+                    local paused = false
+                    -- Runs inside the patch's transaction after the meta read.
+                    artifact_repo._on_meta_read = function(_conn, artifact_id)
+                        if artifact_id ~= id or paused then return end
+                        paused = true
+                        reached:send(true)
+                        resume:receive()
+                    end
+                    coroutine.spawn(function()
+                        local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                        patched:send({ result = result, err = err and tostring(err) or nil })
+                    end)
+                    reached:receive()
+
+                    coroutine.spawn(function()
+                        local err = nil
+                        local ok, thrown = pcall(function()
+                            probe(PEER_DB, function(db)
+                                local _, exec_err = db:execute("UPDATE artifacts SET title = $1 WHERE artifact_id = $2", { "Other writer", id })
+                                if exec_err then err = tostring(exec_err) end
+                            end)
+                        end)
+                        if not ok then err = tostring(thrown) end
+                        other:send({ err = err })
+                    end)
+                    time.sleep("500ms")
+                    -- Whether the other write has already finished while the
+                    -- patch is paused.
+                    local early = channel.select({ other:case_receive(), default = true })
+                    resume:send(true)
+                    local deadline = time.after("20s")
+                    local patched_selected = channel.select({ patched:case_receive(), deadline:case_receive() })
+                    artifact_repo._on_meta_read = original
+                    test.is_true(patched_selected.channel ~= deadline, "the patch settles instead of hanging")
+                    local other_outcome = early.value
+                    if early.default then
+                        local other_selected = channel.select({ other:case_receive(), deadline:case_receive() })
+                        test.is_true(other_selected.channel ~= deadline, "the other write settles once the patch has committed")
+                        other_outcome = other_selected.value
+                    end
+
+                    test.is_true(paused)
+                    test.is_nil(patched_selected.value.err, "the patch is not failed by the other connection")
+                    test.not_nil(patched_selected.value.result)
+                    test.is_true(early.default == true or early.value.err ~= nil,
+                        "the other connection did not commit while the patch held the lock")
+                    local stored = probe(PATCH_DB, function(db)
+                        return db:query("SELECT title, meta FROM artifacts WHERE artifact_id = $1", { id })
+                    end)
+                    local meta = json.decode(stored[1].meta)
+                    test.eq(meta.status, "active")
+                    test.eq(meta.display_type, "inline")
+                    -- The other write either waited for the patch and then
+                    -- committed, or gave up while the lock was held.
+                    if other_outcome.err == nil then
+                        test.eq(stored[1].title, "Other writer")
+                    end
+                end)
+            end)
+        else
+            test.it_skip("update: meta_patch with a second SQLite connection (SQLite only)", function() end)
+        end
     end)
 end
 
