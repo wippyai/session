@@ -454,6 +454,56 @@ local function define_tests()
             test.eq(captured.message_errors[1].id, result.response_id)
         end)
 
+        for _, partial in ipairs({ "", "Partial answer" }) do
+            it("closes a stopped provider step exactly once: " .. partial, function()
+                local agent = fake_agent(nil)
+                agent.bindings = { lifecycle = { { binding = "app:lifecycle" } } }
+                agent.step = function() return { stopped = true, result = partial, finish_reason = "cancelled" } end
+                local phases = {}
+                local original = message_handlers._lifecycle_runtime
+                message_handlers._lifecycle_runtime = { apply = function(_, payload)
+                    table.insert(phases, payload)
+                    return { applied = 1, skipped = 0 }
+                end }
+                local ctx = mock_ctx(agent)
+                local ok, result, err = pcall(user_step, ctx)
+                message_handlers._lifecycle_runtime = original
+                test.is_true(ok, tostring(result))
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(#result.next_ops, 0)
+                test.eq(#phases, 3)
+                test.eq(phases[2].phase, "before_step")
+                test.eq(phases[3].phase, "after_step")
+                test.eq(phases[3].outcome.state, "completed")
+                test.eq(phases[3].outcome.reason, "stop_requested")
+                test.eq(phases[3].refs.response_id, result.response_id)
+            end)
+        end
+
+        it("does not repeat a stopped step's failing AFTER_STEP hook", function()
+            local agent = fake_agent(nil)
+            agent.bindings = { lifecycle = { { binding = "app:lifecycle" } } }
+            agent.step = function() return { stopped = true, finish_reason = "cancelled" } end
+            local after_calls = 0
+            local original = message_handlers._lifecycle_runtime
+            message_handlers._lifecycle_runtime = { apply = function(_, payload)
+                if payload.phase == "after_step" then
+                    after_calls = after_calls + 1
+                    return nil, "stop cleanup failed"
+                end
+                return { applied = 1, skipped = 0 }
+            end }
+            local ctx, captured = mock_ctx(agent)
+            local ok, result, err = pcall(user_step, ctx)
+            message_handlers._lifecycle_runtime = original
+            test.is_true(ok, tostring(result))
+            test.is_nil(err)
+            test.eq(after_calls, 1)
+            test.eq(result.failed, "stop cleanup failed")
+            test.eq(#captured.message_errors, 1)
+        end)
+
         it("closes a failed step with a failed AFTER_STEP, but not a failed lifecycle phase", function()
             local agent = fake_agent(nil)
             agent.bindings = { lifecycle = { { binding = "app:lifecycle" } } }

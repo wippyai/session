@@ -90,7 +90,10 @@ end
 function command_bus:request_stop(stop_request_id)
     if self.state == "closed" or self.state == "draining_finish" then return false end
     if not self:is_turn_active() then return false end
-    if self.state ~= "draining_stop" then self.state = "draining_stop" end
+    if self.state ~= "draining_stop" then
+        self.state = "draining_stop"
+        if self.cancel then self.cancel:close() end
+    end
     self.turn_state.stop_request_id = stop_request_id or self.turn_state.stop_request_id
     self:wake_loop()
     return true
@@ -248,6 +251,7 @@ function command_bus:end_turn()
     end
     self.turn_state.stop_request_id = nil
     self.turn_state.id = nil
+    self.cancel = nil
     if self.context.on_turn_end then self.context.on_turn_end(turn_id, draining, stop_id) end
     return true
 end
@@ -284,6 +288,8 @@ function command_bus:run()
                 if op.type == consts.OP_TYPE.AGENT_STEP and op.from_user and self.state == "idle" then
                     self.state = "running"
                     self.turn_state.id = op.message_id
+                    -- Stop closes it; the turn's in-flight model and tool calls select on it.
+                    self.cancel = channel.new()
                 end
                 if self:stop_requested() and op.type == consts.OP_TYPE.PROCESS_TOOLS then
                     op.cancel_only = true

@@ -1,14 +1,20 @@
 local session = require('session')
 local llm = require('llm')
 local time = require('time')
-local response_mapper = require('response_mapper')
 local writer = require('writer')
 
 local function run(args: any)
     local fixture = args.user_metadata
+    local calls = 0
     llm._models = {
         get_by_name = function(name)
-            return { name = name, providers = { { id = 'scripted', provider_model = name, options = {} } } }
+            calls = calls + 1
+            local request_fixture = {}
+            for key, value in pairs(fixture) do request_fixture[key] = value end
+            request_fixture.worker_pid = process.pid()
+            request_fixture.call_number = calls
+            return { name = name, providers = { { id = 'app:interruption_provider', provider_model = name,
+                context = { fixture = request_fixture } } } }
         end,
     }
     if fixture.cancel_before_tools then
@@ -28,34 +34,6 @@ local function run(args: any)
             return instance
         end
     end
-    local calls = 0
-    llm._providers = {
-        driver_declares_legacy_reasoning_flag = function() return false end,
-        open = function()
-            return {
-                generate = function(_, request)
-                    calls = calls + 1
-                    request.worker_pid = process.pid()
-                    request.responses_input = response_mapper.map_messages(request.messages)
-                    request.responses_instructions = response_mapper.extract_instructions(request.messages)
-                    assert(process.send(fixture.reply_pid :: string, 'provider_prompt', request))
-                    if fixture.lifecycle and calls == 1 then time.sleep('1500ms') end
-                    if fixture.interrupt and calls == 1 then
-                        if fixture.interrupt == 'blocked' then time.sleep('1h') end
-                        time.sleep('300ms')
-                        if fixture.interrupt == 'crash' then error('Scripted provider interruption') end
-                    end
-                    return { success = true, result = {
-                        content = fixture.lifecycle and calls == 1 and '' or 'Scripted answer',
-                        tool_calls = fixture.lifecycle and calls == 1 and {{
-                            id = 'lifecycle-call', name = 'lifecycle_tool', registry_id = 'app:lifecycle_tool', arguments = '{}',
-                        }} or {}, finish_reason = 'stop',
-                        tokens = { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 },
-                    } }
-                end,
-            }
-        end,
-    }
     return session.run(args)
 end
 
