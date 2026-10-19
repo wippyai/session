@@ -161,7 +161,7 @@ local function define_tests(blocked_only, lifecycle_only)
                 end, '3s')
                 test.eq(closed.reason, 'deleted')
                 test.eq(#closed.active_session_ids, 0)
-                test.is_nil(process.registry.lookup('session.' .. session_id))
+                test.is_nil((process.registry.lookup('session.' .. session_id)))
                 test.eq(select(2, sessions.get(session_id)), 'Session not found')
                 local exit = receive(function(topic, event)
                     return topic == 'exit' and event.from == plugin_pid

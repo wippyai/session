@@ -247,12 +247,13 @@ local function define_tests()
             while not exited do
                 local selected = channel.select({ process.events():case_receive(), timer:channel():case_receive() })
                 if selected.channel == timer:channel() then break end
-                exited = selected.value.from == pid
+                local event = selected.value :: process.Event
+                exited = event.from == pid
             end
             timer:stop()
             if exited then workers[pid] = nil end
             test.is_true(exited, 'deleted idle session owner remains alive and registered')
-            test.is_nil(process.registry.lookup('session.' .. session))
+            test.is_nil((process.registry.lookup('session.' .. session)))
         end)
         it('hydrates once and acknowledges the original server message after worker restart and stage cleanup', function()
             for _, referenced in ipairs({ false, true }) do
