@@ -58,6 +58,13 @@ local function run_setup_bootloaders()
     bootloaders_started = true
 end
 
+local function ensure_user(user_id)
+    local db = assert(sql.get("app:db"))
+    local _, err = db:execute("INSERT INTO app_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", {user_id})
+    db:release()
+    if err then error("Failed to seed test user: " .. tostring(err)) end
+end
+
 local function run()
     run_setup_bootloaders()
 
@@ -67,10 +74,14 @@ local function run()
     for attempt = 1, max_attempts do
         local db, err = sql.get("app:db")
         if not err then
-            local _, query_err = db:query("SELECT context_id FROM contexts LIMIT 0")
+            local result, query_err = db:query(
+                "SELECT context_id FROM contexts LIMIT 0"
+            )
             db:release()
 
-            if not query_err then
+            if not query_err and result then
+                local actor = security.actor()
+                if actor then ensure_user(actor:id()) end
                 return true
             end
         end
@@ -81,4 +92,4 @@ local function run()
     error("bootloader did not complete within " .. (max_attempts * sleep_ms) .. "ms")
 end
 
-return { run = run, prepare_postgres_dependencies = prepare_postgres_dependencies }
+return { run = run, ensure_user = ensure_user, prepare_postgres_dependencies = prepare_postgres_dependencies }

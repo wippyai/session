@@ -98,6 +98,7 @@ end
 
 local function seed_session()
     wait_for_boot.run()
+    wait_for_boot.ensure_user(TEST_ACTOR_ID)
     cleanup()
 
     -- The anchor is the message the last checkpoint was created at; the primary context

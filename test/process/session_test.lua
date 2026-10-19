@@ -24,6 +24,7 @@ local function fixture(): (any, any, {any}, {any}, {any}, {any})
                 return self:add_message(msg_type, content, metadata)
             end,
             update_meta = function() return true end,
+            stop_with_input_rollback = function(self, _, updates) return self:update_meta(updates) end,
             update_status = function() return true end
         },
         upstream = {

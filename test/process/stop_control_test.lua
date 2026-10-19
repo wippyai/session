@@ -21,7 +21,7 @@ local function fixture(write_error, rollback_error)
             end,
             stop_with_input_rollback = function(_, updates)
                 events[#events + 1] = "stop-write"
-                if rollback_error then return nil, rollback_error end
+                if rollback_error or write_error then return nil, rollback_error or write_error end
                 for _, update in ipairs(updates) do update.restored = true end
                 return true
             end,
@@ -57,7 +57,7 @@ local function define_tests()
 
             test.is_nil(err)
             test.is_true(ok)
-            test.eq(events[1], "write")
+            test.eq(events[1], "stop-write")
             test.eq(events[2], "ack:stop-1")
             test.eq(#events, 2)
             test.is_true(ctx.stop_requested)
@@ -72,7 +72,7 @@ local function define_tests()
 
             test.is_nil(ok)
             test.eq(err, "disk failure")
-            test.eq(events[1], "write")
+            test.eq(events[1], "stop-write")
             test.eq(events[2], "error:stop-2:STORAGE_ERROR")
             test.is_false(ctx.stop_requested)
             test.eq(ctx.turn_state.input_policy.while_running, "steer")
