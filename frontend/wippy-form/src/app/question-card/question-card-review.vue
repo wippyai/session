@@ -45,14 +45,15 @@ const missingText = computed(() => {
       <button
         v-bind="partAttrs('review-edit')"
         type="button"
-        :aria-label="`Question ${row.number}: change the answer`"
         :data-focus="row.key"
         @click="controller.go(i, 'first')"
       >
+        <!-- No aria-label: it would replace the question and the answer in the button's name. The name is built from the content instead: this prefix, the question, the answer, then the action. -->
         <span
           v-bind="partAttrs('review-number')"
           aria-hidden="true"
         >{{ row.number }}</span>
+        <span class="sr-only">Question {{ row.number }}: </span>
         <span v-bind="partAttrs('review-question')">
           <QuestionCardRichText :text="row.field.label" />
         </span>
@@ -72,6 +73,7 @@ const missingText = computed(() => {
             v-bind="partAttrs('answer-empty')"
           >Skipped</span>
         </span>
+        <span class="sr-only">. Change the answer.</span>
       </button>
     </li>
   </ol>

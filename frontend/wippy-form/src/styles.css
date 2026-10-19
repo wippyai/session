@@ -26,6 +26,8 @@
   --_border: var(--wippy-form-border, transparent);
   --_text: var(--wippy-form-text, var(--p-text-color));
   --_muted: var(--wippy-form-text-muted, var(--p-text-muted-color));
+  /* Muted text on an answer row. The row is darker than the card, and the hovered row darker still, so the plain muted colour falls under 4.5:1 on them in the default light theme (about 4.0, and 3.3 on hover). The theme's hover-muted text colour reaches 4.5:1 on both rows in the light and the dark theme. */
+  --_muted-row: var(--wippy-form-text-muted-on-row, var(--p-text-hover-muted-color));
   --_row: var(--wippy-form-row, color-mix(in srgb, var(--p-content-hover-background) 40%, var(--p-content-border-color)));
   --_row-hover: var(--wippy-form-row-hover, color-mix(in srgb, var(--p-content-border-color) 90%, var(--p-text-color)));
   --_accent: var(--wippy-form-accent, var(--p-primary-color));
@@ -124,7 +126,7 @@
 /* The Button size comes from its `size="small"` prop, so only the icon colour, which the `text` variant does not set, is set here. */
 .w-form .w-form__prev,
 .w-form .w-form__next {
-  color: var(--_muted);
+  color: var(--_muted-row);
 }
 .w-form .w-form__prev svg,
 .w-form .w-form__next svg {
@@ -169,7 +171,7 @@
   margin: 8px 0 0;
   padding: 6px 8px;
   font-size: var(--_small);
-  color: var(--_muted);
+  color: var(--_muted-row);
   background: var(--_row);
   border-radius: var(--_row-radius);
   max-width: 72ch;
@@ -232,7 +234,7 @@
 }
 .w-form__option-description {
   font-size: var(--_small);
-  color: var(--_muted);
+  color: var(--_muted-row);
   overflow-wrap: anywhere;
 }
 .w-form__option-mark {
@@ -259,7 +261,7 @@ span.w-form__option-mark {
   font-size: var(--_small);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
-  color: var(--_muted);
+  color: var(--_muted-row);
 }
 .w-form__option-note svg {
   width: 12px;
@@ -270,7 +272,7 @@ span.w-form__option-mark {
 }
 .w-form .w-form__note-toggle {
   /* Sized by the Button's `size="small"` prop. */
-  color: var(--_muted);
+  color: var(--_muted-row);
   opacity: 0;
 }
 .w-form__option:hover .w-form__note-toggle,
@@ -307,7 +309,7 @@ span.w-form__option-mark {
   font-weight: 500;
   line-height: 1;
   font-variant-numeric: tabular-nums;
-  color: var(--_muted);
+  color: var(--_muted-row);
   border: 1px solid var(--_key-border);
   border-radius: 5px;
 }
@@ -397,13 +399,13 @@ span.w-form__option-mark {
   grid-row: 1 / span 2;
   font-size: 12px;
   font-weight: 600;
-  color: var(--_muted);
+  color: var(--_muted-row);
   font-variant-numeric: tabular-nums;
   padding-top: 1px;
 }
 .w-form__review-question {
   font-size: var(--_small);
-  color: var(--_muted);
+  color: var(--_muted-row);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -428,7 +430,7 @@ span.w-form__option-mark {
   align-items: baseline;
   font-weight: 400;
   font-size: var(--_small);
-  color: var(--_muted);
+  color: var(--_muted-row);
   white-space: pre-wrap;
 }
 .w-form__answer-note svg {
@@ -441,7 +443,7 @@ span.w-form__option-mark {
 .w-form__answer-empty,
 .w-form__answer-own {
   font-weight: 400;
-  color: var(--_muted);
+  color: var(--_muted-row);
 }
 
 /* ---------- Answered summary ---------- */

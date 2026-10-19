@@ -54,6 +54,7 @@ Set a token on `wippy-form` or on any ancestor.
 | `--wippy-form-border` | `transparent` | Card and counter pill edges |
 | `--wippy-form-text` | `var(--p-text-color)` | Main text |
 | `--wippy-form-text-muted` | `var(--p-text-muted-color)` | Descriptions, hints, icons |
+| `--wippy-form-text-muted-on-row` | `var(--p-text-hover-muted-color)` | Muted text on an answer row (option descriptions, notes, number keys, review numbers and questions). Darker than `--wippy-form-text-muted` because the rows are darker than the card: 4.5:1 or more on a row, resting or hovered, in the light and dark theme |
 | `--wippy-form-row` | `color-mix(in srgb, var(--p-content-hover-background) 40%, var(--p-content-border-color))` | Answer row background |
 | `--wippy-form-row-hover` | `color-mix(in srgb, var(--p-content-border-color) 90%, var(--p-text-color))` | Answer row under the pointer |
 | `--wippy-form-accent` | `var(--p-primary-color)` | Selection, counter, key badges, active note toggle, focus ring |

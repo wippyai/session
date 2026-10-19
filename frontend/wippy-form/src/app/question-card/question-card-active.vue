@@ -216,9 +216,10 @@ watch(() => props.banner, (banner) => {
     void nextTick(restoreFocusAfterFailure)
 })
 
+// Focus stays on the toggle that was pressed: it is not unmounted, and it names
+// the new state ("Show answers" / "Hide answers"), so a screen reader hears it.
 function toggleCollapse() {
   controller.collapsed.value = !controller.collapsed.value
-  controller.requestFocus('card')
 }
 
 function onKeydown(event: KeyboardEvent) {
