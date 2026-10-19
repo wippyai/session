@@ -157,8 +157,8 @@ end
 
 local function tool_boundary_fixture(): (table, {table}, {string}, {string}, table, table)
     local ctx, rows, events, applied = fixture({
-        { message_id = "start", type = consts.MSG_TYPE.USER, data = "original task", metadata = {} },
-        { message_id = "assistant", type = consts.MSG_TYPE.ASSISTANT, data = "working", metadata = {} },
+        { message_id = "start", date = "2026-01-01T00:00:00Z", type = consts.MSG_TYPE.USER, data = "original task", metadata = {} },
+        { message_id = "assistant", date = "2026-01-01T00:00:01Z", type = consts.MSG_TYPE.ASSISTANT, data = "working", metadata = {} },
     })
     local calls, ids, validated = {}, {}, {}
     for index = 1, 2 do
