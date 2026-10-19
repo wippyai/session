@@ -217,6 +217,10 @@ entries:
     source: file://context_transport_runtime_test.lua
     modules: [time, uuid, hash, sql, security]
     imports:
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      session_handlers: wippy.session.process:session_handlers
+      session_service: wippy.session:service
       test: wippy.test:test
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
@@ -224,6 +228,7 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
+      upstream: wippy.session.process:upstream
       relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run

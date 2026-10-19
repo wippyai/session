@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+* Preserve manual session names during automatic title generation. Running sessions publish both title paths through the existing owner using the stored title; renaming a stopped session persists without starting it.
 * Keep the originating user-request text in prompts after a mid-turn checkpoint, alongside the summary and newest tool results. Preserve user authority, avoid reloading summarized attachments, and keep later user turns distinct from the checkpointed request. Bound restored excerpts to 6000 UTF-8 bytes while retaining both ends, and place the original task before retained steering even when its anchor is unavailable. The resume note preserves later corrections and completed progress.
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.

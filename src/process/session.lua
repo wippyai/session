@@ -782,6 +782,14 @@ local function run(args: SessionArgs)
                 if type(notification.attention_context) == 'table' then
                     emit_attention_context(notification.attention_context)
                 end
+            elseif topic == consts.TOPICS.SESSION_UPDATED then
+                local changes = msg:payload():data()
+                if type(changes) == "table" then
+                    local refreshed, refresh_err = session_upstream:refresh_external(changes)
+                    if not refreshed then
+                        session_upstream:session_error("session_update_failed", tostring(refresh_err))
+                    end
+                end
             else
                 local payload_data = msg:payload():data()
                 local attention_handled = false

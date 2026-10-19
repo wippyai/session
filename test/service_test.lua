@@ -12,10 +12,13 @@ local wait_for_boot = require("wait_for_boot")
 
 local CONTRACT_ID = "wippy.session:session_service"
 local BINDING_ID = "wippy.session:service_binding"
-local TEST_ACTOR_ID = "session-service-test@wippy.local"
 
 local tracked_sessions = {}
 local tracked_contexts = {}
+
+local function test_actor_id()
+    return assert(security.actor()):id()
+end
 
 local function track_session(id)
     tracked_sessions[#tracked_sessions + 1] = id
@@ -70,7 +73,7 @@ local function open_binding()
     test.is_nil(def_err, "contract.get: " .. tostring(def_err))
     test.not_nil(def)
 
-    local actor = security.new_actor(TEST_ACTOR_ID, { source = "session_service_test" })
+    local actor = security.new_actor(test_actor_id(), { source = "session_service_test" })
     local scope, scope_err = security.named_scope("app:test_group")
     test.is_nil(scope_err, "security.named_scope: " .. tostring(scope_err))
     test.not_nil(scope)
@@ -86,9 +89,17 @@ end
 
 local function define_tests()
     test.describe("session service", function()
+        local original_upstream = service._upstream
+        local original_context_delete = context_repo.delete
+
+        after_each(function()
+            service._upstream = original_upstream
+            context_repo.delete = original_context_delete
+        end)
+
         before_all(function()
             wait_for_boot.run()
-            wait_for_boot.ensure_user(TEST_ACTOR_ID)
+            wait_for_boot.ensure_user(test_actor_id())
             cleanup()
         end)
 
@@ -99,7 +110,7 @@ local function define_tests()
 
             local result, err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id,
                 title = "Service session",
                 kind = "channel",
@@ -133,7 +144,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -148,7 +159,7 @@ local function define_tests()
 
             local result, err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = uuid.v7()
             })
 
@@ -158,7 +169,7 @@ local function define_tests()
             test.eq(result.primary_context_id, context_id)
             test.eq(result.session.status, consts.STATUS.IDLE)
 
-            local row, get_err = session_repo.get(session_id, TEST_ACTOR_ID)
+            local row, get_err = session_repo.get(session_id, test_actor_id())
             test.is_nil(get_err, "session get: " .. tostring(get_err))
             test.eq(row.status, consts.STATUS.IDLE)
         end)
@@ -167,7 +178,7 @@ local function define_tests()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -181,7 +192,7 @@ local function define_tests()
 
             local result, err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 reset_status = false
             })
 
@@ -190,11 +201,42 @@ local function define_tests()
             test.eq(result.session.status, consts.STATUS.RUNNING)
         end)
 
+        test.it("publishes a persisted service update to a mounted session", function()
+            local session_id, context_id = next_pair()
+            local created, create_err = service.ensure({
+                session_id = session_id,
+                user_id = test_actor_id(),
+                primary_context_id = context_id,
+            })
+            test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
+            test.is_true(created.created)
+
+            local event = nil
+            service._upstream = {
+                notify_external = function(id, changes)
+                    event = { session_id = id, changes = changes }
+                    return true
+                end,
+            }
+
+            local updated, update_err = service.update({
+                session_id = session_id,
+                updates = { title = "Updated by service" },
+            })
+
+            test.is_nil(update_err, "update: " .. tostring(update_err))
+            test.eq(updated.title, "Updated by service")
+            test.not_nil(event)
+            test.eq(event.session_id, session_id)
+            test.eq(event.changes.title, "Updated by service")
+            test.eq(event.changes.last_message_date, updated.last_message_date)
+        end)
+
         test.it("deletes the session and its service-owned primary context", function()
             local session_id, context_id = next_pair()
             local created, create_err = service.ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id
             })
             test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
@@ -202,7 +244,7 @@ local function define_tests()
 
             local deleted, delete_err = service.delete({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(delete_err, "delete: " .. tostring(delete_err))
             test.is_true(deleted.deleted)
@@ -210,7 +252,7 @@ local function define_tests()
 
             local missing_session, session_err = service.get({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(missing_session)
             test.contains(tostring(session_err), "Session not found")
@@ -220,13 +262,109 @@ local function define_tests()
             test.contains(tostring(context_err), "Context not found")
         end)
 
+        test.it("publishes a service deletion after session and owned context persistence", function()
+            local session_id, context_id = next_pair()
+            local created, create_err = service.ensure({
+                session_id = session_id,
+                user_id = test_actor_id(),
+                primary_context_id = context_id,
+            })
+            test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
+            test.is_true(created.created)
+
+            local event = nil
+            service._upstream = {
+                notify_external = function(id, changes)
+                    local session, get_err = session_repo.get(id, test_actor_id())
+                    test.is_nil(session)
+                    test.contains(tostring(get_err), "Session not found")
+                    local context, context_err = context_repo.get(context_id)
+                    test.is_nil(context)
+                    test.contains(tostring(context_err), "Context not found")
+                    event = { session_id = id, changes = changes }
+                    return true
+                end,
+            }
+
+            local deleted, delete_err = service.delete({
+                session_id = session_id,
+                user_id = test_actor_id(),
+            })
+
+            test.is_nil(delete_err, "delete: " .. tostring(delete_err))
+            test.is_true(deleted.deleted)
+            test.not_nil(event)
+            test.eq(event.session_id, session_id)
+            test.is_true(event.changes.deleted)
+        end)
+
+        test.it("completes owned context deletion before reporting a notification failure", function()
+            local session_id, context_id = next_pair()
+            local created, create_err = service.ensure({
+                session_id = session_id,
+                user_id = test_actor_id(),
+                primary_context_id = context_id,
+            })
+            test.is_nil(create_err, "initial ensure: " .. tostring(create_err))
+            test.is_true(created.created)
+            service._upstream = {
+                notify_external = function()
+                    return nil, "notification unavailable"
+                end,
+            }
+
+            local deleted, delete_err = service.delete({
+                session_id = session_id,
+                user_id = test_actor_id(),
+            })
+
+            test.is_nil(deleted)
+            test.eq(delete_err, "notification unavailable")
+            local session, session_err = session_repo.get(session_id, test_actor_id())
+            test.is_nil(session)
+            test.contains(tostring(session_err), "Session not found")
+            local context, context_err = context_repo.get(context_id)
+            test.is_nil(context)
+            test.contains(tostring(context_err), "Context not found")
+        end)
+
+        test.it("retains context deletion errors before publishing the session deletion", function()
+            local session_id, context_id = next_pair()
+            local created, create_err = service.ensure({
+                session_id = session_id,
+                user_id = test_actor_id(),
+                primary_context_id = context_id,
+            })
+            test.is_nil(create_err)
+            test.is_true(created.created)
+            local context_attempted = false
+            context_repo.delete = function(id)
+                test.eq(id, context_id)
+                context_attempted = true
+                return nil, "context deletion unavailable"
+            end
+            service._upstream = {
+                notify_external = function()
+                    test.is_true(context_attempted)
+                    return true
+                end,
+            }
+
+            local deleted, delete_err = service.delete({ session_id = session_id, user_id = test_actor_id() })
+
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
+            test.is_false(deleted.primary_context_deleted)
+            test.eq(deleted.primary_context_error, "context deletion unavailable")
+        end)
+
         test.it("routes service methods through the contract binding", function()
             local session_id, context_id = next_pair()
             local binding = open_binding()
 
             local result, err = binding:ensure({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_id = context_id,
                 title = "Contract session"
             })
@@ -242,7 +380,7 @@ local function define_tests()
 
             local row, get_err = binding:get({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(get_err, "binding get: " .. tostring(get_err))
             test.eq(row.title, "Updated by binding")
@@ -250,7 +388,7 @@ local function define_tests()
 
             local deleted, delete_err = binding:delete({
                 session_id = session_id,
-                user_id = TEST_ACTOR_ID
+                user_id = test_actor_id()
             })
             test.is_nil(delete_err, "binding delete: " .. tostring(delete_err))
             test.is_true(deleted.deleted)
@@ -263,7 +401,7 @@ local function define_tests()
 
             result, err = service.ensure({
                 session_id = uuid.v7(),
-                user_id = TEST_ACTOR_ID,
+                user_id = test_actor_id(),
                 primary_context_data = 42
             })
             test.is_nil(result)

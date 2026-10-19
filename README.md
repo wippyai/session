@@ -57,6 +57,11 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn.
 
+Manual renames and generated titles persist before notifying the live session.
+Title notifications publish through the existing session owner's inbox using the
+stored title. A stopped session can still be renamed without starting a process;
+its next open loads that name. Automatic generation only fills an empty title.
+
 When a checkpoint falls inside a turn, the next agent prompt retains the
 originating user-request text at user authority, followed by the checkpoint
 resume note and subsequent model/tool messages. Restored requests are limited to
