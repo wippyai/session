@@ -99,7 +99,7 @@ local function define_tests()
 
         before_all(function()
             wait_for_boot.run()
-            wait_for_boot.ensure_user(TEST_ACTOR_ID)
+            wait_for_boot.ensure_user(test_actor_id())
             cleanup()
         end)
 
