@@ -189,6 +189,13 @@ rewritten.
 
 ## Checkpoints and prompt caching
 
+The complete checkpoint continuation fix requires Agent 0.5.5 or later. Publish
+Agent 0.5.5 before publishing the Session release that carries this requirement:
+the session keeps the user's task across mid-turn checkpoints, while Agent labels
+per-step memory recall as background context. PostgreSQL installations also need
+Runtime v0.3.50a or later to preserve message timestamp precision when choosing
+checkpoint boundaries.
+
 When a checkpoint function or binding is configured, the session compares each
 model response's normalized `tokens.context_tokens` with
 `token_checkpoint_threshold`. It checks tool continuations too, and schedules
