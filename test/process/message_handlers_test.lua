@@ -1960,7 +1960,7 @@ local function define_tests()
             local ctx, captured, bus, steps, _interactions, _announced, restore = handoff_fixture()
             local pin = { model = "backup", provider_id = "p.b", provider_model = "b-1" }
             local router = ctx.agent_ctx:load_agent()
-            local original_router_step = router.step
+            local original_router_step = assert(router.step)
             router.step = function(self, builder, runtime_options)
                 local response = original_router_step(self, builder, runtime_options)
                 response.route_pin = pin
