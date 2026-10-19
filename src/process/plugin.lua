@@ -108,12 +108,17 @@ end
 
 local function finalize_exit(session_id: string, user_id: string, session_info: any, result: any, exit_error: any)
     local target_status = status_after_exit(session_info, result, exit_error)
+    local stored, read_err = session_repo.get(session_id, user_id)
+    -- Deleted sessions have no status or pending calls to recover. The owner
+    -- still releases its slot on EXIT, without publishing a phantom idle row.
+    if not stored and read_err == "Session not found" then
+        return nil, true, nil, nil, nil
+    end
     local recovery_err = nil
     if target_status == consts.STATUS.FAILED then
         local _, err = recover_session_calls(session_id)
         recovery_err = err
     end
-    local stored, read_err = session_repo.get(session_id, user_id)
     if not stored then
         return target_status, false, read_err or "Session was not found", recovery_err, nil
     end
@@ -1048,6 +1053,7 @@ local function run(args)
                         -- Update session status in database based on termination reason
                         local target_status, success, status_err, recovery_err, interaction =
                             finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error)
+                        if not target_status then err = "deleted" end
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err
@@ -1087,7 +1093,7 @@ local function run(args)
                                     consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
                             end
                             -- Send session status update first
-                            if success then
+                            if success and target_status then
                                 publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, {
                                     type = consts.UPSTREAM_TYPES.UPDATE,
                                     session_id = session_id,

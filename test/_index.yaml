@@ -42,6 +42,7 @@ entries:
     source: file://interruption_prompt_test.lua
     modules: [time, uuid, security, sql, json]
     imports:
+      session_service: wippy.session:service
       test: wippy.test:test
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
@@ -90,6 +91,7 @@ entries:
     source: file://interruption_prompt_test.lua
     modules: [time, uuid, security, sql, json]
     imports:
+      session_service: wippy.session:service
       test: wippy.test:test
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
@@ -107,6 +109,7 @@ entries:
     source: file://interruption_prompt_test.lua
     modules: [time, uuid, security, sql, json]
     imports:
+      session_service: wippy.session:service
       test: wippy.test:test
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo

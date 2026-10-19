@@ -9,6 +9,7 @@ local sessions = require('session_repo')
 local messages = require('message_repo')
 local consts = require('consts')
 local boot = require('wait_for_boot')
+local session_service = require('session_service')
 local relay_consts = require('relay_consts')
 
 local function define_tests(blocked_only, lifecycle_only)
@@ -82,8 +83,10 @@ local function define_tests(blocked_only, lifecycle_only)
         after_each(function()
             if plugin_pid and not exited[plugin_pid] then shutdown() end
             if hub_pid and not exited[hub_pid] then assert(process.cancel(hub_pid, '2s')) end
-            assert(sessions.delete(session_id))
-            assert(contexts.delete(context_id))
+            local _, delete_err = sessions.delete(session_id)
+            assert(not delete_err or delete_err == 'Session not found', tostring(delete_err))
+            local _, context_err = contexts.delete(context_id)
+            assert(not context_err or context_err == 'Context not found', tostring(context_err))
             local db = assert(sql.get('app:db'))
             local _, err = db:execute('DELETE FROM app_users WHERE user_id = $1', {actor_id})
             db:release()
@@ -146,6 +149,26 @@ local function define_tests(blocked_only, lifecycle_only)
             test.eq(durable, 1, 'boundary persists in the native history')
         end
         if lifecycle_only then
+            it('retires an owner deleted mid-call without a recovery warning or a replacement owner', function()
+                label = 'delete-during-turn'
+                start(nil)
+                send('Perform the tool.', 'work')
+                assert(session_service.delete({ session_id = session_id, user_id = actor_id }))
+                receive(function(_, event) return event.deleted == true end, '3s')
+                local closed = receive(function(topic, event)
+                    test.is_true(event.code ~= 'recovery_incomplete', 'deletion must not look like a failed live session')
+                    return topic == consts.TOPICS.SESSION_CLOSED
+                end, '3s')
+                test.eq(closed.reason, 'deleted')
+                test.eq(#closed.active_session_ids, 0)
+                test.is_nil(process.registry.lookup('session.' .. session_id))
+                test.eq(select(2, sessions.get(session_id)), 'Session not found')
+                local exit = receive(function(topic, event)
+                    return topic == 'exit' and event.from == plugin_pid
+                end, '3s')
+                test.is_nil(exit.result and exit.result.error)
+                test.eq(exit.result.value.reason, 'no_active_sessions')
+            end)
             it('settles a Stop-cancelled call live and in durable history', function()
                 label = 'cancelled-call-settlement'
                 start(nil)
