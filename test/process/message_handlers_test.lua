@@ -21,6 +21,8 @@ type PublicToolEvent = {
         call_id: string?,
         function_name: string?,
         error: string?,
+        outcome: string?,
+        status: string?,
     },
 }
 
@@ -64,6 +66,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         session_errors = {} :: { any },
         response_batches = {} :: { any },
         message_errors = {} :: { any },
+        message_updates = {} :: { any },
     }
 
     local empty_query = {
@@ -132,7 +135,9 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         },
         upstream = {
             response_beginning = function() end,
-            send_message_update = function() end,
+            send_message_update = function(_self, id, event_type, payload)
+                table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
+            end,
             invalidate_message = function() end,
             message_error = function(_self, id, code, message)
                 table.insert(captured.message_errors, { id = id, code = code, message = message })
@@ -214,6 +219,8 @@ local function define_tests()
             test.eq(#terminal, 1)
             test.eq(terminal[1].call_id, "cancel-1")
             test.eq(terminal[1].message_id, ids["cancel-1"])
+            test.eq(terminal[1].outcome, consts.FUNC_STATUS.CANCELLED, "live event uses the history field")
+            test.eq(terminal[1].status, consts.FUNC_STATUS.CANCELLED, "0.6.8 clients keep their field")
         end)
         it("emits no terminal cancellation event when durable settlement fails", function()
             local ctx = mock_ctx(fake_agent(nil))
@@ -1187,6 +1194,61 @@ local function define_tests()
             for _, call in ipairs(calls) do
                 test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
             end
+            test.eq(#captured.message_updates, 2)
+            for index, update in ipairs(captured.message_updates) do
+                test.eq(update.type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+                test.eq(update.payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(update.payload.outcome, consts.FUNC_STATUS.CANCELLED)
+                test.eq(update.payload.message_id, calls[index].id)
+                test.eq(update.payload.call_id, calls[index].metadata.call_id)
+                test.eq(update.id, calls[index].metadata.call_id)
+            end
+        end)
+
+        it("settles queued cancelled calls durably before public upstream events", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local result = assert(user_step(ctx))
+            local op = assert((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+            op.cancel_only = true
+            ctx.upstream.send_message_update = function(_self, id, event_type, payload)
+                local row = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1]
+                test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(payload.message_id, row.id)
+                test.eq(payload.status, consts.FUNC_STATUS.CANCELLED)
+                test.eq(payload.outcome, consts.FUNC_STATUS.CANCELLED)
+                table.insert(captured.message_updates, { id = id, type = event_type, payload = payload })
+            end
+            local settled, err = message_handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.is_true(settled.completed)
+            test.eq(#captured.message_updates, 1)
+            test.eq(captured.message_updates[1].type, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+        end)
+
+        it("keeps classified and validated private cancellations off the public upstream", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            local stored = {}
+            ctx.writer.update_message_meta = function(_self, id, metadata)
+                stored[id] = metadata
+                return true
+            end
+            local calls = {
+                { id = "public", name = "public" },
+                { id = "private", name = "private", type = consts.MSG_TYPE.PRIVATE_FUNCTION },
+                { id = "delegation", name = "delegation", type = consts.MSG_TYPE.DELEGATION },
+                { id = "validated-private", name = "validated-private" },
+            }
+            local ids = {}
+            for _, call in ipairs(calls) do ids[call.id] = "stored-" .. call.id end
+            local result, err = message_handlers.process_tools(ctx, {
+                cancel_only = true, tool_calls = calls, call_message_ids = ids,
+                validated_tools = { ["validated-private"] = { meta = { private = true } } },
+            })
+            test.is_nil(err)
+            test.is_true(result.completed)
+            for _, call in ipairs(calls) do test.eq(stored[ids[call.id]].status, consts.FUNC_STATUS.CANCELLED) end
+            test.eq(#captured.message_updates, 1)
+            test.eq(captured.message_updates[1].id, "public")
         end)
 
         it("stops the turn once the agent steps exceed max_turn_iterations", function()
@@ -1541,6 +1603,8 @@ local function define_tests()
             end
             test.eq(events[2].payload.call_id, "function")
             test.eq(events[2].payload.error, "tool failed")
+            test.is_nil(events[2].payload.outcome, "an ordinary error is not a cancellation")
+            test.is_nil(events[2].payload.status)
             for _, row in ipairs(captured.stored) do
                 test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
             end

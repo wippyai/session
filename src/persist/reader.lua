@@ -201,6 +201,15 @@ function session_reader:list_all_messages()
     return session._message_repo.list_all_by_session(self.session_id)
 end
 
+function session_reader:get_message(message_id)
+    local message, err = session._message_repo.get(message_id)
+    if err then return nil, err end
+    if not message or message.session_id ~= self.session_id then
+        return nil, "Message not found in session"
+    end
+    return message, nil
+end
+
 function session_reader:artifacts()
     local query = setmetatable({}, artifact_query)
     query._session_id = self.session_id

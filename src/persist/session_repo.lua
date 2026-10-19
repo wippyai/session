@@ -426,6 +426,31 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     return attention_context(enabled, next_revision, now, updated_by)
 end
 
+function session_repo.update_initial_title(session_id, title)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if not title or title == "" then
+        return nil, "Title cannot be empty"
+    end
+
+    local db, err = get_db()
+    if err then return nil, err end
+    local result
+    result, err = sql.builder.update("sessions")
+        :set("title", title)
+        :set("last_message_date", time.now():format(time.RFC3339))
+        :where("session_id = ?", session_id)
+        :where("(title IS NULL OR title = '')")
+        :run_with(db):exec()
+    db:release()
+    if err then return nil, "Failed to update initial title: " .. err end
+    if not result or type(result.rows_affected) ~= "number" then
+        return nil, "Missing initial title update result"
+    end
+    return result.rows_affected > 0
+end
+
 -- Update session metadata (title, meta, config, public_meta, status, last_message_date)
 function session_repo.update_session_meta(session_id, updates)
     if not session_id or session_id == "" then
