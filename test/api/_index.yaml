@@ -11,6 +11,7 @@ entries:
       suite: session
     source: file://external_session_events_test.lua
     imports:
+      upstream: wippy.session.process:upstream
       test: wippy.test:test
       rename_session: wippy.session.api:rename_session
       delete_session: wippy.session.api:delete_session

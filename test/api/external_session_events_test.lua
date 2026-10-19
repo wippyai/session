@@ -1,6 +1,7 @@
 local test = require("test")
 local rename = require("rename_session")
 local delete = require("delete_session")
+local upstream = require("upstream")
 
 local function response(result)
     return {
@@ -13,6 +14,7 @@ end
 local function define_tests()
     describe("external session mutations", function()
         local original = {
+            upstream_repo = upstream._session_repo,
             rename_http = rename._http,
             rename_security = rename._security,
             rename_writer = rename._session_writer,
@@ -24,6 +26,7 @@ local function define_tests()
         }
 
         after_each(function()
+            upstream._session_repo = original.upstream_repo
             rename._http = original.rename_http
             rename._security = original.rename_security
             rename._session_writer = original.rename_writer
@@ -67,6 +70,36 @@ local function define_tests()
             test.eq(result.status, 200)
             test.eq(result.event.session_id, "session-1")
             test.eq(result.event.changes.title, "Renamed")
+        end)
+
+        it("does not emit an older title after a later rename commits", function()
+            local result, stored_title, incoming_title, events = {}, "Initial", "A", {}
+            rename._http = {
+                STATUS = { OK = 200, BAD_REQUEST = 400, UNAUTHORIZED = 401, INTERNAL_ERROR = 500 },
+                CONTENT = { JSON = "application/json" },
+                response = function() return response(result) end,
+                request = function()
+                    local title = incoming_title
+                    return { body_json = function() return { session_id = "session-1", title = title } end }
+                end,
+            }
+            rename._security = { actor = function() return { id = function() return "actor-1" end } end }
+            rename._session_writer = { new = function() return {
+                update_title = function(_, title) stored_title = title; return true end,
+            } end }
+            upstream._session_repo = { get = function() return { title = stored_title } end }
+            local owner = upstream.new("session-1")
+            owner.update_session = function(_, update) events[#events + 1] = update.title end
+            rename._upstream = { notify_external = function(_, changes)
+                -- Request A committed but was delayed before publishing. Request B
+                -- commits and publishes first; then request A resumes publishing.
+                if changes.title == "A" then incoming_title = "B"; rename.handler() end
+                owner:refresh_external(changes)
+                return true
+            end }
+            rename.handler()
+            test.eq(stored_title, "B")
+            test.eq(events[#events], stored_title, "the owner must publish the authoritative title")
         end)
 
         it("publishes a deletion only after the session persists as deleted", function()

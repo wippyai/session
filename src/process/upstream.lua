@@ -5,7 +5,7 @@ type UpstreamPayload = {
     session_id: string?,
 }
 
-local session_upstream = {}
+local session_upstream = { _session_repo = require("session_repo") }
 session_upstream.__index = session_upstream
 
 local function is_not_found(err)
@@ -33,6 +33,26 @@ function session_upstream.notify_external(session_id, changes)
     if not session_pid then return true end
 
     return process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
+end
+
+-- Called only by the session owner. Notifications invalidate fields; their
+-- values may already be stale by the time this mailbox message is handled.
+function session_upstream:refresh_external(changes)
+    local current, err = session_upstream._session_repo.get(self.session_id)
+    if not current then
+        if err == "Session not found" then
+            self:update_session({ deleted = true })
+            return true
+        end
+        return nil, err or "Failed to reload session"
+    end
+    local update = {}
+    for _, key in ipairs({ "title", "status", "kind", "public_meta", "last_message_date" }) do
+        if changes[key] ~= nil then update[key] = current[key] end
+    end
+    -- Never forward private metadata, config or caller-supplied row contents.
+    self:update_session(update)
+    return true
 end
 
 -- Topic generation methods --

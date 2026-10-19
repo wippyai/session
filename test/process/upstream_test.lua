@@ -13,6 +13,32 @@ end
 
 local function define_tests()
     describe("existing session response protocol", function()
+        local original_repo = upstream._session_repo
+        after_each(function() upstream._session_repo = original_repo end)
+
+        it("settles delayed updates as deleted and keeps private row fields out of events", function()
+            local sender, events = fixture()
+            upstream._session_repo = { get = function()
+                return { title = "latest", meta = { secret = "private" }, config = { model = "private" } }
+            end }
+            test.is_true(sender:refresh_external({ title = "old", meta = {}, config = {} }))
+            test.eq(events[1].data.title, "latest")
+            test.is_nil(events[1].data.meta)
+            test.is_nil(events[1].data.config)
+            upstream._session_repo = { get = function() return nil, "Session not found" end }
+            test.is_true(sender:refresh_external({ title = "old" }))
+            test.is_true(events[2].data.deleted)
+        end)
+
+        it("does not publish stale values when reloading the row fails", function()
+            local sender, events = fixture()
+            upstream._session_repo = { get = function() return nil, "database unavailable" end }
+            local ok, err = sender:refresh_external({ title = "old" })
+            test.is_nil(ok)
+            test.eq(err, "database unavailable")
+            test.eq(#events, 0)
+        end)
+
         it("confirms a persisted message through one correlated receipt", function()
             local sender, events = fixture()
             sender:message_received("m1", "server text", { "file1" }, { state = "pending" }, "r1")

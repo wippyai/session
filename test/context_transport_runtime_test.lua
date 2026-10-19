@@ -145,12 +145,21 @@ local function define_tests()
             local topic = consts.TOPIC_PREFIXES.SESSION .. session
             receive(topic, pid)
 
+            assert(sessions.update_session_meta(session, { title = 'Renamed externally' }))
             assert(upstream.notify_external(session, { title = 'Renamed externally' }))
 
             local update = receive(topic, pid)
             test.eq(update.type, consts.UPSTREAM_TYPES.UPDATE)
             test.eq(update.session_id, session)
             test.eq(update.title, 'Renamed externally')
+
+            -- An earlier rename notification arrives after the newer one has
+            -- committed and been published. It must not restore the old title.
+            assert(sessions.update_session_meta(session, { title = 'Newest title' }))
+            assert(upstream.notify_external(session, { title = 'Newest title' }))
+            test.eq(receive(topic, pid).title, 'Newest title')
+            assert(upstream.notify_external(session, { title = 'Renamed externally' }))
+            test.eq(receive(topic, pid).title, 'Newest title')
         end)
         it('hydrates once and acknowledges the original server message after worker restart and stage cleanup', function()
             for _, referenced in ipairs({ false, true }) do
