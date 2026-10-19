@@ -408,5 +408,43 @@ answers, and how an answer is admitted into the conversation, and
 for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
 from the browser side.
 
+## Upgrading to 0.7.0
+
+Session 0.7.0 adds Session Forms. Check these points before you upgrade.
+
+- **New requirement `ui_server`.** The module now serves the `wippy-form` and
+  `wippy-form-answers` bundles from an HTTP server. The default is
+  `app:gateway`. If your HTTP server has another name, the static routes
+  (`/wippy-session-forms` and `/wippy-session-form-answers`) do not work until
+  you set the parameter on the dependency:
+
+  ```yaml
+  - name: dep.wippy.session
+    kind: ns.dependency
+    component: wippy/session
+    parameters:
+      - name: ui_server
+        value: app:your_server
+  ```
+
+- **Web Host 1.0.65 or later.** The form card needs the Host's artifact-state
+  API. An older Host shows the questions disabled and cannot send answers.
+- **Other users' artifacts answer 404, not 403.** `GET /artifact/{id}` and
+  `GET /artifact/{id}/content` answer an artifact that belongs to someone else
+  exactly like a missing one. A client that reads the 403 must read the 404.
+- **An enforced Stop leaves the session idle.** When a turn does not stop in
+  time and the plugin has to cancel the session process, the session is
+  stored as `idle` (it was `failed`), and Send stays enabled. Form answers
+  accepted during that turn are admitted without starting a new turn.
+- **A stored `running` status reads as `idle`** while no session process is
+  registered for the session. This is what the API returns for a turn that a
+  crash or a restart cut off. The stored row is not changed.
+- **Dates are stored and returned in UTC.** New session and message dates use
+  UTC with a `Z` suffix. Rows written by older versions keep their stored
+  text, so a client must read each date with its own offset.
+- **`reader:list_pending_inputs` is removed.** Use
+  `message_repo.list_pending_inputs(session_id)` if you need the pending
+  steering rows.
+
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases
