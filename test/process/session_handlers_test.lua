@@ -138,6 +138,109 @@ local function mock_checkpoint_ctx(config)
 end
 
 local function define_tests()
+    describe("automatic title admission", function()
+        after_each(function() session_handlers._funcs = nil end)
+
+        local function title_context(initial, during_generation)
+            local state = { title = initial, generated = 0, writes = 0, announcements = 0 }
+            local cached = initial
+            local ctx = {
+                session_id = "title-race",
+                config = { title_function_id = "app:title" },
+                reader = {
+                    state = function() return { title = cached } end,
+                    get_full_context = function() return {} end,
+                    reset = function() cached = state.title; return true end,
+                },
+                writer = {
+                    update_title = function(_, title)
+                        state.title = title
+                        state.writes = state.writes + 1
+                        return true
+                    end,
+                    update_initial_title = function(_, title)
+                        if state.title ~= "" then return false end
+                        state.title = title
+                        state.writes = state.writes + 1
+                        return true
+                    end,
+                },
+                upstream = { update_session = function()
+                    state.announcements = state.announcements + 1
+                end },
+            }
+            session_handlers._funcs = { new = function()
+                return {
+                    with_context = function(self) return self end,
+                    call = function()
+                        state.generated = state.generated + 1
+                        if during_generation then during_generation(state) end
+                        return { title = "Automatic title", tokens = {} }
+                    end,
+                }
+            end }
+            return ctx, state
+        end
+
+        it("preserves a manual rename committed during title generation", function()
+            local ctx, state = title_context("", function(row) row.title = "My title" end)
+            local result, err = session_handlers.generate_title(ctx, {})
+            test.is_nil(err)
+            test.eq(state.title, "My title")
+            test.eq(state.generated, 1)
+            test.eq(state.writes, 0)
+            test.eq(state.announcements, 0)
+            test.is_true(result.skipped)
+        end)
+
+        it("does not generate a replacement for an existing title", function()
+            local ctx, state = title_context("Existing title")
+            local result, err = session_handlers.generate_title(ctx, {})
+            test.is_nil(err)
+            test.eq(state.title, "Existing title")
+            test.eq(state.generated, 0)
+            test.eq(state.writes, 0)
+            test.eq(state.announcements, 0)
+            test.is_true(result.skipped)
+        end)
+
+        it("stores and announces the initial automatic title once", function()
+            local ctx, state = title_context("")
+            local result, err = session_handlers.generate_title(ctx, {})
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(state.title, "Automatic title")
+            test.eq(state.generated, 1)
+            test.eq(state.writes, 1)
+            test.eq(state.announcements, 1)
+        end)
+
+        it("does not announce a rejected persistence write", function()
+            local ctx, state = title_context("")
+            ctx.writer.update_initial_title = function() return nil, "Storage unavailable" end
+            local result, err = session_handlers.generate_title(ctx, {})
+            test.is_nil(result)
+            test.eq(err, "Storage unavailable")
+            test.eq(state.title, "")
+            test.eq(state.announcements, 0)
+        end)
+
+        it("does not announce a title superseded during the reader refresh", function()
+            local ctx, state = title_context("")
+            local reset = ctx.reader.reset
+            ctx.reader.reset = function()
+                state.title = "Manual during refresh"
+                return reset()
+            end
+            local result, err = session_handlers.generate_title(ctx, {})
+            test.is_nil(err)
+            test.eq(state.title, "Manual during refresh")
+            test.eq(state.writes, 1)
+            test.eq(state.announcements, 0)
+            test.is_true(result.skipped)
+        end)
+    end)
+
     describe("session_handlers config normalization", function()
         it("agent_change tolerates a missing live ctx.config", function()
             local ctx, captured = mock_ctx({
@@ -667,7 +770,7 @@ local function define_tests()
         it("returns a failed reader refresh after storing a generated title", function()
             local ctx = mock_checkpoint_ctx({ title_function_id = "app:title" })
             local stored, announced
-            ctx.writer.update_title = function(_self, title) stored = title; return true end
+            ctx.writer.update_initial_title = function(_self, title) stored = title; return true end
             ctx.upstream = { update_session = function(_self, payload) announced = payload.title end }
             ctx.reader.reset = function() return nil, "Session not found during reset" end
             session_handlers._funcs = {
@@ -684,7 +787,7 @@ local function define_tests()
             test.is_nil(result)
             test.contains(tostring(err), "Session not found during reset")
             test.eq(stored, "Stored title")
-            test.eq(announced, "Stored title")
+            test.is_nil(announced)
         end)
 
         it("returns a failed reader refresh after recording the checkpoint", function()
