@@ -2,6 +2,7 @@ import type { Ref } from 'vue'
 import type { FormState } from '../lib/definition'
 import { on } from '@wippy-fe/proxy'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { normalizeHostAnswers } from '../lib/answers'
 import { hostExport } from '../lib/host-proxy'
 import { LOAD_FAILED_MESSAGE } from '../lib/messages'
 
@@ -89,7 +90,7 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       const next = await artifactState(id).get()
       if (myGeneration !== generation)
         return
-      state.value = next
+      state.value = { ...next, data: normalizeHostAnswers(next.data) }
       status.value = 'loaded'
       errorMessage.value = null
       reloadError.value = null

@@ -49,7 +49,7 @@ function N(t, e) {
   const s = I(e);
   s && y(t, s, "@wippy-fe/css-variables-bridge");
 }
-function H(t, e) {
+function x(t, e) {
   const i = (e ?? T).map(async (r) => {
     const n = w[r];
     if (!n)
@@ -69,7 +69,7 @@ function H(t, e) {
     }
   });
 }
-function j(t, e) {
+function H(t, e) {
   const s = document.createElement("style");
   s.textContent = e, t.appendChild(s);
 }
@@ -82,7 +82,7 @@ function y(t, e, s) {
   const i = document.createElement("style");
   i.setAttribute("role", s), i.textContent = e, t.appendChild(i);
 }
-function x(t, e) {
+function j(t, e) {
   y(t, e, "@wippy-fe/custom-css");
 }
 function U(t) {
@@ -327,7 +327,7 @@ var F = class {
       if (e)
         i = this._container;
       else {
-        this.onInit(s), t.inlineCss && j(s, t.inlineCss);
+        this.onInit(s), t.inlineCss && H(s, t.inlineCss);
         try {
           const h = f?.theming, u = O(
             h?.global?.cssVariables,
@@ -340,10 +340,10 @@ var F = class {
           try {
             const h = f?.theming, u = [h?.global?.customCSS, h?.children?.customCSS].filter(Boolean).join(`
 `);
-            u && x(s, u);
+            u && j(s, u);
           } catch {
           }
-        (t.hostCssKeys === void 0 || t.hostCssKeys.length > 0) && H(s, t.hostCssKeys), i = document.createElement("div"), i.setAttribute("data-wippy-theme-root", "");
+        (t.hostCssKeys === void 0 || t.hostCssKeys.length > 0) && x(s, t.hostCssKeys), i = document.createElement("div"), i.setAttribute("data-wippy-theme-root", "");
         const a = t.containerClasses ?? [];
         a.length > 0 && i.classList.add(...a), s.appendChild(i), this._container = i, C(v);
       }
@@ -421,10 +421,18 @@ var F = class {
   }
   /**
    * Extract text from a child `<template data-type="...">` element.
-   * Uses `.content.textContent` since `<template>` stores content in a DocumentFragment.
+   *
+   * A template keeps its children in one of two places. Parsed HTML (page
+   * markup, `innerHTML`) puts them in `template.content`, a DocumentFragment.
+   * DOM APIs add them as the template element's own child nodes and leave
+   * `template.content` empty: that is how a Vue SFC sets
+   * `<template data-type="...">{{ text }}</template>`. The content fragment is
+   * read first, then the element's own children. Only text is returned, never
+   * markup, in both cases.
    */
   _extractContent(t) {
-    return this.querySelector(`template[data-type="${t}"]`)?.content.textContent?.trim() ?? null;
+    const e = this.querySelector(`template[data-type="${t}"]`);
+    return e ? e.content.textContent?.trim() || e.textContent?.trim() || "" : null;
   }
   /** Called when child `<template>` content changes. Override to update framework state. */
   onContentChanged(t) {

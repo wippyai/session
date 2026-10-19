@@ -355,6 +355,35 @@ describe('WippyForm: focus after a successful submit', () => {
   })
 })
 
+describe('WippyForm: a replayed submit that reports the current delivery', () => {
+  const lines = [
+    ['pending', 'Submitted. Waiting for the assistant.'],
+    ['running', 'The assistant is reading your answer.'],
+    ['interrupted', 'The assistant stopped before answering. Send a message to continue.'],
+  ] as const
+
+  it.each(lines)('shows the summary message for a %s delivery', async (delivery, text) => {
+    // The reload after acceptance never settles, so the card keeps the state
+    // built from the submit response.
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(formState())
+      .mockReturnValue(new Promise(() => {}))
+    const submitFn = vi.fn().mockResolvedValue(acceptedResponse({ delivery, replayed: true }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+
+    const wrapper = mountWippyForm({ formVersion: 1, definition: choiceDefinition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('.w-form__option').trigger('click')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(submitFn).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.w-form__status').text()).toContain(text)
+  })
+})
+
 describe('WippyForm: answered elsewhere', () => {
   function loseTheRace() {
     const getFn = vi.fn()

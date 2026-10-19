@@ -32,8 +32,11 @@ export interface SubmitBanner {
  * The brand the Host's `ArtifactStateError` carries on every instance. It is
  * read from the global symbol registry, so it matches an error thrown by any
  * bundle's copy of the Host's proxy, which `instanceof` would not. The proxy
- * version this package builds against does not export `isArtifactStateError`
- * yet, so the brand is checked here.
+ * exports `isArtifactStateError` since 0.0.65, but a Host with an older proxy
+ * does not. A named import of it would fail when the module is linked, and the
+ * component would crash instead of showing its "needs a newer Web Host"
+ * notice, so the brand is checked here, as `hostExport` does for
+ * `artifactState`.
  */
 const ARTIFACT_STATE_ERROR_BRAND = Symbol.for('wippy.artifactStateError')
 

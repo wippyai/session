@@ -5,6 +5,8 @@
  * describe the data.
  */
 
+import type { ArtifactFormDelivery } from '@wippy-fe/proxy'
+
 export interface FormFieldOption {
   value: string
   label: string
@@ -69,7 +71,7 @@ export interface FormState {
   data: FormAnswers | null
   submitted_at: string | null
   answer_message_id: string | null
-  delivery: null | 'pending' | 'running' | 'complete' | 'interrupted'
+  delivery: ArtifactFormDelivery | null
 }
 
 /** POST `/artifact/{id}/state` request body. */
@@ -89,8 +91,8 @@ export interface SubmitAccepted {
   content_version: number
   status: 'idle'
   late: boolean
-  /** `complete` only on a replay of an answer the session already admitted. */
-  delivery: 'pending' | 'complete'
+  /** `pending` for a new answer. An exact replay reports the current delivery, which can be any of the four values. */
+  delivery: ArtifactFormDelivery
   replayed: boolean
 }
 

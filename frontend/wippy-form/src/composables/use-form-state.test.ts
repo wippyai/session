@@ -22,6 +22,20 @@ function mountHarness(artifactId: string | null) {
 
 beforeEach(resetProxyMock)
 
+describe('useFormState: stored answers at the read boundary', () => {
+  it('keeps a noted answer and turns a { value } answer without a note into the plain value', async () => {
+    const stored = formState({ status: 'idle', delivery: 'complete', data: {} })
+    const getFn = vi.fn().mockResolvedValue({ ...stored, data: { f1: { value: 'a', note: 'why' }, f2: { value: 'b' }, f3: { other: 'mine' } } })
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+
+    const wrapper = mountHarness('artifact-1')
+    await flushPromises()
+
+    const loaded = (wrapper.vm as unknown as { state: FormState }).state
+    expect(loaded.data).toEqual({ f1: { value: 'a', note: 'why' }, f2: 'b', f3: { other: 'mine' } })
+  })
+})
+
 describe('useFormState: background reload vs first load', () => {
   it('only sets status to "loading" for the artifact\'s first load, not a later background reload', async () => {
     const getFn = vi.fn().mockResolvedValue(formState())

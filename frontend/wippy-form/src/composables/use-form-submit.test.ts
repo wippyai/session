@@ -1,4 +1,6 @@
-import type { FormAnswers, FormState, SubmitAccepted, SubmitEnvelope, SubmitResult } from '../lib/definition'
+import type { ArtifactStateClient } from '@wippy-fe/proxy'
+import type { FormAnswers, SubmitAccepted, SubmitEnvelope } from '../lib/definition'
+import type { Mock } from 'vitest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 import { acceptedResponse } from '../test-support/fixtures'
@@ -7,11 +9,8 @@ import { artifactStateMock, resetProxyMock, setArtifactStateExport } from '../te
 import { RETRY_DELAY_MS, useFormSubmit } from './use-form-submit'
 
 /** `submit()` never calls `.get`, but the proxy type requires it. */
-function artifactClient(submit: ReturnType<typeof vi.fn>) {
-  return { get: vi.fn(), submit } as unknown as {
-    get: () => Promise<FormState>
-    submit: (envelope: SubmitEnvelope) => Promise<SubmitResult>
-  }
+function artifactClient(submit: Mock<ArtifactStateClient['submit']>): ArtifactStateClient {
+  return { get: vi.fn(), submit }
 }
 
 const answersA: FormAnswers = { f1: 'a' }
@@ -21,7 +20,7 @@ beforeEach(resetProxyMock)
 
 describe('useFormSubmit: request id issuance', () => {
   it('reuses the same request_id across attempts when the answers are unchanged', async () => {
-    const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
+    const submitFn = vi.fn<ArtifactStateClient['submit']>().mockRejectedValue(hostError(409, 'request_conflict'))
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
@@ -37,7 +36,7 @@ describe('useFormSubmit: request id issuance', () => {
   })
 
   it('issues a new request_id once the answers change', async () => {
-    const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
+    const submitFn = vi.fn<ArtifactStateClient['submit']>().mockRejectedValue(hostError(409, 'request_conflict'))
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
@@ -52,7 +51,7 @@ describe('useFormSubmit: request id issuance', () => {
   })
 
   it('resets identity after a successful submit, so a later identical attempt gets a fresh request_id', async () => {
-    const submitFn = vi.fn()
+    const submitFn = vi.fn<ArtifactStateClient['submit']>()
       .mockResolvedValueOnce(acceptedResponse())
       .mockRejectedValueOnce(hostError(409, 'request_conflict'))
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
@@ -71,7 +70,7 @@ describe('useFormSubmit: request id issuance', () => {
 
 describe('useFormSubmit: outcomes', () => {
   it('returns fieldErrors/formErrors for a 422 rejection, with no retry', async () => {
-    const submitFn = vi.fn().mockRejectedValue(
+    const submitFn = vi.fn<ArtifactStateClient['submit']>().mockRejectedValue(
       hostError(422, undefined, {
         errors: { f1: [{ code: 'required', message: 'Required' }] },
         formErrors: [{ code: 'stale', message: 'Stale' }],
@@ -92,7 +91,7 @@ describe('useFormSubmit: outcomes', () => {
   it('retries exactly once, with the same request_id, for an uncertain (no-status) failure', async () => {
     vi.useFakeTimers()
     try {
-      const submitFn = vi.fn()
+      const submitFn = vi.fn<ArtifactStateClient['submit']>()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
         .mockResolvedValueOnce(acceptedResponse())
       artifactStateMock().mockReturnValue(artifactClient(submitFn))
@@ -116,7 +115,7 @@ describe('useFormSubmit: outcomes', () => {
   })
 
   it('does not retry a definite failure such as a 500', async () => {
-    const submitFn = vi.fn().mockRejectedValue(hostError(500))
+    const submitFn = vi.fn<ArtifactStateClient['submit']>().mockRejectedValue(hostError(500))
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
@@ -129,7 +128,7 @@ describe('useFormSubmit: outcomes', () => {
   })
 
   it('returns the documented message and calls nothing when there is no artifact id', async () => {
-    const submitFn = vi.fn()
+    const submitFn = vi.fn<ArtifactStateClient['submit']>()
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>(null)
@@ -146,7 +145,7 @@ describe('useFormSubmit: exhausted-retry copy', () => {
   it('does not say "Retrying…" once the one automatic retry has also failed with no response', async () => {
     vi.useFakeTimers()
     try {
-      const submitFn = vi.fn()
+      const submitFn = vi.fn<ArtifactStateClient['submit']>()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
       artifactStateMock().mockReturnValue(artifactClient(submitFn))
@@ -174,7 +173,7 @@ describe('useFormSubmit: retry outcome mapping', () => {
   it('maps a 422 on the retry attempt itself to field errors, not a generic message', async () => {
     vi.useFakeTimers()
     try {
-      const submitFn = vi.fn()
+      const submitFn = vi.fn<ArtifactStateClient['submit']>()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
         .mockRejectedValueOnce(hostError(422, undefined, {
           errors: { f1: [{ code: 'required', message: 'Required' }] },
@@ -201,7 +200,7 @@ describe('useFormSubmit: retry outcome mapping', () => {
   it('does not force retryable=true for a definite (non-uncertain) failure on the retry attempt', async () => {
     vi.useFakeTimers()
     try {
-      const submitFn = vi.fn()
+      const submitFn = vi.fn<ArtifactStateClient['submit']>()
         .mockRejectedValueOnce(hostError(undefined, 'network_error'))
         .mockRejectedValueOnce(hostError(409, 'request_conflict'))
       artifactStateMock().mockReturnValue(artifactClient(submitFn))
@@ -229,7 +228,7 @@ describe('useFormSubmit: rebind safety', () => {
   it('drops a result that resolves after the artifact id changed mid-flight', async () => {
     let resolveSubmit: ((r: SubmitAccepted) => void) | undefined
     const pending = new Promise<SubmitAccepted>((resolve) => { resolveSubmit = resolve })
-    const submitFn = vi.fn().mockReturnValue(pending)
+    const submitFn = vi.fn<ArtifactStateClient['submit']>().mockReturnValue(pending)
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
@@ -249,7 +248,7 @@ describe('useFormSubmit: rebind safety', () => {
   })
 
   it('resets request-id identity once the artifact id changes', async () => {
-    const submitFn = vi.fn().mockRejectedValue(hostError(409, 'request_conflict'))
+    const submitFn = vi.fn<ArtifactStateClient['submit']>().mockRejectedValue(hostError(409, 'request_conflict'))
     artifactStateMock().mockReturnValue(artifactClient(submitFn))
 
     const artifactId = ref<string | null>('artifact-1')
