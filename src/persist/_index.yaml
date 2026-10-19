@@ -20,6 +20,7 @@ entries:
       - json
       - security
     imports:
+      checkpoint_repo: wippy.session.persist:checkpoint_repo
       session_repo: wippy.session.persist:session_repo
       message_repo: wippy.session.persist:message_repo
       artifact_repo: wippy.session.persist:artifact_repo
@@ -31,6 +32,15 @@ entries:
     kind: library.lua
     meta:
       comment: Atomic persistence of a session checkpoint and its compact request
+    source: file://checkpoint_repo.lua
+    modules: [sql, json, time]
+    imports:
+      consts: wippy.session:consts
+
+  - name: checkpoint_repo
+    kind: library.lua
+    meta:
+      comment: Atomic persistence of a session checkpoint
     source: file://checkpoint_repo.lua
     modules: [sql, json, time]
     imports:

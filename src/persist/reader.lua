@@ -212,6 +212,15 @@ function session_reader:get_behavior_call(message_id)
     return message
 end
 
+function session_reader:get_message(message_id)
+    local message, err = session._message_repo.get(message_id)
+    if err then return nil, err end
+    if not message or message.session_id ~= self.session_id then
+        return nil, "Message not found in session"
+    end
+    return message, nil
+end
+
 function session_reader:artifacts()
     local query = setmetatable({}, artifact_query)
     query._session_id = self.session_id

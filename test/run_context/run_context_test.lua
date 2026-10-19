@@ -73,6 +73,7 @@ end
 
 local function setup_session()
     wait_for_boot.run()
+    wait_for_boot.ensure_user(TEST_ACTOR_ID)
     cleanup()
 
     local context_json, encode_err = json.encode({

@@ -57,6 +57,37 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn.
 
+Manual renames and generated titles persist before notifying the live session.
+Title notifications publish through the existing session owner's inbox using the
+stored title. A stopped session can still be renamed without starting a process;
+its next open loads that name. Automatic generation only fills an empty title.
+
+When a checkpoint falls inside a turn, the next agent prompt retains the
+originating user-request text at user authority, followed by the checkpoint
+resume note and subsequent model/tool messages. Restored requests are limited to
+6000 UTF-8 bytes, including an omission marker when needed; excerpts retain both
+ends. The original request and resume note precede retained steering even when
+its original anchor is unavailable. Later corrections take precedence, and
+completed work stays completed. The checkpoint summary covers
+earlier progress and attachments; restoring the request does not reload those
+attachments. A later ordinary user message starts its own turn and prevents
+restoring the previous request. Pending steering cannot replace the active task.
+
+Stop commits a developer message in conversation history together with its
+interaction state and any pending-input rollback. The message tells the model
+that the preceding turn is cancelled and subsequent user messages are new
+requests. Recovery persists an interruption message before accepting input
+when the preceding turn does not finish, including when no assistant response
+exists. Reopening preserves an existing boundary without duplicating it. Positional
+message metadata requires the LLM companion in version 0.5.7 or later.
+
+Shutdown, user close, inactivity and session-limit eviction finish at the active
+turn boundary. They preserve the in-flight model step, tools and continuation;
+only explicit Stop interrupts the turn. Reconnection cancels a pending disconnect
+finish. Cancelled public calls persist their cancelled status before emitting a
+`function_error` update with `outcome = cancelled` and the deprecated
+`status = cancelled`; private and delegation calls remain private.
+
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
 for Stop, keep explicit false values, and ignore older revisions. Servers
@@ -123,9 +154,14 @@ Retiring children occupy their live session slots until EXIT. A new session at
 capacity receives `session_limit_reached` and can be retried after a child exits;
 reopening an existing child needs no additional slot.
 
-Cancelled public tools emit a terminal function-error event after their outcome
-is stored. History keeps `cancelled` in storage and exposes `status: error` with
-`outcome: cancelled` to existing clients, so reloads show a settled result.
+Cancelled public tools emit a terminal `function_error` event after their
+outcome is stored. The event carries `outcome: cancelled`, the same field that
+history uses, so clients read one field in both places. It also keeps the
+0.6.8 field `status: cancelled` for clients that already read it; that field is
+deprecated. History keeps `cancelled` in storage and exposes `status: error`
+with `outcome: cancelled`, so old and new clients show a settled result after a
+reload. Stop, a failed turn, an agent handoff and a command-bus failure cancel
+calls this way. Private and delegation calls send no event.
 
 ## Tool feedback and loop limits
 
@@ -201,9 +237,11 @@ refs and idempotent writes, not rely on a final `deactivate` callback.
 `memory.compact = true` persists a request that bypasses the token threshold,
 not an explicit disable or a missing provider. False is not cancellation.
 When a proposal also changes configuration, requested compaction captures the
-committed agent/provider, not the old response's settings. An agent handoff
-ends the old turn; accepted steering and compact requests remain persisted for
-the next user turn, without automatically dispatching the replacement agent.
+committed agent/provider, not the old response's settings. An agent handoff continues the current turn through the canonical replacement-agent
+continuation after the preceding tool results settle. Accepted steering reaches
+the new agent once; compaction uses the committed target's provider and options.
+An explicit Stop suppresses that continuation and keeps unapplied steering for
+the next user-started turn.
 Summary replacement, history anchor, audit metadata and request consumption
 commit in one transaction; failed writes retain the previous usable history.
 This does not install a long-term memory provider or a loop policy. Sessions

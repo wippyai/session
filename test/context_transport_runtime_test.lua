@@ -10,11 +10,18 @@ local messages = require('message_repo')
 local attachments = require('context_attachments')
 local staging = require('context_staging_repo')
 local consts = require('consts')
+local upstream = require('upstream')
 local boot = require('wait_for_boot')
+local session_service = require('session_service')
+local reader = require('reader')
+local writer = require('writer')
+local handlers = require('session_handlers')
+local session_service = require('session_service')
 
 local function define_tests()
     describe('Context transport real process and SQL lifecycle', function()
         local workers, fixtures = {}, {}
+        local original_funcs = handlers._funcs
         local function receive(topic, from, request_id)
             local deadline = time.after('3s')
             local inbox, events = process.inbox(), process.events()
@@ -30,10 +37,12 @@ local function define_tests()
                 if msg:topic() == topic and (not from or msg:from() == from) and (not request_id or data.request_id == request_id) then return data, msg:from() end
             end
         end
-        local function fixture()
-            local actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+        local function fixture(title)
+            local actor = assert(security.actor()):id()
+            local context_id, session = uuid.v7(), uuid.v7()
+            boot.ensure_user(actor)
             assert(contexts.create(context_id, 'primary', 'Context transport lifecycle'))
-            assert(sessions.create(session, actor, context_id, 'Transport lifecycle', 'test'))
+            assert(sessions.create(session, actor, context_id, title or 'Transport lifecycle', 'test'))
             table.insert(fixtures, { session = session, context_id = context_id })
             return actor, session
         end
@@ -89,6 +98,7 @@ local function define_tests()
         end
         before_all(function() boot.run() end)
         after_each(function()
+            handlers._funcs = original_funcs
             for pid, entry in pairs(workers) do
                 process.send(pid, entry == 'app:context_transport_worker' and 'context_worker_stop' or consts.TOPICS.FINISH_AND_EXIT, {})
             end
@@ -100,6 +110,37 @@ local function define_tests()
             end
             for _, fixture in ipairs(fixtures) do sessions.delete(fixture.session); contexts.delete(fixture.context_id) end
             fixtures = {}
+        end)
+        it('preserves the previous checkpoint and summary when storing the new summary fails', function()
+            local actor, session = fixture()
+            local w = assert(writer.new(session))
+            local user = assert(w:add_message(consts.MSG_TYPE.USER, 'Complete the document task.', {}))
+            local old = assert(w:add_message(consts.MSG_TYPE.ASSISTANT, 'Earlier progress.', { source_id = user }))
+            assert(w:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, old))
+            assert(w:add_session_context(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY, 'Previous committed summary.'))
+            local next_anchor = assert(w:add_message(consts.MSG_TYPE.ASSISTANT, 'More progress.', { source_id = user }))
+            handlers._funcs = { new = function()
+                return { with_context = function(self) return self end,
+                    call = function() return { summary = 'New summary.' } end }
+            end }
+            -- Duplicate an existing non-summary primary key: the insert fails after
+            -- deleting the old summary inside the checkpoint transaction.
+            local note_id = assert(w:add_session_context('note', 'Keep this note.'))
+            local original_repo = writer._checkpoint_repo
+            w.commit_checkpoint = function(self, op, summary, metadata)
+                return original_repo.commit(self.session_id, self.user_id, op, summary, metadata, note_id)
+            end
+            local ctx = { session_id = session, config = { checkpoint_function_id = 'probe:summary' },
+                reader = assert(reader.open(session)), writer = w }
+            local result, err = handlers.create_checkpoint(ctx, { checkpoint_id = next_anchor, message_id = next_anchor })
+            test.is_nil(result)
+            test.not_nil(err)
+            local reopened = assert(reader.open(session))
+            local summaries = assert(reopened:contexts():type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY):all())
+            test.eq(reopened:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), old,
+                'failed summary insert advanced the checkpoint; retained summaries=' .. #summaries)
+            test.eq(#summaries, 1)
+            test.eq(summaries[1].text, 'Previous committed summary.')
         end)
         it('answers capability probe from the actual Session receiver without persisting a message', function()
             local actor, session = fixture()
@@ -136,6 +177,114 @@ local function define_tests()
             test.is_nil(initial.dispatch_protocol)
             test.is_nil(initial.dispatch_snapshot)
             test.eq(#assert(messages.list_by_session(session)).messages, 0)
+        end)
+        it('relays a persisted external session mutation through the mounted session', function()
+            local actor, session = fixture()
+            local pid = worker(actor, session, 'wippy.session.process:session')
+            local topic = consts.TOPIC_PREFIXES.SESSION .. session
+            receive(topic, pid)
+
+            assert(sessions.update_session_meta(session, { title = 'Renamed externally' }))
+            assert(upstream.notify_external(session, { title = 'Renamed externally' }))
+
+            local update = receive(topic, pid)
+            test.eq(update.type, consts.UPSTREAM_TYPES.UPDATE)
+            test.eq(update.session_id, session)
+            test.eq(update.title, 'Renamed externally')
+
+            -- An earlier rename notification arrives after the newer one has
+            -- committed and been published. It must not restore the old title.
+            assert(sessions.update_session_meta(session, { title = 'Newest title' }))
+            assert(upstream.notify_external(session, { title = 'Newest title' }))
+            test.eq(receive(topic, pid).title, 'Newest title')
+            assert(upstream.notify_external(session, { title = 'Renamed externally' }))
+            test.eq(receive(topic, pid).title, 'Newest title')
+        end)
+        it('keeps a manual title when its notification precedes a delayed automatic title', function()
+            local actor, session = fixture('')
+            local pid = worker(actor, session, 'wippy.session.process:session')
+            local topic = consts.TOPIC_PREFIXES.SESSION .. session
+            receive(topic, pid)
+            local session_reader = assert(reader.open(session))
+            local original_reset = session_reader.reset
+            session_reader.reset = function(self)
+                local ok, err = original_reset(self)
+                if not ok then return nil, err end
+                -- The generation coroutine captured its automatic title, then
+                -- yielded before publication. The manual rename publishes first.
+                assert(session_service.update({ session_id = session, updates = { title = 'Manual name' } }))
+                test.eq(receive(topic, pid).title, 'Manual name')
+                return true
+            end
+            handlers._funcs = { new = function() return {
+                with_context = function(self) return self end,
+                call = function() return { title = 'Earlier automatic name', tokens = {} } end,
+            } end }
+            local publisher = upstream.new(session, nil, process.pid())
+            local generated, err = handlers.generate_title({ session_id = session,
+                config = { title_function_id = 'app:test_title' }, reader = session_reader,
+                writer = assert(writer.new(session)), upstream = publisher,
+            }, {})
+            test.is_nil(err)
+            test.is_true(generated.completed)
+            test.eq(receive(topic).title, 'Manual name', 'late publication must resolve through the owner')
+            test.eq(assert(sessions.get(session)).title, 'Manual name')
+        end)
+
+        it('persists renames before opening and after stopping without spawning a session', function()
+            local actor, session = fixture()
+            local function offline_title(title)
+                test.is_nil(select(1, process.registry.lookup('session.' .. session)))
+                local updated, err = session_service.update({ session_id = session, updates = { title = title } })
+                test.is_nil(err)
+                test.eq(updated.title, title)
+                test.eq(assert(sessions.get(session)).title, title)
+                test.is_nil(select(1, process.registry.lookup('session.' .. session)))
+            end
+            offline_title('Named before open')
+            local pid = worker(actor, session, 'wippy.session.process:session')
+            local topic = consts.TOPIC_PREFIXES.SESSION .. session
+            receive(topic, pid)
+            assert(upstream.notify_external(session, { title = 'Stale old title' }))
+            test.eq(receive(topic, pid).title, 'Named before open')
+            assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {}))
+            local deadline = time.after('3s')
+            while true do
+                local selected = channel.select({ process.events():case_receive(), deadline:case_receive() })
+                assert(selected.channel ~= deadline and selected.ok, 'session exit timed out')
+                if selected.value.from == pid then
+                    test.is_nil(selected.value.result.error)
+                    workers[pid] = nil
+                    break
+                end
+            end
+            offline_title('Renamed after stop')
+            local reopened = worker(actor, session, 'wippy.session.process:session')
+            receive(topic, reopened)
+            assert(upstream.notify_external(session, { title = 'Named before open' }))
+            test.eq(receive(topic, reopened).title, 'Renamed after stop')
+        end)
+
+        it('retires an idle owner after its session is deleted', function()
+            local actor, session = fixture()
+            local pid = worker(actor, session, 'wippy.session.process:session')
+            local topic = consts.TOPIC_PREFIXES.SESSION .. session
+            receive(topic, pid)
+            assert(session_service.delete({ session_id = session, user_id = actor }))
+            local event = receive(topic, pid)
+            test.is_true(event.deleted)
+            local timer = time.timer('3s')
+            local exited = false
+            while not exited do
+                local selected = channel.select({ process.events():case_receive(), timer:channel():case_receive() })
+                if selected.channel == timer:channel() then break end
+                local event = selected.value :: process.Event
+                exited = event.from == pid
+            end
+            timer:stop()
+            if exited then workers[pid] = nil end
+            test.is_true(exited, 'deleted idle session owner remains alive and registered')
+            test.is_nil((process.registry.lookup('session.' .. session)))
         end)
         it('hydrates once and acknowledges the original server message after worker restart and stage cleanup', function()
             for _, referenced in ipairs({ false, true }) do

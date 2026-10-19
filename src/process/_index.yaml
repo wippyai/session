@@ -89,6 +89,7 @@ entries:
       description: Handles communication between session process and upstream systems
     source: file://upstream.lua
     imports:
+      session_repo: wippy.session.persist:session_repo
       consts: wippy.session:consts
       input_policy: wippy.session.process:input_policy
 

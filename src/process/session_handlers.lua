@@ -272,6 +272,11 @@ function session_handlers.generate_title(ctx, op)
         return nil, "No title function ID configured"
     end
 
+    local current = ctx.reader:state()
+    if current.title and current.title ~= "" then
+        return { skipped = true }
+    end
+
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         session_context = {}
@@ -289,15 +294,18 @@ function session_handlers.generate_title(ctx, op)
         return nil, "No title returned"
     end
 
-    local success, err = ctx.writer:update_title(result.title)
-    if not success then
+    local updated, err = ctx.writer:update_initial_title(result.title)
+    if err then
         return nil, err
     end
 
     local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
+    if not updated or ctx.reader:state().title ~= result.title then
+        return { skipped = true }
+    end
 
     ctx.upstream:update_session({ title = result.title })
-    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,

@@ -126,6 +126,24 @@ local function define_tests()
             test.eq(#message_repo.list_behavior_rounds(session_id), 0)
             test.eq(session_repo.get(session_id, user_id).meta.behavior_controls_pending, false)
         end)
+        it("rejects a different owner without changing the checkpoint", function()
+            local ok, err = checkpoint_repo.commit(session_id, "other-owner",
+                { message_id = message_id, checkpoint_id = message_id }, "new summary", {}, uuid.v7())
+            test.is_nil(ok)
+            test.eq(err, "Session not found")
+            test.eq(json.decode(context_repo.get(context_id).data).current_checkpoint_id, "old-anchor")
+        end)
+
+        it("rejects an anchor outside the session without changing its summary", function()
+            local ok, err = checkpoint_repo.commit(session_id, user_id,
+                { message_id = uuid.v7(), checkpoint_id = message_id }, "new summary", {}, uuid.v7())
+            test.is_nil(ok)
+            test.eq(err, "Checkpoint message not found in session")
+            local contexts = session_contexts_repo.list_by_session(session_id)
+            for _, row in ipairs(contexts) do
+                if row.type == consts.CONTEXT_TYPES.CONVERSATION_SUMMARY then test.eq(row.text, "old summary") end
+            end
+        end)
     end)
 end
 
