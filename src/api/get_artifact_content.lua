@@ -110,6 +110,21 @@ local function handler()
         return
     end
 
+    local metadata_content_type: string? = nil
+    local configured_content_type = artifact.meta and artifact.meta.content_type
+    if configured_content_type then
+        if type(configured_content_type) ~= "string" then
+            res:set_content_type(http.CONTENT.JSON)
+            res:set_status(http.STATUS.INTERNAL_ERROR)
+            res:write_json({
+                success = false,
+                error = "Invalid artifact content type"
+            })
+            return
+        end
+        metadata_content_type = configured_content_type
+    end
+
     -- Special handling for view_ref artifacts
     if artifact.kind == "view_ref" and artifact.meta then
         local page_id = artifact.meta.page_id
@@ -172,7 +187,7 @@ local function handler()
         end
 
         -- Set content type and return the rendered content
-        res:set_content_type(artifact.meta.content_type or "text/html")
+        res:set_content_type(metadata_content_type or "text/html")
         res:set_status(http.STATUS.OK)
         res:write(rendered_content :: string)
         return
@@ -190,16 +205,8 @@ local function handler()
         return
     end
 
-    -- Default content type if not specified in metadata
-    local content_type = "text/plain"
-
-    -- Get content type from metadata if available
-    if artifact.meta and artifact.meta.content_type then
-        content_type = artifact.meta.content_type
-    end
-
     -- Set content type and return the content
-    res:set_content_type(content_type :: string)
+    res:set_content_type(metadata_content_type or "text/plain")
     res:set_status(http.STATUS.OK)
     res:write(content :: string)
 end

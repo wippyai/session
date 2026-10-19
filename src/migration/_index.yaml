@@ -2,6 +2,33 @@ version: "1.0"
 namespace: wippy.session.migration
 
 entries:
+  - name: 13_add_attention_context
+    kind: function.lua
+    meta:
+      type: migration
+      tags: [sessions]
+      description: Add normalized per-session Attention context state
+      depends_on: [ns:wippy.migration, wippy.session.migration:11_add_context_staging]
+      timestamp: '2026-09-15T00:00:00Z'
+    source: file://13_add_attention_context.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
+  - name: 11_add_context_staging
+    kind: function.lua
+    meta:
+      type: migration
+      tags: [sessions]
+      depends_on:
+        - ns:wippy.migration
+        - wippy.session.migration:10_add_message_request_idempotency
+      timestamp: '2026-09-07T00:00:00Z'
+    source: file://11_add_context_staging.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
   # wippy.session.migration:01_create_contexts_table
   - name: 01_create_contexts_table
     kind: function.lua
@@ -200,6 +227,23 @@ entries:
         - wippy.session.migration:05_create_artifacts_table
       timestamp: "2026-09-01T00:00:00Z"
     source: file://11_add_content_version_to_artifacts.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
+  # wippy.session.migration:10_add_message_request_idempotency
+  - name: 10_add_message_request_idempotency
+    kind: function.lua
+    meta:
+      type: migration
+      tags:
+        - sessions
+      description: Add durable per-session request idempotency to messages
+      depends_on:
+        - ns:wippy.migration
+        - wippy.session.migration:04_create_messages_table
+      timestamp: "2026-09-04T00:00:00Z"
+    source: file://10_add_message_request_idempotency.lua
     imports:
       migration: wippy.migration:migration
     method: migrate

@@ -2,23 +2,45 @@ name: Publish in the Wippy Registry
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
+
+permissions:
+  contents: read
 
 concurrency:
-  group: publish
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
-
-      - name: Publishing
-        uses: wippyai/action-module-release@main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          directory: .
-          tag: ${{ github.ref_name }}
-          username: ${{ secrets.WIPPY_USERNAME }}
-          password: ${{ secrets.WIPPY_PASSWORD }}
+          path: session
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wippyai/framework
+          ref: 3b92e76d8f8d51343d3a1b5d94483ddf5d8285c9
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: wippy
+      - name: Validate release and publish
+        env:
+          WIPPY: ${{ steps.wippy.outputs.path }}
+          WIPPY_TOKEN: ${{ secrets.WIPPY_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${RELEASE_TAG#v}"
+          test "$(awk '/^version:/ {gsub(/"/, "", $2); print $2; exit}' session/src/_index.yaml)" = "$version"
+          test -n "${WIPPY_TOKEN:-}" || { echo 'WIPPY_TOKEN is required; the Framework companion publisher can publish this release when the token is managed there.' >&2; exit 1; }
+          python3 framework/scripts/release_notes.py --line session/CHANGELOG.md "$version" > release-notes.txt
+          test -s release-notes.txt
+          "$WIPPY" publish --config session --version "$version" --dry-run
+          "$WIPPY" publish --config session --version "$version" --release-notes "$(cat release-notes.txt)"

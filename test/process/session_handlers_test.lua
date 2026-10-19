@@ -162,6 +162,81 @@ local function define_tests()
             test.eq((captured.upstream or {}).model, "model:new")
         end)
 
+        for _, change in ipairs({
+            { name = "agent_change", op = { agent_id = "agent:new", init = true } },
+            { name = "model_change", op = { model = "model:next" } },
+        }) do
+            it(change.name .. " returns a failed reader refresh after the durable config write", function()
+                local ctx, captured = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+                ctx.reader.reset = function() return nil, "Session not found during reset" end
+
+                local result, err = session_handlers[change.name](ctx, change.op)
+
+                test.is_nil(result)
+                test.contains(tostring(err), "Session not found during reset")
+                test.not_nil(captured.persisted)
+                test.not_nil(captured.upstream)
+            end)
+        end
+        it("preserves the switched agent through a model change and a fresh reader", function()
+            local function copy_config(config)
+                local copy = {}
+                for key, value in pairs(config) do copy[key] = value end
+                return copy
+            end
+
+            local persisted = {
+                agent_id = "agent:a",
+                model = "model:a",
+                title_function_id = "keep:title",
+            }
+            local cached = copy_config(persisted)
+            local ctx, captured = mock_ctx(cached)
+            ctx.config = copy_config(persisted)
+            ctx.reader.state = function()
+                return { config = cached }
+            end
+            ctx.reader.reset = function()
+                cached = copy_config(persisted)
+                captured.resets = captured.resets + 1
+                return true
+            end
+            ctx.writer.update_meta = function(_, meta)
+                persisted = copy_config(meta.config)
+                return true
+            end
+            ctx.agent_ctx.switch_to_model = function(self, model)
+                captured.switched_model = model
+                self.current_model = model
+                return true
+            end
+            ctx.agent_ctx.get_current_agent = function()
+                return { id = captured.switched_agent, model = captured.switched_model or "model:new" }
+            end
+
+            local agent_result, agent_err = session_handlers.agent_change(ctx, { agent_id = "agent:b" })
+            test.is_nil(agent_err)
+            test.not_nil(agent_result)
+            test.eq(cached.agent_id, "agent:b")
+
+            local model_result, model_err = session_handlers.model_change(ctx, { model = "model:a" })
+            test.is_nil(model_err)
+            test.not_nil(model_result)
+            test.eq(ctx.config.agent_id, "agent:b")
+            test.eq(ctx.config.model, "model:a")
+            test.eq(persisted.agent_id, "agent:b")
+            test.eq(persisted.model, "model:a")
+            test.eq(persisted.title_function_id, "keep:title")
+            test.eq(captured.switched_agent, "agent:b")
+            test.eq(captured.switched_model, "model:a")
+
+            local fresh_ctx = mock_ctx(copy_config(persisted))
+            local restored = fresh_ctx.reader:state().config
+            test.eq(restored.agent_id, "agent:b")
+            test.eq(restored.model, "model:a")
+            test.eq(restored.title_function_id, "keep:title")
+        end)
+
         it("model_change tolerates a missing live ctx.config", function()
             local ctx, captured = mock_ctx({
                 agent_id = "agent:current",
@@ -587,6 +662,55 @@ local function define_tests()
             test.eq(captured.context_value, "msg-assistant-7")
             test.gte(captured.resets, 1,
                 "the reader caches the primary context; without a reset the next prompt is built from the old anchor")
+        end)
+
+        it("returns a failed reader refresh after storing a generated title", function()
+            local ctx = mock_checkpoint_ctx({ title_function_id = "app:title" })
+            local stored, announced
+            ctx.writer.update_title = function(_self, title) stored = title; return true end
+            ctx.upstream = { update_session = function(_self, payload) announced = payload.title end }
+            ctx.reader.reset = function() return nil, "Session not found during reset" end
+            session_handlers._funcs = {
+                new = function()
+                    return {
+                        with_context = function(self, _context) return self end,
+                        call = function() return { title = "Stored title", tokens = {} } end
+                    }
+                end
+            }
+
+            local result, err = session_handlers.generate_title(ctx, {})
+
+            test.is_nil(result)
+            test.contains(tostring(err), "Session not found during reset")
+            test.eq(stored, "Stored title")
+            test.eq(announced, "Stored title")
+        end)
+
+        it("returns a failed reader refresh after recording the checkpoint", function()
+            local ctx, captured = mock_checkpoint_ctx({
+                checkpoint_function_id = "fallback:checkpoint",
+                title_function_id = nil,
+            })
+            ctx.reader.reset = function() return nil, "Session not found during reset" end
+            session_handlers._funcs = {
+                new = function()
+                    return {
+                        with_context = function(self, _context) return self end,
+                        call = function() return { summary = "summary", tokens = { prompt_tokens = 1 } } end
+                    }
+                end
+            }
+
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "msg-assistant-8",
+                message_id = "msg-assistant-8",
+                trigger_tokens = 200,
+            })
+
+            test.is_nil(result)
+            test.contains(tostring(err), "Session not found during reset")
+            test.eq(captured.context_value, "msg-assistant-8")
         end)
     end)
 end
