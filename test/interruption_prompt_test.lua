@@ -15,7 +15,7 @@ local function define_tests(blocked_only, lifecycle_only)
     describe('Persisted interruption in the provider prompt', function()
         local session_id, context_id, plugin_pid, actor_id, label, hub_pid
         local exited = {}
-        local function receive(predicate, timeout)
+        local function receive(predicate, timeout): any
             local inbox, events, deadline = process.inbox(), process.events(), time.after(timeout)
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
