@@ -98,6 +98,31 @@ local function define_tests()
             projected = history.prepare({ original, observation('read') }, now + 1)
             test.eq(#projected[1].metadata.context_attachments, 2)
         end)
+        it('does not count an accepted form answer that is not admitted yet as the latest user turn', function()
+            local known = { kind = 'wippy.attention', version = 4, attachment_id = 'attention', created_at = '2026-09-18T12:00:00Z', content = 'immutable bytes' }
+            local typed = user('typed', { known })
+            local current = observation('tool')
+            local function answer(pending)
+                return { message_id = 'answer', type = 'user', date = server_date, data = 'Answered: Courier', metadata = {
+                    session_form = { artifact_id = 'form-1', pending = pending },
+                } }
+            end
+            -- The read of the real turn stays valid while the answer waits.
+            local projected, updates = history.prepare({ typed, current, answer(true) }, now + 1)
+            test.eq(#updates, 0)
+            test.eq(projected[2], current)
+            -- The typed message keeps its Attention context.
+            projected, updates = history.prepare({ typed, answer(true) }, now + 1)
+            test.eq(#updates, 0)
+            test.eq(#projected[1].metadata.context_attachments, 1)
+            test.eq(projected[1], typed)
+            -- Admitted, the answer is a user turn like any other.
+            projected, updates = history.prepare({ typed, current, answer(false) }, now + 1)
+            test.eq(#updates, 1)
+            test.eq(updates[1].message_id, 'tool')
+            projected = history.prepare({ typed, answer(false) }, now + 1)
+            test.eq(#projected[1].metadata.context_attachments, 0)
+        end)
         it('preserves unrecognized result schemas and already withdrawn results', function()
             local unknown = observation('unknown')
             unknown.metadata.result.schema = 'wippy.attention.model.v99'

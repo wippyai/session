@@ -2,6 +2,7 @@ local json = require('json')
 local time = require('time')
 local read = require('attention_read')
 local message_order = require('message_order')
+local message_repo = require('message_repo')
 local prompt_builder = require('prompt_builder')
 
 local M = { TTL_SECONDS = 30 }
@@ -122,7 +123,10 @@ end
 function M.prepare(messages, now)
     local latest_user, fresh_read = 0, false
     for index, message in ipairs(messages) do
-        if message.type == 'user' then latest_user = index end
+        -- A form answer the session has not admitted yet is not part of the
+        -- model's view (the prompt builder skips it), so it does not start a
+        -- turn: the real user message before it keeps its Attention context.
+        if message.type == 'user' and not message_repo.is_pending_answer(message) then latest_user = index end
     end
     local latest_query, latest_revision, observations, latest_action = {}, {}, {}, 0
     for index, message in ipairs(messages) do
