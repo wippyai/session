@@ -291,6 +291,7 @@ function M.get_prompt(args)
     for _, event in ipairs(hist.events or {}) do
         messages[#messages + 1] = {
             message_id = event.id,
+            date = event.created_at,
             type = event.role,
             data = event.raw_content,
             metadata = event.metadata or {}

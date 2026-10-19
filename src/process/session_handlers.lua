@@ -294,9 +294,10 @@ function session_handlers.generate_title(ctx, op)
         return nil, err
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     ctx.upstream:update_session({ title = result.title })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -403,7 +404,7 @@ function session_handlers.create_checkpoint(ctx, op)
 
     local committed, commit_err = ctx.writer:commit_checkpoint(op, result.summary, checkpoint_metadata)
     if not committed then return nil, commit_err end
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     local next_ops = {}
     if ctx.config.title_function_id then
@@ -413,6 +414,7 @@ function session_handlers.create_checkpoint(ctx, op)
             current_checkpoint_id = op.checkpoint_id
         })
     end
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -444,6 +446,10 @@ function session_handlers.agent_change(ctx, op)
     local new_model = ctx.agent_ctx.current_model
     current_config.model = new_model
 
+    if previous_agent ~= op.agent_id and type(ctx.invalidate_attention_control) == "function" then
+        ctx.invalidate_attention_control()
+    end
+
     local next_agent = nil
     if type(ctx.agent_ctx.get_current_agent) == "function" then
         next_agent = ctx.agent_ctx:get_current_agent()
@@ -452,10 +458,7 @@ function session_handlers.agent_change(ctx, op)
     local candidate_state = clone(ctx.turn_state)
     if candidate_state then
         candidate_state.input_policy = nil
-        if candidate_state.active then
-            candidate_state.handoff = true
-            candidate_state.failed = true
-        end
+        if candidate_state.active then candidate_state.handoff = true end
     end
     local candidate = {
         config = current_config,
@@ -484,7 +487,7 @@ function session_handlers.agent_change(ctx, op)
     ctx.config = current_config
     ctx.turn_state = candidate_state
     ctx.current_agent = next_agent
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
     input_policy.accept_committed(ctx, interaction)
 
     local switch_message = string.format("Agent changed to: %s (model: %s)", op.agent_id, new_model)
@@ -503,6 +506,7 @@ function session_handlers.agent_change(ctx, op)
         agent = op.agent_id,
         model = new_model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -539,7 +543,7 @@ function session_handlers.model_change(ctx, op)
     end
 
     ctx.config = staged_config
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     local change_message = string.format("Model changed to: %s", op.model)
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, change_message, {
@@ -554,6 +558,7 @@ function session_handlers.model_change(ctx, op)
     ctx.upstream:update_session({
         model = op.model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,

@@ -66,7 +66,8 @@ function control_handlers.context_write(ctx, op)
         return nil, consts.ERR.CONTEXT_UPDATE_FAILED .. ": " .. (err or "unknown error")
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     local context_data, get_err = ctx.reader:get_full_context()
     if get_err then
@@ -99,7 +100,8 @@ function control_handlers.context_delete(ctx, op)
         return nil, consts.ERR.CONTEXT_UPDATE_FAILED .. ": " .. (err or "unknown error")
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     local context_data, get_err = ctx.reader:get_full_context()
     if get_err then
@@ -393,7 +395,8 @@ function control_handlers.control_context(ctx, op)
         end
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     return { completed = true }
 end
@@ -617,10 +620,7 @@ function control_handlers.control_config(ctx, op)
         local candidate_state = clone(ctx.turn_state)
         if agent_changed and candidate_state then
             candidate_state.input_policy = nil
-            if candidate_state.active then
-                candidate_state.handoff = true
-                candidate_state.failed = true
-            end
+            if candidate_state.active then candidate_state.handoff = true end
         end
         local candidate = {
             config = current_config,
@@ -649,7 +649,7 @@ function control_handlers.control_config(ctx, op)
         ctx.config = current_config
         ctx.turn_state = candidate_state
         ctx.current_agent = next_agent
-        ctx.reader:reset()
+        local refreshed, refresh_err = ctx.reader:reset()
         input_policy.accept_committed(ctx, interaction)
         if agent_changed or model_changed then
             ctx.upstream:update_session({
@@ -678,6 +678,7 @@ function control_handlers.control_config(ctx, op)
             })
             ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, change_message)
         end
+        if not refreshed then return nil, refresh_err end
     end
 
     return { completed = true }

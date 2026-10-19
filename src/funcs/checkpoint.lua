@@ -72,7 +72,8 @@ local function newest(items: { string }, max_items: number): { string }
 end
 
 local function checkpoint_prompt(template, max_tokens)
-    return template:gsub("3000", tostring(max_tokens))
+    local rendered = template:gsub("3000", tostring(max_tokens))
+    return rendered
 end
 
 local PROMPTS = {
@@ -148,7 +149,7 @@ local function handle(args)
 
     local existing_summary = nil
     if existing_summaries and #existing_summaries > 0 then
-        table.sort(existing_summaries, function(a, b)
+        table.sort(existing_summaries :: {table}, function(a, b)
             return (a.time or a.created_at or "") > (b.time or b.created_at or "")
         end)
         existing_summary = existing_summaries[1].text
