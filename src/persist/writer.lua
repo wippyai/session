@@ -14,7 +14,6 @@ local session_writer = {
     _artifact_repo = require("artifact_repo"),
     _context_repo = require("context_repo"),
     _session_contexts_repo = require("session_contexts_repo"),
-    _checkpoint_repo = require("checkpoint_repo"),
     session_id = nil :: string?,
     user_id = nil :: string?,
     actor = nil :: any,
