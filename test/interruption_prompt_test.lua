@@ -184,10 +184,10 @@ local function define_tests(blocked_only, lifecycle_only)
                 }))
                 receive(function(_, data) return data.request_id == 'stop' end, '3s')
                 local event = receive(function(_, data)
-                    return data.type == consts.UPSTREAM_TYPES.FUNCTION_ERROR and data.status == consts.FUNC_STATUS.CANCELLED
+                    return data.type == consts.UPSTREAM_TYPES.FUNCTION_ERROR and data.outcome == consts.FUNC_STATUS.CANCELLED
                 end, '3s')
                 idle()
-                test.eq(event.outcome, consts.FUNC_STATUS.CANCELLED, 'the live event uses the history field')
+                test.is_nil(event.status, 'the live event carries only outcome')
                 local row = assert(messages.get(event.message_id))
                 test.eq(row.metadata.status, consts.FUNC_STATUS.CANCELLED)
                 test.eq(row.metadata.call_id, event.call_id)
