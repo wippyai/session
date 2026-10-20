@@ -110,22 +110,22 @@ when Wippy is not on PATH. The test target clears only its own test database.
 
 ## Runtime tests and benchmarks
 
-`make test-postgres FRAMEWORK_DIR=/absolute/path/to/framework` checks the
+`make test-postgres` checks the
 affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
 disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
 `PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
 supplies the application's user-table contract and runs these checks in UTC.
 
 On Unix, `make install test` runs the suite against the locked dependencies.
-`make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
+`make test-runtime` exercises
 registered tools, agent compilation, the Session
 process, and SQLite persistence with deterministic model responses. It covers
 handoff history, persisted control operations, mixed tool results, and Stop.
-The Framework checkout supplies local agent, LLM, and test sources. Required
-runtime checks need the candidate runner so missing or empty suites fail.
-CI runs both locked compatibility and candidate tests.
+Required runtime checks fail if a selected suite executes no cases. Set
+`FRAMEWORK_DIR=/absolute/path/to/framework` to use local Agent, LLM, and test
+sources instead of the locked published dependencies. CI checks both modes.
 
-`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes local JSON reports
+`make bench` writes local JSON reports
 with median, p95, throughput, samples, allocation counters, and revision
 metadata. Defaults are 100 warmups and 100 measured batches at
 sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
@@ -256,7 +256,8 @@ refs and idempotent writes, not rely on a final `deactivate` callback.
 `memory.compact = true` persists a request that bypasses the token threshold,
 not an explicit disable or a missing provider. False is not cancellation.
 When a proposal also changes configuration, requested compaction captures the
-committed agent/provider, not the old response's settings. An agent handoff continues the current turn through the canonical replacement-agent
+committed agent/provider, not the old response's settings. An agent handoff
+continues the current turn through the canonical replacement-agent
 continuation after the preceding tool results settle. Accepted steering reaches
 the new agent once; compaction uses the committed target's provider and options.
 An explicit Stop suppresses that continuation and keeps unapplied steering for
