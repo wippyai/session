@@ -496,11 +496,10 @@ local function settle_cancelled_call(ctx, call, message_id, call_type, validated
         private = private or (schema and schema.meta and schema.meta.private)
     end
     if not private and not delegation then
-        -- outcome matches the REST projection in api/session_messages.lua. status
-        -- is the deprecated 0.6.8 field, kept for clients that already read it.
+        -- outcome matches the REST projection in api/session_messages.lua.
         ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
             message_id = message_id, call_id = call.id, function_name = call.name,
-            error = reason, outcome = consts.FUNC_STATUS.CANCELLED, status = consts.FUNC_STATUS.CANCELLED,
+            error = reason, outcome = consts.FUNC_STATUS.CANCELLED,
         })
     end
     return true
