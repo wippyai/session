@@ -9,6 +9,40 @@
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
 
+## [0.6.9](https://github.com/wippyai/session/compare/v0.6.8...v0.6.9) (2026-10-20)
+
+
+### Features
+
+* keep the route pinned by an llm fallback for the rest of the turn ([fbe2e84](https://github.com/wippyai/session/commit/fbe2e845d9896101f32356532a7910b9a2e8c8cc))
+* **session:** apply agent behavior controls after tool settlement ([#40](https://github.com/wippyai/session/issues/40)) ([e9d3dd2](https://github.com/wippyai/session/commit/e9d3dd29846c064cdb5de7424a676e5fb32e6e37))
+* **session:** send outcome cancelled on cancelled function_error events ([555d61b](https://github.com/wippyai/session/commit/555d61b1f5929342f57df9e2e12bde5d5a79b893))
+
+
+### Bug Fixes
+
+* clear pinned routes after committed model switches ([def8fbb](https://github.com/wippyai/session/commit/def8fbbb0263f2107388df42924759806fbc627b))
+* close stopped steps through the lifecycle hooks ([5182fbb](https://github.com/wippyai/session/commit/5182fbbd10f7d9fe301d9af153a6fa9cf890c760))
+* persist checkpoint state atomically ([4280dad](https://github.com/wippyai/session/commit/4280dadb05b09348a449d81d47b19bf47450c38c))
+* persist checkpoint state atomically ([c1182af](https://github.com/wippyai/session/commit/c1182afe82562c3af8e1b337bf6f70fa7fe47ed5))
+* preserve end-hook status for deleted sessions ([f24631c](https://github.com/wippyai/session/commit/f24631ccd1cffa50e3ffcce4da873ac972cf0185))
+* preserve explicitly named session titles ([42ac5fb](https://github.com/wippyai/session/commit/42ac5fbaa0539d0b9a6e4a6c11b631ff1870080f))
+* publish all titles through the owner and allow offline renames ([b04304d](https://github.com/wippyai/session/commit/b04304dfba29d69151dbec7e0aa2c505cc1c3c41))
+* publish authoritative session state for delayed external events ([2b02223](https://github.com/wippyai/session/commit/2b02223a99403fc178de1e62c0d9683dc572e987))
+* require Agent 0.5.5 for complete checkpoint continuation ([b06a379](https://github.com/wippyai/session/commit/b06a37905f269343ad29d77fd73ee1d20c810652))
+* require Agent memory labeling for checkpoint continuation ([30fbe96](https://github.com/wippyai/session/commit/30fbe96a45b0de88c27bcb8be6bcb5d64bf045ba))
+* retain canonical lifecycle finish and clarify explicit continuation ([d52c9c1](https://github.com/wippyai/session/commit/d52c9c159480010e2498534e3b515b844b2fb104))
+* retire deleted session owners without recovery notices ([1c8fb10](https://github.com/wippyai/session/commit/1c8fb10225d54a74762f1d7de37479860d765304))
+* retire deleted session owners without recovery notices ([52a4a9a](https://github.com/wippyai/session/commit/52a4a9a83866d7335fac7f29208155e2a364333f))
+* **session:** cancel in-flight model and tool calls on Stop ([0798126](https://github.com/wippyai/session/commit/079812607eac76a0ce0161bc72474ef18425c3ec))
+* **session:** cancel in-flight model and tool calls on Stop ([714d733](https://github.com/wippyai/session/commit/714d733d4da120eaed211f5d987c473773f20774))
+* **session:** preserve Stop and recovery intent in subsequent prompts ([321cf12](https://github.com/wippyai/session/commit/321cf1288dddd90837de2b14071748f8df3178da))
+* **session:** preserve task ordering and bound checkpoint excerpts ([599b1b4](https://github.com/wippyai/session/commit/599b1b42629834c26cdb25286874098a93397a0f))
+* **session:** retain the active user request across checkpoints ([a0c322a](https://github.com/wippyai/session/commit/a0c322a40a00baed48b5cbd1157c88fde4aeecf6))
+* **session:** retain the user task across mid-turn checkpoints ([485bc9f](https://github.com/wippyai/session/commit/485bc9f551838d37c854a1a6e6b014c1d0f8093e))
+* **session:** send only outcome on cancelled function_error events ([#82](https://github.com/wippyai/session/issues/82)) ([9a579cf](https://github.com/wippyai/session/commit/9a579cf343df3b2fe7641129aa5c27f4864effff))
+* **session:** unify title updates and preserve offline renames ([807f73c](https://github.com/wippyai/session/commit/807f73cfef343956ff9741e0ca9d40c9c9458eda))
+
 ## [0.6.8](https://github.com/wippyai/session/compare/v0.6.7...v0.6.8) (2026-10-14)
 
 
