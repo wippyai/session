@@ -12,6 +12,8 @@ local wait_for_boot = require("wait_for_boot")
 local writer = require("writer")
 local reader = require("reader")
 local message_handlers = require("message_handlers")
+local sql = require("sql")
+local time = require("time")
 
 local function define_tests()
     describe("atomic session checkpoints", function()
@@ -84,6 +86,65 @@ local function define_tests()
                 if row.type == consts.CONTEXT_TYPES.CONVERSATION_SUMMARY then test.eq(row.text, "old summary") end
             end
         end)
+
+        local dialect_db = assert(sql.get(consts.get_db_resource()))
+        local postgres = dialect_db:type() == "postgres"
+        dialect_db:release()
+        for _, target in ipairs({ "session", "context", "message" }) do
+            local pg_it = postgres and it or test.it_skip
+            pg_it("preserves an interleaved " .. target .. " update during checkpoint commit (PostgreSQL)", function()
+                local db = assert(sql.get(consts.get_db_resource()))
+                local blocker = assert(db:begin())
+                local pid = assert(blocker:query("SELECT pg_backend_pid() AS pid"))[1].pid
+                -- Hold the old summary so checkpoint commit waits only after
+                -- reading the JSON fields it is about to replace.
+                assert(blocker:query("SELECT id FROM session_contexts WHERE session_id = $1 FOR UPDATE", { session_id }))
+                local done = channel.new(1)
+                coroutine.spawn(function()
+                    local ran, result, err = pcall(checkpoint_repo.commit, session_id, user_id,
+                        { message_id = message_id, checkpoint_id = message_id, clear_request = true },
+                        "new summary", { checkpoint_summary = "new summary" }, uuid.v7())
+                    done:send({ ran = ran, result = result, err = err })
+                end)
+                local interleaved, interleave_err = pcall(function()
+                    local blocked = false
+                    for _ = 1, 100 do
+                        local waiting = assert(db:query("SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))",
+                            { pid }))
+                        if #waiting > 0 then blocked = true; break end
+                        time.sleep("50ms")
+                    end
+                    assert(blocked, "checkpoint did not reach the controlled write boundary")
+                    if target == "session" then
+                        assert(session_repo.update_session_meta(session_id, { meta = { external_update = true } }))
+                    elseif target == "context" then
+                        assert(context_repo.update(context_id, json.encode({ current_checkpoint_id = "old-anchor",
+                            checkpoint_requested = true, external_update = true })))
+                    else
+                        assert(message_repo.update_metadata(message_id, { external_update = true }))
+                    end
+                end)
+                blocker:rollback()
+                db:release()
+                local outcome = done:receive()
+                test.is_true(interleaved, tostring(interleave_err))
+                test.is_true(outcome.ran, tostring(outcome.result))
+                test.is_nil(outcome.result, "checkpoint must reject a stale JSON snapshot")
+                test.contains(tostring(outcome.err), "changed during checkpoint")
+                local session = session_repo.get(session_id, user_id)
+                local context = json.decode(context_repo.get(context_id).data)
+                local message = message_repo.get(message_id)
+                if target == "session" then test.is_true(session.meta.external_update)
+                elseif target == "context" then test.is_true(context.external_update)
+                else test.is_true(message.metadata.external_update) end
+                test.eq(context.current_checkpoint_id, "old-anchor")
+                test.is_true(context.checkpoint_requested)
+                test.is_nil(message.metadata.checkpoint_summary)
+                for _, row in ipairs(session_contexts_repo.list_by_session(session_id)) do
+                    if row.type == consts.CONTEXT_TYPES.CONVERSATION_SUMMARY then test.eq(row.text, "old summary") end
+                end
+            end)
+        end
 
         it("keeps plain response writes valid without behavior metadata", function()
             local plain_writer, writer_err = writer.new(session_id)

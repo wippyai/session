@@ -424,6 +424,63 @@ local function define_tests()
     end)
 
     describe("session checkpoint dispatch", function()
+        it("rejects oversized function and binding summaries before changing history", function()
+            for _, binding in ipairs({ false, true }) do
+                local ctx, captured = mock_checkpoint_ctx({})
+                local output = { summary = string.rep("x", 4096) }
+                session_handlers._funcs = { new = function()
+                    return { with_context = function(self) return self end, call = function() return output end }
+                end }
+                session_handlers._checkpoint_runtime = { create = function() return { result = output } end }
+                local result, err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_id = "settled", message_id = "settled", clear_request = true,
+                    checkpoint_options = { function_id = "app:summary", max_memory_chars = 64 },
+                    checkpoint_bindings = binding and {{ id = "app:summary" }} or nil,
+                })
+                test.is_nil(result)
+                test.contains(tostring(err), "exceeds max_memory_chars")
+                test.is_nil(captured.summary)
+                test.is_nil(captured.context_key)
+                test.eq(captured.resets, 0)
+            end
+        end)
+
+        it("rejects malformed or empty summaries without committing a checkpoint", function()
+            for _, output in ipairs({ true, "raw text", { summary = true }, { summary = {} },
+                { summary = "" }, { summary = " \n\t" }, {} }) do
+                local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "app:summary" })
+                session_handlers._funcs = { new = function()
+                    return { with_context = function(self) return self end, call = function() return output end }
+                end }
+                local called, result, err = pcall(session_handlers.create_checkpoint, ctx, {
+                    checkpoint_id = "settled", message_id = "settled", clear_request = true,
+                })
+                test.is_true(called, "malformed output should return an error, not throw")
+                test.is_nil(result)
+                test.contains(tostring(err), "summary")
+                test.is_nil(captured.summary)
+                test.eq(captured.resets, 0)
+            end
+        end)
+
+        it("accepts an exact limit and preserves unlimited checkpoint policies", function()
+            for _, options in ipairs({ { max_memory_chars = 64 }, { max_memory_chars = "64" },
+                { max_memory_chars = 0 }, { max_memory_chars = -1 }, {} }) do
+                local ctx, captured = mock_checkpoint_ctx({})
+                options.function_id = "app:summary"
+                session_handlers._funcs = { new = function()
+                    return { with_context = function(self) return self end,
+                        call = function() return { memory = string.rep("x", 64) } end }
+                end }
+                local result, err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_id = "settled", message_id = "settled", checkpoint_options = options,
+                })
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(captured.summary, string.rep("x", 64))
+            end
+        end)
+
         it("schedules a persisted compact request without a token threshold", function()
             local ctx = mock_checkpoint_ctx({ checkpoint_function_id = "host:checkpoint" })
             ctx.reader.get_context = function(_, key) return key == "checkpoint_requested" and true or nil end

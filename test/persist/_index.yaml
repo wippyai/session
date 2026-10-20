@@ -10,7 +10,7 @@ entries:
       type: test
       suite: session
     source: file://checkpoint_repo_test.lua
-    modules: [uuid, json, security]
+    modules: [uuid, json, security, sql, time]
     imports:
       test: wippy.test:test
       checkpoint_repo: wippy.session.persist:checkpoint_repo

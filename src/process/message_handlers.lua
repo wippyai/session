@@ -1641,6 +1641,17 @@ message_handlers._resolve_tool_runtime_context = function(context: AttentionTool
     }, nil
 end
 
+local function settle_behavior_round(ctx, op, cancelled)
+    if not op.behavior_round then return true end
+    local marked, mark_err = ctx.writer:update_message_meta(op.checkpoint_anchor_id, {
+        behavior_control_state = cancelled and "cancelled" or "applied",
+    })
+    if not marked then return nil, mark_err end
+    local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+    if not cleared then return nil, clear_err end
+    return ctx.reader:reset()
+end
+
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
@@ -1653,6 +1664,8 @@ function message_handlers.process_tools(ctx, op)
                 op.validated_tools and op.validated_tools[call.id])
             if err then return nil, err end
         end
+        local settled, settle_err = settle_behavior_round(ctx, op, true)
+        if not settled then return nil, settle_err end
         return { completed = true, next_ops = {} }
     end
 
@@ -1757,6 +1770,7 @@ function message_handlers.process_tools(ctx, op)
         if not stored then return fail_remaining(1, store_err) end
     end
 
+    local calls_cancelled = false
     for index, call in ipairs(op.tool_calls) do
         local call_id = call.id
         local result_data = results[call_id]
@@ -1776,6 +1790,7 @@ function message_handlers.process_tools(ctx, op)
         local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
 
         if result_data.cancelled then
+            calls_cancelled = true
             local _, cancel_err = settle_cancelled_call(ctx, call, message_id,
                 op.call_message_types and op.call_message_types[call_id],
                 validated_tools and validated_tools[call_id], "Session stopped while the call was running")
@@ -1889,22 +1904,17 @@ function message_handlers.process_tools(ctx, op)
 
     message_handlers.note_tool_round(ctx, results)
 
-    local policies_cancelled = is_turn_blocked(ctx)
+    -- A successful handoff blocks the old agent's next step, but does not
+    -- cancel proposals from its settled round. Match recovery's call statuses.
+    local policies_cancelled = calls_cancelled or is_turn_stopped(ctx)
     if not policies_cancelled then
         if #controls > 0 then
             local applied, control_err = control_handlers.apply_behavior_controls(ctx, controls)
             if not applied then return nil, control_err end
         end
     end
-    if op.behavior_round then
-        local marked, mark_err = ctx.writer:update_message_meta(op.checkpoint_anchor_id, {
-            behavior_control_state = policies_cancelled and "cancelled" or "applied",
-        })
-        if not marked then return nil, mark_err end
-        local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
-        if not cleared then return nil, clear_err end
-        ctx.reader:reset()
-    end
+    local settled, settle_err = settle_behavior_round(ctx, op, policies_cancelled)
+    if not settled then return nil, settle_err end
 
     if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
         -- Requested compaction waits for the complete tool/result round. The

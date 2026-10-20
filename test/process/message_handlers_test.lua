@@ -625,6 +625,58 @@ local function define_tests()
         end)
     end)
     describe("behavior control settlement", function()
+        it("finishes a queued cancellation without leaving a pending proposal", function()
+            local agent = fake_agent()
+            agent.bindings = { lifecycle = {} }
+            message_handlers._lifecycle_runtime = { apply = function(_, payload)
+                if payload.phase == "after_step" then
+                    return { controls = {{ context = { session = { set = { must_not_apply = true } } } }} }
+                end
+                return {}
+            end }
+            local ctx, captured = mock_ctx(agent)
+            local updates
+            ctx.writer.update_meta = function(_, value) updates = value; return true end
+            ctx.writer.set_context = function() error("cancelled proposals applied") end
+            local step = user_step(ctx)
+            local op = find_op(step.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+            op.cancel_only = true
+            local result, err = message_handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1].metadata.status, consts.FUNC_STATUS.CANCELLED)
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].metadata.behavior_control_state, "cancelled")
+            test.is_false(updates.meta.behavior_controls_pending)
+        end)
+
+        it("treats a cancelled call consistently live and after recovery", function()
+            local agent = fake_agent()
+            agent.bindings = { lifecycle = {} }
+            message_handlers._lifecycle_runtime = { apply = function(_, payload)
+                if payload.phase == "after_step" then
+                    return { controls = {{ context = { session = { set = { must_not_apply = true } } } }} }
+                end
+                return {}
+            end }
+            local ctx, captured = mock_ctx(agent)
+            local writes = 0
+            ctx.writer.set_context = function() writes = writes + 1; return true end
+            local step, step_err = user_step(ctx)
+            test.is_nil(step_err)
+            local op = find_op(step.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+            op.caller = { set_strategy = function() end, execute = function()
+                return { ["call-1"] = { cancelled = true, tool_call = {
+                    name = "pack_document", registry_id = "app:pack_document", meta = {},
+                } } }
+            end }
+            local result, err = message_handlers.process_tools(ctx, op)
+            message_handlers._lifecycle_runtime = nil
+            test.is_nil(err)
+            test.not_nil(result)
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1].metadata.status, consts.FUNC_STATUS.CANCELLED)
+            test.eq(writes, 0, "cancelled rounds cannot apply proposals live either")
+        end)
+
         after_each(function() message_handlers._lifecycle_runtime = nil end)
 
         it("replays stored policies after settled outcomes without executing tools or taking another model step", function()
@@ -2427,6 +2479,50 @@ local function define_tests()
             return ctx, captured, bus, steps, interactions, announced,
                 function() tool_caller.new = original_new end
         end
+
+        it("keeps settled behavior proposals when a successful tool hands off", function()
+            local ctx, captured, bus, steps, _, _, restore = handoff_fixture()
+            local router = ctx.agent_ctx:get_current_agent()
+            router.bindings = { lifecycle = {} }
+            local writes = 0
+            ctx.writer.set_context = function() writes = writes + 1; return true end
+            message_handlers._lifecycle_runtime = { apply = function(_, payload)
+                if payload.phase == "after_step" then
+                    return { controls = {{ context = { session = { set = { retained = true } } } }} }
+                end
+                return {}
+            end }
+            local ok, err = bus:run()
+            restore()
+            message_handlers._lifecycle_runtime = nil
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.help, 1, "the accepted handoff completed")
+            test.eq(writes, 1, "a handoff must not discard the settled round's proposal")
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].metadata.behavior_control_state, "applied")
+        end)
+
+        it("suppresses behavior proposals when Stop arrives during a tool-driven handoff", function()
+            local ctx, captured, bus, steps, _, _, restore = handoff_fixture()
+            ctx.stop_in_handoff = true
+            ctx.agent_ctx:get_current_agent().bindings = { lifecycle = {} }
+            local writes = 0
+            ctx.writer.set_context = function() writes = writes + 1; return true end
+            message_handlers._lifecycle_runtime = { apply = function(_, payload)
+                if payload.phase == "after_step" then
+                    return { controls = {{ context = { session = { set = { must_not_apply = true } } } }} }
+                end
+                return {}
+            end }
+            local ok, err = bus:run()
+            restore()
+            message_handlers._lifecycle_runtime = nil
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(writes, 0)
+            test.eq(steps.help, 0)
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].metadata.behavior_control_state, "cancelled")
+        end)
 
         it("continues the turn with the new agent after a tool-driven agent switch", function()
             local ctx, captured, bus, steps, interactions, announced, restore = handoff_fixture()

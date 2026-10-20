@@ -395,8 +395,21 @@ function session_handlers.create_checkpoint(ctx, op)
         result.summary = result.memory
     end
 
-    if not result or not result.summary then
-        return nil, "No summary returned"
+    if type(result) ~= "table" or type(result.summary) ~= "string" or not result.summary:find("%S") then
+        return nil, "No non-empty summary returned"
+    end
+
+    -- Providers receive the policy, but the host owns the persistence boundary.
+    -- Reject rather than truncate: an incomplete summary could discard the task
+    -- when the checkpoint moves the visible history anchor.
+    if checkpoint_options.max_memory_chars ~= nil then
+        local limit = tonumber(checkpoint_options.max_memory_chars)
+        if not limit or limit ~= limit or math.abs(limit) == math.huge then
+            return nil, "Invalid checkpoint max_memory_chars"
+        end
+        if limit > 0 and #result.summary > math.floor(limit) then
+            return nil, "Checkpoint summary exceeds max_memory_chars"
+        end
     end
 
     local checkpoint_metadata = {
