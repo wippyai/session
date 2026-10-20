@@ -248,6 +248,8 @@ The response and its pending proposal marker are saved atomically. Tool and
 delegation outcomes settle before a proposal takes effect. Recovery replays
 persisted proposals without rerunning tools or taking another model step;
 explicitly cancelled tool rounds do not apply their proposals.
+Proposals apply in order. An explicit model, trait or tool target is retained
+when switching agents, even if it matches the preceding agent's settings.
 
 Replay is at-least-once: a crash between a declarative effect and its completion
 marker can repeat it. External providers and lifecycle hooks must use stable

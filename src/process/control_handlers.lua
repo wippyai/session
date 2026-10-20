@@ -702,11 +702,14 @@ function control_handlers.apply_behavior_controls(ctx, controls)
             -- targets already committed, including an agent switch: replay must
             -- not reset that agent's overlays or emit duplicate announcements.
             local current = ctx.config or (ctx.reader:state() or {}).config or {}
+            local switching_agent = control.config.agent ~= nil and control.config.agent ~= current.agent_id
             local changes = {}
             for key, value in pairs(control.config) do
                 local stored_key = key == "agent" and "agent_id" or
                     (key == "traits" and "active_traits" or (key == "tools" and "active_tools" or key))
-                if json.encode(current[stored_key]) ~= json.encode(value) then changes[key] = value end
+                -- A switch resets the model and overlays. Explicit targets in
+                -- the same proposal must survive even if they match the old agent.
+                if switching_agent or json.encode(current[stored_key]) ~= json.encode(value) then changes[key] = value end
             end
             if next(changes) then
                 local applied, err = control_handlers.control_config(ctx, { config_changes = changes })
