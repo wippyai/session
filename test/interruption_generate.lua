@@ -5,6 +5,7 @@ local response_mapper = require('response_mapper')
 local function run(request)
     local fixture = assert(ctx.get('fixture'))
     request.worker_pid = fixture.worker_pid
+    request.provider_call = fixture.call_number
     request.responses_input = response_mapper.map_messages(request.messages)
     request.responses_instructions = response_mapper.extract_instructions(request.messages)
     assert(process.send(fixture.reply_pid, 'provider_prompt', request))

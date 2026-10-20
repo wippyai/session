@@ -84,19 +84,24 @@ local function has_checkpoint_bindings(bindings: any): boolean
     return #bindings > 0
 end
 
-local function resolve_checkpoint_config(ctx, op): (string?, number?)
-    local checkpoint_options = checkpoint_options_from_agent(op)
-    local function_id = checkpoint_options.function_id or ctx.config.checkpoint_function_id
+local function resolve_checkpoint_options(ctx, op): table
+    local config = ctx.config or {}
+    local options = checkpoint_runtime.resolve_options(checkpoint_options_from_agent(op), {
+        token_threshold = config.token_checkpoint_threshold,
+        function_id = config.checkpoint_function_id,
+    })
+    return checkpoint_runtime.resolve_options(options, config.checkpoint) or {}
+end
+
+local function resolve_checkpoint_config(ctx, op): (string?, number?, table)
+    local checkpoint_options = resolve_checkpoint_options(ctx, op)
+    local function_id = checkpoint_options.function_id
     if type(function_id) ~= "string" or function_id == "" then
         function_id = nil
     end
     local threshold = tonumber(checkpoint_options.token_threshold)
 
-    if not threshold then
-        threshold = tonumber(ctx.config.token_checkpoint_threshold)
-    end
-
-    return function_id, threshold
+    return function_id, threshold, checkpoint_options
 end
 
 function session_handlers.execute_function(ctx, op)
@@ -195,7 +200,8 @@ function session_handlers.check_background_triggers(ctx, op)
     local tokens = op.tokens
     local message_id = op.message_id
 
-    if not tokens or not message_id then
+    local compact_requested = ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true
+    if (not tokens and not compact_requested) or not message_id then
         return { skipped = true }
     end
 
@@ -206,14 +212,15 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local session_data = ctx.reader:state()
 
-    local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
+    local checkpoint_function_id, token_threshold, checkpoint_options = resolve_checkpoint_config(ctx, op)
     local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
     -- context_tokens is the full prompt size (uncached input plus cache reads
     -- and writes); prompt_tokens alone counts only the uncached input.
-    local context_tokens = tokens.context_tokens
-    if checkpoint_available and context_tokens and token_threshold and token_threshold > 0 then
-
-        if context_tokens > token_threshold then
+    local context_tokens = tokens and tokens.context_tokens
+    local threshold_exceeded = not op.requested_only and context_tokens and token_threshold
+        and token_threshold > 0 and context_tokens > token_threshold
+    if checkpoint_options.enabled ~= false and checkpoint_available then
+        if compact_requested or threshold_exceeded then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
@@ -222,14 +229,17 @@ function session_handlers.check_background_triggers(ctx, op)
                 checkpoint_id = anchor_id,
                 message_id = anchor_id,
                 trigger_tokens = context_tokens,
+                reason = compact_requested and "compaction_requested" or "token_threshold_exceeded",
+                clear_request = compact_requested,
                 agent = op.agent,
                 agent_options = op.agent_options,
+                checkpoint_options = checkpoint_options,
                 run_context_binding = op.run_context_binding
             })
         end
     end
 
-    if ctx.config.title_function_id and not checkpoint_needed then
+    if ctx.config.title_function_id and not checkpoint_needed and not op.requested_only then
         local has_title = session_data.title and session_data.title ~= ""
 
         if not has_title then
@@ -305,7 +315,11 @@ function session_handlers.generate_title(ctx, op)
 end
 
 function session_handlers.create_checkpoint(ctx, op)
-    local checkpoint_function_id = op.checkpoint_function_id or ctx.config.checkpoint_function_id
+    local checkpoint_options = type(op.checkpoint_options) == "table" and op.checkpoint_options
+        or resolve_checkpoint_options(ctx, op)
+    local checkpoint_function_id = op.checkpoint_function_id or checkpoint_options.function_id
+    if checkpoint_options.enabled == false then return { skipped = true } end
+    local reason = op.reason or "token_threshold_exceeded"
 
     if not op.checkpoint_id then
         return nil, "Checkpoint ID required"
@@ -319,7 +333,6 @@ function session_handlers.create_checkpoint(ctx, op)
     local result = nil
     local checkpoint_source = "function"
     local checkpoint_binding_metadata = nil
-    local checkpoint_options = checkpoint_options_from_agent(op)
 
     if has_checkpoint_bindings(op.checkpoint_bindings) then
         local host = {
@@ -335,7 +348,7 @@ function session_handlers.create_checkpoint(ctx, op)
         }, {
             host = host,
             agent = agent,
-            reason = "token_threshold_exceeded",
+            reason = reason,
             selector = {
                 mode = "since_checkpoint"
             },
@@ -382,13 +395,26 @@ function session_handlers.create_checkpoint(ctx, op)
         result.summary = result.memory
     end
 
-    if not result or not result.summary then
-        return nil, "No summary returned"
+    if type(result) ~= "table" or type(result.summary) ~= "string" or not result.summary:find("%S") then
+        return nil, "No non-empty summary returned"
+    end
+
+    -- Providers receive the policy, but the host owns the persistence boundary.
+    -- Reject rather than truncate: an incomplete summary could discard the task
+    -- when the checkpoint moves the visible history anchor.
+    if checkpoint_options.max_memory_chars ~= nil then
+        local limit = tonumber(checkpoint_options.max_memory_chars)
+        if not limit or limit ~= limit or math.abs(limit) == math.huge then
+            return nil, "Invalid checkpoint max_memory_chars"
+        end
+        if limit > 0 and #result.summary > math.floor(limit) then
+            return nil, "Checkpoint summary exceeds max_memory_chars"
+        end
     end
 
     local checkpoint_metadata = {
         checkpoint_summary = result.summary,
-        checkpoint_reason = "token_threshold_exceeded",
+        checkpoint_reason = reason,
         checkpoint_id = op.checkpoint_id,
         trigger_tokens = op.trigger_tokens or 0,
         checkpoint_generated_at = time.now():format(time.RFC3339),

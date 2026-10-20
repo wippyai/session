@@ -14,6 +14,26 @@ entries:
     groups:
       - test_group
 
+  - name: deny_session_read
+    kind: security.policy
+    meta:
+      comment: Allows contract dispatch but denies session reads in protection tests
+    policy:
+      actions: read
+      resources: "session:*"
+      effect: deny
+    groups:
+      - denied_group
+
+  - name: denied_group_dispatch
+    kind: security.policy
+    policy:
+      actions: "*"
+      resources: "*"
+      effect: allow
+    groups:
+      - denied_group
+
   - name: run_context_test
     kind: function.lua
     meta:

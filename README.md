@@ -110,22 +110,22 @@ when Wippy is not on PATH. The test target clears only its own test database.
 
 ## Runtime tests and benchmarks
 
-`make test-postgres FRAMEWORK_DIR=/absolute/path/to/framework` checks the
+`make test-postgres` checks the
 affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
 disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
 `PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
 supplies the application's user-table contract and runs these checks in UTC.
 
 On Unix, `make install test` runs the suite against the locked dependencies.
-`make test-runtime FRAMEWORK_DIR=/absolute/path/to/framework` exercises
+`make test-runtime` exercises
 registered tools, agent compilation, the Session
 process, and SQLite persistence with deterministic model responses. It covers
 handoff history, persisted control operations, mixed tool results, and Stop.
-The Framework checkout supplies local agent, LLM, and test sources. Required
-runtime checks need the candidate runner so missing or empty suites fail.
-CI runs both locked compatibility and candidate tests.
+Required runtime checks fail if a selected suite executes no cases. Set
+`FRAMEWORK_DIR=/absolute/path/to/framework` to use local Agent, LLM, and test
+sources instead of the locked published dependencies. CI checks both modes.
 
-`make bench FRAMEWORK_DIR=/absolute/path/to/framework` writes local JSON reports
+`make bench` writes local JSON reports
 with median, p95, throughput, samples, allocation counters, and revision
 metadata. Defaults are 100 warmups and 100 measured batches at
 sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
@@ -214,6 +214,21 @@ model response's normalized `tokens.context_tokens` with
 the checkpoint before the next tool round and model step. The existing strict
 `>` threshold is unchanged; reaching the threshold exactly does not trigger it.
 
+Checkpoint options resolve in this order: trait defaults, explicit agent
+`agent_options.checkpoint`, then persisted session config. The existing
+`token_checkpoint_threshold` and `checkpoint_function_id` session fields override
+agent values; an optional `config.checkpoint` map overlays those fields last.
+That map is read from persisted host configuration, not accepted implicitly by
+the start token or `_control.config`. `enabled = false` disables scheduling;
+the existing zero/nonpositive session threshold remains disabled. Maps merge
+recursively and lists replace, including an explicit empty list.
+
+The scheduler captures detached effective options for each queued checkpoint,
+so later config changes cannot alter that operation. A trait checkpoint binding
+is attempted before the configured function fallback; both receive effective
+`options`. A strict binding failure prevents fallback and checkpoint-state
+writes. Without behaviors, the existing function path remains available.
+
 This is the current prompt size, not cumulative usage across the turn. Cached
 input still occupies context even when `prompt_tokens` reports only a small
 uncached suffix. The LLM module normalizes provider accounting; the session does
@@ -224,6 +239,36 @@ stable history prefix on later requests. Caching is provider-dependent, can
 expire or miss, and cached reads still have a cost. Checkpointing shortens the
 active prompt after a successful summary; neither mechanism is a hard spending
 limit or a preflight guarantee against one oversized tool result.
+
+## Durable behavior controls
+
+Opt-in trait behaviors can propose the shared declarative `_control` subset:
+agent/model/trait/tool targets, session/public metadata, and `memory.compact`.
+The response and its pending proposal marker are saved atomically. Tool and
+delegation outcomes settle before a proposal takes effect. Recovery replays
+persisted proposals without rerunning tools or taking another model step;
+explicitly cancelled tool rounds do not apply their proposals.
+Proposals apply in order. An explicit model, trait or tool target is retained
+when switching agents, even if it matches the preceding agent's settings.
+
+Replay is at-least-once: a crash between a declarative effect and its completion
+marker can repeat it. External providers and lifecycle hooks must use stable
+refs and idempotent writes, not rely on a final `deactivate` callback.
+
+`memory.compact = true` persists a request that bypasses the token threshold,
+not an explicit disable or a missing provider. False is not cancellation.
+When a proposal also changes configuration, requested compaction captures the
+committed agent/provider, not the old response's settings. An agent handoff
+continues the current turn through the canonical replacement-agent
+continuation after the preceding tool results settle. Accepted steering reaches
+the new agent once; compaction uses the committed target's provider and options.
+An explicit Stop suppresses that continuation and keeps unapplied steering for
+the next user-started turn.
+Summary replacement, history anchor, audit metadata and request consumption
+commit in one transaction; failed writes retain the previous usable history.
+This does not install a long-term memory provider or a loop policy. Sessions
+without opted-in behaviors do not scan history for proposals or start new
+automatic model continuations.
 
 ## Artifacts
 

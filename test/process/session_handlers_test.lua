@@ -424,6 +424,114 @@ local function define_tests()
     end)
 
     describe("session checkpoint dispatch", function()
+        it("rejects oversized function and binding summaries before changing history", function()
+            for _, binding in ipairs({ false, true }) do
+                local ctx, captured = mock_checkpoint_ctx({})
+                local output = { summary = string.rep("x", 4096) }
+                session_handlers._funcs = { new = function()
+                    return { with_context = function(self) return self end, call = function() return output end }
+                end }
+                session_handlers._checkpoint_runtime = { create = function() return { result = output } end }
+                local result, err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_id = "settled", message_id = "settled", clear_request = true,
+                    checkpoint_options = { function_id = "app:summary", max_memory_chars = 64 },
+                    checkpoint_bindings = binding and {{ id = "app:summary" }} or nil,
+                })
+                test.is_nil(result)
+                test.contains(tostring(err), "exceeds max_memory_chars")
+                test.is_nil(captured.summary)
+                test.is_nil(captured.context_key)
+                test.eq(captured.resets, 0)
+            end
+        end)
+
+        it("rejects malformed or empty summaries without committing a checkpoint", function()
+            for _, output in ipairs({ true, "raw text", { summary = true }, { summary = {} },
+                { summary = "" }, { summary = " \n\t" }, {} }) do
+                local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "app:summary" })
+                session_handlers._funcs = { new = function()
+                    return { with_context = function(self) return self end, call = function() return output end }
+                end }
+                local called, result, err = pcall(session_handlers.create_checkpoint, ctx, {
+                    checkpoint_id = "settled", message_id = "settled", clear_request = true,
+                })
+                test.is_true(called, "malformed output should return an error, not throw")
+                test.is_nil(result)
+                test.contains(tostring(err), "summary")
+                test.is_nil(captured.summary)
+                test.eq(captured.resets, 0)
+            end
+        end)
+
+        it("accepts an exact limit and preserves unlimited checkpoint policies", function()
+            for _, options in ipairs({ { max_memory_chars = 64 }, { max_memory_chars = "64" },
+                { max_memory_chars = 0 }, { max_memory_chars = -1 }, {} }) do
+                local ctx, captured = mock_checkpoint_ctx({})
+                options.function_id = "app:summary"
+                session_handlers._funcs = { new = function()
+                    return { with_context = function(self) return self end,
+                        call = function() return { memory = string.rep("x", 64) } end }
+                end }
+                local result, err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_id = "settled", message_id = "settled", checkpoint_options = options,
+                })
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(captured.summary, string.rep("x", 64))
+            end
+        end)
+
+        it("schedules a persisted compact request without a token threshold", function()
+            local ctx = mock_checkpoint_ctx({ checkpoint_function_id = "host:checkpoint" })
+            ctx.reader.get_context = function(_, key) return key == "checkpoint_requested" and true or nil end
+            local result = session_handlers.check_background_triggers(ctx, {
+                message_id = "settled-assistant", tokens = {}, requested_only = true,
+            })
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].reason, "compaction_requested")
+            test.eq(result.next_ops[1].checkpoint_id, "settled-assistant")
+            test.is_true(result.next_ops[1].clear_request)
+        end)
+
+        it("does not consume compact requests when checkpointing is disabled or unavailable", function()
+            for _, config in ipairs({ {}, { checkpoint = { enabled = false, function_id = "host:checkpoint" } } }) do
+                local ctx = mock_checkpoint_ctx(config)
+                ctx.reader.get_context = function() return true end
+                local result = session_handlers.check_background_triggers(ctx, {
+                    message_id = "settled-assistant", requested_only = true,
+                })
+                test.is_true(result.skipped)
+            end
+        end)
+
+        it("keeps a compact request until summary persistence succeeds", function()
+            local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "host:checkpoint" })
+            session_handlers._funcs = { new = function()
+                return { with_context = function(self) return self end,
+                    call = function() return { summary = "compacted" } end }
+            end }
+            local cleared = false
+            ctx.writer.commit_checkpoint = function() return nil, "disk full" end
+            local op = { checkpoint_id = "settled", message_id = "settled",
+                reason = "compaction_requested", clear_request = true }
+            local result, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(result)
+            test.eq(err, "disk full")
+            test.is_false(cleared)
+            ctx.writer.commit_checkpoint = function(_, checkpoint_op, summary, metadata)
+                test.is_true(checkpoint_op.clear_request)
+                test.eq(summary, "compacted")
+                captured.message_meta = metadata
+                cleared = true
+                return true
+            end
+            result, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.is_true(cleared)
+            test.eq(captured.message_meta.checkpoint_reason, "compaction_requested")
+        end)
+
         before_each(function()
             session_handlers._checkpoint_runtime = nil
             session_handlers._funcs = nil
@@ -432,6 +540,138 @@ local function define_tests()
         after_each(function()
             session_handlers._checkpoint_runtime = nil
             session_handlers._funcs = nil
+        end)
+
+        it("uses the session threshold and function above agent checkpoint settings", function()
+            local ctx = mock_checkpoint_ctx({
+                token_checkpoint_threshold = 50000,
+                checkpoint_function_id = "host:checkpoint",
+            })
+            local agent_options = { checkpoint = {
+                token_threshold = 12000, function_id = "agent:checkpoint", max_tokens = 1000,
+            } }
+            local result = session_handlers.check_background_triggers(ctx, {
+                message_id = "msg-1", tokens = { context_tokens = 20000 },
+                agent_options = agent_options,
+            })
+            test.is_true(result.skipped)
+            result = session_handlers.check_background_triggers(ctx, {
+                message_id = "msg-1", tokens = { context_tokens = 50001 },
+                agent_options = agent_options,
+            })
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].checkpoint_function_id, "host:checkpoint")
+            test.eq(result.next_ops[1].checkpoint_options.token_threshold, 50000)
+            test.eq(result.next_ops[1].checkpoint_options.max_tokens, 1000)
+            test.eq(agent_options.checkpoint.token_threshold, 12000)
+        end)
+
+        it("uses agent checkpoint settings when the session does not override them", function()
+            local ctx = mock_checkpoint_ctx({})
+            local result = session_handlers.check_background_triggers(ctx, {
+                message_id = "msg-1", tokens = { context_tokens = 12001 },
+                agent_options = { checkpoint = {
+                    token_threshold = 12000, function_id = "agent:checkpoint",
+                } },
+            })
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].checkpoint_function_id, "agent:checkpoint")
+        end)
+
+        it("does not fall back to the agent threshold when the session disables checkpoints", function()
+            local ctx = mock_checkpoint_ctx({
+                token_checkpoint_threshold = 0, checkpoint_function_id = "host:checkpoint",
+            })
+            local result = session_handlers.check_background_triggers(ctx, {
+                message_id = "msg-1", tokens = { context_tokens = 50001 },
+                agent_options = { checkpoint = { token_threshold = 12000 } },
+            })
+            test.is_true(result.skipped)
+        end)
+
+        it("honors a disabled agent checkpoint policy", function()
+            local ctx = mock_checkpoint_ctx({
+                token_checkpoint_threshold = 50000, checkpoint_function_id = "host:checkpoint",
+            })
+            local result = session_handlers.check_background_triggers(ctx, {
+                message_id = "msg-1", tokens = { context_tokens = 50001 },
+                agent_options = { checkpoint = { enabled = false } },
+            })
+            test.is_true(result.skipped)
+        end)
+
+        it("keeps scheduled options stable through dispatch and provider fallback", function()
+            local ctx = mock_checkpoint_ctx({
+                token_checkpoint_threshold = 50000, checkpoint_function_id = "host:checkpoint",
+            })
+            local options = { checkpoint = {
+                token_threshold = 12000, function_id = "agent:checkpoint", max_tokens = 1000,
+            } }
+            local trigger = session_handlers.check_background_triggers(ctx, {
+                message_id = "msg-1", tokens = { context_tokens = 50001 }, agent_options = options,
+            })
+            options.checkpoint.max_tokens = 999999
+            ctx.config.checkpoint_function_id = "changed:checkpoint"
+            local captured
+            session_handlers._funcs = { new = function()
+                return {
+                    with_context = function(self) return self end,
+                    call = function(_, id, args)
+                        captured = { id = id, options = args.options }
+                        return { summary = "checkpoint" }
+                    end,
+                }
+            end }
+            local _, err = session_handlers.create_checkpoint(ctx, trigger.next_ops[1])
+            test.is_nil(err)
+            test.eq(captured.id, "host:checkpoint")
+            test.eq(captured.options.token_threshold, 50000)
+            test.eq(captured.options.max_tokens, 1000)
+        end)
+
+        it("applies canonical host checkpoint options last, including explicit disabling", function()
+            local ctx = mock_checkpoint_ctx({
+                token_checkpoint_threshold = 50000, checkpoint_function_id = "flat:checkpoint",
+                checkpoint = { enabled = true, token_threshold = 100, function_id = "host:checkpoint", max_tokens = 500 },
+            })
+            local op = {
+                message_id = "msg-1", tokens = { context_tokens = 101 },
+                agent_options = { checkpoint = { enabled = false, token_threshold = 12000, max_tokens = 1000 } },
+            }
+            local result, err = session_handlers.check_background_triggers(ctx, op)
+            test.is_nil(err)
+            test.is_true(result.checkpoint_triggered)
+            test.eq(result.next_ops[1].checkpoint_function_id, "host:checkpoint")
+            test.eq(result.next_ops[1].checkpoint_options.token_threshold, 100)
+            test.eq(result.next_ops[1].checkpoint_options.max_tokens, 500)
+            ctx.config.checkpoint.enabled = false
+            result, err = session_handlers.check_background_triggers(ctx, op)
+            test.is_nil(err)
+            test.is_true(result.skipped)
+        end)
+
+        it("does not fall back or write checkpoint state after a strict binding failure", function()
+            local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "fallback:checkpoint" })
+            session_handlers._checkpoint_runtime = {
+                create = function(bindings)
+                    test.is_true(bindings.checkpoint[1].strict)
+                    return { applied = 0 }, "strict checkpoint failure"
+                end,
+            }
+            session_handlers._funcs = { new = function()
+                error("function fallback must not execute after a strict failure")
+            end }
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "msg-1", message_id = "msg-1",
+                checkpoint_bindings = { { binding = "memory:checkpoint", strict = true } },
+            })
+            test.is_nil(result)
+            test.eq(err, "strict checkpoint failure")
+            test.is_nil(captured.message_meta)
+            test.is_nil(captured.session_meta)
+            test.is_nil(captured.context_key)
+            test.is_nil(captured.summary)
+            test.eq(captured.resets, 0)
         end)
 
         it("triggers a checkpoint when a trait binding exists without a function id", function()

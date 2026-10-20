@@ -5,7 +5,7 @@ local consts = require("consts")
 
 local checkpoint_repo = {}
 
--- Keep the prompt anchor, summary and audit metadata in one
+-- Keep the prompt anchor, summary, audit metadata and compact request in one
 -- transaction. A failed or interrupted write must leave the old prompt usable.
 function checkpoint_repo.commit(session_id, user_id, op, summary, message_metadata, summary_id)
     local resource = consts.get_db_resource()
@@ -50,6 +50,7 @@ function checkpoint_repo.commit(session_id, user_id, op, summary, message_metada
         }
     end
     context[consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID] = op.checkpoint_id
+    if op.clear_request then context[consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED] = nil end
     local meta_json, encode_err = json.encode(meta)
     if encode_err then return abort(encode_err) end
     local context_json, context_encode_err = json.encode(context)
@@ -65,15 +66,23 @@ function checkpoint_repo.commit(session_id, user_id, op, summary, message_metada
         text = summary, time = now,
     }):run_with(tx):exec()
     if insert_err then return abort(insert_err) end
-    local _, message_write_err = sql.builder.update("messages"):set("metadata", metadata_json)
-        :where("session_id = ? AND message_id = ?", session_id, op.message_id):run_with(tx):exec()
+    -- External writers need not share the Session process's writer lock. Refuse
+    -- a stale snapshot instead of replacing their newer metadata or context.
+    local message_write, message_write_err = sql.builder.update("messages"):set("metadata", metadata_json)
+        :where("session_id = ? AND message_id = ?", session_id, op.message_id)
+        :where("COALESCE(metadata, '{}') = ?", messages[1].metadata or "{}"):run_with(tx):exec()
     if message_write_err then return abort(message_write_err) end
-    local _, session_write_err = sql.builder.update("sessions"):set("meta", meta_json)
-        :where("session_id = ?", session_id):run_with(tx):exec()
+    if not message_write or message_write.rows_affected ~= 1 then return abort("Message changed during checkpoint") end
+    local session_write, session_write_err = sql.builder.update("sessions"):set("meta", meta_json)
+        :where("session_id = ? AND user_id = ? AND primary_context_id = ?", session_id, user_id, session.primary_context_id)
+        :where("COALESCE(meta, '{}') = ?", session.meta or "{}"):run_with(tx):exec()
     if session_write_err then return abort(session_write_err) end
-    local _, context_write_err = sql.builder.update("contexts"):set("data", context_json)
-        :where("context_id = ?", session.primary_context_id):run_with(tx):exec()
+    if not session_write or session_write.rows_affected ~= 1 then return abort("Session changed during checkpoint") end
+    local context_write, context_write_err = sql.builder.update("contexts"):set("data", context_json)
+        :where("context_id = ?", session.primary_context_id)
+        :where("COALESCE(data, '{}') = ?", contexts[1].data or "{}"):run_with(tx):exec()
     if context_write_err then return abort(context_write_err) end
+    if not context_write or context_write.rows_affected ~= 1 then return abort("Context changed during checkpoint") end
     local committed, commit_err = tx:commit()
     if not committed then return abort(commit_err or "Checkpoint commit failed") end
     db:release()

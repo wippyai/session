@@ -79,6 +79,7 @@ local function define_tests(blocked_only, lifecycle_only)
             assert(contexts.create(context_id, 'primary', '{}'))
             assert(sessions.create(session_id, actor_id, context_id, 'Interruption prompt', 'test', {}, {
                 agent_id = lifecycle_only and 'app:lifecycle_agent' or 'app.process:initial_agent',
+                active_traits = lifecycle_only and { 'app:native_behavior_trait' } or nil,
             }))
         end)
         after_each(function()
@@ -193,6 +194,8 @@ local function define_tests(blocked_only, lifecycle_only)
                 test.eq(row.metadata.call_id, event.call_id)
                 test.eq(row.metadata.function_name, event.function_name)
                 test.eq(row.metadata.result, event.error)
+                local primary = json.decode(assert(contexts.get(context_id)).data)
+                test.is_nil(primary.native_behavior_applied, 'Stop must cancel the pending behavior proposal')
             end)
             it('resumes a pending shutdown with the same session process', function()
                 label = 'resume-pending-finish'
@@ -204,6 +207,7 @@ local function define_tests(blocked_only, lifecycle_only)
                 idle()
                 local next_request = send('Perform only the new request.', 'followup')
                 test.eq(next_request.worker_pid, first.worker_pid)
+                test.eq(next_request.provider_call, 3, 'behaviors must not add model calls')
                 idle()
                 local page = assert(messages.list_by_session(session_id))
                 for _, message in ipairs(page.messages) do test.is_nil(message.metadata.interruption) end
@@ -240,7 +244,8 @@ local function define_tests(blocked_only, lifecycle_only)
                         if message.type == consts.MSG_TYPE.ASSISTANT and message.data == 'Scripted answer' then answer = message end
                         test.is_nil(message.metadata.interruption, 'disconnect does not persist a Stop boundary')
                     end
-                    if answer then
+                    local primary = json.decode(assert(contexts.get(context_id)).data)
+                    if answer and primary.native_behavior_applied then
                         test.not_nil(tool)
                         test.eq(tool.metadata.status, consts.FUNC_STATUS.SUCCESS)
                         test.eq(tool.metadata.result.marker, 'stored-tool-result')

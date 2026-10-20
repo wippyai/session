@@ -82,6 +82,107 @@ local function mock_ctx()
 end
 
 local function define_tests()
+    describe("explicit behavior targets across agent switches", function()
+        it("preserves an explicitly empty tools restriction across an agent switch", function()
+            local ctx = mock_ctx()
+            ctx.config = { agent_id = "agent:old", active_tools = {} }
+            local ok, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { agent = "agent:new", tools = {} } }
+            })
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(type(ctx.config.active_tools), "table")
+            test.eq(#ctx.config.active_tools, 0)
+        end)
+
+        it("retains an explicit trait overlay equal to the old agent overlay", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:old", model = "model:old", active_traits = { "trait:keep" } }
+            local ok, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { agent = "agent:new", traits = { "trait:keep" } } }
+            })
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(type(ctx.config.active_traits), "table")
+            test.eq(ctx.config.active_traits[1], "trait:keep")
+        end)
+        it("retains an explicit model equal to the old model when the new default differs", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:old", model = "model:keep" }
+            ctx.agent_ctx.switch_to_agent = function(self, id, options)
+                self.current_model = options and options.model or "model:new_default"
+                captured.current_agent = id
+                return true
+            end
+            local ok, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { agent = "agent:new", model = "model:keep" } }
+            })
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(ctx.config.model, "model:keep")
+        end)
+    end)
+
+    describe("behavior controls", function()
+        it("replays a combined agent/model/overlay target without resetting it again", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:old", model = "model:keep", active_tools = {} }
+            local controls = {{ config = { agent = "agent:new", model = "model:keep", tools = {} } }}
+            local initial_writes, initial_announcements
+            for attempt = 1, 2 do
+                local result, err = control_handlers.apply_behavior_controls(ctx, controls)
+                test.is_nil(err)
+                test.is_true(result)
+                test.eq(ctx.config.model, "model:keep")
+                test.eq(type(ctx.config.active_tools), "table")
+                test.eq(#ctx.config.active_tools, 0)
+                if attempt == 1 then
+                    initial_writes, initial_announcements = captured.persist_calls, captured.upstream_calls
+                else
+                    test.eq(captured.persist_calls, initial_writes, "replay adds no durable writes")
+                    test.eq(captured.upstream_calls, initial_announcements, "replay adds no announcements")
+                end
+            end
+            test.eq(#captured.switches, 1)
+            test.eq(captured.persist_calls, 1)
+        end)
+
+        it("does not reset overlays or announce an already-committed target during replay", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:target", model = "model:target", active_traits = { "trait:kept" } }
+            local result, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { agent = "agent:target", model = "model:target", traits = { "trait:kept" } } }
+            })
+            test.is_nil(err)
+            test.is_true(result)
+            test.eq(#captured.switches, 0)
+            test.eq(captured.persist_calls, 0)
+            test.eq(captured.upstream_calls, 0)
+        end)
+
+        it("validates the entire batch before applying any effects", function()
+            local ctx, captured = mock_ctx()
+            local result, err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { model = "model:new" } }, { config = { stop = true } }
+            })
+            test.is_nil(result)
+            test.not_nil(err)
+            test.eq(captured.persist_calls, 0)
+        end)
+
+        it("returns storage failures without continuing later policies", function()
+            local ctx, captured = mock_ctx()
+            ctx.writer.set_context = function() return nil, "disk full" end
+            local result, err = control_handlers.apply_behavior_controls(ctx, {
+                { context = { session = { set = { key = "value" } } } },
+                { config = { model = "model:new" } }
+            })
+            test.is_nil(result)
+            test.contains(tostring(err), "disk full")
+            test.eq(captured.persist_calls, 0)
+        end)
+    end)
+
     describe("context and memory control failures", function()
         it("returns the storage error from each context write", function()
             for _, case in ipairs({

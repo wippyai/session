@@ -272,6 +272,7 @@ function session_writer:add_response(content, metadata, calls)
             }
         })
     end
+    if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
     local _, err = session_writer._message_repo.create_batch(self.session_id, rows)
     if err then return nil, nil, err end
     return assistant_id, call_ids, nil

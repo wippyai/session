@@ -33,13 +33,11 @@ test: clean
 
 test-runtime: TEST_FILTER = app.runtime:handoff_runtime
 test-runtime:
-	@test -n "$(FRAMEWORK_DIR)" || { echo 'Set FRAMEWORK_DIR to use the required runtime test runner' >&2; exit 1; }
 	$(MAKE) install
 	WIPPY_TEST_REQUIRE_CASES=1 $(MAKE) test TEST_FILTER="$(TEST_FILTER)"
 
 # The caller supplies a fresh disposable database; this target never drops one.
 test-postgres:
-	@test -n "$(FRAMEWORK_DIR)" || { echo 'Set FRAMEWORK_DIR to use the required runtime test runner' >&2; exit 1; }
 	$(MAKE) install
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
 	cd "$(TEST_DIR)" && TZ=UTC WIPPY_TEST_REQUIRE_CASES=1 WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test --config "$(TEST_CONFIG)" \
@@ -48,7 +46,7 @@ test-postgres:
 		-o "app:db:options.sslmode=disable" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
-		test -- app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime
+		test -- app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test
 
 bench:
 	@set -eu; run_benchmark() { \
