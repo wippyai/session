@@ -89,13 +89,23 @@ local function define_tests()
                 run("bash " .. quote(repository .. "/scripts/test-workspace.sh") .. " " .. quote(source) .. " " .. quote(alias), 1)
             end)
         end)
-        test.it("requires the candidate runner for mandatory runtime checks", function()
+        test.it("requires executed cases with published or candidate dependencies", function()
             with_directory(function(directory, repository)
-                for _, target in ipairs({ "test-runtime", "bench" }) do
-                    run("make -s -C " .. quote(repository) .. " " .. target ..
-                        " FRAMEWORK_DIR= WIPPY=true " .. quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
-                        " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"), 2)
+                for _, framework in ipairs({ "", repository }) do
+                    local output = run("make -s -n -C " .. quote(repository) .. " test-runtime " ..
+                        quote("FRAMEWORK_DIR=" .. framework) ..
+                        " " .. quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
+                        " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"))
+                    test.contains(output, "WIPPY_TEST_REQUIRE_CASES=1")
+                    test.contains(output, 'test -- "app.runtime:handoff_runtime"')
                 end
+            end)
+        end)
+        test.it("rejects a benchmark runner that produces no report", function()
+            with_directory(function(directory, repository)
+                run("make -s -C " .. quote(repository) .. " bench FRAMEWORK_DIR= WIPPY=true " ..
+                    quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
+                    " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"), 2)
             end)
         end)
     end)
