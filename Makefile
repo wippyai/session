@@ -5,6 +5,7 @@ TEST_CONFIG ?= $(abspath $(TEST_DIR))/.wippy.yaml
 TEST_DB ?= $(TEST_ARTIFACTS)/test.db
 TEST_BACKUP_DIR ?= $(TEST_ARTIFACTS)/backups
 TEST_FILTER ?=
+POSTGRES_TEST_OVERRIDES ?=
 POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test
 FRAMEWORK_DIR ?=
 PGHOST ?= localhost
@@ -47,9 +48,13 @@ test-postgres:
 		-o "app:db:options.sslmode=disable" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
+		$(POSTGRES_TEST_OVERRIDES) \
 		$(if $(strip $(POSTGRES_TEST_FILTER)),test -- $(POSTGRES_TEST_FILTER))
 
 # Release validation executes every suite rather than only persistence handoff.
+# Benchmarks are opt-in workloads run by make bench; keep strict case checks
+# for every normal suite without treating intentionally skipped workloads as failures.
+test-postgres-full: POSTGRES_TEST_OVERRIDES = -o app.runtime:handoff_benchmark:meta.type=benchmark -o app.runtime:metadata_benchmark:meta.type=benchmark
 test-postgres-full: POSTGRES_TEST_FILTER =
 test-postgres-full: test-postgres
 
