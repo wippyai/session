@@ -113,7 +113,9 @@ when Wippy is not on PATH. The test target clears only its own test database.
 `make test-postgres` checks the
 affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
 disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
-`PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
+`PGPASSWORD`; the target never drops it. `make test-postgres-full` runs every
+normal suite and leaves opt-in benchmarks to `make bench`. CI uses this full
+gate with PostgreSQL 17. The harness
 supplies the application's user-table contract and runs these checks in UTC.
 
 On Unix, `make install test` runs the suite against the locked dependencies.

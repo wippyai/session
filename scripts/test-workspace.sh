@@ -18,6 +18,7 @@ awk -v modules="$modules" -v source="$source" '
 ' "$repository/test/wippy.lock" > "$workspace/wippy.lock"
 jq -n --arg repository "$repository" --arg workspace "$workspace" --arg framework "$framework" '
   {version: "1.0", logger: {level: "error"},
+   override: {"wippy.session.process:context_cleanup.service:lifecycle.auto_start": false},
    registry: {dependency_vendor_dir: ($workspace + "/modules/vendor"),
               dependency_lock_path: ($workspace + "/wippy.lock")},
    workspace: {replacements: ({"wippy/session": $repository} +

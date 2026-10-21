@@ -55,8 +55,9 @@ local function define_tests()
             assert(pid, tostring(err or 'cleanup spawn failed'))
             worker_pid = pid
         end
-        local function sweep_result()
-            local inbox, events, deadline = process.inbox(), process.events(), time.after('3s')
+        local function sweep_result(deadline)
+            deadline = deadline or time.after('3s')
+            local inbox, events = process.inbox(), process.events()
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
                 assert(selected.ok and selected.channel ~= deadline, 'cleanup sweep timed out')
@@ -111,8 +112,12 @@ local function define_tests()
             test.eq(removed, 104)
             test.eq(remaining(), 0)
             stages(1); expire()
-            local result = sweep_result()
-            test.is_false(result.unavailable)
+            local deadline = time.after('3s')
+            local result
+            repeat
+                result = sweep_result(deadline)
+                test.is_false(result.unavailable)
+            until result.count > 0
             test.eq(result.count, 1)
             test.eq(remaining(), 0)
             stop()

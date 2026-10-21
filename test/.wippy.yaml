@@ -1,4 +1,7 @@
 version: "1.0"
+# Runtime cleanup tests own their worker; the resident service must not consume its fixtures.
+override:
+  "wippy.session.process:context_cleanup.service:lifecycle.auto_start": false
 workspace:
   replacements:
     wippy/session: ..
