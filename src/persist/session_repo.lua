@@ -411,8 +411,21 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     local result, update_err = update:run_with(tx):exec()
     if update_err or not result or result.rows_affected ~= 1 then
         tx:rollback()
+        if update_err or not result then
+            db:release()
+            return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+        end
+        -- PostgreSQL can read the previous revision before a competing writer
+        -- commits. After losing the conditional update, return the committed
+        -- state rather than the snapshot read before that race.
+        local latest_rows, latest_err = current_query:limit(1):run_with(db):query()
         db:release()
-        return nil, update_err and 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' or 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+        if latest_err then return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' end
+        if #latest_rows == 0 then return nil, 'SESSION_NOT_FOUND' end
+        local latest = latest_rows[1]
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', attention_context(
+            latest.attention_enabled, latest.attention_revision,
+            latest.attention_updated_at, latest.attention_updated_by)
     end
 
     local commit_ok, commit_err = tx:commit()

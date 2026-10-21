@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  FRAMEWORK_REF: 0ee3843e7a5b4afcca6f5d7d7e1a61894c6142c6
+  FRAMEWORK_REF: a3e5f59cb3f7c443e79d0df6ad998fbde6dbd55d
 
 jobs:
   lint:
@@ -153,4 +153,4 @@ jobs:
         id: runtime
       - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
       - name: Verify PostgreSQL persistence and handoff
-        run: make test-postgres
+        run: make test-postgres-full
