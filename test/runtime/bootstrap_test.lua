@@ -10,7 +10,7 @@ end
 
 local function run(command, expected_status)
     local executor = exec.get("app.runtime:executor")
-    local child, create_err = executor:exec("sh -c " .. quote(command .. " 2>&1"))
+    local child, create_err = executor:exec("sh -c " .. quote("export PATH; " .. command .. " 2>&1"))
     test.is_nil(create_err)
     test.not_nil(child)
     local started, start_err = child:start()
@@ -47,6 +47,9 @@ local function define_tests()
             test.it_skip("requires the Unix Makefile bootstrap environment", function() end)
             return
         end
+        test.it("exports the shell tool search path to child commands", function()
+            test.eq(run("printenv PATH"), run('printf "%s" "$PATH"') .. "\n")
+        end)
         test.it("preserves the previous SQLite contents before resetting the test database", function()
             with_directory(function(directory, repository)
                 local database = directory .. "/test.db"
