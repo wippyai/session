@@ -1938,6 +1938,19 @@ local function define_tests()
             test.is_true(result.completed)
         end)
 
+        it("preserves typed context admission details in the failed turn", function()
+            local agent = fake_agent(nil)
+            local details = { error_type = "context_window", estimated_prompt_tokens = 300, context_window = 200 }
+            agent.step = function() return nil, "Prompt exceeds the model context window", details end
+            local ctx, captured = mock_ctx(agent)
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.not_nil(result.failed)
+            test.eq(captured.message_errors[1].code, "context_window")
+            local system = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(system[1].metadata.error_details, details)
+        end)
+
         it("propagates checkpoint errors before dispatch", function()
             local agent = fake_agent(nil)
             local ctx = mock_ctx(agent)

@@ -821,6 +821,7 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: " .. detail, {
         system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
         error_code = code,
+        error_details = opts and opts.error_details,
         source_id = op.message_id,
         response_id = response_id
     })
@@ -1225,11 +1226,19 @@ function message_handlers.agent_step(ctx, op)
         }
     end
 
-    local result, exec_err = agent:step(builder, runtime_options)
+    local result, exec_err, exec_details = agent:step(builder, runtime_options)
     if exec_err or type(result) ~= "table" then
-        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+        local error_code = consts.ERROR_CODES.AGENT_ERROR
+        local error_details = nil
+        if type(exec_details) == "table" and exec_details.error_type
+            and exec_details.error_type == output.ERROR_TYPE.CONTEXT_WINDOW then
+            error_code = exec_details.error_type
+            error_details = exec_details
+        end
+        return fail_turn(ctx, op, agent, response_id, error_code,
             exec_err or "Agent step returned no result", {
                 after_step = true,
+                error_details = error_details,
                 tokens = type(result) == "table" and result.tokens or nil
             })
     end
