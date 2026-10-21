@@ -10,7 +10,7 @@ end
 
 local function run(command, expected_status)
     local executor = exec.get("app.runtime:executor")
-    local child, create_err = executor:exec("sh -c " .. quote(command))
+    local child, create_err = executor:exec("sh -c " .. quote(command .. " 2>&1"))
     test.is_nil(create_err)
     test.not_nil(child)
     local started, start_err = child:start()
@@ -26,8 +26,9 @@ local function run(command, expected_status)
     local status, wait_err = child:wait()
     executor:release()
     test.is_nil(wait_err)
-    test.eq(status, expected_status or 0, command)
-    return table.concat(parts)
+    local output = table.concat(parts)
+    test.eq(status, expected_status or 0, command .. "\n" .. output)
+    return output
 end
 
 local function with_directory(body)
