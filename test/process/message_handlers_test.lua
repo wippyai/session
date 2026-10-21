@@ -1889,6 +1889,71 @@ local function define_tests()
         end)
     end)
 
+    describe("outgoing context checkpoint", function()
+        local original_checkpoint
+        before_each(function() original_checkpoint = session_handlers.create_checkpoint end)
+        after_each(function() session_handlers.create_checkpoint = original_checkpoint end)
+
+        it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local checkpoints, builds = 0, 0
+            ctx.prepare_attention_prompt = function()
+                builds = builds + 1
+                return { get_messages = function() return { { role = "user", content = checkpoints == 0 and "large tool result" or "task and summary" } } end }
+            end
+            session_handlers.create_checkpoint = function(context, op)
+                test.eq(context, ctx)
+                test.eq(op.checkpoint_function_id, "wippy.session.funcs:checkpoint")
+                test.eq(op.trigger_tokens, 150000)
+                test.eq(op.checkpoint_id, "msg-user")
+                checkpoints = checkpoints + 1
+                return { completed = true }
+            end
+            agent.step = function(_self, _builder, options)
+                test.not_nil(options.checkpoint)
+                test.eq(options.checkpoint.token_threshold, THRESHOLD)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000, context_window = 200000 })
+                test.is_nil(err)
+                test.eq(replacement:get_messages()[1].content, "task and summary")
+                test.eq(checkpoints, 1)
+                return { result = "done" }
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(builds, 2)
+        end)
+
+        it("preserves explicit disabled checkpoint policy", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent, { checkpoint = { enabled = false } })
+            agent.step = function(_self, _builder, options)
+                test.is_nil(options.checkpoint)
+                return { result = "done" }
+            end
+            session_handlers.create_checkpoint = function() error("disabled checkpoint") end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("propagates checkpoint errors before dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            session_handlers.create_checkpoint = function() return nil, "checkpoint failed" end
+            agent.step = function(_self, _builder, options)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                test.is_nil(replacement)
+                test.eq(err, "checkpoint failed")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "checkpoint failed")
+        end)
+    end)
+
     describe("usage context", function()
         it("passes the session identifier on initial and continued steps", function()
             local agent = fake_agent(nil)

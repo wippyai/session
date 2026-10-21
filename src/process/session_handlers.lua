@@ -93,7 +93,7 @@ local function resolve_checkpoint_options(ctx, op): table
     return checkpoint_runtime.resolve_options(options, config.checkpoint) or {}
 end
 
-local function resolve_checkpoint_config(ctx, op): (string?, number?, table)
+function session_handlers.resolve_checkpoint_config(ctx, op): (string?, number?, table, boolean)
     local checkpoint_options = resolve_checkpoint_options(ctx, op)
     local function_id = checkpoint_options.function_id
     if type(function_id) ~= "string" or function_id == "" then
@@ -101,7 +101,7 @@ local function resolve_checkpoint_config(ctx, op): (string?, number?, table)
     end
     local threshold = tonumber(checkpoint_options.token_threshold)
 
-    return function_id, threshold, checkpoint_options
+    return function_id, threshold, checkpoint_options, function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
 end
 
 function session_handlers.execute_function(ctx, op)
@@ -212,8 +212,7 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local session_data = ctx.reader:state()
 
-    local checkpoint_function_id, token_threshold, checkpoint_options = resolve_checkpoint_config(ctx, op)
-    local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
+    local checkpoint_function_id, token_threshold, checkpoint_options, checkpoint_available = session_handlers.resolve_checkpoint_config(ctx, op)
     -- context_tokens is the full prompt size (uncached input plus cache reads
     -- and writes); prompt_tokens alone counts only the uncached input.
     local context_tokens = tokens and tokens.context_tokens

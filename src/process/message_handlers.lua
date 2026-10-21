@@ -12,6 +12,7 @@ local lifecycle_runtime = require("lifecycle_runtime")
 local lifecycle_controller = require("lifecycle_controller")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
+local session_handlers = require("session_handlers")
 local message_order = require("message_order")
 local hash = require("hash")
 
@@ -1170,6 +1171,47 @@ function message_handlers.agent_step(ctx, op)
         cancel = ctx.coordinator and ctx.coordinator.cancel
     }
 
+    local checkpoint_op = {
+        agent_options = agent.agent_options,
+        checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+    }
+    local checkpoint_function_id, threshold, checkpoint_options, checkpoint_available =
+        session_handlers.resolve_checkpoint_config(ctx, checkpoint_op)
+    local checkpoint_next_ops = {}
+    if checkpoint_available and checkpoint_options.enabled ~= false then
+        runtime_options.checkpoint = {
+            token_threshold = threshold,
+            compact = function(info)
+                local messages, read_err = ctx.reader:messages():from_checkpoint():all()
+                if not messages then return nil, read_err end
+                local tail = messages[#messages]
+                local anchor_id = tail and tail.message_id or op.message_id
+                local checkpoint_result, checkpoint_err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_function_id = checkpoint_function_id,
+                    checkpoint_bindings = checkpoint_op.checkpoint_bindings,
+                    checkpoint_options = checkpoint_options,
+                    checkpoint_id = anchor_id,
+                    message_id = anchor_id,
+                    trigger_tokens = info.estimated_prompt_tokens,
+                    agent = { id = agent.id, model = agent.model },
+                    agent_options = agent.agent_options,
+                })
+                if not checkpoint_result then return nil, checkpoint_err end
+                checkpoint_next_ops = checkpoint_result.next_ops or {}
+                local replacement, build_err
+                if type(ctx.prepare_attention_prompt) == "function" then
+                    replacement, build_err = ctx.prepare_attention_prompt(prompt_options)
+                else
+                    replacement, build_err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+                end
+                if not replacement then return nil, build_err end
+                append_lifecycle_messages(replacement, activate_result)
+                append_lifecycle_messages(replacement, before_result)
+                return replacement
+            end,
+        }
+    end
+
     if state.route ~= nil then
         runtime_options.route = state.route
     end
@@ -1484,7 +1526,7 @@ function message_handlers.agent_step(ctx, op)
 
     -- Separate user-facing operations from background operations
     local user_facing_ops = {}
-    local background_ops = {}
+    local background_ops = checkpoint_next_ops
 
     if #unified_tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(user_facing_ops, {
