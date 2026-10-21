@@ -349,7 +349,7 @@ entries:
       timeout: 180s
     source: file://metadata_benchmark.lua
     method: run
-    modules: [security, uuid, time, env]
+    modules: [security, uuid, time, env, sql]
     imports:
       test: wippy.test:test
       writer: wippy.session.persist:writer
