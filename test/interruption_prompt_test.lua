@@ -79,7 +79,7 @@ local function define_tests(blocked_only, lifecycle_only)
             assert(contexts.create(context_id, 'primary', '{}'))
             assert(sessions.create(session_id, actor_id, context_id, 'Interruption prompt', 'test', {}, {
                 agent_id = lifecycle_only and 'app:lifecycle_agent' or 'app.process:initial_agent',
-                active_traits = lifecycle_only and { 'app:native_behavior_trait' } or nil,
+                active_traits = lifecycle_only and { 'app:native_behavior_trait', 'app:persist_probe_trait' } or nil,
             }))
         end)
         after_each(function()
@@ -154,6 +154,32 @@ local function define_tests(blocked_only, lifecycle_only)
             test.eq(durable, 1, 'boundary persists in the native history')
         end
         if lifecycle_only then
+            it('delivers after_persist once each step record is readable through run_context', function()
+                label = 'after-persist-readable'
+                start(nil)
+                send('Perform the tool.', 'work')
+                idle()
+                local db = assert(sql.get('app:db'))
+                local rows = assert(db:query('SELECT request_id, payload FROM interruption_prompt_captures WHERE label = $1',
+                    { 'after_persist:' .. session_id }))
+                db:release()
+                test.eq(#rows, 2, 'one delivery per stored step')
+                local seen = {}
+                local answer_capture
+                for _, row in ipairs(rows) do
+                    local capture = json.decode(row.payload)
+                    test.is_nil(capture.history_error)
+                    test.eq(capture.last_id, capture.event_id, 'range ending at event_id includes that record')
+                    test.eq(capture.last_role, consts.MSG_TYPE.ASSISTANT)
+                    local stored = assert(messages.get(capture.event_id))
+                    test.eq(stored.type, consts.MSG_TYPE.ASSISTANT)
+                    test.is_nil(seen[capture.event_id], 'each stored step has its own event id')
+                    seen[capture.event_id] = true
+                    if capture.last_content == 'Scripted answer' then answer_capture = capture end
+                end
+                test.not_nil(answer_capture)
+                test.eq(answer_capture.outcome.state, 'completed')
+            end)
             it('retires an owner deleted mid-call without a recovery warning or a replacement owner', function()
                 label = 'delete-during-turn'
                 start(nil)

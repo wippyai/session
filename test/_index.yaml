@@ -33,6 +33,35 @@ entries:
           handlers:
             lifecycle: app:native_behavior_binding
 
+  - name: persist_probe
+    kind: function.lua
+    meta:
+      test_only: true
+    source: file://persist_probe.lua
+    modules: [contract, json, sql]
+    method: apply
+
+  - name: persist_probe_binding
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:lifecycle
+        methods:
+          apply: app:persist_probe
+
+  - name: persist_probe_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      test_only: true
+    data:
+      behaviors:
+        - id: persist_probe
+          kind: memory
+          handles: [after_persist]
+          strict: true
+          handlers:
+            lifecycle: app:persist_probe_binding
+
   - name: lifecycle_behavior_trait
     kind: registry.entry
     meta:
