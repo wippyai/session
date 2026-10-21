@@ -1164,6 +1164,7 @@ function message_handlers.agent_step(ctx, op)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
+        context_id = ctx.session_id,
         context = session_context,
         stop_check = step_stop_check(ctx),
         cancel = ctx.coordinator and ctx.coordinator.cancel
