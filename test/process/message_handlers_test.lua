@@ -1890,9 +1890,15 @@ local function define_tests()
     end)
 
     describe("outgoing context checkpoint", function()
-        local original_checkpoint
-        before_each(function() original_checkpoint = session_handlers.create_checkpoint end)
-        after_each(function() session_handlers.create_checkpoint = original_checkpoint end)
+        local original_checkpoint, original_context_type
+        before_each(function()
+            original_checkpoint = session_handlers.create_checkpoint
+            original_context_type = output.ERROR_TYPE.CONTEXT_WINDOW
+        end)
+        after_each(function()
+            session_handlers.create_checkpoint = original_checkpoint
+            output.ERROR_TYPE.CONTEXT_WINDOW = original_context_type
+        end)
 
         it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
             local agent = fake_agent(nil)
@@ -1943,6 +1949,7 @@ local function define_tests()
             local details = { error_type = "context_window", estimated_prompt_tokens = 300, context_window = 200 }
             agent.step = function() return nil, "Prompt exceeds the model context window", details end
             local ctx, captured = mock_ctx(agent)
+            output.ERROR_TYPE.CONTEXT_WINDOW = nil
             local result, err = user_step(ctx)
             test.is_nil(err)
             test.not_nil(result.failed)

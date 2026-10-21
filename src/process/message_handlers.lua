@@ -1231,7 +1231,7 @@ function message_handlers.agent_step(ctx, op)
         local error_code = consts.ERROR_CODES.AGENT_ERROR
         local error_details = nil
         if type(exec_details) == "table" and exec_details.error_type
-            and exec_details.error_type == output.ERROR_TYPE.CONTEXT_WINDOW then
+            and exec_details.error_type == consts.ERROR_CODES.CONTEXT_WINDOW then
             error_code = exec_details.error_type
             error_details = exec_details
         end

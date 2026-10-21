@@ -258,6 +258,7 @@ local consts = {
         INVALID_FILE_REFERENCES = "invalid_file_references",
         INVALID_CONTEXT_ATTACHMENTS = "invalid_context_attachments",
         AGENT_ERROR = "agent_error",
+        CONTEXT_WINDOW = "context_window",
         STORAGE_ERROR = "storage_error"
     },
 
