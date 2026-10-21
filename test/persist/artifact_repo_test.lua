@@ -21,10 +21,11 @@ local function insert_artifact(db, artifact_id, session_id, user_id, kind, title
     end
 
     local now = time.now():format(time.RFC3339)
-    db:execute(
+    local _, insert_err = db:execute(
         "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         { artifact_id, session_id, user_id, kind, title, content or "", meta_json, now, now }
     )
+    test.is_nil(insert_err)
 end
 
 local function define_tests()
@@ -316,6 +317,14 @@ local function define_tests()
             local third_id = uuid.v7()
             local foreign_id = uuid.v7()
 
+            wait_for_boot.ensure_user(owner_id)
+            wait_for_boot.ensure_user(other_owner_id)
+            for _, session_id in ipairs({ session_a, session_b }) do
+                local _, session_err = session_repo.create(session_id, owner_id, test_data.context_id,
+                    "Catalog session", "test")
+                test.is_nil(session_err)
+            end
+
             local db_resource, _ = consts.get_db_resource()
             local db, db_err = sql.get(db_resource)
             if db_err then
@@ -396,9 +405,9 @@ local function define_tests()
             test.is_nil(missing)
             test.contains(tostring(missing_err), "User ID is required")
 
-            db:execute("DELETE FROM artifacts WHERE session_id = $1 OR session_id = $2",
-                { session_a, session_b })
             db:release()
+            test.is_nil(select(2, session_repo.delete(session_a)))
+            test.is_nil(select(2, session_repo.delete(session_b)))
         end)
     end)
 end

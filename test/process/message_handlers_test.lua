@@ -1889,6 +1889,24 @@ local function define_tests()
         end)
     end)
 
+    describe("usage context", function()
+        it("passes the session identifier on initial and continued steps", function()
+            local agent = fake_agent(nil)
+            local original_step = agent.step
+            local seen = {}
+            agent.step = function(self, builder, options)
+                seen[#seen + 1] = options
+                return original_step(self, builder, options)
+            end
+            local ctx = mock_ctx(agent)
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(select(2, continue_step(ctx)))
+            test.eq(#seen, 2)
+            test.eq(seen[1].context_id, ctx.session_id)
+            test.eq(seen[2].context_id, ctx.session_id)
+        end)
+    end)
+
     describe("step stop check", function()
         it("uses the current turn after replacing a failed turn", function()
             local agent = fake_agent(nil)
