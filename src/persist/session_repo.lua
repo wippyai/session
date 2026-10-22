@@ -452,7 +452,6 @@ function session_repo.update_initial_title(session_id, title)
     local result
     result, err = sql.builder.update("sessions")
         :set("title", title)
-        :set("last_message_date", time.now():format(time.RFC3339))
         :where("session_id = ?", session_id)
         :where("(title IS NULL OR title = '')")
         :run_with(db):exec()
@@ -529,15 +528,22 @@ function session_repo.update_session_meta(session_id, updates)
         result.public_meta = updates.public_meta
     end
 
-    -- Always update last_message_date if any field is updated
-    local date
+    -- Message persistence owns implicit recency updates. Metadata edits only
+    -- change the date when the caller supplies one explicitly.
     if updates.last_message_date ~= nil then
-        date = time.unix(updates.last_message_date, 0):format(time.RFC3339)
-    else
-        date = time.now():format(time.RFC3339)
+        local date = time.unix(updates.last_message_date, 0):format(time.RFC3339)
+        update_query = update_query:set("last_message_date", date)
+        result.last_message_date = date
+    elseif updates.title == nil and updates.status == nil and updates.kind == nil
+        and updates.meta == nil and updates.config == nil and updates.public_meta == nil then
+        -- Preserve successful no-op updates without generating an empty SET
+        -- clause or manufacturing message activity. Missing sessions still fail.
+        local rows, read_err = db:query("SELECT session_id FROM sessions WHERE session_id = $1", { session_id })
+        db:release()
+        if read_err then return nil, "Failed to update session metadata: " .. read_err end
+        if not rows or #rows == 0 then return nil, "Session not found" end
+        return result
     end
-    update_query = update_query:set("last_message_date", date)
-    result.last_message_date = date
 
     -- Add WHERE clause
     update_query = update_query:where("session_id = ?", session_id)
