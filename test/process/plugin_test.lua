@@ -2,6 +2,7 @@ local test = require("test")
 local plugin = require("plugin")
 local session = require("session")
 local message_handlers = require("message_handlers")
+local agent_context = require("agent_context")
 local writer = require("writer")
 local uuid = require("uuid")
 local json = require("json")
@@ -139,6 +140,9 @@ local function run_start_through_session(actor, session_id, registry, session_pi
         table.insert(sent, { pid = pid, topic = topic, payload = payload })
         if topic == consts.TOPICS.SESSION_OPENED and pid == spawned_init.parent_pid then
             table.insert(plugin_pending, plugin_message(topic, payload))
+        elseif options.deliver_upstream and in_session and pid == spawned_init.parent_pid
+            and string.sub(topic, 1, #consts.TOPIC_PREFIXES.SESSION) == consts.TOPIC_PREFIXES.SESSION then
+            table.insert(plugin_pending, plugin_message(topic, payload, session_pid))
         end
         return true, nil
     end)
@@ -954,6 +958,54 @@ local function define_tests()
                         or "Failed to recover pending calls")
                 cleanup_session_fixture(session_id, context_id)
             end
+        end)
+        it("reports an initial agent load failure to session subscribers and fails the start request", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Initial agent failure")
+            local _, config_err = session_repo.update_session_meta(session_id, { config = {
+                agent_id = "app.process:initial_agent",
+            } })
+            test.is_nil(config_err)
+            local reason = "Agent capability context is invalid: notes.scope expected declared context field, got extra"
+            local original_agent_new = agent_context.new
+            agent_context.new = function(agent_options)
+                local ctx = original_agent_new(agent_options)
+                ctx.load_agent = function() return nil, reason end
+                return ctx
+            end
+            local ok, run = pcall(run_start_through_session, actor, session_id, {}, "failed-initial-agent",
+                "cancel", { deliver_upstream = true })
+            agent_context.new = original_agent_new
+            cleanup_session_fixture(session_id, context_id)
+            test.is_true(ok, tostring(run))
+
+            local expected = "Failed to load initial agent: " .. reason
+            local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
+            local upstream_failure = nil :: any
+            local relayed_failure = nil :: any
+            local start_error = nil :: any
+            for _, sent in ipairs(run.sent) do
+                test.is_false(sent.topic == consts.TOPICS.SESSION_OPENED)
+                if sent.topic == session_topic and sent.payload.code == consts.ERROR_CODES.AGENT_ERROR then
+                    if sent.pid == run.spawned_init.parent_pid then upstream_failure = sent.payload end
+                    if sent.pid == "start-hub" then relayed_failure = sent.payload end
+                elseif sent.topic == consts.TOPICS.ERROR and sent.payload.request_id == "start-request" then
+                    start_error = sent
+                end
+            end
+            test.not_nil(upstream_failure, "the session upstream must receive the session error")
+            test.eq(upstream_failure.type, consts.UPSTREAM_TYPES.ERROR)
+            test.eq(upstream_failure.session_id, session_id)
+            test.eq(upstream_failure.message, expected)
+            test.not_nil(relayed_failure, "session subscribers must receive the session error")
+            test.eq(relayed_failure.message, expected)
+            test.not_nil(start_error)
+            test.eq(start_error.pid, "start-caller")
+            test.eq(start_error.payload.error, consts.ERROR_CODES.SESSION_SPAWN)
+            test.eq(string.sub(start_error.payload.message, 1, #"Failed to create session: "),
+                "Failed to create session: ")
+            test.contains(start_error.payload.message, expected)
+            test.contains(run.session_result.error, expected)
         end)
         it("rejects queued requests when the initial status write fails", function()
             local actor = security.actor()

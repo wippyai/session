@@ -436,7 +436,11 @@ local function run(args: SessionArgs)
         return context.current_agent
     end
     local initial_agent, initial_agent_err = active_agent()
-    if initial_agent_err then error("Failed to load initial agent: " .. tostring(initial_agent_err)) end
+    if initial_agent_err then
+        local load_failure = "Failed to load initial agent: " .. tostring(initial_agent_err)
+        session_upstream:session_error(consts.ERROR_CODES.AGENT_ERROR, load_failure)
+        error(load_failure)
+    end
     local initial_interaction = input_policy.snapshot(context, context, initial_agent)
     local initialized, initial_err = session_writer:update_meta({
         status = consts.STATUS.IDLE, meta = { interaction = initial_interaction },
