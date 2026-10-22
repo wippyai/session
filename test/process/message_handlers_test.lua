@@ -2085,6 +2085,145 @@ local function define_tests()
         end)
     end)
 
+    describe("outgoing context checkpoint", function()
+        local original_checkpoint, original_context_type
+        before_each(function()
+            original_checkpoint = session_handlers.create_checkpoint
+            original_context_type = output.ERROR_TYPE.CONTEXT_WINDOW
+        end)
+        after_each(function()
+            session_handlers.create_checkpoint = original_checkpoint
+            output.ERROR_TYPE.CONTEXT_WINDOW = original_context_type
+        end)
+
+        it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local checkpoints, builds = 0, 0
+            ctx.prepare_attention_prompt = function()
+                builds = builds + 1
+                return { get_messages = function() return { { role = "user", content = checkpoints == 0 and "large tool result" or "task and summary" } } end }
+            end
+            session_handlers.create_checkpoint = function(context, op)
+                test.eq(context, ctx)
+                test.eq(op.checkpoint_function_id, "wippy.session.funcs:checkpoint")
+                test.eq(op.trigger_tokens, 150000)
+                test.eq(op.checkpoint_id, "msg-user")
+                checkpoints = checkpoints + 1
+                return { completed = true }
+            end
+            agent.step = function(_self, _builder, options)
+                test.not_nil(options.checkpoint)
+                test.eq(options.checkpoint.token_threshold, THRESHOLD)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000, context_window = 200000 })
+                test.is_nil(err)
+                test.eq(replacement:get_messages()[1].content, "task and summary")
+                test.eq(checkpoints, 1)
+                return { result = "done" }
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(builds, 2)
+        end)
+
+        it("keeps pending steering outside the summarized boundary", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local arrived = false
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function()
+                    local rows = {{message_id = "completed-tool", type = consts.MSG_TYPE.FUNCTION,
+                        metadata = {status = consts.FUNC_STATUS.SUCCESS}}}
+                    if arrived then rows[#rows + 1] = {message_id = "pending-steering", type = consts.MSG_TYPE.USER,
+                        metadata = {input = {state = "pending"}}} end
+                    return rows
+                end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function(_, op)
+                test.eq(op.checkpoint_id, "completed-tool")
+                test.eq(op.source_id, "msg-user")
+                test.is_true(op.exclusive)
+                return {completed = true}
+            end
+            agent.step = function(_, _, options)
+                arrived = true
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(err)
+                test.not_nil(replacement)
+                return {result = "done"}
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("does not summarize an unsettled tool round", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function() return {{message_id = "pending-tool", type = consts.MSG_TYPE.FUNCTION,
+                    metadata = {status = consts.FUNC_STATUS.PENDING}}} end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function() error("must not summarize pending tools") end
+            agent.step = function(_, _, options)
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(replacement)
+                test.eq(err, "Cannot checkpoint an unsettled tool round")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "Cannot checkpoint an unsettled tool round")
+        end)
+
+        it("preserves explicit disabled checkpoint policy", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent, { checkpoint = { enabled = false } })
+            agent.step = function(_self, _builder, options)
+                test.is_nil(options.checkpoint)
+                return { result = "done" }
+            end
+            session_handlers.create_checkpoint = function() error("disabled checkpoint") end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("preserves typed context admission details in the failed turn", function()
+            local agent = fake_agent(nil)
+            local details = { error_type = "context_window", estimated_prompt_tokens = 300, context_window = 200 }
+            agent.step = function() return nil, "Prompt exceeds the model context window", details end
+            local ctx, captured = mock_ctx(agent)
+            output.ERROR_TYPE.CONTEXT_WINDOW = nil
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.not_nil(result.failed)
+            test.eq(captured.message_errors[1].code, "context_window")
+            local system = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(system[1].metadata.error_details, details)
+        end)
+
+        it("propagates checkpoint errors before dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            session_handlers.create_checkpoint = function() return nil, "checkpoint failed" end
+            agent.step = function(_self, _builder, options)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                test.is_nil(replacement)
+                test.eq(err, "checkpoint failed")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "checkpoint failed")
+        end)
+    end)
+
     describe("usage context", function()
         it("passes the session identifier on initial and continued steps", function()
             local agent = fake_agent(nil)

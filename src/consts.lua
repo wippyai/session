@@ -40,6 +40,7 @@ local consts = {
     -- Context Keys
     CONTEXT_KEYS = {
         CURRENT_CHECKPOINT_ID = "current_checkpoint_id",
+        CURRENT_CHECKPOINT_BOUNDARY = "current_checkpoint_boundary",
         CHECKPOINT_REQUESTED = "checkpoint_requested",
         FULL_CONTEXT = "full_context"
     },
@@ -258,6 +259,7 @@ local consts = {
         INVALID_FILE_REFERENCES = "invalid_file_references",
         INVALID_CONTEXT_ATTACHMENTS = "invalid_context_attachments",
         AGENT_ERROR = "agent_error",
+        CONTEXT_WINDOW = "context_window",
         STORAGE_ERROR = "storage_error"
     },
 

@@ -937,7 +937,7 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
     }
 end
 
-function message_repo.list_after_message(session_id, after_message_id, limit: number?)
+function message_repo.list_after_message(session_id, after_message_id, limit: number?, exclude_anchor: boolean?)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"
     end
@@ -960,7 +960,7 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
         :from("messages")
         :where(sql.builder.and_({
             sql.builder.expr("session_id = ?", session_id),
-            sql.builder.expr("(" .. date_key .. " > ? OR (" .. date_key .. " = ? AND message_id >= ?))",
+            sql.builder.expr("(" .. date_key .. " > ? OR (" .. date_key .. " = ? AND message_id " .. (exclude_anchor == true and ">" or ">=") .. " ?))",
                 date, date, after_message_id)
         }))
 

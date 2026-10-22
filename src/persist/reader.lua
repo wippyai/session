@@ -33,6 +33,7 @@ local message_query = {
     _limit = nil :: number?,
     _offset = nil :: number?,
     _after_message_id = nil :: string?,
+    _exclude_anchor = false,
     _error = nil :: string?,
 }
 message_query.__index = message_query
@@ -274,6 +275,7 @@ function message_query:after(message_id)
         return self
     end
     self._after_message_id = message_id
+    self._exclude_anchor = false
     return self
 end
 
@@ -286,8 +288,12 @@ function message_query:from_checkpoint()
     -- Load the current checkpoint ID from session context
     local checkpoint_id = self._reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
+    self._exclude_anchor = false
     if checkpoint_id then
         self._after_message_id = checkpoint_id
+        local boundary = self._reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY)
+        self._exclude_anchor = type(boundary) == "table" and boundary.checkpoint_id == checkpoint_id
+            and boundary.exclusive == true
     end
 
     return self
@@ -301,7 +307,7 @@ function message_query:all()
     local messages, err
 
     if self._after_message_id then
-        messages, err = session._message_repo.list_after_message(self._session_id, self._after_message_id, self._limit)
+        messages, err = session._message_repo.list_after_message(self._session_id, self._after_message_id, self._limit, self._exclude_anchor)
     elseif self._type_filter then
         messages, err = session._message_repo.list_by_type(self._session_id, self._type_filter, self._limit, self
         ._offset)

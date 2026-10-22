@@ -12,6 +12,7 @@ local lifecycle_runtime = require("lifecycle_runtime")
 local lifecycle_controller = require("lifecycle_controller")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
+local session_handlers = require("session_handlers")
 local message_order = require("message_order")
 local hash = require("hash")
 
@@ -858,6 +859,7 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: " .. detail, {
         system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
         error_code = code,
+        error_details = opts and opts.error_details,
         source_id = op.message_id,
         response_id = response_id,
         memory_recall_error = memory_recall_error
@@ -1209,6 +1211,59 @@ function message_handlers.agent_step(ctx, op)
         cancel = ctx.coordinator and ctx.coordinator.cancel
     }
 
+    local checkpoint_op = {
+        agent_options = agent.agent_options,
+        checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+    }
+    local checkpoint_function_id, threshold, checkpoint_options, checkpoint_available =
+        session_handlers.resolve_checkpoint_config(ctx, checkpoint_op)
+    local checkpoint_next_ops = {}
+    if checkpoint_available and checkpoint_options.enabled ~= false then
+        runtime_options.checkpoint = {
+            token_threshold = threshold,
+            compact = function(info)
+                local messages, read_err = ctx.reader:messages():from_checkpoint():all()
+                if not messages then return nil, read_err end
+                local tail = nil
+                for _, message in ipairs(messages) do
+                    local metadata = message.metadata or {}
+                    local input = metadata.input
+                    if (message.type == consts.MSG_TYPE.FUNCTION or message.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+                        or message.type == consts.MSG_TYPE.DELEGATION) and metadata.status == consts.FUNC_STATUS.PENDING then
+                        return nil, "Cannot checkpoint an unsettled tool round"
+                    end
+                    if type(input) ~= "table" or input.state == "applied" then tail = message end
+                end
+                local anchor_id = tail and tail.message_id
+                    or ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or op.message_id
+                local checkpoint_result, checkpoint_err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_function_id = checkpoint_function_id,
+                    checkpoint_bindings = checkpoint_op.checkpoint_bindings,
+                    checkpoint_options = checkpoint_options,
+                    checkpoint_id = anchor_id,
+                    message_id = anchor_id,
+                    exclusive = true,
+                    source_id = op.message_id,
+                    trigger_tokens = info.estimated_prompt_tokens,
+                    agent = { id = agent.id, model = agent.model },
+                    agent_options = agent.agent_options,
+                })
+                if not checkpoint_result then return nil, checkpoint_err end
+                checkpoint_next_ops = checkpoint_result.next_ops or {}
+                local replacement, build_err
+                if type(ctx.prepare_attention_prompt) == "function" then
+                    replacement, build_err = ctx.prepare_attention_prompt(prompt_options)
+                else
+                    replacement, build_err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+                end
+                if not replacement then return nil, build_err end
+                append_lifecycle_messages(replacement, activate_result)
+                append_lifecycle_messages(replacement, before_result)
+                return replacement
+            end,
+        }
+    end
+
     if state.route ~= nil then
         runtime_options.route = state.route
     end
@@ -1222,12 +1277,20 @@ function message_handlers.agent_step(ctx, op)
         }
     end
 
-    local result, exec_err = agent:step(builder, runtime_options)
+    local result, exec_err, exec_details = agent:step(builder, runtime_options)
     local memory_recall_error = type(result) == "table" and result.memory_recall_error or nil
     if exec_err or type(result) ~= "table" then
-        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+        local error_code = consts.ERROR_CODES.AGENT_ERROR
+        local error_details = nil
+        if type(exec_details) == "table" and exec_details.error_type
+            and exec_details.error_type == consts.ERROR_CODES.CONTEXT_WINDOW then
+            error_code = exec_details.error_type
+            error_details = exec_details
+        end
+        return fail_turn(ctx, op, agent, response_id, error_code,
             exec_err or "Agent step returned no result", {
                 after_step = true,
+                error_details = error_details,
                 tokens = type(result) == "table" and result.tokens or nil,
                 memory_recall_error = memory_recall_error
             })
@@ -1541,7 +1604,7 @@ function message_handlers.agent_step(ctx, op)
 
     -- Separate user-facing operations from background operations
     local user_facing_ops = {}
-    local background_ops = {}
+    local background_ops = checkpoint_next_ops
 
     if #unified_tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(user_facing_ops, {

@@ -89,3 +89,9 @@ prepare:
 
 clean:
 	bash scripts/prepare-test-db.sh "$(TEST_DB)" "$(TEST_BACKUP_DIR)"
+
+# Require the admission capability in either published dependencies or an explicit source composition.
+.PHONY: test-admission
+test-admission:
+	$(MAKE) install
+	WIPPY_TEST_REQUIRE_ADMISSION=1 $(MAKE) test TEST_FILTER=app.persist:checkpoint_repo_test

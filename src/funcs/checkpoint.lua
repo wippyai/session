@@ -130,6 +130,21 @@ Avoid duplicating non-unique information in checkpoint.
 ]],
 }
 
+-- Bound outgoing summaries to the captured settled tail. Pending steering is
+-- still queued; neither it nor later arrivals belong to this summary.
+local function select_messages(messages, checkpoint_id)
+    if checkpoint_id == nil then return messages end
+    local selected = {}
+    for _, message in ipairs(messages) do
+        local input = (message.metadata or {}).input
+        if type(input) ~= "table" or input.state == "applied" then
+            selected[#selected + 1] = message
+        end
+        if message.message_id == checkpoint_id then return selected end
+    end
+    return nil, "Checkpoint boundary not found in summary history"
+end
+
 local function handle(args)
     if not args.session_id then
         return nil, "session_id is required"
@@ -170,6 +185,9 @@ local function handle(args)
         range_messages = all_messages
     end
 
+    local selected, selection_err = select_messages(range_messages, args.checkpoint_id)
+    if not selected then return nil, selection_err end
+    range_messages = selected
     if #range_messages == 0 then
         return nil, "No messages found for checkpoint"
     end
@@ -291,6 +309,7 @@ end
 
 return {
     handle = handle,
+    select_messages = select_messages,
     config_from_args = config_from_args,
     checkpoint_prompt = checkpoint_prompt,
     clamp_transcript = clamp_transcript,
