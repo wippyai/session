@@ -431,10 +431,10 @@ the summary; a failed write leaves the previous prompt usable. Reopening a sessi
 honors that boundary, and pending input remains queued for its normal safe boundary.
 Existing checkpoints and explicit `messages():after(id)` queries remain inclusive.
 
-This path requires the unreleased Agent/LLM checkpoint callback capability proposed
-in Framework #203. This change must remain a draft until that capability is approved,
-published, and required by the Session dependency minimums and test lock.
+This path requires Agent 0.5.9 and LLM 0.5.11 or later, which provide the checkpoint
+callback and prompt-admission capability released from Framework #203. Session's
+dependency minimums and test lock require those published versions.
 
-The source-composed integration gate is
-`make test-admission FRAMEWORK_DIR=/path/to/framework-with-admission`. It fails
-rather than skipping when the companion callback capability is unavailable.
+Run `make test-admission` to check the published dependencies. For a source composition,
+use `make test-admission FRAMEWORK_DIR=/path/to/framework`. Both forms fail rather than
+skip when the checkpoint callback capability is unavailable.

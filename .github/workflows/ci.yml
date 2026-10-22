@@ -13,7 +13,8 @@ permissions:
   contents: read
 
 env:
-  FRAMEWORK_REF: fa607e6de45a95253ef0f57c6700002b48c2a266
+  WIPPY_TEST_REQUIRE_ADMISSION: "1"
+  FRAMEWORK_REF: ce29b6db7df2fa59a12062e4542a789f36ada8d2
 
 jobs:
   lint:

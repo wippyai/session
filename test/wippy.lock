@@ -3,14 +3,14 @@ directories:
     src: .
 modules:
     - name: wippy/agent
-      version: 0.5.7
-      hash: af28fc888be6dfc63543be75ed3b4e0b1651fe57b32bbe5a4966ad36cfca8843
+      version: 0.5.9
+      hash: c0eff8b8cebd49bec8a2704ead671e0ea79434b54b9ebb5c36873b823c08ab4c
     - name: wippy/bootloader
       version: 0.3.18
       hash: c7e71b358539b450b49b55e725f60f2dac8218e1c596cf3a473ce71e36b10a9b
     - name: wippy/llm
-      version: 0.5.9
-      hash: 11bb24279b79463cac1c5c82e0474079f500d4cd091760132281889658f88561
+      version: 0.5.11
+      hash: 9d82161f52d88f00e1112c25e8930c874bd2bcaf8d43b132df883838e48b66a4
     - name: wippy/migration
       version: 0.3.24
       hash: 9ce9cbcde0e149762ef69c84710f5072da814e72d4e5eb93c7211ed51941b13b
