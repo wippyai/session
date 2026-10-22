@@ -959,7 +959,7 @@ local function define_tests()
                 cleanup_session_fixture(session_id, context_id)
             end
         end)
-        it("reports an initial agent load failure to session subscribers and fails the start request", function()
+        it("reports an initial agent load failure to session subscribers once as a start failure", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Initial agent failure")
             local _, config_err = session_repo.update_session_meta(session_id, { config = {
@@ -979,33 +979,29 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
             test.is_true(ok, tostring(run))
 
-            local expected = "Failed to load initial agent: " .. reason
+            local expected = "Failed to create session: Failed to load initial agent: " .. reason
             local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
-            local upstream_failure = nil :: any
-            local relayed_failure = nil :: any
+            local subscriber_errors = {}
             local start_error = nil :: any
             for _, sent in ipairs(run.sent) do
                 test.is_false(sent.topic == consts.TOPICS.SESSION_OPENED)
-                if sent.topic == session_topic and sent.payload.code == consts.ERROR_CODES.AGENT_ERROR then
-                    if sent.pid == run.spawned_init.parent_pid then upstream_failure = sent.payload end
-                    if sent.pid == "start-hub" then relayed_failure = sent.payload end
+                if sent.pid == "start-hub" and sent.topic == session_topic
+                    and sent.payload.type == consts.UPSTREAM_TYPES.ERROR then
+                    table.insert(subscriber_errors, sent.payload)
                 elseif sent.topic == consts.TOPICS.ERROR and sent.payload.request_id == "start-request" then
                     start_error = sent
                 end
             end
-            test.not_nil(upstream_failure, "the session upstream must receive the session error")
-            test.eq(upstream_failure.type, consts.UPSTREAM_TYPES.ERROR)
-            test.eq(upstream_failure.session_id, session_id)
-            test.eq(upstream_failure.message, expected)
-            test.not_nil(relayed_failure, "session subscribers must receive the session error")
-            test.eq(relayed_failure.message, expected)
+            test.eq(#subscriber_errors, 1, "session subscribers must receive exactly one error")
+            test.eq(subscriber_errors[1].session_id, session_id)
+            test.eq(subscriber_errors[1].code, consts.ERROR_CODES.SESSION_SPAWN)
+            local subscriber_message = tostring(subscriber_errors[1].message)
+            test.eq(subscriber_message, expected)
+            test.is_nil((string.find(subscriber_message, "Send a new message to continue", 1, true)))
             test.not_nil(start_error)
             test.eq(start_error.pid, "start-caller")
             test.eq(start_error.payload.error, consts.ERROR_CODES.SESSION_SPAWN)
-            test.eq(string.sub(start_error.payload.message, 1, #"Failed to create session: "),
-                "Failed to create session: ")
-            test.contains(start_error.payload.message, expected)
-            test.contains(run.session_result.error, expected)
+            test.eq(start_error.payload.message, expected)
         end)
         it("rejects queued requests when the initial status write fails", function()
             local actor = security.actor()
@@ -1545,7 +1541,8 @@ local function define_tests()
             test.not_nil(update)
             test.eq(update.session_id, session_id)
             test.eq(update.code, "recovery_incomplete")
-            test.not_nil(update.message)
+            test.contains(update.message, "tool crashed")
+            test.contains(update.message, "Send a new message to continue")
             test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.FAILED)
             cleanup_session_fixture(session_id, context_id)
         end)
