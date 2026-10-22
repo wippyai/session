@@ -2127,6 +2127,60 @@ local function define_tests()
             test.eq(builds, 2)
         end)
 
+        it("keeps pending steering outside the summarized boundary", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local arrived = false
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function()
+                    local rows = {{message_id = "completed-tool", type = consts.MSG_TYPE.FUNCTION,
+                        metadata = {status = consts.FUNC_STATUS.SUCCESS}}}
+                    if arrived then rows[#rows + 1] = {message_id = "pending-steering", type = consts.MSG_TYPE.USER,
+                        metadata = {input = {state = "pending"}}} end
+                    return rows
+                end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function(_, op)
+                test.eq(op.checkpoint_id, "completed-tool")
+                test.eq(op.source_id, "msg-user")
+                test.is_true(op.exclusive)
+                return {completed = true}
+            end
+            agent.step = function(_, _, options)
+                arrived = true
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(err)
+                test.not_nil(replacement)
+                return {result = "done"}
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("does not summarize an unsettled tool round", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function() return {{message_id = "pending-tool", type = consts.MSG_TYPE.FUNCTION,
+                    metadata = {status = consts.FUNC_STATUS.PENDING}}} end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function() error("must not summarize pending tools") end
+            agent.step = function(_, _, options)
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(replacement)
+                test.eq(err, "Cannot checkpoint an unsettled tool round")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "Cannot checkpoint an unsettled tool round")
+        end)
+
         it("preserves explicit disabled checkpoint policy", function()
             local agent = fake_agent(nil)
             local ctx = mock_ctx(agent, { checkpoint = { enabled = false } })

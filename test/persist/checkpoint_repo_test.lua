@@ -13,6 +13,9 @@ local writer = require("writer")
 local reader = require("reader")
 local message_handlers = require("message_handlers")
 local session_handlers = require("session_handlers")
+local agent_library = require("agent_library")
+local llm = require("llm")
+local env = require("env")
 local sql = require("sql")
 local time = require("time")
 
@@ -198,6 +201,7 @@ local function define_tests()
                 local _, ids, response_err = host_writer:add_response("Reading", {source_id = request_id},
                     {{id = "read-1", name = "read", arguments = {}, type = consts.MSG_TYPE.FUNCTION}})
                 test.is_nil(response_err)
+                if not ids then error("response must return persisted call IDs") end
                 local large = string.rep("large-result-data ", 10000)
                 assert(host_writer:update_message_meta(ids["read-1"], {status = consts.FUNC_STATUS.SUCCESS, result = large}))
                 local replacement = nil
@@ -225,15 +229,138 @@ local function define_tests()
                 test.is_true(ran, tostring(result))
                 test.is_nil(err)
                 test.not_nil(replacement)
+                test.eq(message_repo.get(ids["read-1"]).metadata.result, large, "compaction must preserve durable tool history")
                 local encoded = json.encode(replacement)
                 if expectation == "raw result" then
                     test.is_nil(string.find(encoded, large, 1, true), "checkpoint must remove the oversized tool result")
                 else
-                    test.not_nil(string.find(encoded, "Keep the original task verbatim.", 1, true),
-                        "checkpoint must restore the current request at user authority")
+                    local found = false
+                    for _, message in ipairs(replacement) do
+                        if message.role == "user" and message.content[1].text == "Keep the original task verbatim." then
+                            found = true
+                        end
+                    end
+                    test.is_true(found, "checkpoint must restore the current request at user authority")
                 end
             end)
         end
+
+        local admission_supported = llm.ERROR_TYPE.CONTEXT_WINDOW ~= nil
+        if env.get("WIPPY_TEST_REQUIRE_ADMISSION") == "1" and not admission_supported then
+            error("Outgoing checkpoint integration requires Framework admission support")
+        end
+        local admission_it = admission_supported and it or test.it_skip
+        admission_it("compacts through real Agent and LLM admission before dispatching a fitting prompt", function()
+            assert(context_repo.update(context_id, "{}"))
+            local request_id = uuid.v7()
+            assert(message_repo.create(request_id, session_id, consts.MSG_TYPE.USER, "Finish the document task.", {}))
+            local host_writer = assert(writer.new(session_id))
+            local _, ids, response_err = host_writer:add_response("Reading", {source_id = request_id},
+                {{id = "read-1", name = "read", arguments = {}, type = consts.MSG_TYPE.FUNCTION}})
+            test.is_nil(response_err)
+            if not ids then error("response must return persisted call IDs") end
+            local large = string.rep("large-result-data ", 10000)
+            assert(host_writer:update_message_meta(ids["read-1"], {status = consts.FUNC_STATUS.SUCCESS, result = large}))
+            local runner = agent_library.new({id = "test:admission", name = "Admission integration",
+                description = "Test fixture", model = "test-model", prompt = "Complete the current task."})
+            local generated, summarized = 0, 0
+            local saved = {agent_llm = agent_library._llm, models = llm._models, providers = llm._providers,
+                resolver = llm._model_resolver, usage = llm._usage_tracker, funcs = session_handlers._funcs}
+            agent_library._llm = llm
+            llm._model_resolver = {resolve = function() return {
+                name = "test-model", max_tokens = 2000, capabilities = {"generate"},
+                providers = {{id = "test:provider", provider_model = "wire"}},
+            } end}
+            llm._usage_tracker = false
+            llm._providers = {
+                driver_declares_legacy_reasoning_flag = function() return false end,
+                open = function() return {generate = function(_, args)
+                    generated = generated + 1
+                    local encoded = json.encode(args.messages)
+                    test.is_nil((string.find(encoded, large, 1, true)))
+                    test.not_nil((string.find(encoded, "Finish the document task.", 1, true)))
+                    test.not_nil((string.find(encoded, "The document data was summarized.", 1, true)))
+                    return {result = "Done.", tokens = {prompt_tokens = 100, completion_tokens = 2}, metadata = {}}
+                end} end,
+            }
+            session_handlers._funcs = {new = function() return {
+                with_context = function(self) return self end,
+                call = function()
+                    summarized = summarized + 1
+                    return {summary = "The document data was summarized."}
+                end,
+            } end}
+            local ctx = {session_id = session_id, user_id = user_id,
+                config = {agent_id = runner.id, model = runner.model, checkpoint_function_id = "test:summary"},
+                reader = assert(reader.open(session_id)), writer = host_writer, lifecycle_state = {},
+                agent_ctx = {load_agent = function() return runner end, get_current_agent = function() return runner end},
+                upstream = {response_beginning = function() end, send_message_update = function() end,
+                    invalidate_message = function() end, message_error = function() end,
+                    update_session = function() end, session_error = function() end}}
+            local ran, result, err = pcall(message_handlers.agent_step, ctx, {message_id = request_id, request_id = "admission"})
+            agent_library._llm, llm._models, llm._providers = saved.agent_llm, saved.models, saved.providers
+            llm._model_resolver, llm._usage_tracker, session_handlers._funcs = saved.resolver, saved.usage, saved.funcs
+            test.is_true(ran, tostring(result))
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(summarized, 1)
+            test.eq(generated, 1)
+            test.eq(message_repo.get(ids["read-1"]).metadata.result, large)
+        end)
+
+        it("persists an exclusive boundary across reopening and clears it for an ordinary checkpoint", function()
+            local request_id = uuid.v7()
+            assert(message_repo.create(request_id, session_id, consts.MSG_TYPE.USER, "Keep this task.", {}))
+            local anchor_id = uuid.v7()
+            assert(message_repo.create(anchor_id, session_id, consts.MSG_TYPE.ASSISTANT, "Summarized.", {source_id = request_id}))
+            local later_id = uuid.v7()
+            assert(message_repo.create(later_id, session_id, consts.MSG_TYPE.ASSISTANT, "Continue.", {source_id = request_id}))
+            assert(checkpoint_repo.commit(session_id, user_id,
+                {checkpoint_id = anchor_id, message_id = anchor_id, exclusive = true, source_id = request_id},
+                "summary", {}, uuid.v7()))
+            local reopened = assert(reader.open(session_id))
+            local rows = assert(reopened:messages():from_checkpoint():last(1):all())
+            test.eq(#rows, 1)
+            test.eq(rows[1].message_id, later_id)
+            rows = assert(reopened:messages():after(anchor_id):all())
+            test.eq(#rows, 2, "explicit after() retains its inclusive public behavior")
+            test.eq(rows[1].message_id, anchor_id)
+            assert(checkpoint_repo.commit(session_id, user_id,
+                {checkpoint_id = anchor_id, message_id = anchor_id}, "ordinary summary", {}, uuid.v7()))
+            reopened = assert(reader.open(session_id))
+            test.is_nil(reopened:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY))
+            rows = assert(reopened:messages():from_checkpoint():all())
+            test.eq(rows[1].message_id, anchor_id)
+        end)
+
+        it("rolls back an exclusive boundary when summary insertion fails", function()
+            local request_id = uuid.v7()
+            assert(message_repo.create(request_id, session_id, consts.MSG_TYPE.USER, "Keep this task.", {}))
+            local ok, err = checkpoint_repo.commit(session_id, user_id,
+                {checkpoint_id = message_id, message_id = message_id, exclusive = true, source_id = request_id},
+                "must roll back", {}, note_id)
+            test.is_nil(ok)
+            test.not_nil(err)
+            local context = json.decode(context_repo.get(context_id).data)
+            test.eq(context.current_checkpoint_id, "old-anchor")
+            test.is_nil(context.current_checkpoint_boundary)
+            test.is_true(context.checkpoint_requested)
+        end)
+
+        it("rejects a foreign resume request before moving the checkpoint", function()
+            local foreign_session, foreign_context, request_id = uuid.v7(), uuid.v7(), uuid.v7()
+            assert(context_repo.create(foreign_context, "primary", "{}"))
+            assert(session_repo.create(foreign_session, user_id, foreign_context, "foreign request", "test"))
+            assert(message_repo.create(request_id, foreign_session, consts.MSG_TYPE.USER, "Foreign task.", {}))
+            local ok, err = checkpoint_repo.commit(session_id, user_id,
+                {checkpoint_id = message_id, message_id = message_id, exclusive = true, source_id = request_id},
+                "summary", {}, uuid.v7())
+            session_repo.delete(foreign_session)
+            context_repo.delete(foreign_context)
+            test.is_nil(ok)
+            test.eq(err, "Checkpoint request not found in session")
+            test.eq(json.decode(context_repo.get(context_id).data).current_checkpoint_id, "old-anchor")
+        end)
 
         it("rejects a different owner without changing the checkpoint", function()
             local ok, err = checkpoint_repo.commit(session_id, "other-owner",

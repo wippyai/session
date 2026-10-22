@@ -635,6 +635,10 @@ local function checkpoint_agent_message(session: any, messages: any): any
         return nil
     end
     local checkpoint_id = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
+    local boundary = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY)
+    if checkpoint_id and type(boundary) == "table" and boundary.checkpoint_id == checkpoint_id and boundary.exclusive == true then
+        return { message_id = checkpoint_id, metadata = { source_id = boundary.source_id } }
+    end
     for _, message in ipairs(messages) do
         if message.message_id == checkpoint_id then
             if message.type ~= consts.MSG_TYPE.USER and message.type ~= consts.MSG_TYPE.DEVELOPER then

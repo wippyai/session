@@ -89,3 +89,10 @@ prepare:
 
 clean:
 	bash scripts/prepare-test-db.sh "$(TEST_DB)" "$(TEST_BACKUP_DIR)"
+
+# Until admission is published, this explicit gate must use the companion Framework source.
+.PHONY: test-admission
+test-admission:
+	@test -n "$(FRAMEWORK_DIR)" || { echo "FRAMEWORK_DIR with admission support is required" >&2; exit 1; }
+	$(MAKE) install
+	WIPPY_TEST_REQUIRE_ADMISSION=1 $(MAKE) test TEST_FILTER=app.persist:checkpoint_repo_test

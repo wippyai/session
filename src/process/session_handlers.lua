@@ -348,9 +348,11 @@ function session_handlers.create_checkpoint(ctx, op)
             host = host,
             agent = agent,
             reason = reason,
-            selector = {
-                mode = "since_checkpoint"
-            },
+            selector = op.exclusive == true and {
+                mode = "range",
+                from_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID),
+                to_id = op.checkpoint_id,
+            } or { mode = "since_checkpoint" },
             run_context = {
                 contract = RUN_CONTEXT_CONTRACT,
                 binding = op.run_context_binding or (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
@@ -382,6 +384,7 @@ function session_handlers.create_checkpoint(ctx, op)
         local func_err
         result, func_err = funcs_module().new():with_context(session_context):call(checkpoint_function_id :: string, {
             session_id = ctx.session_id,
+            checkpoint_id = op.exclusive == true and op.checkpoint_id or nil,
             options = checkpoint_options
         })
 

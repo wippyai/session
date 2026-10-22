@@ -1224,14 +1224,26 @@ function message_handlers.agent_step(ctx, op)
             compact = function(info)
                 local messages, read_err = ctx.reader:messages():from_checkpoint():all()
                 if not messages then return nil, read_err end
-                local tail = messages[#messages]
-                local anchor_id = tail and tail.message_id or op.message_id
+                local tail = nil
+                for _, message in ipairs(messages) do
+                    local metadata = message.metadata or {}
+                    local input = metadata.input
+                    if (message.type == consts.MSG_TYPE.FUNCTION or message.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+                        or message.type == consts.MSG_TYPE.DELEGATION) and metadata.status == consts.FUNC_STATUS.PENDING then
+                        return nil, "Cannot checkpoint an unsettled tool round"
+                    end
+                    if type(input) ~= "table" or input.state == "applied" then tail = message end
+                end
+                local anchor_id = tail and tail.message_id
+                    or ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or op.message_id
                 local checkpoint_result, checkpoint_err = session_handlers.create_checkpoint(ctx, {
                     checkpoint_function_id = checkpoint_function_id,
                     checkpoint_bindings = checkpoint_op.checkpoint_bindings,
                     checkpoint_options = checkpoint_options,
                     checkpoint_id = anchor_id,
                     message_id = anchor_id,
+                    exclusive = true,
+                    source_id = op.message_id,
                     trigger_tokens = info.estimated_prompt_tokens,
                     agent = { id = agent.id, model = agent.model },
                     agent_options = agent.agent_options,

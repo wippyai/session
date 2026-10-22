@@ -416,3 +416,21 @@ Only `session:`-prefixed topics are relayed to clients.
 
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases
+
+### Outgoing prompt checkpoints (pending upstream admission support)
+
+When Agent requests compaction before model dispatch, Session commits an explicit
+exclusive checkpoint boundary: the summary replaces completed history through the
+anchor, while the originating user request is restored at user authority. Stored
+tool results remain intact. The boundary and request reference are committed with
+the summary; a failed write leaves the previous prompt usable. Reopening a session
+honors that boundary, and pending input remains queued for its normal safe boundary.
+Existing checkpoints and explicit `messages():after(id)` queries remain inclusive.
+
+This path requires the unreleased Agent/LLM checkpoint callback capability proposed
+in Framework #203. This change must remain a draft until that capability is approved,
+published, and required by the Session dependency minimums and test lock.
+
+The source-composed integration gate is
+`make test-admission FRAMEWORK_DIR=/path/to/framework-with-admission`. It fails
+rather than skipping when the companion callback capability is unavailable.
