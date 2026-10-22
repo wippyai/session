@@ -230,6 +230,10 @@ so later config changes cannot alter that operation. A trait checkpoint binding
 is attempted before the configured function fallback; both receive effective
 `options`. A strict binding failure prevents fallback and checkpoint-state
 writes. Without behaviors, the existing function path remains available.
+When a checkpoint succeeds after a non-strict binding failure, the checkpoint
+anchor's metadata retains the runtime diagnostics in `checkpoint_binding_errors`,
+including when a later binding or the configured function supplies the summary.
+Healthy checkpoints omit this field.
 
 This is the current prompt size, not cumulative usage across the turn. Cached
 input still occupies context even when `prompt_tokens` reports only a small

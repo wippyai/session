@@ -333,6 +333,7 @@ function session_handlers.create_checkpoint(ctx, op)
     local result = nil
     local checkpoint_source = "function"
     local checkpoint_binding_metadata = nil
+    local checkpoint_binding_errors = nil
 
     if has_checkpoint_bindings(op.checkpoint_bindings) then
         local host = {
@@ -367,6 +368,9 @@ function session_handlers.create_checkpoint(ctx, op)
         })
         if runtime_err then
             return nil, runtime_err
+        end
+        if runtime_result and type(runtime_result.errors) == "table" and #runtime_result.errors > 0 then
+            checkpoint_binding_errors = runtime_result.errors
         end
         if runtime_result and runtime_result.result then
             result = runtime_result.result
@@ -420,7 +424,8 @@ function session_handlers.create_checkpoint(ctx, op)
         checkpoint_generated_at = time.now():format(time.RFC3339),
         checkpoint_tokens = result.tokens or {},
         checkpoint_source = checkpoint_source,
-        checkpoint_binding_metadata = checkpoint_binding_metadata
+        checkpoint_binding_metadata = checkpoint_binding_metadata,
+        checkpoint_binding_errors = checkpoint_binding_errors
     }
 
     local committed, commit_err = ctx.writer:commit_checkpoint(op, result.summary, checkpoint_metadata)
