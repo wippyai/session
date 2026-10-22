@@ -12,6 +12,7 @@ local wait_for_boot = require("wait_for_boot")
 local writer = require("writer")
 local reader = require("reader")
 local message_handlers = require("message_handlers")
+local session_handlers = require("session_handlers")
 local sql = require("sql")
 local time = require("time")
 
@@ -187,6 +188,53 @@ local function define_tests()
             test.eq(#message_repo.list_behavior_rounds(session_id), 0)
             test.eq(session_repo.get(session_id, user_id).meta.behavior_controls_pending, false)
         end)
+        for _, expectation in ipairs({"raw result", "user request"}) do
+            it("pre-dispatch compaction preserves the task and replaces the " .. expectation, function()
+                assert(context_repo.update(context_id, json.encode({project = "kept"})))
+                local request_id = uuid.v7()
+                assert(message_repo.create(request_id, session_id, consts.MSG_TYPE.USER,
+                    "Keep the original task verbatim.", {}))
+                local host_writer = assert(writer.new(session_id))
+                local _, ids, response_err = host_writer:add_response("Reading", {source_id = request_id},
+                    {{id = "read-1", name = "read", arguments = {}, type = consts.MSG_TYPE.FUNCTION}})
+                test.is_nil(response_err)
+                local large = string.rep("large-result-data ", 10000)
+                assert(host_writer:update_message_meta(ids["read-1"], {status = consts.FUNC_STATUS.SUCCESS, result = large}))
+                local replacement = nil
+                local agent = {id = "test:agent", model = "test-model", agent_options = {}, tool_wrappers = {}}
+                agent.step = function(_, _, runtime)
+                    local compacted, err = runtime.checkpoint.compact({estimated_prompt_tokens = 50000})
+                    assert(compacted, tostring(err))
+                    replacement = compacted:get_messages()
+                    return {result = "done"}
+                end
+                local ctx = {session_id = session_id, user_id = user_id,
+                    config = {agent_id = agent.id, model = agent.model, checkpoint_function_id = "test:summary"},
+                    reader = assert(reader.open(session_id)), writer = host_writer, lifecycle_state = {},
+                    agent_ctx = {load_agent = function() return agent end, get_current_agent = function() return agent end},
+                    upstream = {response_beginning = function() end, send_message_update = function() end,
+                        invalidate_message = function() end, message_error = function() end,
+                        update_session = function() end, session_error = function() end}}
+                local saved_funcs = session_handlers._funcs
+                session_handlers._funcs = {new = function() return {
+                    with_context = function(self) return self end,
+                    call = function() return {summary = "The tool found useful information."} end,
+                } end}
+                local ran, result, err = pcall(message_handlers.agent_step, ctx, {message_id = request_id, request_id = "review"})
+                session_handlers._funcs = saved_funcs
+                test.is_true(ran, tostring(result))
+                test.is_nil(err)
+                test.not_nil(replacement)
+                local encoded = json.encode(replacement)
+                if expectation == "raw result" then
+                    test.is_nil(string.find(encoded, large, 1, true), "checkpoint must remove the oversized tool result")
+                else
+                    test.not_nil(string.find(encoded, "Keep the original task verbatim.", 1, true),
+                        "checkpoint must restore the current request at user authority")
+                end
+            end)
+        end
+
         it("rejects a different owner without changing the checkpoint", function()
             local ok, err = checkpoint_repo.commit(session_id, "other-owner",
                 { message_id = message_id, checkpoint_id = message_id }, "new summary", {}, uuid.v7())
