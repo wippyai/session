@@ -59,8 +59,17 @@ local function deadline_matches(session_info, deadline)
         and active.level == deadline.level
 end
 
-local function exit_error_payload(session_id, status, reason)
+local function exit_error_payload(session_id, status, reason, start_failure)
     if status ~= consts.STATUS.FAILED then return nil end
+    -- A session that exits before confirming start has not run any work.
+    if start_failure then
+        return {
+            type = consts.UPSTREAM_TYPES.ERROR,
+            session_id = session_id,
+            code = consts.ERROR_CODES.SESSION_SPAWN,
+            message = start_failure
+        }
+    end
     return {
         type = consts.UPSTREAM_TYPES.ERROR,
         session_id = session_id,
@@ -1031,12 +1040,14 @@ local function run(args)
                             break
                         end
 
+                        local start_failure = nil
                         if not session_info.open_notified then
                             local reason = "Session exited before confirming start"
                             if exit_error or (type(exit_result) == "table" and exit_result.error) then
                                 reason = exit_error or exit_result.error
                             end
-                            fail_start_requests(session_info, "Failed to create session: " .. tostring(reason))
+                            start_failure = "Failed to create session: " .. tostring(reason)
+                            fail_start_requests(session_info, start_failure)
                         end
 
                         clear_stop_deadline(session_info)
@@ -1089,7 +1100,7 @@ local function run(args)
                         })
 
                         if state.user_hub_pid then
-                            local error_update = exit_error_payload(session_id, target_status, err)
+                            local error_update = exit_error_payload(session_id, target_status, err, start_failure)
                             if error_update then
                                 process.send(state.user_hub_pid :: string,
                                     consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
