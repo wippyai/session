@@ -650,6 +650,91 @@ local function define_tests()
             test.is_true(result.skipped)
         end)
 
+        it("retains failed binding diagnostics when the function fallback succeeds", function()
+            local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "fallback:checkpoint" })
+            local failures = { { binding_id = "custom", trait_id = "memory", error = "binding unavailable", strict = false } }
+            local fallback_calls = 0
+            session_handlers._checkpoint_runtime = { create = function()
+                return { applied = 0, errors = failures }, nil
+            end }
+            session_handlers._funcs = { new = function()
+                return { with_context = function(self) return self end, call = function()
+                    fallback_calls = fallback_calls + 1
+                    return { summary = "function summary", tokens = { total_tokens = 9 } }
+                end }
+            end }
+
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "settled", message_id = "settled",
+                checkpoint_bindings = { { binding = "custom:checkpoint" } },
+            })
+
+            test.is_nil(err)
+            test.eq(fallback_calls, 1)
+            test.eq(captured.summary, "function summary")
+            test.eq(captured.message_meta.checkpoint_source, "function")
+            test.is_nil(captured.message_meta.checkpoint_binding_metadata)
+            test.eq(captured.message_meta.checkpoint_binding_errors, failures)
+            test.eq(result.tokens.total_tokens, 9)
+            test.eq(#result.next_ops, 0)
+        end)
+
+        it("retains earlier binding failures when a later binding supplies the summary", function()
+            local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "fallback:checkpoint" })
+            local failures = { { binding_id = "first", error = "first unavailable", strict = false } }
+            local metadata = { { binding_id = "second", metadata = { selected = true } } }
+            session_handlers._checkpoint_runtime = { create = function()
+                return { applied = 1, errors = failures, result = { memory = "second binding summary" }, metadata = metadata }
+            end }
+            session_handlers._funcs = { new = function() error("function fallback must not execute") end }
+
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "settled", message_id = "settled",
+                checkpoint_bindings = { { binding = "first:checkpoint" }, { binding = "second:checkpoint" } },
+            })
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.summary, "second binding summary")
+            test.eq(captured.message_meta.checkpoint_source, "binding")
+            test.eq(captured.message_meta.checkpoint_binding_metadata, metadata)
+            test.eq(captured.message_meta.checkpoint_binding_errors, failures)
+        end)
+
+        it("does not add binding error metadata when every attempted binding succeeds", function()
+            local ctx, captured = mock_checkpoint_ctx({})
+            session_handlers._checkpoint_runtime = { create = function()
+                return { applied = 1, errors = {}, result = { summary = "healthy summary" } }
+            end }
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "settled", message_id = "settled",
+                checkpoint_bindings = { { binding = "healthy:checkpoint" } },
+            })
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.is_nil(captured.message_meta.checkpoint_binding_errors)
+        end)
+
+        it("keeps function fallback failure terminal without committing binding diagnostics", function()
+            local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "fallback:checkpoint" })
+            session_handlers._checkpoint_runtime = { create = function()
+                return { applied = 0, errors = { { error = "binding failed" } } }
+            end }
+            session_handlers._funcs = { new = function()
+                return { with_context = function(self) return self end,
+                    call = function() return nil, "function fallback failed" end }
+            end }
+            local result, err = session_handlers.create_checkpoint(ctx, {
+                checkpoint_id = "settled", message_id = "settled",
+                checkpoint_bindings = { { binding = "custom:checkpoint" } },
+            })
+            test.is_nil(result)
+            test.eq(err, "function fallback failed")
+            test.is_nil(captured.message_meta)
+            test.is_nil(captured.summary)
+            test.eq(captured.resets, 0)
+        end)
+
         it("does not fall back or write checkpoint state after a strict binding failure", function()
             local ctx, captured = mock_checkpoint_ctx({ checkpoint_function_id = "fallback:checkpoint" })
             session_handlers._checkpoint_runtime = {
@@ -835,6 +920,7 @@ local function define_tests()
             test.eq(((called or {}).args or {}).session_id, "sess-1")
             test.eq(captured.summary, "fallback summary")
             test.eq((captured.message_meta or {}).checkpoint_source, "function")
+            test.is_nil((captured.message_meta or {}).checkpoint_binding_errors)
             test.eq(result.tokens.prompt_tokens, 12)
         end)
 
