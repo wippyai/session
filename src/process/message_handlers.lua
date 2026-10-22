@@ -382,7 +382,10 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
     return transition.activation or { applied = 0, skipped = 0 }, nil
 end
 
-local function outcome_from_agent_result(result: any): table
+local function step_outcome(result: any): table
+    if result and result.stopped then
+        return { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+    end
     if result and result.truncated then
         return {
             state = result.truncation_reason == "empty_output" and OUTCOME.FAILED or OUTCOME.CONTINUES,
@@ -405,6 +408,39 @@ local function outcome_from_agent_result(result: any): table
         state = OUTCOME.COMPLETED,
         reason = REASON.NO_TOOLS_REQUIRED
     }
+end
+
+local function outcome_from_agent_result(result: any): table
+    local outcome = step_outcome(result)
+    if result and result.memory_recall_error then
+        outcome.memory_recall_error = result.memory_recall_error
+    end
+    return outcome
+end
+
+-- Runs after_persist for a committed assistant record. A strict binding error is
+-- returned to the caller, which settles it through the fatal path: the record and
+-- any tool intents are already stored.
+local function apply_after_persist(ctx: SessionContext, op: any, agent: any, response_id: string,
+    event_id: string, result: any): string?
+    if not lifecycle_runtime.subscribed(agent.bindings, lifecycle_runtime.PHASE.AFTER_PERSIST) then
+        return nil
+    end
+    local _, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_PERSIST, agent, {
+        reason = "agent_step",
+        refs = {
+            message_id = op.message_id,
+            response_id = response_id,
+            request_id = op.request_id,
+            event_id = event_id
+        },
+        outcome = outcome_from_agent_result(result)
+    })
+    if err then
+        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, err)
+        return err
+    end
+    return nil
 end
 
 -- LOOP GUARDS. One turn is one user message and the chain of agent steps it triggers
@@ -803,6 +839,7 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     input_policy.clear_turn(ctx)
     ctx.upstream:message_error(response_id, code, detail)
 
+    local memory_recall_error = opts and opts.memory_recall_error
     if opts and opts.after_step then
         apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
             reason = REASON.HOST_FAILED,
@@ -813,7 +850,8 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
             },
             outcome = {
                 state = OUTCOME.FAILED,
-                reason = REASON.HOST_FAILED
+                reason = REASON.HOST_FAILED,
+                memory_recall_error = memory_recall_error
             }
         })
     end
@@ -823,7 +861,8 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
         error_code = code,
         error_details = opts and opts.error_details,
         source_id = op.message_id,
-        response_id = response_id
+        response_id = response_id,
+        memory_recall_error = memory_recall_error
     })
 
     return {
@@ -1227,6 +1266,7 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local result, exec_err, exec_details = agent:step(builder, runtime_options)
+    local memory_recall_error = type(result) == "table" and result.memory_recall_error or nil
     if exec_err or type(result) ~= "table" then
         local error_code = consts.ERROR_CODES.AGENT_ERROR
         local error_details = nil
@@ -1239,7 +1279,8 @@ function message_handlers.agent_step(ctx, op)
             exec_err or "Agent step returned no result", {
                 after_step = true,
                 error_details = error_details,
-                tokens = type(result) == "table" and result.tokens or nil
+                tokens = type(result) == "table" and result.tokens or nil,
+                memory_recall_error = memory_recall_error
             })
     end
     if result.stopped then
@@ -1250,19 +1291,26 @@ function message_handlers.agent_step(ctx, op)
                 response_id = response_id,
                 request_id = op.request_id
             },
-            outcome = { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+            outcome = {
+                state = OUTCOME.COMPLETED,
+                reason = REASON.STOP_REQUESTED,
+                memory_recall_error = memory_recall_error
+            }
         })
         if after_err then
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
         end
         if type(result.result) == "string" and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
-                stopped = true
+                stopped = true,
+                memory_recall_error = memory_recall_error
             })
             if store_err then return nil, store_err end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
                 using_tools = false
@@ -1304,16 +1352,19 @@ function message_handlers.agent_step(ctx, op)
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
         if result.result and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
                 tokens = result.tokens,
-                truncated = true
+                truncated = true,
+                memory_recall_error = memory_recall_error
             })
             if store_err then
                 return nil, store_err
             end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
 
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
@@ -1440,6 +1491,9 @@ function message_handlers.agent_step(ctx, op)
             metadata.memory_ids = result.memory_recall.memory_ids
             metadata.memory_count = result.memory_recall.count
         end
+        if memory_recall_error then
+            metadata.memory_recall_error = memory_recall_error
+        end
 
         if result.metadata then
             for k, v in pairs(result.metadata) do
@@ -1485,6 +1539,9 @@ function message_handlers.agent_step(ctx, op)
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
         result.call_message_types = call_message_types
+
+        local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+        if persist_err then return nil, persist_err end
 
         if is_turn_blocked(ctx) then
             for index, call in ipairs(unified_tool_calls) do
