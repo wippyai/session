@@ -9,6 +9,13 @@
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
 
+## [0.6.11](https://github.com/wippyai/session/compare/v0.6.10...v0.6.11) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** report pre-start session exits as start failures ([#90](https://github.com/wippyai/session/issues/90)) ([17fec9d](https://github.com/wippyai/session/commit/17fec9d5610cd00e35f432d5d5dbc9fc994847ea))
+
 ## [0.6.10](https://github.com/wippyai/session/compare/v0.6.9...v0.6.10) (2026-10-22)
 
 
