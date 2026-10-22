@@ -16,15 +16,24 @@ local benchmark_report = require("benchmark_report")
 local framework_capabilities = require("framework_capabilities")
 local active_pid = nil
 local active_exit = nil
+local observed = {}
+local test_inbox, test_events
+
+local function receive_channels()
+    if not test_inbox then test_inbox = process.inbox() end
+    if not test_events then test_events = process.events() end
+    return test_inbox, test_events
+end
 
 local function receive_until(predicate, description)
-    local inbox, events, timer = process.inbox(), process.events(), time.timer("5s")
+    local inbox, events = receive_channels()
+    local timer = time.timer("5s")
     local deadline = timer:channel()
     while true do
         local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
         if selected.channel == deadline then
             timer:stop()
-            error("Deadline waiting for " .. description)
+            error("Deadline waiting for " .. description .. "; observed=" .. tostring(json.encode(observed)))
         end
         if selected.channel == events then
             if selected.value.from == active_pid then
@@ -35,6 +44,10 @@ local function receive_until(predicate, description)
         else
             local message = selected.value
             local payload = message:payload():data()
+            observed[#observed + 1] = {topic = message:topic(), type = payload.type,
+                session_id = payload.session_id, request_id = payload.request_id,
+                status = payload.status, code = payload.code}
+            if #observed > 16 then table.remove(observed, 1) end
             if payload.type == consts.UPSTREAM_TYPES.ERROR then
                 timer:stop()
                 error("Session error: " .. tostring(payload.message or payload.code))
@@ -55,14 +68,26 @@ local function open_process(session_id, user_id, create, conn_pid)
     test.is_nil(err)
     test.not_nil(pid)
     active_pid, active_exit = pid, nil
-    receive_until(function(topic, payload)
-        return topic == "session:" .. session_id and payload.status == "idle" and payload.interaction ~= nil
-    end, "session readiness")
+    -- Agent initialization publishes an idle interaction before model
+    -- configuration has finished. A correlated inbox reply proves ingress
+    -- is accepting commands after all initial configuration has completed.
+    local request_id = "runtime-ready:" .. uuid.v7()
+    local sent, send_err = process.send(pid, consts.TOPICS.COMMAND, {
+        command = "context_transport_capabilities", capabilities_version = 1, request_id = request_id,
+    })
+    test.is_nil(send_err)
+    test.is_true(sent)
+    local ready = receive_until(function(topic, payload)
+        return topic == "session:" .. session_id and payload.type == consts.UPSTREAM_TYPES.COMMAND_RESPONSE
+            and payload.request_id == request_id
+    end, "session ingress readiness")
+    test.is_true(ready.success)
     return pid
 end
 
 local function wait_for_exit(pid, session_id)
-    local events, timer = process.events(), time.timer("5s")
+    local _, events = receive_channels()
+    local timer = time.timer("5s")
     local deadline = timer:channel()
     while true do
         local selected = channel.select({ events:case_receive(), deadline:case_receive() })
@@ -94,7 +119,8 @@ local function stop_active_process()
     local pid = active_pid
     if not active_exit then
         local _, terminate_err = process.terminate(pid)
-        local events, timer = process.events(), time.timer("5s")
+        local _, events = receive_channels()
+        local timer = time.timer("5s")
         local deadline = timer:channel()
         while not active_exit do
             local selected = channel.select({ events:case_receive(), deadline:case_receive() })
@@ -138,6 +164,7 @@ local function run_scenario(options)
     local handoff_cancelled = options.stop and options.cancels_in_flight
     local actor = security.actor()
     local session_id, context_id = uuid.v7(), uuid.v7()
+    observed = {}
     local _, context_err = context_repo.create(context_id, "primary", "{}")
     test.is_nil(context_err)
     local _, create_err = session_repo.create(session_id, actor:id(), context_id, "Runtime handoff", "test", {}, {
@@ -524,6 +551,49 @@ local function define_checkpoint_tests()
     end)
 end
 
+local function define_readiness_tests()
+    test.describe("Session ingress readiness without generation", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("applies the configured model before admitting commands without generating", function()
+            local storage = assert(store.get("app.runtime:state"))
+            storage:set("requests", {})
+            storage:set("scenario", {})
+            local samples = tonumber((env.get("WIPPY_BENCH_SAMPLES"))) or 25
+            test.is_true(samples > 0 and samples <= 10000 and samples % 1 == 0)
+            local actor = security.actor()
+            for _ = 1, samples do
+                local session_id, context_id = uuid.v7(), uuid.v7()
+                assert(context_repo.create(context_id, "primary", "{}"))
+                assert(session_repo.create(session_id, actor:id(), context_id, "Readiness", "test", {}, {
+                    -- Initial agent selection restores the router default;
+                    -- the following model operation must apply this override.
+                    agent_id = "app.runtime:router", model = "session-runtime-help",
+                }))
+                local ok, failure = pcall(function()
+                    local pid = open_process(session_id, actor:id(), true)
+                    local state = assert(reader.open(session_id)):state()
+                    test.eq(state.config.model, "session-runtime-help")
+                    close_process(pid, session_id)
+                end)
+                local _, cleanup_err = stop_active_process()
+                if cleanup_err then
+                    storage:release()
+                    error(tostring(failure or "Readiness cleanup failed") .. "; " .. cleanup_err)
+                end
+                session_repo.delete(session_id)
+                context_repo.delete(context_id)
+                if not ok then
+                    storage:release()
+                    error(failure)
+                end
+            end
+            local requests = storage:get("requests")
+            storage:release()
+            test.eq(#requests, 0, "initialization and the readiness barrier must never generate")
+        end)
+    end)
+end
+
 local function define_tests()
     test.describe("Session handoff through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
@@ -622,5 +692,5 @@ local function define_benchmark()
     end)
 end
 
-return { run = test.run_cases(define_tests), checkpoint = test.run_cases(define_checkpoint_tests),
+return { readiness = test.run_cases(define_readiness_tests), run = test.run_cases(define_tests), checkpoint = test.run_cases(define_checkpoint_tests),
     benchmark = test.run_cases(define_benchmark) }
