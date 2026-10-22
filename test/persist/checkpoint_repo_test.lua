@@ -72,6 +72,42 @@ local function define_tests()
             end
         end)
 
+        it("persists fallback binding diagnostics through the checkpoint handler and a fresh message read", function()
+            local saved_runtime, saved_funcs = session_handlers._checkpoint_runtime, session_handlers._funcs
+            session_handlers._checkpoint_runtime = { create = function()
+                return { applied = 0, errors = { {
+                    binding_id = "custom", trait_id = "memory", error = "binding unavailable", strict = false,
+                } } }
+            end }
+            session_handlers._funcs = { new = function()
+                return { with_context = function(self) return self end,
+                    call = function() return { summary = "fallback summary" } end }
+            end }
+            local ok, result, err = pcall(function()
+                return session_handlers.create_checkpoint({
+                    session_id = session_id,
+                    config = { checkpoint_function_id = "fallback:checkpoint" },
+                    reader = assert(reader.open(session_id)), writer = assert(writer.new(session_id)),
+                }, {
+                    checkpoint_id = message_id, message_id = message_id,
+                    checkpoint_bindings = { { binding = "custom:checkpoint" } },
+                })
+            end)
+            session_handlers._checkpoint_runtime, session_handlers._funcs = saved_runtime, saved_funcs
+
+            test.is_true(ok, tostring(result))
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local message = assert(message_repo.get(message_id))
+            test.eq(message.metadata.checkpoint_source, "function")
+            test.eq(message.metadata.checkpoint_summary, "fallback summary")
+            local failure = message.metadata.checkpoint_binding_errors[1]
+            test.eq(failure.binding_id, "custom")
+            test.eq(failure.trait_id, "memory")
+            test.eq(failure.error, "binding unavailable")
+            test.is_false(failure.strict)
+        end)
+
         it("rolls back a summary insertion failure without losing old history or the compact request", function()
             -- Reuse the note's primary key to force an insertion failure after
             -- the old summary has been deleted inside the transaction.
