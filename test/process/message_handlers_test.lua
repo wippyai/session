@@ -639,10 +639,26 @@ local function define_tests()
             test.eq(persisted.payload.outcome.state, "continues")
         end)
 
+        it("dispatches after_persist for retained text from a stopped response", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({result = "partial answer", stopped = true}))
+            local phases = record_phases(captured)
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.not_nil(assistant)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id])
+            test.eq(persisted.payload.outcome.state, "completed")
+            test.eq(persisted.payload.outcome.reason, "stop_requested")
+        end)
+
         it("does not dispatch after_persist when nothing is stored", function()
             local failures = {
                 { label = "provider failure", result = nil, err = "provider failed" },
                 { label = "empty response", result = { result = "" } },
+                { label = "stopped without text", result = { stopped = true, result = "" } },
                 { label = "truncated without text", result = { result = "", truncated = true,
                     truncation_reason = "tool_calls" } },
             }
@@ -674,6 +690,17 @@ local function define_tests()
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
             test.eq(captured.message_errors[1].message, "index unavailable")
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 0, "the turn is not settled as an agent failure")
+        end)
+
+        it("keeps retained stopped text when its strict after_persist hook fails", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({result = "partial answer", stopped = true}))
+            record_phases(captured, {after_persist = "index unavailable"})
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.eq(err, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            test.eq(captured.message_errors[1].message, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 0)
         end)
 
         it("reports a recall failure to lifecycle handlers and in the stored record", function()

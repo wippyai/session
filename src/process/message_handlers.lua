@@ -382,6 +382,9 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
 end
 
 local function step_outcome(result: any): table
+    if result and result.stopped then
+        return { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+    end
     if result and result.truncated then
         return {
             state = result.truncation_reason == "empty_output" and OUTCOME.FAILED or OUTCOME.CONTINUES,
@@ -419,6 +422,9 @@ end
 -- any tool intents are already stored.
 local function apply_after_persist(ctx: SessionContext, op: any, agent: any, response_id: string,
     event_id: string, result: any): string?
+    if not lifecycle_runtime.subscribed(agent.bindings, lifecycle_runtime.PHASE.AFTER_PERSIST) then
+        return nil
+    end
     local _, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_PERSIST, agent, {
         reason = "agent_step",
         refs = {
@@ -1244,7 +1250,7 @@ function message_handlers.agent_step(ctx, op)
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
         end
         if type(result.result) == "string" and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
@@ -1252,6 +1258,8 @@ function message_handlers.agent_step(ctx, op)
                 memory_recall_error = memory_recall_error
             })
             if store_err then return nil, store_err end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
                 using_tools = false
