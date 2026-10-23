@@ -1318,6 +1318,11 @@ function message_handlers.agent_step(ctx, op)
     if result.truncated then
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
+        -- A truncated text response is durable and visible before the retry.
+        -- Record any tag it already placed, but never append one until a
+        -- later, non-truncated tool-free response finishes the turn.
+        local pending_inline_artifacts, remaining_inline_artifacts, synchronize_inline_artifacts =
+            synchronize_inline_artifacts(ctx, result, 1)
         if result.result and result.result ~= "" then
             local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
@@ -1328,6 +1333,9 @@ function message_handlers.agent_step(ctx, op)
             })
             if store_err then
                 return nil, store_err
+            end
+            if synchronize_inline_artifacts then
+                commit_inline_artifacts(ctx, pending_inline_artifacts, remaining_inline_artifacts)
             end
 
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {

@@ -1040,6 +1040,35 @@ local function define_tests()
             test.eq(captured.response_batches[1].content, "A new answer.")
             test.is_nil(ctx.turn_state.pending_inline_artifacts)
         end)
+
+        it("does not duplicate a tag already emitted in a truncated response", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local tag = '<artifact id="artifact-1"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            local steps = 0
+            agent.step = function()
+                steps = steps + 1
+                if steps == 1 then return { result = "Partial: " .. tag, truncated = true } end
+                return { result = "Completed after retry." }
+            end
+
+            local partial, partial_err = continue_step(ctx)
+            test.is_nil(partial_err)
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].content, "Partial: " .. tag)
+
+            local retry = find_op(partial.next_ops, consts.OP_TYPE.AGENT_STEP)
+            local final, final_err = message_handlers.agent_step(ctx, retry)
+            test.is_nil(final_err)
+            test.is_true(final.completed)
+            test.eq(captured.response_batches[1].content, "Completed after retry.")
+        end)
     end)
 
     describe("checkpoint trigger inside a tool loop", function()
