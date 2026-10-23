@@ -784,6 +784,62 @@ local function error_text(err: any): string
     return tostring(err)
 end
 
+-- Inline artifacts are created by a tool round, then normally referenced by
+-- the model in its following response. Keep that authored placement when it
+-- is present, but make the rendering contract reliable if the model omits the
+-- tag. The IDs originate from the session, not model text.
+local function prepare_inline_artifact_fallback(ctx: SessionContext, result: any,
+    tool_call_count: number): ({any}?, boolean)
+    if tool_call_count > 0 then return nil, false end
+
+    local state = ctx.turn_state
+    local pending = state and state.pending_inline_artifacts
+    if type(pending) ~= "table" or #pending == 0 then return nil, false end
+
+    local text = type(result.result) == "string" and result.result or ""
+    local missing = {}
+    for _, artifact in ipairs(pending) do
+        local artifact_id = type(artifact) == "table" and artifact.artifact_id or nil
+        if type(artifact_id) == "string" and artifact_id ~= "" then
+            local tag = '<artifact id="' .. artifact_id .. '"/>'
+            if not text:find(tag, 1, true) then
+                table.insert(missing, tag)
+            end
+        end
+    end
+
+    if #missing > 0 then
+        if text ~= "" then text = text .. "\n\n" end
+        result.result = text .. table.concat(missing, "\n")
+    end
+    return pending, true
+end
+
+local function clear_inline_artifact_fallback(ctx: SessionContext, pending: {any}?)
+    if pending and ctx.turn_state and ctx.turn_state.pending_inline_artifacts == pending then
+        ctx.turn_state.pending_inline_artifacts = nil
+    end
+end
+
+local function queue_inline_artifacts(ctx: SessionContext, created_artifacts: any)
+    if type(created_artifacts) ~= "table" then return end
+    local pending = nil
+    for _, artifact in ipairs(created_artifacts) do
+        if type(artifact) == "table" and artifact.inline == true
+            and type(artifact.artifact_id) == "string" and artifact.artifact_id ~= "" then
+            pending = pending or {}
+            table.insert(pending, { artifact_id = artifact.artifact_id })
+        end
+    end
+    if pending and #pending > 0 then
+        local state = turn_state(ctx)
+        state.pending_inline_artifacts = state.pending_inline_artifacts or {}
+        for _, artifact in ipairs(pending) do
+            table.insert(state.pending_inline_artifacts, artifact)
+        end
+    end
+end
+
 -- Ends only the current turn after an agent, provider, or configuration failure; the
 -- session stays open and accepts the next message. Use it only before add_response:
 -- after that the turn has stored tool intents, and failures must stay fatal so the
@@ -1373,6 +1429,9 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
+    local pending_inline_artifacts, finalize_inline_artifacts = prepare_inline_artifact_fallback(
+        ctx, result, #unified_tool_calls)
+
     if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall or behavior_round then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
@@ -1430,6 +1489,9 @@ function message_handlers.agent_step(ctx, op)
             return nil, store_err
         end
         assistant_message_id = stored_id
+        if finalize_inline_artifacts then
+            clear_inline_artifact_fallback(ctx, pending_inline_artifacts)
+        end
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
         result.call_message_types = call_message_types
@@ -1886,6 +1948,9 @@ function message_handlers.process_tools(ctx, op)
                     if not ran or effect_err or not applied then
                         local reason = ran and (effect_err or "Control effect failed") or applied
                         return fail_remaining(index, reason)
+                    end
+                    if effect[1] == control_handlers.control_artifacts then
+                        queue_inline_artifacts(ctx, applied.created_artifacts)
                     end
                 end
             end

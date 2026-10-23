@@ -179,7 +179,8 @@ function control_handlers.control_artifacts(ctx, op)
                     table.insert(created_artifacts, {
                         artifact_id = artifact_id,
                         title = artifact_data.title,
-                        kind = consts.ARTIFACT_TYPES.VIEW_REF
+                        kind = consts.ARTIFACT_TYPES.VIEW_REF,
+                        inline = artifact_data.instructions ~= false
                     })
 
                     if artifact_data.instructions ~= false then
@@ -226,7 +227,8 @@ function control_handlers.control_artifacts(ctx, op)
                     table.insert(created_artifacts, {
                         artifact_id = artifact_id,
                         title = artifact_data.title,
-                        kind = artifact_data.type or consts.ARTIFACT_TYPES.INLINE
+                        kind = artifact_data.type or consts.ARTIFACT_TYPES.INLINE,
+                        inline = artifact_data.instructions ~= false
                     })
 
                     if artifact_data.instructions ~= false then

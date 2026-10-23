@@ -871,6 +871,73 @@ local function define_tests()
         end)
     end)
 
+    describe("inline artifact rendering", function()
+        it("appends a missing system-created tag to the final answer exactly once", function()
+            local agent = fake_agent(nil)
+            local steps = 0
+            local ctx, captured = mock_ctx(agent)
+            ctx.writer.create_artifact = function() return true end
+
+            agent.step = function()
+                steps = steps + 1
+                if steps == 1 then
+                    return { result = "", tool_calls = {{
+                        id = "create-chart", name = "CreateArtifact", arguments = "{}",
+                        registry_id = "kickside.agents.traits:create_artifact",
+                    }} }
+                end
+                return { result = "Here are the observations." }
+            end
+
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    set_strategy = function() end,
+                    validate = function(_self, calls)
+                        return { [calls[1].id] = {
+                            valid = true, name = calls[1].name, args = {}, registry_id = calls[1].registry_id,
+                        } }, nil
+                    end,
+                    execute = function(_self, _context, tools)
+                        local call = tools["create-chart"]
+                        return { ["create-chart"] = { tool_call = call, result = {
+                            success = true,
+                            _control = { artifacts = {{
+                                title = "Quarterly chart", content = "<svg></svg>", instructions = true,
+                            }} },
+                        } } }
+                    end,
+                }
+            end
+
+            local ok, failure = pcall(function()
+                local first, first_err = user_step(ctx)
+                test.is_nil(first_err)
+                local tool_op = find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+                test.not_nil(tool_op)
+
+                local settled, settle_err = message_handlers.process_tools(ctx, tool_op)
+                test.is_nil(settle_err)
+                local expected_tag = '<artifact id="' .. ctx.turn_state.pending_inline_artifacts[1].artifact_id .. '"/>'
+
+                local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
+                test.not_nil(continuation)
+                local final, final_err = message_handlers.agent_continue(ctx, continuation)
+                test.is_nil(final_err)
+                test.is_true(final.completed)
+                test.eq(captured.response_batches[2].content, "Here are the observations.\n\n" .. expected_tag)
+                test.is_nil(ctx.turn_state.pending_inline_artifacts)
+                local last_update = captured.message_updates[#captured.message_updates]
+                test.eq(last_update.type, consts.UPSTREAM_TYPES.CONTENT)
+                test.eq(last_update.payload.content, captured.response_batches[2].content)
+            end)
+            tool_caller.new = original_new
+            test.is_true(ok, tostring(failure))
+        end)
+    end)
+
     describe("checkpoint trigger inside a tool loop", function()
         it("queues the background trigger check on the first step of a user turn, anchored on the user's message", function()
             local ctx = mock_ctx(fake_agent(PROMPT_TOKENS_OVER_THRESHOLD))
