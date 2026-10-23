@@ -1318,8 +1318,8 @@ function message_handlers.agent_step(ctx, op)
         -- A truncated text response is durable and visible before the retry.
         -- Record any tag it already placed, but never append one until a
         -- later, non-truncated tool-free response finishes the turn.
-        local pending_inline_artifacts, remaining_inline_artifacts, synchronize_inline_artifacts =
-            synchronize_inline_artifacts(ctx, result, 1)
+        local pending_inline_artifacts, remaining_inline_artifacts, should_commit_inline_artifacts =
+            synchronize_inline_artifacts(ctx :: SessionContext, result, 1)
         if result.result and result.result ~= "" then
             local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
@@ -1331,8 +1331,8 @@ function message_handlers.agent_step(ctx, op)
             if store_err then
                 return nil, store_err
             end
-            if synchronize_inline_artifacts then
-                commit_inline_artifacts(ctx, pending_inline_artifacts, remaining_inline_artifacts)
+            if should_commit_inline_artifacts then
+                commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts, remaining_inline_artifacts)
             end
 
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
@@ -1445,8 +1445,8 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
-    local pending_inline_artifacts, remaining_inline_artifacts, synchronize_inline_artifacts = synchronize_inline_artifacts(
-        ctx, result, #unified_tool_calls)
+    local pending_inline_artifacts, remaining_inline_artifacts, should_commit_inline_artifacts = synchronize_inline_artifacts(
+        ctx :: SessionContext, result, #unified_tool_calls)
 
     if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall or behavior_round then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
@@ -1505,8 +1505,8 @@ function message_handlers.agent_step(ctx, op)
             return nil, store_err
         end
         assistant_message_id = stored_id
-        if synchronize_inline_artifacts then
-            commit_inline_artifacts(ctx, pending_inline_artifacts, remaining_inline_artifacts)
+        if should_commit_inline_artifacts then
+            commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts, remaining_inline_artifacts)
         end
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
