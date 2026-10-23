@@ -1863,6 +1863,7 @@ local function define_tests()
     describe("agent lifecycle transitions", function()
         after_each(function()
             message_handlers._lifecycle_runtime = nil
+            message_handlers._report_lifecycle_errors = nil
         end)
 
         local function lifecycle_agent(id: string, binding: string): any
@@ -1877,6 +1878,7 @@ local function define_tests()
             local active = first
             local transitions = {}
             local rejected_phase = nil
+            local non_strict_rejected_phase = nil
 
             ctx.agent_ctx.load_agent = function() return active, nil end
             ctx.agent_ctx.get_current_agent = function() return active end
@@ -1893,6 +1895,11 @@ local function define_tests()
                     if payload.phase == rejected_phase then
                         return nil, "strict lifecycle failure"
                     end
+                    if payload.phase == non_strict_rejected_phase then
+                        return { applied = 0, messages = {}, errors = {
+                            { error = "non-strict lifecycle failure", strict = false }
+                        } }, nil
+                    end
                     return { applied = 1, messages = {} }, nil
                 end
             }
@@ -1900,6 +1907,7 @@ local function define_tests()
             return ctx, transitions, {
                 set_agent = function(agent) active = agent end,
                 reject = function(phase) rejected_phase = phase end,
+                reject_non_strict = function(phase) non_strict_rejected_phase = phase end,
             }
         end
 
@@ -2056,6 +2064,37 @@ local function define_tests()
             test.eq(#transitions, 2)
             test.eq(ctx.lifecycle_state.active_agent_id, first.id)
             test.eq(ctx.lifecycle_state.active_agent, first)
+        end)
+
+        it("receipts a reported non-strict deactivation failure without blocking the switch", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local receipts = {}
+            message_handlers._report_lifecycle_errors = function(receipt_ctx, phase, agent, lifecycle_errors)
+                receipts[#receipts + 1] = {
+                    session_id = receipt_ctx.session_id,
+                    phase = phase,
+                    agent_id = agent.id,
+                    error = lifecycle_errors[1].error,
+                }
+            end
+
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            controls.reject_non_strict("deactivate")
+            ctx.config.agent_id = second.id
+
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_nil(result.failed)
+            test.eq(#transitions, 3)
+            test.eq(ctx.lifecycle_state.active_agent_id, second.id)
+            test.eq(#receipts, 1)
+            test.eq(receipts[1].session_id, ctx.session_id)
+            test.eq(receipts[1].phase, "deactivate")
+            test.eq(receipts[1].agent_id, first.id)
+            test.eq(receipts[1].error, "non-strict lifecycle failure")
         end)
     end)
 
