@@ -231,6 +231,39 @@ local function define_tests()
     end)
 
     describe("artifact control failures", function()
+        it("classifies standalone and inline deliveries independently", function()
+            local messages = {}
+            local ctx = {
+                writer = {
+                    create_artifact = function() return true end,
+                    add_message = function(_self, kind, content, metadata)
+                        table.insert(messages, { kind = kind, content = content, metadata = metadata })
+                        return "message-" .. tostring(#messages)
+                    end,
+                },
+                upstream = {
+                    send_message_update = function() end,
+                    update_session = function() end,
+                },
+            }
+
+            local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
+                { title = "Inline chart", content = "<svg/>", instructions = true },
+                { title = "Standalone report", content = "report", instructions = false },
+            } })
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(#result.created_artifacts, 2)
+            test.is_true(result.created_artifacts[1].inline)
+            test.is_false(result.created_artifacts[2].inline)
+            local cards = 0
+            for _, message in ipairs(messages) do
+                if message.kind == consts.MSG_TYPE.ARTIFACT then cards = cards + 1 end
+            end
+            test.eq(cards, 1, "only instructions=false gets a standalone artifact card")
+        end)
+
         it("continues when an artifact announcement or instruction write fails", function()
             for _, failed_type in ipairs({ consts.MSG_TYPE.SYSTEM, consts.MSG_TYPE.DEVELOPER }) do
                 local updates = 0

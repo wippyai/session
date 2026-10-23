@@ -792,6 +792,94 @@ end
 -- the model in its following response. Keep that authored placement when it
 -- is present, but make the rendering contract reliable if the model omits the
 -- tag. The IDs originate from the session, not model text.
+--
+-- The generated instruction uses the canonical `<artifact id="…"/>` form.
+-- The chat renderer sanitizes `artifact` tags and retains their `id` attribute:
+-- HTML-compatible quote style, attribute spacing/order, and harmless extra
+-- attributes therefore still render the same artifact. Recognize those
+-- renderer-valid forms before appending a fallback. This intentionally is not
+-- an HTML parser: a tag in Markdown code is presentation text, not a
+-- renderable artifact.
+local function escape_pattern(value: string): string
+    return value:gsub("([^%w])", "%%%1")
+end
+
+local function has_artifact_id(attributes: string, artifact_id: string): boolean
+    local id = escape_pattern(artifact_id)
+    for _, quote in ipairs({ '"', "'" }) do
+        local pattern = "id%s*=%s*" .. quote .. id .. quote
+        local start_at = 1
+        while true do
+            local start_index, end_index = attributes:find(pattern, start_at)
+            if not start_index then break end
+            if start_index == 1 or attributes:sub(start_index - 1, start_index - 1):match("%s") then
+                return true
+            end
+            start_at = end_index + 1
+        end
+    end
+    return false
+end
+
+local function tag_is_inline_code(line: string, tag_start: number): boolean
+    local delimiter = nil :: number?
+    local position = 1
+    while position < tag_start do
+        local start_index, end_index = line:find("`+", position)
+        if not start_index or start_index >= tag_start then break end
+        local size = end_index - start_index + 1
+        if delimiter == nil then
+            delimiter = size
+        elseif delimiter == size then
+            delimiter = nil
+        end
+        position = end_index + 1
+    end
+    return delimiter ~= nil
+end
+
+local function fence_marker(line: string): (string?, number?)
+    local marker = line:match("^%s*([`~]+)")
+    if not marker or #marker < 3 then return nil, nil end
+    local character = marker:sub(1, 1)
+    if marker:gsub(character, "") ~= "" then return nil, nil end
+    return character, #marker
+end
+
+local function line_has_renderable_artifact_tag(line: string, artifact_id: string): boolean
+    local position = 1
+    while true do
+        local start_index = line:find("<artifact%s", position)
+        if not start_index then return false end
+        local close_index = line:find(">", start_index + #"<artifact", true)
+        if not close_index then return false end
+        local attributes = line:sub(start_index + #"<artifact", close_index - 1)
+        if not tag_is_inline_code(line, start_index) and has_artifact_id(attributes, artifact_id) then
+            return true
+        end
+        position = close_index + 1
+    end
+end
+
+local function has_renderable_artifact_tag(text: string, artifact_id: string): boolean
+    local fence_character = nil :: string?
+    local fence_size = 0
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        line = line:gsub("\r$", "")
+        local marker, marker_size = fence_marker(line)
+        if fence_character then
+            if marker == fence_character and (marker_size :: number) >= fence_size then
+                fence_character, fence_size = nil, 0
+            end
+        elseif marker then
+            fence_character, fence_size = marker, marker_size :: number
+        elseif line_has_renderable_artifact_tag(line, artifact_id) then
+            return true
+        end
+    end
+    return false
+end
+
 local function synchronize_inline_artifacts(ctx: SessionContext, result: any,
     tool_call_count: number): ({any}?, {any}?, boolean)
     local state = ctx.turn_state
@@ -805,7 +893,7 @@ local function synchronize_inline_artifacts(ctx: SessionContext, result: any,
         local artifact_id = type(artifact) == "table" and artifact.artifact_id or nil
         if type(artifact_id) == "string" and artifact_id ~= "" then
             local tag = '<artifact id="' .. artifact_id .. '"/>'
-            local emitted = text:find(tag, 1, true) ~= nil
+            local emitted = has_renderable_artifact_tag(text, artifact_id)
             if emitted then
                 -- The provider emitted this tag in a response that will be
                 -- persisted below, even if it also calls another tool.

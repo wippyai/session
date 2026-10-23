@@ -982,6 +982,77 @@ local function define_tests()
             test.is_nil(ctx.turn_state.pending_inline_artifacts)
         end)
 
+        it("keeps renderer-equivalent authored artifact tags without appending a duplicate", function()
+            for _, tag in ipairs({
+                "<artifact id='artifact-1'/>",
+                '<artifact   id = "artifact-1" />',
+                '<artifact class="chart" id="artifact-1" data-source="model"/>',
+            }) do
+                local agent = fake_agent(nil)
+                local ctx, captured = mock_ctx(agent)
+                ctx.turn_state = {
+                    active = true,
+                    steps = 0,
+                    repeated_calls = 0,
+                    pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+                }
+                agent.step = function() return { result = "The chart is below.\n\n" .. tag } end
+
+                local result, err = continue_step(ctx)
+
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(captured.response_batches[1].content, "The chart is below.\n\n" .. tag)
+                test.is_nil(ctx.turn_state.pending_inline_artifacts)
+            end
+        end)
+
+        it("appends a canonical tag when a lookalike is inside Markdown code", function()
+            for _, text in ipairs({
+                "```html\n<artifact id=\"artifact-1\"/>\n```\nThe source is above.",
+                "Use `<artifact id=\"artifact-1\"/>` in HTML.",
+            }) do
+                local agent = fake_agent(nil)
+                local ctx, captured = mock_ctx(agent)
+                local canonical = '<artifact id="artifact-1"/>'
+                ctx.turn_state = {
+                    active = true,
+                    steps = 0,
+                    repeated_calls = 0,
+                    pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+                }
+                agent.step = function() return { result = text } end
+
+                local result, err = continue_step(ctx)
+
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(captured.response_batches[1].content, text .. "\n\n" .. canonical)
+                test.is_nil(ctx.turn_state.pending_inline_artifacts)
+            end
+        end)
+
+        it("renders every pending inline artifact once when a tool round creates several", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local first = '<artifact id="artifact-1"/>'
+            local second = '<artifact id="artifact-2"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }, { artifact_id = "artifact-2" }},
+            }
+            agent.step = function() return { result = "Both charts are ready." } end
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.response_batches[1].content, "Both charts are ready.\n\n" .. first .. "\n" .. second)
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
+
         it("does not duplicate a tag emitted before a later tool round", function()
             local agent = fake_agent(nil)
             local ctx, captured = mock_ctx(agent)
