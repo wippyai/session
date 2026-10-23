@@ -936,6 +936,26 @@ local function define_tests()
             tool_caller.new = original_new
             test.is_true(ok, tostring(failure))
         end)
+
+        it("keeps an exact tag already placed by the model", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local tag = '<artifact id="artifact-1"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            agent.step = function() return { result = "The chart is below.\n\n" .. tag } end
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.response_batches[1].content, "The chart is below.\n\n" .. tag)
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
     end)
 
     describe("checkpoint trigger inside a tool loop", function()
