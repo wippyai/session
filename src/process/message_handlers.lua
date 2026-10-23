@@ -14,6 +14,7 @@ local tools = require("tools")
 local control_handlers = require("control_handlers")
 local message_order = require("message_order")
 local hash = require("hash")
+local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
     session_id: string,
@@ -67,9 +68,23 @@ type ToolWrapperExecutionContext = {
     run_context: table?,
 }
 
+local function report_lifecycle_errors(ctx, phase, agent, lifecycle_errors)
+    local first = lifecycle_errors[1]
+    logger:warn("lifecycle binding reported non-strict failure", {
+        session_id = ctx.session_id,
+        phase = phase,
+        agent_id = agent and agent.id,
+        error_count = #lifecycle_errors,
+        binding_id = type(first) == "table" and first.binding_id or nil,
+        trait_id = type(first) == "table" and first.trait_id or nil,
+        error = type(first) == "table" and tostring(first.error or "") or nil,
+    })
+end
+
 local message_handlers = {
     _prompt_builder = nil :: any,
     _lifecycle_runtime = nil :: { apply: (bindings: any, payload: any) -> (table?, string?) }?,
+    _report_lifecycle_errors = report_lifecycle_errors,
 }
 message_handlers._context_staging = require('context_staging_repo')
 
@@ -249,7 +264,17 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
         run_context = run_context_ref(ctx, agent_ref, host),
     } :: LifecyclePayload
 
-    return (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
+    local result, err = (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
+    if err then return result, err end
+
+    -- Non-strict binding failures are intentionally non-fatal to the host. They
+    -- still need a structured receipt: otherwise a lifecycle provider can fail
+    -- invisibly and leave an operator with no boundary-level evidence.
+    if type(result) == "table" and type(result.errors) == "table" and #result.errors > 0 then
+        (message_handlers._report_lifecycle_errors or report_lifecycle_errors)(ctx, phase, agent, result.errors)
+    end
+
+    return result, nil
 end
 
 local function append_lifecycle_messages(builder: any, result: table?)

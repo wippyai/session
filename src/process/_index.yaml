@@ -137,6 +137,7 @@ entries:
       - uuid
       - funcs
       - time
+      - logger
     imports:
       consts: wippy.session:consts
       agent_context: wippy.agent:context
