@@ -789,43 +789,34 @@ local function error_text(err: any): string
 end
 
 -- Inline artifacts are created by a tool round, then normally referenced by
--- the model in its following response. Keep that authored placement when it
--- is present, but make the rendering contract reliable if the model omits the
--- tag. The IDs originate from the session, not model text.
---
-local function synchronize_inline_artifacts(ctx: SessionContext, result: any,
-    tool_call_count: number): ({any}?, {any}?, boolean)
+-- the model in its following response. A terminal response carries the
+-- system-issued references as presentation metadata as well. The renderer owns
+-- placement: it preserves an authored component when it rendered one and
+-- mounts a missing reference outside the Markdown body.  Session must not
+-- append markup to model text: Markdown may legally end in an unterminated
+-- fence, quote, or HTML context.
+local function terminal_inline_artifact_presentation(ctx: SessionContext,
+    tool_call_count: number): (any?, {any}?)
     local state = ctx.turn_state
     local pending = state and state.pending_inline_artifacts
-    if type(pending) ~= "table" or #pending == 0 then return nil, nil, false end
+    if type(pending) ~= "table" or #pending == 0 or tool_call_count > 0 then return nil, nil end
 
-    -- Markdown/HTML validity belongs to the presentation renderer.  Do not
-    -- duplicate its grammar here: append a canonical fallback element only
-    -- once the turn has no more tools.  The renderer preserves authored
-    -- placement when it parsed a real tag, and suppresses this fallback by the
-    -- system-issued artifact ID. Older renderers discard this dedicated element,
-    -- so a rolling upgrade preserves their current behavior. Code samples,
-    -- comments, multiline markup, and future renderer grammar therefore cannot
-    -- make Session guess wrong.
-    if tool_call_count > 0 then return pending, pending, false end
-
-    local text = type(result.result) == "string" and result.result or ""
-    local fallback_tags = {}
+    local refs = {}
+    local seen = {}
     for _, artifact in ipairs(pending) do
         local artifact_id = type(artifact) == "table" and artifact.artifact_id or nil
-        if type(artifact_id) == "string" and artifact_id ~= "" then
-            table.insert(fallback_tags, '<artifact-fallback id="' .. artifact_id .. '"/>')
+        if type(artifact_id) == "string" and artifact_id ~= "" and not seen[artifact_id] then
+            refs[#refs + 1] = { artifact_id = artifact_id }
+            seen[artifact_id] = true
         end
     end
-    if #fallback_tags == 0 then return pending, nil, true end
-    if text ~= "" then text = text .. "\n\n" end
-    result.result = text .. table.concat(fallback_tags, "\n")
-    return pending, nil, true
+    if #refs == 0 then return nil, nil end
+    return { artifact_refs = refs }, pending
 end
 
-local function commit_inline_artifacts(ctx: SessionContext, pending: {any}?, remaining: {any}?)
+local function commit_inline_artifacts(ctx: SessionContext, pending: {any}?)
     if pending and ctx.turn_state and ctx.turn_state.pending_inline_artifacts == pending then
-        ctx.turn_state.pending_inline_artifacts = remaining and #remaining > 0 and remaining or nil
+        ctx.turn_state.pending_inline_artifacts = nil
     end
 end
 
@@ -1315,11 +1306,8 @@ function message_handlers.agent_step(ctx, op)
     if result.truncated then
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
-        -- A truncated text response is durable and visible before the retry.
-        -- Record any tag it already placed, but never append one until a
-        -- later, non-truncated tool-free response finishes the turn.
-        local pending_inline_artifacts, remaining_inline_artifacts, should_commit_inline_artifacts =
-            synchronize_inline_artifacts(ctx :: SessionContext, result, 1)
+        -- A truncated response is not terminal. Keep presentation refs for the
+        -- eventual tool-free answer rather than attaching them to partial text.
         if result.result and result.result ~= "" then
             local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
@@ -1331,10 +1319,6 @@ function message_handlers.agent_step(ctx, op)
             if store_err then
                 return nil, store_err
             end
-            if should_commit_inline_artifacts then
-                commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts, remaining_inline_artifacts)
-            end
-
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
                 using_tools = false
@@ -1445,10 +1429,11 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
-    local pending_inline_artifacts, remaining_inline_artifacts, should_commit_inline_artifacts = synchronize_inline_artifacts(
-        ctx :: SessionContext, result, #unified_tool_calls)
+    local terminal_presentation, pending_inline_artifacts = terminal_inline_artifact_presentation(
+        ctx :: SessionContext, #unified_tool_calls)
 
-    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall or behavior_round then
+    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall
+        or behavior_round or terminal_presentation then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
         local metadata = {
@@ -1469,6 +1454,10 @@ function message_handlers.agent_step(ctx, op)
                 metadata[k] = v
             end
         end
+        -- This is server-owned presentation data, never model output.  It is
+        -- intentionally stored with the terminal assistant message so reloads
+        -- and live delivery use the same contract.
+        if terminal_presentation then metadata.presentation = terminal_presentation end
         if behavior_round then
             metadata.behavior_controls = behavior_controls
             metadata.behavior_control_state = "pending"
@@ -1505,9 +1494,7 @@ function message_handlers.agent_step(ctx, op)
             return nil, store_err
         end
         assistant_message_id = stored_id
-        if should_commit_inline_artifacts then
-            commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts, remaining_inline_artifacts)
-        end
+        commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts)
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
         result.call_message_types = call_message_types
@@ -1523,10 +1510,11 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        if result.result and result.result ~= "" then
+        if result.result and result.result ~= "" or terminal_presentation then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
-                using_tools = (#unified_tool_calls > 0)
+                using_tools = (#unified_tool_calls > 0),
+                presentation = terminal_presentation
             })
         end
     else

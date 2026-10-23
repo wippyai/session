@@ -304,7 +304,7 @@ the artifact reaches the thread.
 | `display_type` | Messages written | How it reaches the thread |
 |---|---|---|
 | `standalone` | `type="artifact"` with `metadata.artifact_id`, plus `system` `artifact_created` | the client renders the artifact message |
-| `inline` | a `developer` message carrying an embed instruction, plus `system` | the agent pastes `<artifact id="…"/>` into its reply |
+| `inline` | a `developer` message carrying an embed instruction, plus `system` | the terminal assistant message carries `metadata.presentation.artifact_refs`; the renderer preserves an authored `<artifact id="…"/>` placement when valid, otherwise mounts the reference after the Markdown body |
 
 The reference tools derive placement from `instructions`: `true` → `inline`,
 otherwise `standalone`. The standalone artifact message is written only when
@@ -314,6 +314,13 @@ The two settings are independent — any combination is valid. A `standalone`
 placement with an `inline` render mode puts the content in its own message; a
 `standalone` render mode with an `inline` placement gives a chip embedded in the
 agent's reply.
+
+Inline presentation references are server-owned terminal-message metadata, not
+markup appended to model output. This keeps an artifact visible when a model
+omits its requested tag or ends in an unfinished Markdown fence. A renderer
+deduplicates the metadata reference against a successfully rendered authored
+`<artifact>` component. Clients that do not understand `presentation` retain
+their existing behavior and ignore the field.
 
 Placement must not be mapped onto `type`. Returning `meta.display_type` as
 `type` for every kind was tried and reverted: it collapses the two settings into
