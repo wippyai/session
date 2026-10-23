@@ -454,6 +454,10 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.last_round_failed = false
     state.last_round_tools = nil
     state.route = nil
+    -- Presentation obligations belong only to the turn that created them.
+    -- An interrupted/cancelled turn must never render an old artifact in a
+    -- later user's answer.
+    state.pending_inline_artifacts = nil
     state.active = true
     return state
 end
@@ -788,36 +792,43 @@ end
 -- the model in its following response. Keep that authored placement when it
 -- is present, but make the rendering contract reliable if the model omits the
 -- tag. The IDs originate from the session, not model text.
-local function prepare_inline_artifact_fallback(ctx: SessionContext, result: any,
-    tool_call_count: number): ({any}?, boolean)
-    if tool_call_count > 0 then return nil, false end
-
+local function synchronize_inline_artifacts(ctx: SessionContext, result: any,
+    tool_call_count: number): ({any}?, {any}?, boolean)
     local state = ctx.turn_state
     local pending = state and state.pending_inline_artifacts
-    if type(pending) ~= "table" or #pending == 0 then return nil, false end
+    if type(pending) ~= "table" or #pending == 0 then return nil, nil, false end
 
     local text = type(result.result) == "string" and result.result or ""
+    local remaining = {}
     local missing = {}
     for _, artifact in ipairs(pending) do
         local artifact_id = type(artifact) == "table" and artifact.artifact_id or nil
         if type(artifact_id) == "string" and artifact_id ~= "" then
             local tag = '<artifact id="' .. artifact_id .. '"/>'
-            if not text:find(tag, 1, true) then
+            local emitted = text:find(tag, 1, true) ~= nil
+            if emitted then
+                -- The provider emitted this tag in a response that will be
+                -- persisted below, even if it also calls another tool.
+            else
+                table.insert(remaining, artifact)
+            end
+            if tool_call_count == 0 and not emitted then
                 table.insert(missing, tag)
             end
         end
     end
 
-    if #missing > 0 then
+    if tool_call_count == 0 and #missing > 0 then
         if text ~= "" then text = text .. "\n\n" end
         result.result = text .. table.concat(missing, "\n")
     end
-    return pending, true
+    if tool_call_count == 0 then remaining = {} end
+    return pending, remaining, #remaining ~= #pending or tool_call_count == 0
 end
 
-local function clear_inline_artifact_fallback(ctx: SessionContext, pending: {any}?)
+local function commit_inline_artifacts(ctx: SessionContext, pending: {any}?, remaining: {any}?)
     if pending and ctx.turn_state and ctx.turn_state.pending_inline_artifacts == pending then
-        ctx.turn_state.pending_inline_artifacts = nil
+        ctx.turn_state.pending_inline_artifacts = remaining and #remaining > 0 and remaining or nil
     end
 end
 
@@ -1429,7 +1440,7 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
-    local pending_inline_artifacts, finalize_inline_artifacts = prepare_inline_artifact_fallback(
+    local pending_inline_artifacts, remaining_inline_artifacts, synchronize_inline_artifacts = synchronize_inline_artifacts(
         ctx, result, #unified_tool_calls)
 
     if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall or behavior_round then
@@ -1489,8 +1500,8 @@ function message_handlers.agent_step(ctx, op)
             return nil, store_err
         end
         assistant_message_id = stored_id
-        if finalize_inline_artifacts then
-            clear_inline_artifact_fallback(ctx, pending_inline_artifacts)
+        if synchronize_inline_artifacts then
+            commit_inline_artifacts(ctx, pending_inline_artifacts, remaining_inline_artifacts)
         end
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end

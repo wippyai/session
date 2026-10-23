@@ -956,6 +956,90 @@ local function define_tests()
             test.eq(captured.response_batches[1].content, "The chart is below.\n\n" .. tag)
             test.is_nil(ctx.turn_state.pending_inline_artifacts)
         end)
+
+        it("does not duplicate a tag emitted before a later tool round", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local tag = '<artifact id="artifact-1"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            local steps = 0
+            agent.step = function()
+                steps = steps + 1
+                if steps == 1 then
+                    return { result = "I created it here: " .. tag, tool_calls = {{
+                        id = "follow-up", name = "Lookup", arguments = "{}", registry_id = "app:lookup",
+                    }} }
+                end
+                return { result = "The follow-up is complete." }
+            end
+
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    set_strategy = function() end,
+                    validate = function(_self, calls)
+                        return { [calls[1].id] = {
+                            valid = true, name = calls[1].name, args = {}, registry_id = calls[1].registry_id,
+                        } }, nil
+                    end,
+                    execute = function(_self, _context, tools)
+                        return { ["follow-up"] = { tool_call = tools["follow-up"], result = "done" } }
+                    end,
+                }
+            end
+
+            local ok, failure = pcall(function()
+                local first, first_err = continue_step(ctx)
+                test.is_nil(first_err)
+                test.eq(captured.response_batches[1].content, "I created it here: " .. tag)
+                test.is_nil(ctx.turn_state.pending_inline_artifacts)
+
+                local tool_op = find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+                local settled, settle_err = message_handlers.process_tools(ctx, tool_op)
+                test.is_nil(settle_err)
+                local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
+                local final, final_err = message_handlers.agent_continue(ctx, continuation)
+                test.is_nil(final_err)
+                test.is_true(final.completed)
+                test.eq(captured.response_batches[2].content, "The follow-up is complete.")
+            end)
+            tool_caller.new = original_new
+            test.is_true(ok, tostring(failure))
+        end)
+
+        it("does not carry an interrupted turn's artifact into a new user turn", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            ctx.turn_state = {
+                active = true,
+                steps = 1,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "old-artifact" }},
+            }
+            agent.step = function() return { result = "A new answer." } end
+
+            ctx.stop_requested = true
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            ctx.stop_requested = false
+
+            local result, err = message_handlers.agent_step(ctx, {
+                message_id = "new-user-message", request_id = "new-request", from_user = true,
+            })
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.response_batches[1].content, "A new answer.")
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
     end)
 
     describe("checkpoint trigger inside a tool loop", function()
