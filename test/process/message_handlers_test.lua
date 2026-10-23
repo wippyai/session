@@ -947,12 +947,13 @@ local function define_tests()
                 test.is_nil(settle_err)
                 expected_tag = '<artifact id="' .. ctx.turn_state.pending_inline_artifacts[1].artifact_id .. '"/>'
 
+                local expected_fallback = expected_tag:gsub("artifact", "artifact-fallback", 1)
                 local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
                 test.not_nil(continuation)
                 local final, final_err = message_handlers.agent_continue(ctx, continuation)
                 test.is_nil(final_err)
                 test.is_true(final.completed)
-                test.eq(captured.response_batches[2].content, "Here are the observations.\n\n" .. expected_tag)
+                test.eq(captured.response_batches[2].content, "Here are the observations.\n\n" .. expected_fallback)
                 test.is_nil(ctx.turn_state.pending_inline_artifacts)
                 local last_update = captured.message_updates[#captured.message_updates]
                 test.eq(last_update.type, consts.UPSTREAM_TYPES.CONTENT)
@@ -962,7 +963,7 @@ local function define_tests()
             test.is_true(ok, tostring(failure))
         end)
 
-        it("keeps an exact tag already placed by the model", function()
+        it("appends a marked fallback even when the model wrote an exact tag", function()
             local agent = fake_agent(nil)
             local ctx, captured = mock_ctx(agent)
             local tag = '<artifact id="artifact-1"/>'
@@ -978,11 +979,12 @@ local function define_tests()
 
             test.is_nil(err)
             test.is_true(result.completed)
-            test.eq(captured.response_batches[1].content, "The chart is below.\n\n" .. tag)
+            test.eq(captured.response_batches[1].content,
+                "The chart is below.\n\n" .. tag .. "\n\n<artifact-fallback id=\"artifact-1\"/>")
             test.is_nil(ctx.turn_state.pending_inline_artifacts)
         end)
 
-        it("keeps renderer-equivalent authored artifact tags without appending a duplicate", function()
+        it("leaves renderer-equivalent authored tags to the presentation owner", function()
             for _, tag in ipairs({
                 "<artifact id='artifact-1'/>",
                 '<artifact   id = "artifact-1" />',
@@ -1002,19 +1004,20 @@ local function define_tests()
 
                 test.is_nil(err)
                 test.is_true(result.completed)
-                test.eq(captured.response_batches[1].content, "The chart is below.\n\n" .. tag)
+                test.eq(captured.response_batches[1].content,
+                    "The chart is below.\n\n" .. tag .. "\n\n<artifact-fallback id=\"artifact-1\"/>")
                 test.is_nil(ctx.turn_state.pending_inline_artifacts)
             end
         end)
 
-        it("appends a canonical tag when a lookalike is inside Markdown code", function()
+        it("appends the same marked fallback without interpreting Markdown", function()
             for _, text in ipairs({
                 "```html\n<artifact id=\"artifact-1\"/>\n```\nThe source is above.",
                 "Use `<artifact id=\"artifact-1\"/>` in HTML.",
             }) do
                 local agent = fake_agent(nil)
                 local ctx, captured = mock_ctx(agent)
-                local canonical = '<artifact id="artifact-1"/>'
+                local canonical = '<artifact-fallback id="artifact-1"/>'
                 ctx.turn_state = {
                     active = true,
                     steps = 0,
@@ -1035,8 +1038,8 @@ local function define_tests()
         it("renders every pending inline artifact once when a tool round creates several", function()
             local agent = fake_agent(nil)
             local ctx, captured = mock_ctx(agent)
-            local first = '<artifact id="artifact-1"/>'
-            local second = '<artifact id="artifact-2"/>'
+            local first = '<artifact-fallback id="artifact-1"/>'
+            local second = '<artifact-fallback id="artifact-2"/>'
             ctx.turn_state = {
                 active = true,
                 steps = 0,
@@ -1053,7 +1056,7 @@ local function define_tests()
             test.is_nil(ctx.turn_state.pending_inline_artifacts)
         end)
 
-        it("does not duplicate a tag emitted before a later tool round", function()
+        it("holds fallback delivery until the terminal response after a tool round", function()
             local agent = fake_agent(nil)
             local ctx, captured = mock_ctx(agent)
             local tag = '<artifact id="artifact-1"/>'
@@ -1095,7 +1098,7 @@ local function define_tests()
                 local first, first_err = continue_step(ctx)
                 test.is_nil(first_err)
                 test.eq(captured.response_batches[1].content, "I created it here: " .. tag)
-                test.is_nil(ctx.turn_state.pending_inline_artifacts)
+                test.not_nil(ctx.turn_state.pending_inline_artifacts)
 
                 local tool_op = find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
                 local settled, settle_err = message_handlers.process_tools(ctx, tool_op)
@@ -1104,7 +1107,8 @@ local function define_tests()
                 local final, final_err = message_handlers.agent_continue(ctx, continuation)
                 test.is_nil(final_err)
                 test.is_true(final.completed)
-                test.eq(captured.response_batches[2].content, "The follow-up is complete.")
+                test.eq(captured.response_batches[2].content,
+                    "The follow-up is complete.\n\n<artifact-fallback id=\"artifact-1\"/>")
             end)
             tool_caller.new = original_new
             test.is_true(ok, tostring(failure))
@@ -1137,7 +1141,7 @@ local function define_tests()
             test.is_nil(ctx.turn_state.pending_inline_artifacts)
         end)
 
-        it("does not duplicate a tag already emitted in a truncated response", function()
+        it("holds fallback delivery across a truncated response", function()
             local agent = fake_agent(nil)
             local ctx, captured = mock_ctx(agent)
             local tag = '<artifact id="artifact-1"/>'
@@ -1156,14 +1160,15 @@ local function define_tests()
 
             local partial, partial_err = continue_step(ctx)
             test.is_nil(partial_err)
-            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+            test.not_nil(ctx.turn_state.pending_inline_artifacts)
             test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].content, "Partial: " .. tag)
 
             local retry = find_op(partial.next_ops, consts.OP_TYPE.AGENT_STEP)
             local final, final_err = message_handlers.agent_step(ctx, retry)
             test.is_nil(final_err)
             test.is_true(final.completed)
-            test.eq(captured.response_batches[1].content, "Completed after retry.")
+            test.eq(captured.response_batches[1].content,
+                "Completed after retry.\n\n<artifact-fallback id=\"artifact-1\"/>")
         end)
     end)
 
