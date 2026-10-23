@@ -876,9 +876,25 @@ local function define_tests()
             local agent = fake_agent(nil)
             local steps = 0
             local ctx, captured = mock_ctx(agent)
+            local expected_tag = nil
             ctx.writer.create_artifact = function() return true end
+            local function stored_rows()
+                local rows = {}
+                for _, row in ipairs(captured.stored) do
+                    table.insert(rows, {
+                        message_id = row.id,
+                        type = row.type,
+                        data = row.content,
+                        metadata = row.metadata,
+                    })
+                end
+                return rows, nil
+            end
+            ctx.reader.messages = function()
+                return { from_checkpoint = function(self) return self end, all = stored_rows }
+            end
 
-            agent.step = function()
+            agent.step = function(_self, builder)
                 steps = steps + 1
                 if steps == 1 then
                     return { result = "", tool_calls = {{
@@ -886,6 +902,15 @@ local function define_tests()
                         registry_id = "kickside.agents.traits:create_artifact",
                     }} }
                 end
+                local found_instruction = false
+                for _, message in ipairs(builder:get_messages()) do
+                    if message.role == "developer" and message.content and message.content[1]
+                        and message.content[1].text and message.content[1].text:find(expected_tag, 1, true) then
+                        found_instruction = true
+                    end
+                end
+                test.is_true(found_instruction,
+                    "the next same-turn model request must include the generated artifact tag instruction")
                 return { result = "Here are the observations." }
             end
 
@@ -920,7 +945,7 @@ local function define_tests()
 
                 local settled, settle_err = message_handlers.process_tools(ctx, tool_op)
                 test.is_nil(settle_err)
-                local expected_tag = '<artifact id="' .. ctx.turn_state.pending_inline_artifacts[1].artifact_id .. '"/>'
+                expected_tag = '<artifact id="' .. ctx.turn_state.pending_inline_artifacts[1].artifact_id .. '"/>'
 
                 local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
                 test.not_nil(continuation)
