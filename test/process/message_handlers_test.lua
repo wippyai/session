@@ -3148,6 +3148,55 @@ local function define_tests()
                 "the first admitted source turn has a valid open history start")
         end)
 
+        it("does not attribute the retired agent history to its mid-turn successor", function()
+            local ctx, _captured, bus, _steps, _interactions, _announced, restore = handoff_fixture(true)
+            local router = ctx.agent_ctx:get_current_agent()
+            router.bindings = { lifecycle = { { binding = "binding:router" } } }
+            local switch = ctx.agent_ctx.switch_to_agent
+            local latest = nil
+            ctx.agent_ctx.switch_to_agent = function(self, id)
+                local ok, err = switch(self, id)
+                local successor = self:get_current_agent()
+                successor.bindings = { lifecycle = { { binding = "binding:help" } } }
+                local step = successor.step
+                successor.step = function(...)
+                    local result = step(...)
+                    latest = "help-final"
+                    return result
+                end
+                return ok, err
+            end
+            local messages = ctx.reader.messages
+            ctx.reader.messages = function(...)
+                local query = messages(...)
+                query.last = function()
+                    return { all = function()
+                        return { { message_id = latest or (ctx.handoff_settled and "handoff-tool-result" or "msg-user") } }, nil
+                    end }
+                end
+                return query
+            end
+            local transitions = {}
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "deactivate" then transitions[#transitions + 1] = payload end
+                    return { applied = 1, messages = {} }, nil
+                end,
+            }
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(select(2, message_handlers.deactivate_current_agent(ctx, "session_finished")))
+            message_handlers._lifecycle_runtime = nil
+            test.eq(#transitions, 2)
+            test.eq(transitions[2].agent.id, "agent:help")
+            test.eq(transitions[2].refs.deactivation_range.to_id, "help-final")
+            test.eq(transitions[2].refs.deactivation_range.from_id, "handoff-tool-result",
+                "the successor range starts after the predecessor's settled tool result")
+        end)
+
         it("does not start the new agent when Stop lands in the handoff round", function()
             local ctx, captured, bus, steps, _interactions, _announced, restore = handoff_fixture()
             ctx.stop_in_handoff = true

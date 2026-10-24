@@ -601,7 +601,7 @@ local function latest_message_id(ctx): (string?, boolean, boolean)
     return nil, false, false
 end
 
-local function record_completed_turn_span(ctx, state)
+local function record_completed_turn_span(ctx, state): string?
     if not state or not state.active or state.span_anchor_known ~= true then return end
     local lifecycle = ctx.lifecycle_state
     if type(lifecycle) ~= "table" or type(lifecycle.active_agent_id) ~= "string"
@@ -632,6 +632,7 @@ local function record_completed_turn_span(ctx, state)
         open_start = open_start,
         to_id = to_id,
     }
+    return to_id
 end
 
 deactivation_refs = function(state)
@@ -2129,7 +2130,13 @@ function message_handlers.process_tools(ctx, op)
     -- capture the old agent's completed span before the successor activation
     -- performs the deferred deactivation.
     if not policies_cancelled and ctx.turn_state and ctx.turn_state.handoff then
-        record_completed_turn_span(ctx, ctx.turn_state)
+        local outgoing_end = record_completed_turn_span(ctx, ctx.turn_state)
+        -- The successor continues this user turn, but owns a new lifecycle
+        -- span. Its eventual deactivation must not reuse the retired agent's
+        -- first-history anchor. Unknown boundaries remain unknown.
+        ctx.turn_state.span_from_id = outgoing_end
+        ctx.turn_state.span_anchor_known = outgoing_end ~= nil
+        ctx.turn_state.span_open_start = false
     end
 
     if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
