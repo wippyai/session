@@ -369,11 +369,6 @@ function state_service.submit(user_id, artifact_id, raw_body)
     if expected_version ~= nil and (artifact.content_version or 1) ~= expected_version then
         return failure(409, "version_conflict", "The form changed since it was loaded.", conflict_extra(artifact))
     end
-    local normalized, field_errors, form_errors = definition.validate_answers(form.definition, envelope.answers)
-    if not normalized then
-        return 422, validation_body(field_errors, form_errors)
-    end
-
     local message_id, id_err = state_service._new_message_id()
     if not message_id then return internal_failure("Failed to create the answer id", id_err) end
     local session_id = artifact.session_id
@@ -402,13 +397,26 @@ function state_service.submit(user_id, artifact_id, raw_body)
             return nil, { version_conflict = current }
         end
 
+        -- Normalize under the acceptance lock so the pending answer and
+        -- artifact submission can only be committed for the definition that
+        -- this transaction actually accepts.
+        local current_normalized, current_field_errors, current_form_errors =
+            definition.validate_answers(current_form.definition, envelope.answers)
+        if not current_normalized then
+            return nil, {
+                validation_failed = true,
+                field_errors = current_field_errors,
+                form_errors = current_form_errors,
+            }
+        end
+
         local late, stale_err = moved_on(current, current_form.meta, { tx = dbtx })
         if stale_err then return nil, tostring(stale_err) end
 
         local text = answer_text.build({
             artifact_id = current.artifact_id,
             definition = current_form.definition,
-            answers = normalized,
+            answers = current_normalized,
             late = late,
         })
         -- The row's marker: which form it answers, and that the session has
@@ -425,7 +433,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
         if not content then return nil, content_err end
         local record = form_meta.with_submission(current_form.meta, {
             request_id = request_id,
-            answers = normalized,
+            answers = current_normalized,
             -- The answer row's own date: its place in the input order.
             submitted_at = stored.date,
             message_id = message_id,
@@ -451,6 +459,9 @@ function state_service.submit(user_id, artifact_id, raw_body)
     if not accepted then
         if type(accept_err) == "table" then
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
+            if accept_err.validation_failed then
+                return 422, validation_body(accept_err.field_errors, accept_err.form_errors)
+            end
             if accept_err.existing then
                 return against_existing(accept_err.existing, accept_err.form,
                     form_meta.submission(accept_err.form.meta), request_id, envelope.answers)

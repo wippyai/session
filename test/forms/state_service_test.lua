@@ -453,6 +453,40 @@ local function define_tests()
             test.eq(ok_body.content_version, 2)
         end)
 
+        it("revalidates against a definition changed before acceptance without writing an answer", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local original_new_id = state_service._new_message_id
+            local changed = false
+            state_service._new_message_id = function()
+                if not changed then
+                    changed = true
+                    -- This runs after the initial artifact read but before
+                    -- the acceptance transaction. The changed definition
+                    -- rejects the request's formerly valid Courier answer.
+                    local artifact = artifact_repo.get(artifact_id)
+                    local content = json.decode(artifact.content)
+                    content.props.definition.fields[1].options = { "Locker" }
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                end
+                return original_new_id()
+            end
+            local request = answer(nil, { delivery = "Courier" })
+            request.expected_content_version = nil
+            local status, body = post(artifact_id, request)
+            state_service._new_message_id = original_new_id
+
+            test.eq(status, 422)
+            test.eq(body.code, "validation_failed")
+            test.eq(body.errors.delivery[1].code, "invalid_option")
+            local artifact = artifact_repo.get(artifact_id)
+            test.eq(artifact.content_version, 2, "only the competing definition update committed")
+            test.is_nil(artifact.meta.session_form.submission, "rejected answer does not settle the form")
+            test.eq(#user_rows(ctx.session_id), 0, "rejected answer creates no pending row")
+            test.eq(#wakes, 0, "rejected answer does not wake the session")
+        end)
+
         it("returns field errors without changing anything", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
