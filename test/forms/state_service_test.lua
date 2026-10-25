@@ -507,7 +507,7 @@ local function define_tests()
                 end
                 return original_new_id()
             end
-            local request = answer(nil, { extras = { "Gift wrap", "Receipt" } })
+            local request = answer(nil, { delivery = "Courier", extras = { "Gift wrap", "Receipt" } })
             request.expected_content_version = nil
             local status, body = post(artifact_id, request)
             state_service._new_message_id = original_new_id
