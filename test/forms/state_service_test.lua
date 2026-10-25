@@ -518,6 +518,9 @@ local function define_tests()
             local extras = artifact.meta.session_form.submission.answers.extras
             test.eq(extras[1], "Receipt")
             test.eq(extras[2], "Gift wrap")
+            local row: any = message_repo.get(body.answer_message_id)
+            test.contains(row.data,
+                '"answer":[{"value":"Receipt","label":"Receipt"},{"value":"Gift wrap","label":"Gift wrap"}]')
             test.eq(#user_rows(ctx.session_id), 1)
             test.eq(#wakes, 1)
         end)
