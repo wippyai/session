@@ -1,6 +1,7 @@
 local test = require("test")
 local consts = require("consts")
 local message_handlers = require("message_handlers")
+local default_lifecycle_error_report = message_handlers._report_lifecycle_errors
 local session_handlers = require("session_handlers")
 local command_bus = require("command_bus")
 local tool_caller = require("tool_caller")
@@ -2095,6 +2096,61 @@ local function define_tests()
             test.eq(receipts[1].phase, "deactivate")
             test.eq(receipts[1].agent_id, first.id)
             test.eq(receipts[1].error, "non-strict lifecycle failure")
+        end)
+
+        local function native_failure_switch(strict: boolean): (any, any, any, any)
+            local first = lifecycle_agent("agent:one", "app.lifecycle_receipts:binding")
+            first.bindings.lifecycle[1].id = "receipt-binding"
+            first.bindings.lifecycle[1].trait_id = "trait:receipt"
+            first.bindings.lifecycle[1].phases = { "deactivate" }
+            first.bindings.lifecycle[1].strict = strict
+            local second = fake_agent(nil)
+            second.id = "agent:two"
+            local ctx, _, controls = lifecycle_context(first)
+            local receipts = {}
+            -- Exercise the published Agent lifecycle runtime and a native
+            -- contract binding rather than the lifecycle_context double.
+            message_handlers._lifecycle_runtime = nil
+            message_handlers._report_lifecycle_errors = function(receipt_ctx, phase, agent, lifecycle_errors)
+                receipts[#receipts + 1] = {
+                    session_id = receipt_ctx.session_id,
+                    phase = phase,
+                    agent_id = agent.id,
+                    errors = lifecycle_errors,
+                }
+                if default_lifecycle_error_report then
+                    default_lifecycle_error_report(receipt_ctx, phase, agent, lifecycle_errors)
+                end
+            end
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            return ctx, result, receipts, first
+        end
+
+        it("reports a real non-strict lifecycle binding error and completes the switch", function()
+            local ctx, result, receipts = native_failure_switch(false)
+            test.is_nil(result.failed)
+            test.eq(ctx.lifecycle_state.active_agent_id, "agent:two")
+            test.eq(#receipts, 1)
+            test.eq(receipts[1].session_id, ctx.session_id)
+            test.eq(receipts[1].phase, "deactivate")
+            test.eq(receipts[1].agent_id, "agent:one")
+            test.eq(#receipts[1].errors, 1)
+            test.eq(receipts[1].errors[1].binding_id, "receipt-binding")
+            test.eq(receipts[1].errors[1].trait_id, "trait:receipt")
+            test.eq(receipts[1].errors[1].strict, false)
+            test.contains(receipts[1].errors[1].error, "lifecycle receipt failure")
+        end)
+
+        it("keeps a real strict lifecycle binding error fatal to the switch", function()
+            local ctx, result, receipts, first = native_failure_switch(true)
+            test.contains(result.failed, "lifecycle receipt failure")
+            test.eq(ctx.lifecycle_state.active_agent_id, first.id)
+            test.eq(ctx.lifecycle_state.active_agent, first)
+            test.eq(#receipts, 0, "a strict failure retains its existing fatal path")
         end)
     end)
 
