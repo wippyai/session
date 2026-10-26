@@ -9,6 +9,41 @@
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
 
+## [0.6.13](https://github.com/wippyai/session/compare/v0.6.12...v0.6.13) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** preserve the task across outgoing checkpoints ([#88](https://github.com/wippyai/session/issues/88)) ([5f970bd](https://github.com/wippyai/session/commit/5f970bd5eb3a4e48aeb74a2937d96838eb9ba096))
+
+## [0.6.12](https://github.com/wippyai/session/compare/v0.6.11...v0.6.12) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** preserve message recency on metadata edits ([#92](https://github.com/wippyai/session/issues/92)) ([c4a168b](https://github.com/wippyai/session/commit/c4a168b1724b7d4c019ded9f45a7199a0a498635))
+* **session:** retain checkpoint binding diagnostics ([#93](https://github.com/wippyai/session/issues/93)) ([2e1480b](https://github.com/wippyai/session/commit/2e1480ba3151815020cd192fc38eb468f2b0791f))
+
+## [0.6.11](https://github.com/wippyai/session/compare/v0.6.10...v0.6.11) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** report pre-start session exits as start failures ([#90](https://github.com/wippyai/session/issues/90)) ([17fec9d](https://github.com/wippyai/session/commit/17fec9d5610cd00e35f432d5d5dbc9fc994847ea))
+
+## [0.6.10](https://github.com/wippyai/session/compare/v0.6.9...v0.6.10) (2026-10-22)
+
+
+### Features
+
+* **process:** dispatch after_persist and report recall failures ([#89](https://github.com/wippyai/session/issues/89)) ([1a30458](https://github.com/wippyai/session/commit/1a30458d7ea79805ebb1833ed0282c8fa99a6ea2))
+
+
+### Bug Fixes
+
+* pass session context to agent usage tracking ([#83](https://github.com/wippyai/session/issues/83)) ([2a9521c](https://github.com/wippyai/session/commit/2a9521c6fbbd9ffea488b10db19edbc13c219a99))
+* **session:** return committed Attention state and validate full PostgreSQL suite ([#86](https://github.com/wippyai/session/issues/86)) ([409b631](https://github.com/wippyai/session/commit/409b63105641acd6fcef53bfef5bf223e4802517))
+
 ## [0.6.9](https://github.com/wippyai/session/compare/v0.6.8...v0.6.9) (2026-10-20)
 
 

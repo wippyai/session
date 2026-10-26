@@ -113,7 +113,9 @@ when Wippy is not on PATH. The test target clears only its own test database.
 `make test-postgres` checks the
 affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
 disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
-`PGPASSWORD`; the target never drops it. CI provides PostgreSQL 17. The harness
+`PGPASSWORD`; the target never drops it. `make test-postgres-full` runs every
+normal suite and leaves opt-in benchmarks to `make bench`. CI uses this full
+gate with PostgreSQL 17. The harness
 supplies the application's user-table contract and runs these checks in UTC.
 
 On Unix, `make install test` runs the suite against the locked dependencies.
@@ -228,6 +230,10 @@ so later config changes cannot alter that operation. A trait checkpoint binding
 is attempted before the configured function fallback; both receive effective
 `options`. A strict binding failure prevents fallback and checkpoint-state
 writes. Without behaviors, the existing function path remains available.
+When a checkpoint succeeds after a non-strict binding failure, the checkpoint
+anchor's metadata retains the runtime diagnostics in `checkpoint_binding_errors`,
+including when a later binding or the configured function supplies the summary.
+Healthy checkpoints omit this field.
 
 This is the current prompt size, not cumulative usage across the turn. Cached
 input still occupies context even when `prompt_tokens` reports only a small
@@ -414,3 +420,21 @@ Only `session:`-prefixed topics are relayed to clients.
 
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases
+
+### Outgoing prompt checkpoints (pending upstream admission support)
+
+When Agent requests compaction before model dispatch, Session commits an explicit
+exclusive checkpoint boundary: the summary replaces completed history through the
+anchor, while the originating user request is restored at user authority. Stored
+tool results remain intact. The boundary and request reference are committed with
+the summary; a failed write leaves the previous prompt usable. Reopening a session
+honors that boundary, and pending input remains queued for its normal safe boundary.
+Existing checkpoints and explicit `messages():after(id)` queries remain inclusive.
+
+This path requires Agent 0.5.9 and LLM 0.5.11 or later, which provide the checkpoint
+callback and prompt-admission capability released from Framework #203. Session's
+dependency minimums and test lock require those published versions.
+
+Run `make test-admission` to check the published dependencies. For a source composition,
+use `make test-admission FRAMEWORK_DIR=/path/to/framework`. Both forms fail rather than
+skip when the checkpoint callback capability is unavailable.

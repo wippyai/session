@@ -10,13 +10,16 @@ entries:
       type: test
       suite: session
     source: file://checkpoint_repo_test.lua
-    modules: [uuid, json, security, sql, time]
+    modules: [uuid, json, security, sql, time, env]
     imports:
       test: wippy.test:test
       checkpoint_repo: wippy.session.persist:checkpoint_repo
       writer: wippy.session.persist:writer
       reader: wippy.session.persist:reader
       message_handlers: wippy.session.process:message_handlers
+      session_handlers: wippy.session.process:session_handlers
+      agent_library: wippy.agent:agent
+      llm: wippy.llm:llm
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
@@ -132,6 +135,7 @@ entries:
     imports:
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot

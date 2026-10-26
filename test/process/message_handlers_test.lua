@@ -545,6 +545,202 @@ local function define_tests()
         end)
     end)
 
+    describe("persisted step lifecycle", function()
+        local original_lifecycle
+
+        -- Records each phase with a snapshot of the rows stored when it ran.
+        local function record_phases(captured: any, failing: {[string]: string}?): {any}
+            local phases = {}
+            original_lifecycle = message_handlers._lifecycle_runtime
+            message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                local stored_ids = {}
+                for _, row in ipairs(captured.stored) do stored_ids[row.id] = row end
+                table.insert(phases, { payload = payload, stored = stored_ids })
+                local failure = failing and failing[payload.phase]
+                if failure then return { applied = 0, skipped = 0, errors = {} }, failure end
+                return { applied = 1, skipped = 0, messages = {}, controls = {}, errors = {} }, nil
+            end }
+            return phases
+        end
+
+        after_each(function()
+            message_handlers._lifecycle_runtime = original_lifecycle
+        end)
+
+        local function phase_named(phases: {any}, name: string): any
+            for _, entry in ipairs(phases) do
+                if entry.payload.phase == name then return entry end
+            end
+            return nil
+        end
+
+        local function lifecycle_agent(step_result: any, step_err: any?): any
+            local agent = fake_agent(nil)
+            agent.bindings = { lifecycle = { { binding = "app:lifecycle", phases = { "after_persist" } } } }
+            agent.step = function() return step_result, step_err end
+            return agent
+        end
+
+        it("dispatches after_persist with the committed assistant record id", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer",
+                tokens = { prompt_tokens = 10, completion_tokens = 2, total_tokens = 12 } }))
+            local phases = record_phases(captured)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id], "record is stored before the hook runs")
+            test.eq(persisted.stored[assistant.id].content, "Final answer")
+            test.eq(persisted.payload.refs.message_id, "msg-user")
+            test.eq(persisted.payload.refs.request_id, "req-1")
+            test.eq(persisted.payload.refs.response_id, result.response_id)
+            test.eq(persisted.payload.outcome.state, "completed")
+            test.eq(phases[#phases].payload.phase, "after_persist")
+            local after_step = test.not_nil(phase_named(phases, "after_step")) :: any
+            test.is_nil(after_step.payload.refs.event_id, "after_step keeps its original refs")
+        end)
+
+        it("dispatches after_persist for a tool step before the tool round runs", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "", tool_calls = {
+                { id = "call-1", name = "pack_document", arguments = "{}", registry_id = "app:pack_document" },
+            } }))
+            local phases = record_phases(captured)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.eq(persisted.payload.outcome.state, "continues")
+            local call = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1]
+            test.eq(persisted.stored[call.id].metadata.status, consts.FUNC_STATUS.PENDING,
+                "the hook sees the stored intent, not a tool result")
+        end)
+
+        it("dispatches after_persist for a stored truncated response", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "partial reasoning", truncated = true,
+                truncation_reason = "tool_calls" }))
+            local phases = record_phases(captured)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_false(result.completed)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id])
+            test.eq(persisted.payload.outcome.state, "continues")
+        end)
+
+        it("dispatches after_persist for retained text from a stopped response", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({result = "partial answer", stopped = true}))
+            local phases = record_phases(captured)
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.not_nil(assistant)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id])
+            test.eq(persisted.payload.outcome.state, "completed")
+            test.eq(persisted.payload.outcome.reason, "stop_requested")
+        end)
+
+        it("does not dispatch after_persist when nothing is stored", function()
+            local failures = {
+                { label = "provider failure", result = nil, err = "provider failed" },
+                { label = "empty response", result = { result = "" } },
+                { label = "stopped without text", result = { stopped = true, result = "" } },
+                { label = "truncated without text", result = { result = "", truncated = true,
+                    truncation_reason = "tool_calls" } },
+            }
+            for _, case in ipairs(failures) do
+                local ctx, captured = mock_ctx(lifecycle_agent(case.result, case.err))
+                local phases = record_phases(captured)
+                user_step(ctx)
+                message_handlers._lifecycle_runtime = original_lifecycle
+                test.is_nil(phase_named(phases, "after_persist"), case.label)
+            end
+
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer" }))
+            ctx.writer.add_response = function() return nil, nil, "disk full" end
+            local phases = record_phases(captured)
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.eq(err, "disk full")
+            test.is_nil(phase_named(phases, "after_persist"), "failed persistence")
+        end)
+
+        it("keeps the stored record and fails through the fatal path on a strict after_persist error", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer" }))
+            record_phases(captured, { after_persist = "index unavailable" })
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(result)
+            test.eq(err, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            test.eq(captured.message_errors[1].message, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 0, "the turn is not settled as an agent failure")
+        end)
+
+        it("keeps retained stopped text when its strict after_persist hook fails", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({result = "partial answer", stopped = true}))
+            record_phases(captured, {after_persist = "index unavailable"})
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.eq(err, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            test.eq(captured.message_errors[1].message, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 0)
+        end)
+
+        it("reports a recall failure to lifecycle handlers and in the stored record", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer",
+                memory_recall_error = "Memory recall failed: vector store offline" }))
+            local phases = record_phases(captured)
+
+            local _, err = user_step(ctx)
+
+            test.is_nil(err)
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(assistant.metadata.memory_recall_error, "Memory recall failed: vector store offline")
+            test.eq(phase_named(phases, "after_step").payload.outcome.memory_recall_error,
+                "Memory recall failed: vector store offline")
+            test.eq(phase_named(phases, "after_persist").payload.outcome.memory_recall_error,
+                "Memory recall failed: vector store offline")
+        end)
+
+        it("keeps a recall failure on truncated and failed steps", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "partial", truncated = true,
+                truncation_reason = "tool_calls", memory_recall_error = "Memory recall failed: offline" }))
+            record_phases(captured)
+            user_step(ctx)
+            message_handlers._lifecycle_runtime = original_lifecycle
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].metadata.memory_recall_error,
+                "Memory recall failed: offline")
+
+            local failed_ctx, failed_captured = mock_ctx(lifecycle_agent(
+                { memory_recall_error = "Memory recall failed: offline" }, "provider failed"))
+            local phases = record_phases(failed_captured)
+            local result, err = user_step(failed_ctx)
+            test.is_nil(err)
+            test.eq(result.failed, "provider failed")
+            test.eq(phase_named(phases, "after_step").payload.outcome.memory_recall_error,
+                "Memory recall failed: offline")
+            test.eq(stored_of_type(failed_captured, consts.MSG_TYPE.SYSTEM)[1].metadata.memory_recall_error,
+                "Memory recall failed: offline")
+        end)
+    end)
+
     describe("wrapped tool call persistence", function()
         it("classifies function, private, and delegation intents before execution", function()
             local agent = fake_agent(nil)
@@ -1925,6 +2121,163 @@ local function define_tests()
             test.is_true((ctx.turn_state :: any).failed)
             test.eq((persisted :: any).status, consts.STATUS.FAILED)
             test.is_false((persisted :: any).meta.interaction.can_send)
+        end)
+    end)
+
+    describe("outgoing context checkpoint", function()
+        local original_checkpoint, original_context_type
+        before_each(function()
+            original_checkpoint = session_handlers.create_checkpoint
+            original_context_type = output.ERROR_TYPE.CONTEXT_WINDOW
+        end)
+        after_each(function()
+            session_handlers.create_checkpoint = original_checkpoint
+            output.ERROR_TYPE.CONTEXT_WINDOW = original_context_type
+        end)
+
+        it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local checkpoints, builds = 0, 0
+            ctx.prepare_attention_prompt = function()
+                builds = builds + 1
+                return { get_messages = function() return { { role = "user", content = checkpoints == 0 and "large tool result" or "task and summary" } } end }
+            end
+            session_handlers.create_checkpoint = function(context, op)
+                test.eq(context, ctx)
+                test.eq(op.checkpoint_function_id, "wippy.session.funcs:checkpoint")
+                test.eq(op.trigger_tokens, 150000)
+                test.eq(op.checkpoint_id, "msg-user")
+                checkpoints = checkpoints + 1
+                return { completed = true }
+            end
+            agent.step = function(_self, _builder, options)
+                test.not_nil(options.checkpoint)
+                test.eq(options.checkpoint.token_threshold, THRESHOLD)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000, context_window = 200000 })
+                test.is_nil(err)
+                test.eq(replacement:get_messages()[1].content, "task and summary")
+                test.eq(checkpoints, 1)
+                return { result = "done" }
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(builds, 2)
+        end)
+
+        it("keeps pending steering outside the summarized boundary", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local arrived = false
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function()
+                    local rows = {{message_id = "completed-tool", type = consts.MSG_TYPE.FUNCTION,
+                        metadata = {status = consts.FUNC_STATUS.SUCCESS}}}
+                    if arrived then rows[#rows + 1] = {message_id = "pending-steering", type = consts.MSG_TYPE.USER,
+                        metadata = {input = {state = "pending"}}} end
+                    return rows
+                end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function(_, op)
+                test.eq(op.checkpoint_id, "completed-tool")
+                test.eq(op.source_id, "msg-user")
+                test.is_true(op.exclusive)
+                return {completed = true}
+            end
+            agent.step = function(_, _, options)
+                arrived = true
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(err)
+                test.not_nil(replacement)
+                return {result = "done"}
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("does not summarize an unsettled tool round", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function() return {{message_id = "pending-tool", type = consts.MSG_TYPE.FUNCTION,
+                    metadata = {status = consts.FUNC_STATUS.PENDING}}} end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function() error("must not summarize pending tools") end
+            agent.step = function(_, _, options)
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(replacement)
+                test.eq(err, "Cannot checkpoint an unsettled tool round")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "Cannot checkpoint an unsettled tool round")
+        end)
+
+        it("preserves explicit disabled checkpoint policy", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent, { checkpoint = { enabled = false } })
+            agent.step = function(_self, _builder, options)
+                test.is_nil(options.checkpoint)
+                return { result = "done" }
+            end
+            session_handlers.create_checkpoint = function() error("disabled checkpoint") end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("preserves typed context admission details in the failed turn", function()
+            local agent = fake_agent(nil)
+            local details = { error_type = "context_window", estimated_prompt_tokens = 300, context_window = 200 }
+            agent.step = function() return nil, "Prompt exceeds the model context window", details end
+            local ctx, captured = mock_ctx(agent)
+            output.ERROR_TYPE.CONTEXT_WINDOW = nil
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.not_nil(result.failed)
+            test.eq(captured.message_errors[1].code, "context_window")
+            local system = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(system[1].metadata.error_details, details)
+        end)
+
+        it("propagates checkpoint errors before dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            session_handlers.create_checkpoint = function() return nil, "checkpoint failed" end
+            agent.step = function(_self, _builder, options)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                test.is_nil(replacement)
+                test.eq(err, "checkpoint failed")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "checkpoint failed")
+        end)
+    end)
+
+    describe("usage context", function()
+        it("passes the session identifier on initial and continued steps", function()
+            local agent = fake_agent(nil)
+            local original_step = agent.step
+            local seen = {}
+            agent.step = function(self, builder, options)
+                seen[#seen + 1] = options
+                return original_step(self, builder, options)
+            end
+            local ctx = mock_ctx(agent)
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(select(2, continue_step(ctx)))
+            test.eq(#seen, 2)
+            test.eq(seen[1].context_id, ctx.session_id)
+            test.eq(seen[2].context_id, ctx.session_id)
         end)
     end)
 

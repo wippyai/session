@@ -299,6 +299,27 @@ entries:
     model: session-runtime-stream
     prompt: Answer the question.
 
+  - name: session_readiness
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: readiness
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+      framework_capabilities: app.runtime:framework_capabilities
+
   - name: handoff_runtime
     kind: function.lua
     meta:
@@ -349,7 +370,7 @@ entries:
       timeout: 180s
     source: file://metadata_benchmark.lua
     method: run
-    modules: [security, uuid, time, env]
+    modules: [security, uuid, time, env, sql]
     imports:
       test: wippy.test:test
       writer: wippy.session.persist:writer

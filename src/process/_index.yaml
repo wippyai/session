@@ -153,6 +153,7 @@ entries:
       output: wippy.llm:output
       input_policy: wippy.session.process:input_policy
       control_handlers: wippy.session.process:control_handlers
+      session_handlers: wippy.session.process:session_handlers
 
   - name: input_policy
     kind: library.lua
