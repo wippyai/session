@@ -602,17 +602,27 @@ local function latest_message_id(ctx): (string?, boolean, boolean)
 end
 
 local function record_completed_turn_span(ctx, state): string?
-    if not state or not state.active or state.span_anchor_known ~= true then return end
+    if not state or not state.active then return end
     local lifecycle = ctx.lifecycle_state
     if type(lifecycle) ~= "table" or type(lifecycle.active_agent_id) ~= "string"
         or lifecycle.active_agent_id == "" then return end
-    local to_id, known = latest_message_id(ctx)
-    if not known or not to_id then return end
     local prior = lifecycle.completed_turn_span
     local same_active_agent = type(prior) == "table"
         and prior.agent_id == lifecycle.active_agent_id
         and prior.model == lifecycle.active_model
         and prior.revision == lifecycle.active_revision
+    if state.span_anchor_known ~= true and not same_active_agent then
+        lifecycle.completed_turn_span = nil
+        return
+    end
+    local to_id, known = latest_message_id(ctx)
+    if not known or not to_id then
+        -- Retain the activation's original anchor for a later successful
+        -- completion, but never expose an earlier end as the current end.
+        if same_active_agent then prior.to_id = nil
+        else lifecycle.completed_turn_span = nil end
+        return
+    end
     -- A lifecycle activation can cover several completed user turns before a
     -- real successor step finally retires it. Preserve the first exclusive
     -- anchor across that run, while moving only the inclusive end forward.

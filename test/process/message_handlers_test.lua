@@ -2015,6 +2015,66 @@ local function define_tests()
             test.is_nil(range.from_id, "first turn has no exclusive predecessor")
         end)
 
+        for _, lookup in ipairs({ "malformed", "unavailable" }) do
+            it("does not reuse an earlier completed end when the current lookup is " .. lookup, function()
+                local first = lifecycle_agent("agent:one", "binding:one")
+                local second = lifecycle_agent("agent:two", "binding:two")
+                local ctx, transitions, controls = lifecycle_context(first)
+                test.is_nil(select(2, user_step(ctx)))
+                local default_messages = ctx.reader.messages
+                ctx.lifecycle_state.completed_turn_span = {
+                    agent_id = ctx.lifecycle_state.active_agent_id, model = ctx.lifecycle_state.active_model,
+                    revision = ctx.lifecycle_state.active_revision,
+                    from_id = "original-predecessor", to_id = "earlier-final",
+                }
+                ctx.turn_state.span_anchor_known = true
+                ctx.turn_state.span_from_id = "later-predecessor"
+                ctx.reader.messages = function()
+                    return { all = function() return {}, nil end, last = function()
+                        return { all = function()
+                            if lookup == "unavailable" then return nil, "history unavailable" end
+                            return { {} }, nil
+                        end }
+                    end }
+                end
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                test.is_nil(ctx.lifecycle_state.completed_turn_span.to_id)
+                test.eq(ctx.lifecycle_state.completed_turn_span.from_id, "original-predecessor")
+                ctx.reader.messages = default_messages
+                controls.set_agent(second)
+                ctx.config.agent_id = second.id
+                test.is_nil(select(2, user_step(ctx)))
+                test.is_nil(transitions[2].refs, "the outgoing agent has no known complete end")
+            end)
+        end
+
+        it("recovers the original anchor after a completion with an unknown end", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.completed_turn_span = {
+                agent_id = ctx.lifecycle_state.active_agent_id, model = ctx.lifecycle_state.active_model,
+                revision = ctx.lifecycle_state.active_revision,
+                from_id = "original-predecessor", to_id = "earlier-final",
+            }
+            ctx.turn_state.span_anchor_known = true
+            ctx.reader.messages = function()
+                return { all = function() return {}, nil end,
+                    last = function() return { all = function() return { {} }, nil end } end }
+            end
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span.to_id)
+            ctx.turn_state = { active = true, span_anchor_known = false }
+            ctx.reader.messages = function()
+                return { all = function() return {}, nil end,
+                    last = function() return { all = function() return { { message_id = "recovered-final" } }, nil end } end }
+            end
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.eq(span.from_id, "original-predecessor", "a failed lookup must not lose the activation anchor")
+            test.eq(span.to_id, "recovered-final")
+        end)
+
         it("does not expose a range when the bounded history lookup is malformed", function()
             local first = lifecycle_agent("agent:one", "binding:one")
             local second = lifecycle_agent("agent:two", "binding:two")
