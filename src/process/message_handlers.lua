@@ -320,6 +320,8 @@ local function current_agent(ctx: AttentionToolContext): any?
     return nil
 end
 
+local deactivation_refs
+
 function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: string?, outcome: table?): (table?, string?)
     ctx.lifecycle_state = ctx.lifecycle_state or {}
     local state = ctx.lifecycle_state
@@ -338,18 +340,21 @@ function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: 
             variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
         } or nil,
         payload = function(_phase, _descriptor)
-            return {
+            local payload = {
                 reason = reason or REASON.SESSION_FINISHED,
                 outcome = outcome or {
                     state = OUTCOME.COMPLETED,
                     reason = reason or REASON.SESSION_FINISHED
                 }
             }
+            payload.refs = deactivation_refs(state)
+            return payload
         end,
         dispatch = function(active_agent, phase, payload)
             return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
         end
     })
+    if not err and transition.deactivation then state.completed_turn_span = nil end
     return transition.deactivation or { applied = 0, skipped = 0 }, err
 end
 
@@ -379,13 +384,15 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
         } or nil,
         payload = function(phase, _descriptor)
             if phase == lifecycle_runtime.PHASE.DEACTIVATE then
-                return {
+                local payload = {
                     reason = REASON.AGENT_SWITCH,
                     outcome = {
                         state = OUTCOME.CONTINUES,
                         reason = REASON.AGENT_SWITCH
                     }
                 }
+                payload.refs = deactivation_refs(state)
+                return payload
             end
             return {
                 reason = "agent_loaded",
@@ -403,6 +410,8 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
     if err then
         return (transition.activation :: table?), err
     end
+
+    if transition.deactivation then state.completed_turn_span = nil end
 
     return transition.activation or { applied = 0, skipped = 0 }, nil
 end
@@ -593,6 +602,90 @@ local function all_messages(ctx)
     return ctx.reader:messages():all()
 end
 
+-- Lifecycle deactivation is deliberately deferred until the successor takes a
+-- real turn. Keep the completed outgoing turn bounded independently of the
+-- moving checkpoint cursor, so a lifecycle consumer neither loses its source
+-- user request nor absorbs the successor input that caused the switch.
+--
+-- `last(1)` is backed by the chronology index. Do not replace this with an
+-- all-history read: sessions can be arbitrarily long and a range consumer
+-- needs only the immediate predecessor / final row.
+local function latest_message_id(ctx): (string?, boolean, boolean)
+    if not ctx.reader or type(ctx.reader.messages) ~= "function" then return nil, false, false end
+    local query = ctx.reader:messages()
+    if not query or type(query.last) ~= "function" or type(query.all) ~= "function" then
+        return nil, false, false
+    end
+    local messages, err = query:last(1):all()
+    if err or type(messages) ~= "table" then return nil, false, false end
+    if #messages == 0 then return nil, true, true end
+    local message = messages[#messages]
+    if message and type(message.message_id) == "string" and message.message_id ~= "" then
+        return message.message_id, true, false
+    end
+    return nil, false, false
+end
+
+local function record_completed_turn_span(ctx, state): string?
+    if not state or not state.active then return end
+    local lifecycle = ctx.lifecycle_state
+    if type(lifecycle) ~= "table" or type(lifecycle.active_agent_id) ~= "string"
+        or lifecycle.active_agent_id == "" then return end
+    local prior = lifecycle.completed_turn_span
+    local same_active_agent = type(prior) == "table"
+        and prior.agent_id == lifecycle.active_agent_id
+        and prior.model == lifecycle.active_model
+        and prior.revision == lifecycle.active_revision
+    if state.span_anchor_known ~= true and not same_active_agent then
+        lifecycle.completed_turn_span = nil
+        return
+    end
+    local to_id, known = latest_message_id(ctx)
+    if not known or not to_id then
+        -- Retain the activation's original anchor for a later successful
+        -- completion, but never expose an earlier end as the current end.
+        if same_active_agent then prior.to_id = nil
+        else lifecycle.completed_turn_span = nil end
+        return
+    end
+    -- A lifecycle activation can cover several completed user turns before a
+    -- real successor step finally retires it. Preserve the first exclusive
+    -- anchor across that run, while moving only the inclusive end forward.
+    -- A restart has no active lifecycle state, so it intentionally emits no
+    -- guessed span rather than widening a range from unrelated history.
+    local from_id = state.span_from_id
+    local open_start = state.span_open_start == true
+    if same_active_agent then
+        from_id = prior.from_id
+        open_start = prior.open_start == true
+    end
+    lifecycle.completed_turn_span = {
+        agent_id = lifecycle.active_agent_id,
+        model = lifecycle.active_model,
+        revision = lifecycle.active_revision,
+        from_id = from_id,
+        open_start = open_start,
+        to_id = to_id,
+    }
+    return to_id
+end
+
+deactivation_refs = function(state)
+    local span = type(state) == "table" and state.completed_turn_span or nil
+    if type(span) ~= "table" or span.agent_id ~= state.active_agent_id
+        or span.model ~= state.active_model or span.revision ~= state.active_revision
+        or type(span.to_id) ~= "string" or span.to_id == "" then
+        return nil
+    end
+    local range = { to_id = span.to_id }
+    if type(span.from_id) == "string" and span.from_id ~= "" then
+        range.from_id = span.from_id
+    elseif span.open_start ~= true then
+        return nil
+    end
+    return { deactivation_range = range }
+end
+
 local function prepare_pending_inputs(ctx, new_user_id)
     local messages, read_err = all_messages(ctx)
     if not messages then return nil, read_err or "Failed to read pending inputs" end
@@ -702,6 +795,7 @@ function message_handlers.finish_turn(ctx)
     if not ok then
         return nil, err or "Failed to persist turn completion"
     end
+    record_completed_turn_span(ctx, state)
     ctx.turn_state = candidate_state
     ctx.status = target_status
     input_policy.accept_committed(ctx, interaction)
@@ -1057,7 +1151,12 @@ function message_handlers.handle_message(ctx, op)
         if type(ctx.writer.admit_message) ~= "function" then
             return nil, "Session writer does not support atomic admission"
         end
-        next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        local prior_id, prior_known, prior_empty = latest_message_id(ctx)
+        next_turn = {
+            active = true, steps = 0, repeated_calls = 0,
+            span_from_id = prior_id, span_anchor_known = prior_known,
+            span_open_start = prior_empty,
+        }
         local candidate = {
             config = ctx.config,
             turn_state = next_turn,
@@ -2060,6 +2159,20 @@ function message_handlers.process_tools(ctx, op)
     end
     local settled, settle_err = settle_behavior_round(ctx, op, policies_cancelled)
     if not settled then return nil, settle_err end
+
+    -- A control-driven handoff starts the successor before the old turn can
+    -- reach the queue-empty boundary. Its tool results are now durable, so
+    -- capture the old agent's completed span before the successor activation
+    -- performs the deferred deactivation.
+    if not policies_cancelled and ctx.turn_state and ctx.turn_state.handoff then
+        local outgoing_end = record_completed_turn_span(ctx, ctx.turn_state)
+        -- The successor continues this user turn, but owns a new lifecycle
+        -- span. Its eventual deactivation must not reuse the retired agent's
+        -- first-history anchor. Unknown boundaries remain unknown.
+        ctx.turn_state.span_from_id = outgoing_end
+        ctx.turn_state.span_anchor_known = outgoing_end ~= nil
+        ctx.turn_state.span_open_start = false
+    end
 
     if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
         -- Requested compaction waits for the complete tool/result round. The

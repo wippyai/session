@@ -1891,6 +1891,7 @@ local function define_tests()
                             agent_id = payload.agent.id,
                             binding = bindings.lifecycle[1].binding,
                             reason = payload.reason,
+                            refs = payload.refs,
                         }
                     end
                     if payload.phase == rejected_phase then
@@ -1948,6 +1949,255 @@ local function define_tests()
             test.eq(transitions[2].reason, "agent_switch")
             test.eq(transitions[3].phase, "activate")
             test.eq(transitions[3].binding, "binding:two")
+        end)
+
+        it("passes only the completed outgoing history span when a later real turn switches agents", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local last_limit = nil
+            local default_messages = ctx.reader.messages
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.reader.messages = function()
+                return {
+                    all = function() return {}, nil end,
+                    last = function(_, limit)
+                        last_limit = limit
+                        return {
+                            all = function()
+                                -- This models a long conversation without an all-history read.
+                                return { { message_id = "outgoing-final" } }, nil
+                            end,
+                        }
+                    end,
+                }
+            end
+
+            ctx.turn_state.span_anchor_known = true
+            ctx.turn_state.span_from_id = "outgoing-predecessor"
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            test.eq(last_limit, 1, "completed-span lookup must remain bounded")
+            ctx.reader.messages = default_messages
+
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+
+            test.eq(transitions[2].phase, "deactivate")
+            test.eq(transitions[2].refs.deactivation_range.from_id, "outgoing-predecessor")
+            test.eq(transitions[2].refs.deactivation_range.to_id, "outgoing-final")
+            test.eq(transitions[3].phase, "activate")
+            test.is_nil(transitions[3].refs.deactivation_range,
+                "the successor must not inherit the outgoing range")
+        end)
+
+        it("uses an open start only for a first completed turn", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local default_messages = ctx.reader.messages
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.reader.messages = function()
+                return {
+                    all = function() return {}, nil end,
+                    last = function()
+                        return { all = function() return { { message_id = "first-final" } }, nil end }
+                    end,
+                }
+            end
+
+            ctx.turn_state.span_anchor_known = true
+            ctx.turn_state.span_from_id = nil
+            ctx.turn_state.span_open_start = true
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            ctx.reader.messages = default_messages
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+
+            local range = transitions[2].refs.deactivation_range
+            test.eq(range.to_id, "first-final")
+            test.is_nil(range.from_id, "first turn has no exclusive predecessor")
+        end)
+
+        for _, lookup in ipairs({ "malformed", "unavailable" }) do
+            it("does not reuse an earlier completed end when the current lookup is " .. lookup, function()
+                local first = lifecycle_agent("agent:one", "binding:one")
+                local second = lifecycle_agent("agent:two", "binding:two")
+                local ctx, transitions, controls = lifecycle_context(first)
+                test.is_nil(select(2, user_step(ctx)))
+                local default_messages = ctx.reader.messages
+                ctx.lifecycle_state.completed_turn_span = {
+                    agent_id = ctx.lifecycle_state.active_agent_id, model = ctx.lifecycle_state.active_model,
+                    revision = ctx.lifecycle_state.active_revision,
+                    from_id = "original-predecessor", to_id = "earlier-final",
+                }
+                ctx.turn_state.span_anchor_known = true
+                ctx.turn_state.span_from_id = "later-predecessor"
+                ctx.reader.messages = function()
+                    return { all = function() return {}, nil end, last = function()
+                        return { all = function()
+                            if lookup == "unavailable" then return nil, "history unavailable" end
+                            return { {} }, nil
+                        end }
+                    end }
+                end
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                test.is_nil(ctx.lifecycle_state.completed_turn_span.to_id)
+                test.eq(ctx.lifecycle_state.completed_turn_span.from_id, "original-predecessor")
+                ctx.reader.messages = default_messages
+                controls.set_agent(second)
+                ctx.config.agent_id = second.id
+                test.is_nil(select(2, user_step(ctx)))
+                test.is_nil(transitions[2].refs, "the outgoing agent has no known complete end")
+            end)
+        end
+
+        it("recovers the original anchor after a completion with an unknown end", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.completed_turn_span = {
+                agent_id = ctx.lifecycle_state.active_agent_id, model = ctx.lifecycle_state.active_model,
+                revision = ctx.lifecycle_state.active_revision,
+                from_id = "original-predecessor", to_id = "earlier-final",
+            }
+            ctx.turn_state.span_anchor_known = true
+            ctx.reader.messages = function()
+                return { all = function() return {}, nil end,
+                    last = function() return { all = function() return { {} }, nil end } end }
+            end
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span.to_id)
+            ctx.turn_state = { active = true, span_anchor_known = false }
+            ctx.reader.messages = function()
+                return { all = function() return {}, nil end,
+                    last = function() return { all = function() return { { message_id = "recovered-final" } }, nil end } end }
+            end
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.eq(span.from_id, "original-predecessor", "a failed lookup must not lose the activation anchor")
+            test.eq(span.to_id, "recovered-final")
+        end)
+
+        it("does not expose a range when the bounded history lookup is malformed", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local default_messages = ctx.reader.messages
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.reader.messages = function()
+                return {
+                    all = function() return {}, nil end,
+                    last = function() return { all = function() return { {} }, nil end } end,
+                }
+            end
+            ctx.turn_state.span_anchor_known = true
+            ctx.turn_state.span_from_id = "known-predecessor"
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span)
+            ctx.reader.messages = default_messages
+
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(transitions[2].refs,
+                "an invalid final row must not be treated as an open-history anchor")
+        end)
+
+        it("retains the first admitted user span across consecutive completed turns", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            ctx.lifecycle_state = { active_agent_id = first.id, active_model = first.model }
+            local history = { { message_id = "before-facts" } }
+            local admitted = 0
+            ctx.reader.messages = function()
+                return {
+                    last = function()
+                        return { all = function() return { history[#history] }, nil end }
+                    end,
+                    all = function() return history, nil end,
+                    from_checkpoint = function(self) return self end,
+                    count = function() return #history, nil end,
+                }
+            end
+            ctx.writer.admit_message = function()
+                admitted = admitted + 1
+                local id = "source-user-" .. tostring(admitted)
+                history[#history + 1] = { message_id = id }
+                return id, nil, false
+            end
+            ctx.upstream.message_received = function() end
+
+            local first_input, first_err = message_handlers.handle_message(ctx, {
+                data = { text = "fact: keep the migration key" }, request_id = "source-request-1",
+            })
+            test.is_nil(first_err)
+            test.eq(first_input.message_id, "source-user-1")
+            history[#history + 1] = { message_id = "first-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+
+            local second_input, second_err = message_handlers.handle_message(ctx, {
+                data = { text = "brief handoff" }, request_id = "source-request-2",
+            })
+            test.is_nil(second_err)
+            test.eq(second_input.message_id, "source-user-2")
+            history[#history + 1] = { message_id = "second-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.eq(span.from_id, "before-facts")
+            test.eq(span.to_id, "second-answer")
+        end)
+
+        it("retains an open first-history anchor across consecutive admitted turns", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            ctx.lifecycle_state = { active_agent_id = first.id, active_model = first.model }
+            local history = {}
+            local admitted = 0
+            ctx.reader.messages = function()
+                return {
+                    last = function()
+                        return { all = function()
+                            local last = history[#history]
+                            return last and { last } or {}, nil
+                        end }
+                    end,
+                    all = function() return history, nil end,
+                    from_checkpoint = function(self) return self end,
+                    count = function() return #history, nil end,
+                }
+            end
+            ctx.writer.admit_message = function()
+                admitted = admitted + 1
+                local id = "first-history-user-" .. tostring(admitted)
+                history[#history + 1] = { message_id = id }
+                return id, nil, false
+            end
+            ctx.upstream.message_received = function() end
+
+            test.is_nil(select(2, message_handlers.handle_message(ctx, {
+                data = { text = "fact: first history key" }, request_id = "first-history-request-1",
+            })))
+            history[#history + 1] = { message_id = "first-history-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span.from_id)
+
+            test.is_nil(select(2, message_handlers.handle_message(ctx, {
+                data = { text = "brief handoff" }, request_id = "first-history-request-2",
+            })))
+            history[#history + 1] = { message_id = "second-history-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.is_nil(span.from_id, "first-history range must remain open")
+            test.eq(span.to_id, "second-history-answer")
         end)
 
         it("recovers the active agent for a switch when only its ID was retained", function()
@@ -2858,7 +3108,7 @@ local function define_tests()
     end)
 
     describe("agent handoff", function()
-        local function handoff_fixture()
+        local function handoff_fixture(admit_first_user)
             local steps = { router = 0, help = 0 }
             local router = fake_agent(nil)
             router.id = "agent:router"
@@ -2914,6 +3164,7 @@ local function define_tests()
                     end,
                     execute = function(_self, _context, tools)
                         if ctx.stop_in_handoff then bus:request_stop() end
+                        ctx.handoff_settled = true
                         return { ["call-1"] = { result = { _control = { config = { agent = help.id } } },
                             tool_call = tools["call-1"] } }
                     end,
@@ -2922,8 +3173,40 @@ local function define_tests()
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, message_handlers.agent_step)
             bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
             bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, message_handlers.agent_continue)
-            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
-                message_id = "msg-user", request_id = "req-1", from_user = true })
+            if admit_first_user then
+                local history = {}
+                ctx.reader.messages = function()
+                    return {
+                        from_checkpoint = function(self) return self end,
+                        all = function() return history, nil end,
+                        last = function()
+                            return { all = function()
+                                if ctx.handoff_settled then
+                                    -- The settled tool result is the final outgoing row.
+                                    return { { message_id = "handoff-tool-result" } }, nil
+                                end
+                                local last = history[#history]
+                                return last and { last } or {}, nil
+                            end }
+                        end,
+                        count = function() return #history, nil end,
+                    }
+                end
+                ctx.writer.admit_message = function()
+                    history[#history + 1] = { message_id = "msg-user", type = consts.MSG_TYPE.USER,
+                        data = "fact from the first routed user turn" }
+                    return "msg-user", nil, false
+                end
+                ctx.upstream.message_received = function() end
+                local accepted, accept_err = message_handlers.handle_message(ctx, {
+                    data = { text = "fact from the first routed user turn" }, request_id = "req-1",
+                })
+                assert(not accept_err)
+                assert(bus:queue_op(accepted.next_ops[1]))
+            else
+                bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                    message_id = "msg-user", request_id = "req-1", from_user = true })
+            end
             return ctx, captured, bus, steps, interactions, announced,
                 function() tool_caller.new = original_new end
         end
@@ -2992,6 +3275,81 @@ local function define_tests()
             test.eq(answers[#answers].content, "Here is the answer from the help agent.")
             test.is_false(interactions[1].can_send)
             test.is_true(interactions[#interactions].can_send)
+        end)
+
+        it("bounds deferred deactivation after a first-turn tool handoff", function()
+            local ctx, _captured, bus, steps, _interactions, _announced, restore = handoff_fixture(true)
+            local router = ctx.agent_ctx:get_current_agent()
+            router.bindings = { lifecycle = { { binding = "binding:router" } } }
+            local transitions = {}
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "deactivate" then transitions[#transitions + 1] = payload end
+                    return { applied = 1, messages = {} }, nil
+                end,
+            }
+
+            local ok, err = bus:run()
+            restore()
+            message_handlers._lifecycle_runtime = nil
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.router, 1)
+            test.eq(steps.help, 1)
+            test.eq(#transitions, 1)
+            test.eq(transitions[1].agent.id, "agent:router")
+            test.eq(transitions[1].refs.deactivation_range.to_id, "handoff-tool-result")
+            test.is_nil(transitions[1].refs.deactivation_range.from_id,
+                "the first admitted source turn has a valid open history start")
+        end)
+
+        it("does not attribute the retired agent history to its mid-turn successor", function()
+            local ctx, _captured, bus, _steps, _interactions, _announced, restore = handoff_fixture(true)
+            local router = ctx.agent_ctx:get_current_agent()
+            router.bindings = { lifecycle = { { binding = "binding:router" } } }
+            local switch = ctx.agent_ctx.switch_to_agent
+            local latest = nil
+            ctx.agent_ctx.switch_to_agent = function(self, id)
+                local ok, err = switch(self, id)
+                local successor = self:get_current_agent()
+                successor.bindings = { lifecycle = { { binding = "binding:help" } } }
+                local step = successor.step
+                successor.step = function(...)
+                    local result = step(...)
+                    latest = "help-final"
+                    return result
+                end
+                return ok, err
+            end
+            local messages = ctx.reader.messages
+            ctx.reader.messages = function(...)
+                local query = messages(...)
+                query.last = function()
+                    return { all = function()
+                        return { { message_id = latest or (ctx.handoff_settled and "handoff-tool-result" or "msg-user") } }, nil
+                    end }
+                end
+                return query
+            end
+            local transitions = {}
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "deactivate" then transitions[#transitions + 1] = payload end
+                    return { applied = 1, messages = {} }, nil
+                end,
+            }
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(select(2, message_handlers.deactivate_current_agent(ctx, "session_finished")))
+            message_handlers._lifecycle_runtime = nil
+            test.eq(#transitions, 2)
+            test.eq(transitions[2].agent.id, "agent:help")
+            test.eq(transitions[2].refs.deactivation_range.to_id, "help-final")
+            test.eq(transitions[2].refs.deactivation_range.from_id, "handoff-tool-result",
+                "the successor range starts after the predecessor's settled tool result")
         end)
 
         it("does not start the new agent when Stop lands in the handoff round", function()
