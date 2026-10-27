@@ -1,4 +1,4 @@
-version: "0.6.9" # x-release-please-version
+version: "0.6.15" # x-release-please-version
 namespace: wippy.session
 
 entries:
@@ -451,7 +451,7 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.7"
+    version: ">=v0.5.11"
 
   - name: migration
     kind: ns.dependency
@@ -464,7 +464,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.5.5"
+    version: ">=v0.5.9"
 
   - name: dep.wippy.views
     kind: ns.dependency

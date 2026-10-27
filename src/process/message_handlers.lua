@@ -12,8 +12,10 @@ local lifecycle_runtime = require("lifecycle_runtime")
 local lifecycle_controller = require("lifecycle_controller")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
+local session_handlers = require("session_handlers")
 local message_order = require("message_order")
 local hash = require("hash")
+local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
     session_id: string,
@@ -67,9 +69,23 @@ type ToolWrapperExecutionContext = {
     run_context: table?,
 }
 
+local function report_lifecycle_errors(ctx, phase, agent, lifecycle_errors)
+    local first = lifecycle_errors[1]
+    logger:warn("lifecycle binding reported non-strict failure", {
+        session_id = ctx.session_id,
+        phase = phase,
+        agent_id = agent and agent.id,
+        error_count = #lifecycle_errors,
+        binding_id = type(first) == "table" and first.binding_id or nil,
+        trait_id = type(first) == "table" and first.trait_id or nil,
+        error = type(first) == "table" and tostring(first.error or "") or nil,
+    })
+end
+
 local message_handlers = {
     _prompt_builder = nil :: any,
     _lifecycle_runtime = nil :: { apply: (bindings: any, payload: any) -> (table?, string?) }?,
+    _report_lifecycle_errors = report_lifecycle_errors,
 }
 message_handlers._context_staging = require('context_staging_repo')
 
@@ -249,7 +265,17 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
         run_context = run_context_ref(ctx, agent_ref, host),
     } :: LifecyclePayload
 
-    return (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
+    local result, err = (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
+    if err then return result, err end
+
+    -- Non-strict binding failures are intentionally non-fatal to the host. They
+    -- still need a structured receipt: otherwise a lifecycle provider can fail
+    -- invisibly and leave an operator with no boundary-level evidence.
+    if type(result) == "table" and type(result.errors) == "table" and #result.errors > 0 then
+        (message_handlers._report_lifecycle_errors or report_lifecycle_errors)(ctx, phase, agent, result.errors)
+    end
+
+    return result, nil
 end
 
 local function append_lifecycle_messages(builder: any, result: table?)
@@ -294,6 +320,8 @@ local function current_agent(ctx: AttentionToolContext): any?
     return nil
 end
 
+local deactivation_refs
+
 function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: string?, outcome: table?): (table?, string?)
     ctx.lifecycle_state = ctx.lifecycle_state or {}
     local state = ctx.lifecycle_state
@@ -312,18 +340,21 @@ function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: 
             variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
         } or nil,
         payload = function(_phase, _descriptor)
-            return {
+            local payload = {
                 reason = reason or REASON.SESSION_FINISHED,
                 outcome = outcome or {
                     state = OUTCOME.COMPLETED,
                     reason = reason or REASON.SESSION_FINISHED
                 }
             }
+            payload.refs = deactivation_refs(state)
+            return payload
         end,
         dispatch = function(active_agent, phase, payload)
             return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
         end
     })
+    if not err and transition.deactivation then state.completed_turn_span = nil end
     return transition.deactivation or { applied = 0, skipped = 0 }, err
 end
 
@@ -353,13 +384,15 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
         } or nil,
         payload = function(phase, _descriptor)
             if phase == lifecycle_runtime.PHASE.DEACTIVATE then
-                return {
+                local payload = {
                     reason = REASON.AGENT_SWITCH,
                     outcome = {
                         state = OUTCOME.CONTINUES,
                         reason = REASON.AGENT_SWITCH
                     }
                 }
+                payload.refs = deactivation_refs(state)
+                return payload
             end
             return {
                 reason = "agent_loaded",
@@ -378,10 +411,15 @@ local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: tab
         return (transition.activation :: table?), err
     end
 
+    if transition.deactivation then state.completed_turn_span = nil end
+
     return transition.activation or { applied = 0, skipped = 0 }, nil
 end
 
-local function outcome_from_agent_result(result: any): table
+local function step_outcome(result: any): table
+    if result and result.stopped then
+        return { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+    end
     if result and result.truncated then
         return {
             state = result.truncation_reason == "empty_output" and OUTCOME.FAILED or OUTCOME.CONTINUES,
@@ -404,6 +442,39 @@ local function outcome_from_agent_result(result: any): table
         state = OUTCOME.COMPLETED,
         reason = REASON.NO_TOOLS_REQUIRED
     }
+end
+
+local function outcome_from_agent_result(result: any): table
+    local outcome = step_outcome(result)
+    if result and result.memory_recall_error then
+        outcome.memory_recall_error = result.memory_recall_error
+    end
+    return outcome
+end
+
+-- Runs after_persist for a committed assistant record. A strict binding error is
+-- returned to the caller, which settles it through the fatal path: the record and
+-- any tool intents are already stored.
+local function apply_after_persist(ctx: SessionContext, op: any, agent: any, response_id: string,
+    event_id: string, result: any): string?
+    if not lifecycle_runtime.subscribed(agent.bindings, lifecycle_runtime.PHASE.AFTER_PERSIST) then
+        return nil
+    end
+    local _, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_PERSIST, agent, {
+        reason = "agent_step",
+        refs = {
+            message_id = op.message_id,
+            response_id = response_id,
+            request_id = op.request_id,
+            event_id = event_id
+        },
+        outcome = outcome_from_agent_result(result)
+    })
+    if err then
+        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, err)
+        return err
+    end
+    return nil
 end
 
 -- LOOP GUARDS. One turn is one user message and the chain of agent steps it triggers
@@ -535,6 +606,90 @@ local function all_messages(ctx)
     return ctx.reader:messages():all()
 end
 
+-- Lifecycle deactivation is deliberately deferred until the successor takes a
+-- real turn. Keep the completed outgoing turn bounded independently of the
+-- moving checkpoint cursor, so a lifecycle consumer neither loses its source
+-- user request nor absorbs the successor input that caused the switch.
+--
+-- `last(1)` is backed by the chronology index. Do not replace this with an
+-- all-history read: sessions can be arbitrarily long and a range consumer
+-- needs only the immediate predecessor / final row.
+local function latest_message_id(ctx): (string?, boolean, boolean)
+    if not ctx.reader or type(ctx.reader.messages) ~= "function" then return nil, false, false end
+    local query = ctx.reader:messages()
+    if not query or type(query.last) ~= "function" or type(query.all) ~= "function" then
+        return nil, false, false
+    end
+    local messages, err = query:last(1):all()
+    if err or type(messages) ~= "table" then return nil, false, false end
+    if #messages == 0 then return nil, true, true end
+    local message = messages[#messages]
+    if message and type(message.message_id) == "string" and message.message_id ~= "" then
+        return message.message_id, true, false
+    end
+    return nil, false, false
+end
+
+local function record_completed_turn_span(ctx, state): string?
+    if not state or not state.active then return end
+    local lifecycle = ctx.lifecycle_state
+    if type(lifecycle) ~= "table" or type(lifecycle.active_agent_id) ~= "string"
+        or lifecycle.active_agent_id == "" then return end
+    local prior = lifecycle.completed_turn_span
+    local same_active_agent = type(prior) == "table"
+        and prior.agent_id == lifecycle.active_agent_id
+        and prior.model == lifecycle.active_model
+        and prior.revision == lifecycle.active_revision
+    if state.span_anchor_known ~= true and not same_active_agent then
+        lifecycle.completed_turn_span = nil
+        return
+    end
+    local to_id, known = latest_message_id(ctx)
+    if not known or not to_id then
+        -- Retain the activation's original anchor for a later successful
+        -- completion, but never expose an earlier end as the current end.
+        if same_active_agent then prior.to_id = nil
+        else lifecycle.completed_turn_span = nil end
+        return
+    end
+    -- A lifecycle activation can cover several completed user turns before a
+    -- real successor step finally retires it. Preserve the first exclusive
+    -- anchor across that run, while moving only the inclusive end forward.
+    -- A restart has no active lifecycle state, so it intentionally emits no
+    -- guessed span rather than widening a range from unrelated history.
+    local from_id = state.span_from_id
+    local open_start = state.span_open_start == true
+    if same_active_agent then
+        from_id = prior.from_id
+        open_start = prior.open_start == true
+    end
+    lifecycle.completed_turn_span = {
+        agent_id = lifecycle.active_agent_id,
+        model = lifecycle.active_model,
+        revision = lifecycle.active_revision,
+        from_id = from_id,
+        open_start = open_start,
+        to_id = to_id,
+    }
+    return to_id
+end
+
+deactivation_refs = function(state)
+    local span = type(state) == "table" and state.completed_turn_span or nil
+    if type(span) ~= "table" or span.agent_id ~= state.active_agent_id
+        or span.model ~= state.active_model or span.revision ~= state.active_revision
+        or type(span.to_id) ~= "string" or span.to_id == "" then
+        return nil
+    end
+    local range = { to_id = span.to_id }
+    if type(span.from_id) == "string" and span.from_id ~= "" then
+        range.from_id = span.from_id
+    elseif span.open_start ~= true then
+        return nil
+    end
+    return { deactivation_range = range }
+end
+
 local function prepare_pending_inputs(ctx, new_user_id)
     local messages, read_err = all_messages(ctx)
     if not messages then return nil, read_err or "Failed to read pending inputs" end
@@ -644,6 +799,7 @@ function message_handlers.finish_turn(ctx)
     if not ok then
         return nil, err or "Failed to persist turn completion"
     end
+    record_completed_turn_span(ctx, state)
     ctx.turn_state = candidate_state
     ctx.status = target_status
     input_policy.accept_committed(ctx, interaction)
@@ -857,6 +1013,7 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     input_policy.clear_turn(ctx)
     ctx.upstream:message_error(response_id, code, detail)
 
+    local memory_recall_error = opts and opts.memory_recall_error
     if opts and opts.after_step then
         apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
             reason = REASON.HOST_FAILED,
@@ -867,7 +1024,8 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
             },
             outcome = {
                 state = OUTCOME.FAILED,
-                reason = REASON.HOST_FAILED
+                reason = REASON.HOST_FAILED,
+                memory_recall_error = memory_recall_error
             }
         })
     end
@@ -875,8 +1033,10 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: " .. detail, {
         system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
         error_code = code,
+        error_details = opts and opts.error_details,
         source_id = op.message_id,
-        response_id = response_id
+        response_id = response_id,
+        memory_recall_error = memory_recall_error
     })
 
     return {
@@ -1046,7 +1206,12 @@ function message_handlers.handle_message(ctx, op)
         if type(ctx.writer.admit_message) ~= "function" then
             return nil, "Session writer does not support atomic admission"
         end
-        next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        local prior_id, prior_known, prior_empty = latest_message_id(ctx)
+        next_turn = {
+            active = true, steps = 0, repeated_calls = 0,
+            span_from_id = prior_id, span_anchor_known = prior_known,
+            span_open_start = prior_empty,
+        }
         local candidate = {
             config = ctx.config,
             turn_state = next_turn,
@@ -1219,10 +1384,64 @@ function message_handlers.agent_step(ctx, op)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
+        context_id = ctx.session_id,
         context = session_context,
         stop_check = step_stop_check(ctx),
         cancel = ctx.coordinator and ctx.coordinator.cancel
     }
+
+    local checkpoint_op = {
+        agent_options = agent.agent_options,
+        checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+    }
+    local checkpoint_function_id, threshold, checkpoint_options, checkpoint_available =
+        session_handlers.resolve_checkpoint_config(ctx, checkpoint_op)
+    local checkpoint_next_ops = {}
+    if checkpoint_available and checkpoint_options.enabled ~= false then
+        runtime_options.checkpoint = {
+            token_threshold = threshold,
+            compact = function(info)
+                local messages, read_err = ctx.reader:messages():from_checkpoint():all()
+                if not messages then return nil, read_err end
+                local tail = nil
+                for _, message in ipairs(messages) do
+                    local metadata = message.metadata or {}
+                    local input = metadata.input
+                    if (message.type == consts.MSG_TYPE.FUNCTION or message.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+                        or message.type == consts.MSG_TYPE.DELEGATION) and metadata.status == consts.FUNC_STATUS.PENDING then
+                        return nil, "Cannot checkpoint an unsettled tool round"
+                    end
+                    if type(input) ~= "table" or input.state == "applied" then tail = message end
+                end
+                local anchor_id = tail and tail.message_id
+                    or ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or op.message_id
+                local checkpoint_result, checkpoint_err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_function_id = checkpoint_function_id,
+                    checkpoint_bindings = checkpoint_op.checkpoint_bindings,
+                    checkpoint_options = checkpoint_options,
+                    checkpoint_id = anchor_id,
+                    message_id = anchor_id,
+                    exclusive = true,
+                    source_id = op.message_id,
+                    trigger_tokens = info.estimated_prompt_tokens,
+                    agent = { id = agent.id, model = agent.model },
+                    agent_options = agent.agent_options,
+                })
+                if not checkpoint_result then return nil, checkpoint_err end
+                checkpoint_next_ops = checkpoint_result.next_ops or {}
+                local replacement, build_err
+                if type(ctx.prepare_attention_prompt) == "function" then
+                    replacement, build_err = ctx.prepare_attention_prompt(prompt_options)
+                else
+                    replacement, build_err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+                end
+                if not replacement then return nil, build_err end
+                append_lifecycle_messages(replacement, activate_result)
+                append_lifecycle_messages(replacement, before_result)
+                return replacement
+            end,
+        }
+    end
 
     if state.route ~= nil then
         runtime_options.route = state.route
@@ -1237,12 +1456,22 @@ function message_handlers.agent_step(ctx, op)
         }
     end
 
-    local result, exec_err = agent:step(builder, runtime_options)
+    local result, exec_err, exec_details = agent:step(builder, runtime_options)
+    local memory_recall_error = type(result) == "table" and result.memory_recall_error or nil
     if exec_err or type(result) ~= "table" then
-        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+        local error_code = consts.ERROR_CODES.AGENT_ERROR
+        local error_details = nil
+        if type(exec_details) == "table" and exec_details.error_type
+            and exec_details.error_type == consts.ERROR_CODES.CONTEXT_WINDOW then
+            error_code = exec_details.error_type
+            error_details = exec_details
+        end
+        return fail_turn(ctx, op, agent, response_id, error_code,
             exec_err or "Agent step returned no result", {
                 after_step = true,
-                tokens = type(result) == "table" and result.tokens or nil
+                error_details = error_details,
+                tokens = type(result) == "table" and result.tokens or nil,
+                memory_recall_error = memory_recall_error
             })
     end
     if result.stopped then
@@ -1253,19 +1482,26 @@ function message_handlers.agent_step(ctx, op)
                 response_id = response_id,
                 request_id = op.request_id
             },
-            outcome = { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+            outcome = {
+                state = OUTCOME.COMPLETED,
+                reason = REASON.STOP_REQUESTED,
+                memory_recall_error = memory_recall_error
+            }
         })
         if after_err then
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
         end
         if type(result.result) == "string" and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
-                stopped = true
+                stopped = true,
+                memory_recall_error = memory_recall_error
             })
             if store_err then return nil, store_err end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
                 using_tools = false
@@ -1309,16 +1545,20 @@ function message_handlers.agent_step(ctx, op)
         -- A truncated response is not terminal. Keep presentation refs for the
         -- eventual tool-free answer rather than attaching them to partial text.
         if result.result and result.result ~= "" then
-            local _, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
                 tokens = result.tokens,
-                truncated = true
+                truncated = true,
+                memory_recall_error = memory_recall_error
             })
             if store_err then
                 return nil, store_err
             end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
+
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
                 using_tools = false
@@ -1448,10 +1688,13 @@ function message_handlers.agent_step(ctx, op)
             metadata.memory_ids = result.memory_recall.memory_ids
             metadata.memory_count = result.memory_recall.count
         end
+        if memory_recall_error then
+            metadata.memory_recall_error = memory_recall_error
+        end
 
         if result.metadata then
             for k, v in pairs(result.metadata) do
-                metadata[k] = v
+                if k ~= "presentation" then metadata[k] = v end
             end
         end
         -- This is server-owned presentation data, never model output.  It is
@@ -1498,6 +1741,9 @@ function message_handlers.agent_step(ctx, op)
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
         result.call_message_types = call_message_types
+
+        local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+        if persist_err then return nil, persist_err end
 
         if is_turn_blocked(ctx) then
             for index, call in ipairs(unified_tool_calls) do
@@ -1549,7 +1795,7 @@ function message_handlers.agent_step(ctx, op)
 
     -- Separate user-facing operations from background operations
     local user_facing_ops = {}
-    local background_ops = {}
+    local background_ops = checkpoint_next_ops
 
     if #unified_tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(user_facing_ops, {
@@ -1983,6 +2229,20 @@ function message_handlers.process_tools(ctx, op)
     end
     local settled, settle_err = settle_behavior_round(ctx, op, policies_cancelled)
     if not settled then return nil, settle_err end
+
+    -- A control-driven handoff starts the successor before the old turn can
+    -- reach the queue-empty boundary. Its tool results are now durable, so
+    -- capture the old agent's completed span before the successor activation
+    -- performs the deferred deactivation.
+    if not policies_cancelled and ctx.turn_state and ctx.turn_state.handoff then
+        local outgoing_end = record_completed_turn_span(ctx, ctx.turn_state)
+        -- The successor continues this user turn, but owns a new lifecycle
+        -- span. Its eventual deactivation must not reuse the retired agent's
+        -- first-history anchor. Unknown boundaries remain unknown.
+        ctx.turn_state.span_from_id = outgoing_end
+        ctx.turn_state.span_anchor_known = outgoing_end ~= nil
+        ctx.turn_state.span_open_start = false
+    end
 
     if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
         -- Requested compaction waits for the complete tool/result round. The

@@ -25,6 +25,18 @@ function checkpoint_repo.commit(session_id, user_id, op, summary, message_metada
     local messages, message_err = sql.builder.select("metadata"):from("messages")
         :where("session_id = ? AND message_id = ?", session_id, op.message_id):run_with(tx):query()
     if message_err or not messages or #messages ~= 1 then return abort(message_err or "Checkpoint message not found in session") end
+    -- An outgoing checkpoint summarizes the complete settled tail. Keep the
+    -- resume request in the same session; ordinary checkpoints remain inclusive.
+    if op.exclusive == true then
+        if op.checkpoint_id ~= op.message_id then return abort("Exclusive checkpoint anchor must match message") end
+        if type(op.source_id) ~= "string" or op.source_id == "" then return abort("Checkpoint source ID required") end
+        local sources, source_err = sql.builder.select("message_id"):from("messages")
+            :where("session_id = ? AND message_id = ? AND type = ?", session_id, op.source_id, consts.MSG_TYPE.USER)
+            :run_with(tx):query()
+        if source_err or not sources or #sources ~= 1 then
+            return abort(source_err or "Checkpoint request not found in session")
+        end
+    end
     local contexts, context_err = sql.builder.select("data"):from("contexts")
         :where("context_id = ?", session.primary_context_id):run_with(tx):query()
     if context_err or not contexts or #contexts ~= 1 then return abort(context_err or "Primary context not found") end
@@ -50,6 +62,9 @@ function checkpoint_repo.commit(session_id, user_id, op, summary, message_metada
         }
     end
     context[consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID] = op.checkpoint_id
+    context[consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY] = op.exclusive == true and {
+        checkpoint_id = op.checkpoint_id, exclusive = true, source_id = op.source_id,
+    } or nil
     if op.clear_request then context[consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED] = nil end
     local meta_json, encode_err = json.encode(meta)
     if encode_err then return abort(encode_err) end

@@ -3,6 +3,33 @@ local checkpoint = require("checkpoint")
 local prompt = require("prompt")
 
 local function define_tests()
+    describe("outgoing summary boundary", function()
+        it("excludes queued steering and later arrivals from the captured settled tail", function()
+            local messages = {
+                {message_id = "request", metadata = {}},
+                {message_id = "queued", metadata = {input = {state = "pending"}}},
+                {message_id = "applied", metadata = {input = {state = "applied"}}},
+                {message_id = "tool", metadata = {}},
+                {message_id = "later", metadata = {}},
+            }
+            local selected, err = checkpoint.select_messages(messages, "tool")
+            test.is_nil(err)
+            test.eq(#selected, 3)
+            test.eq(selected[1].message_id, "request")
+            test.eq(selected[2].message_id, "applied")
+            test.eq(selected[3].message_id, "tool")
+        end)
+        it("fails if the captured boundary disappeared", function()
+            local selected, err = checkpoint.select_messages({{message_id = "different"}}, "missing")
+            test.is_nil(selected)
+            test.eq(err, "Checkpoint boundary not found in summary history")
+        end)
+        it("preserves ordinary checkpoint selection", function()
+            local messages = {{message_id = "queued", metadata = {input = {state = "pending"}}}}
+            test.eq(checkpoint.select_messages(messages), messages)
+        end)
+    end)
+
     describe("checkpoint config_from_args", function()
         it("falls back to defaults when no options are supplied", function()
             local cfg = checkpoint.config_from_args({ session_id = "s1" })

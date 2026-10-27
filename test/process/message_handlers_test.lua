@@ -1,6 +1,7 @@
 local test = require("test")
 local consts = require("consts")
 local message_handlers = require("message_handlers")
+local default_lifecycle_error_report = message_handlers._report_lifecycle_errors
 local session_handlers = require("session_handlers")
 local command_bus = require("command_bus")
 local tool_caller = require("tool_caller")
@@ -545,6 +546,210 @@ local function define_tests()
         end)
     end)
 
+    describe("persisted step lifecycle", function()
+        local original_lifecycle
+
+        -- Records each phase with a snapshot of the rows stored when it ran.
+        local function record_phases(captured: any, failing: {[string]: string}?): {any}
+            local phases = {}
+            original_lifecycle = message_handlers._lifecycle_runtime
+            message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                local stored_ids = {}
+                for _, row in ipairs(captured.stored) do stored_ids[row.id] = row end
+                table.insert(phases, { payload = payload, stored = stored_ids })
+                local failure = failing and failing[payload.phase]
+                if failure then return { applied = 0, skipped = 0, errors = {} }, failure end
+                return { applied = 1, skipped = 0, messages = {}, controls = {}, errors = {} }, nil
+            end }
+            return phases
+        end
+
+        after_each(function()
+            message_handlers._lifecycle_runtime = original_lifecycle
+        end)
+
+        local function phase_named(phases: {any}, name: string): any
+            for _, entry in ipairs(phases) do
+                if entry.payload.phase == name then return entry end
+            end
+            return nil
+        end
+
+        local function lifecycle_agent(step_result: any, step_err: any?): any
+            local agent = fake_agent(nil)
+            agent.bindings = { lifecycle = { { binding = "app:lifecycle", phases = { "after_persist" } } } }
+            agent.step = function() return step_result, step_err end
+            return agent
+        end
+
+        it("dispatches after_persist with the committed assistant record id", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer",
+                tokens = { prompt_tokens = 10, completion_tokens = 2, total_tokens = 12 } }))
+            local phases = record_phases(captured)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id], "record is stored before the hook runs")
+            test.eq(persisted.stored[assistant.id].content, "Final answer")
+            test.eq(persisted.payload.refs.message_id, "msg-user")
+            test.eq(persisted.payload.refs.request_id, "req-1")
+            test.eq(persisted.payload.refs.response_id, result.response_id)
+            test.eq(persisted.payload.outcome.state, "completed")
+            test.eq(phases[#phases].payload.phase, "after_persist")
+            local after_step = test.not_nil(phase_named(phases, "after_step")) :: any
+            test.is_nil(after_step.payload.refs.event_id, "after_step keeps its original refs")
+        end)
+
+        it("dispatches after_persist for a tool step before the tool round runs", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "", tool_calls = {
+                { id = "call-1", name = "pack_document", arguments = "{}", registry_id = "app:pack_document" },
+            } }))
+            local phases = record_phases(captured)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.not_nil((find_op(result.next_ops, consts.OP_TYPE.PROCESS_TOOLS)))
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.eq(persisted.payload.outcome.state, "continues")
+            local call = stored_of_type(captured, consts.MSG_TYPE.FUNCTION)[1]
+            test.eq(persisted.stored[call.id].metadata.status, consts.FUNC_STATUS.PENDING,
+                "the hook sees the stored intent, not a tool result")
+        end)
+
+        it("dispatches after_persist for a stored truncated response", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "partial reasoning", truncated = true,
+                truncation_reason = "tool_calls" }))
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "pending-artifact" }},
+            }
+            local phases = record_phases(captured)
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_false(result.completed)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id])
+            test.eq(persisted.payload.outcome.state, "continues")
+            test.is_nil(assistant.metadata.presentation)
+            test.eq(ctx.turn_state.pending_inline_artifacts[1].artifact_id, "pending-artifact")
+        end)
+
+        it("dispatches after_persist for retained text from a stopped response", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({result = "partial answer", stopped = true}))
+            local phases = record_phases(captured)
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.not_nil(assistant)
+            local persisted = test.not_nil(phase_named(phases, "after_persist")) :: any
+            test.eq(persisted.payload.refs.event_id, assistant.id)
+            test.not_nil(persisted.stored[assistant.id])
+            test.eq(persisted.payload.outcome.state, "completed")
+            test.eq(persisted.payload.outcome.reason, "stop_requested")
+        end)
+
+        it("does not dispatch after_persist when nothing is stored", function()
+            local failures = {
+                { label = "provider failure", result = nil, err = "provider failed" },
+                { label = "empty response", result = { result = "" } },
+                { label = "stopped without text", result = { stopped = true, result = "" } },
+                { label = "truncated without text", result = { result = "", truncated = true,
+                    truncation_reason = "tool_calls" } },
+            }
+            for _, case in ipairs(failures) do
+                local ctx, captured = mock_ctx(lifecycle_agent(case.result, case.err))
+                local phases = record_phases(captured)
+                user_step(ctx)
+                message_handlers._lifecycle_runtime = original_lifecycle
+                test.is_nil(phase_named(phases, "after_persist"), case.label)
+            end
+
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer" }))
+            ctx.writer.add_response = function() return nil, nil, "disk full" end
+            local phases = record_phases(captured)
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.eq(err, "disk full")
+            test.is_nil(phase_named(phases, "after_persist"), "failed persistence")
+        end)
+
+        it("keeps the stored record and fails through the fatal path on a strict after_persist error", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer" }))
+            record_phases(captured, { after_persist = "index unavailable" })
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(result)
+            test.eq(err, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            test.eq(captured.message_errors[1].message, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 0, "the turn is not settled as an agent failure")
+        end)
+
+        it("keeps retained stopped text when its strict after_persist hook fails", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({result = "partial answer", stopped = true}))
+            record_phases(captured, {after_persist = "index unavailable"})
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.eq(err, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            test.eq(captured.message_errors[1].message, "index unavailable")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 0)
+        end)
+
+        it("reports a recall failure to lifecycle handlers and in the stored record", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "Final answer",
+                memory_recall_error = "Memory recall failed: vector store offline" }))
+            local phases = record_phases(captured)
+
+            local _, err = user_step(ctx)
+
+            test.is_nil(err)
+            local assistant = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(assistant.metadata.memory_recall_error, "Memory recall failed: vector store offline")
+            test.eq(phase_named(phases, "after_step").payload.outcome.memory_recall_error,
+                "Memory recall failed: vector store offline")
+            test.eq(phase_named(phases, "after_persist").payload.outcome.memory_recall_error,
+                "Memory recall failed: vector store offline")
+        end)
+
+        it("keeps a recall failure on truncated and failed steps", function()
+            local ctx, captured = mock_ctx(lifecycle_agent({ result = "partial", truncated = true,
+                truncation_reason = "tool_calls", memory_recall_error = "Memory recall failed: offline" }))
+            record_phases(captured)
+            user_step(ctx)
+            message_handlers._lifecycle_runtime = original_lifecycle
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].metadata.memory_recall_error,
+                "Memory recall failed: offline")
+
+            local failed_ctx, failed_captured = mock_ctx(lifecycle_agent(
+                { memory_recall_error = "Memory recall failed: offline" }, "provider failed"))
+            local phases = record_phases(failed_captured)
+            local result, err = user_step(failed_ctx)
+            test.is_nil(err)
+            test.eq(result.failed, "provider failed")
+            test.eq(phase_named(phases, "after_step").payload.outcome.memory_recall_error,
+                "Memory recall failed: offline")
+            test.eq(stored_of_type(failed_captured, consts.MSG_TYPE.SYSTEM)[1].metadata.memory_recall_error,
+                "Memory recall failed: offline")
+        end)
+    end)
+
     describe("wrapped tool call persistence", function()
         it("classifies function, private, and delegation intents before execution", function()
             local agent = fake_agent(nil)
@@ -872,6 +1077,29 @@ local function define_tests()
     end)
 
     describe("inline artifact presentation", function()
+        it("does not accept presentation refs supplied in agent metadata", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return {
+                    result = "An ordinary answer.",
+                    metadata = {
+                        presentation = { artifact_refs = {{ artifact_id = "foreign-artifact" }} },
+                        provider_marker = "retained",
+                    },
+                }
+            end
+            local ctx, captured = mock_ctx(agent)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.is_nil(answer.metadata.presentation)
+            test.eq(answer.metadata.provider_marker, "retained")
+            test.is_nil(captured.message_updates[#captured.message_updates].payload.presentation)
+        end)
+
         it("persists and publishes server-owned refs when the model omits its inline tag", function()
             local agent = fake_agent(nil)
             local steps = 0
@@ -976,7 +1204,12 @@ local function define_tests()
                 repeated_calls = 0,
                 pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
             }
-            agent.step = function() return { result = "The chart is below.\n\n" .. tag } end
+            agent.step = function()
+                return {
+                    result = "The chart is below.\n\n" .. tag,
+                    metadata = { presentation = { artifact_refs = {{ artifact_id = "foreign-artifact" }} } },
+                }
+            end
 
             local result, err = continue_step(ctx)
 
@@ -1975,6 +2208,7 @@ local function define_tests()
     describe("agent lifecycle transitions", function()
         after_each(function()
             message_handlers._lifecycle_runtime = nil
+            message_handlers._report_lifecycle_errors = nil
         end)
 
         local function lifecycle_agent(id: string, binding: string): any
@@ -1989,6 +2223,7 @@ local function define_tests()
             local active = first
             local transitions = {}
             local rejected_phase = nil
+            local non_strict_rejected_phase = nil
 
             ctx.agent_ctx.load_agent = function() return active, nil end
             ctx.agent_ctx.get_current_agent = function() return active end
@@ -2000,10 +2235,16 @@ local function define_tests()
                             agent_id = payload.agent.id,
                             binding = bindings.lifecycle[1].binding,
                             reason = payload.reason,
+                            refs = payload.refs,
                         }
                     end
                     if payload.phase == rejected_phase then
                         return nil, "strict lifecycle failure"
+                    end
+                    if payload.phase == non_strict_rejected_phase then
+                        return { applied = 0, messages = {}, errors = {
+                            { error = "non-strict lifecycle failure", strict = false }
+                        } }, nil
                     end
                     return { applied = 1, messages = {} }, nil
                 end
@@ -2012,6 +2253,7 @@ local function define_tests()
             return ctx, transitions, {
                 set_agent = function(agent) active = agent end,
                 reject = function(phase) rejected_phase = phase end,
+                reject_non_strict = function(phase) non_strict_rejected_phase = phase end,
             }
         end
 
@@ -2051,6 +2293,255 @@ local function define_tests()
             test.eq(transitions[2].reason, "agent_switch")
             test.eq(transitions[3].phase, "activate")
             test.eq(transitions[3].binding, "binding:two")
+        end)
+
+        it("passes only the completed outgoing history span when a later real turn switches agents", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local last_limit = nil
+            local default_messages = ctx.reader.messages
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.reader.messages = function()
+                return {
+                    all = function() return {}, nil end,
+                    last = function(_, limit)
+                        last_limit = limit
+                        return {
+                            all = function()
+                                -- This models a long conversation without an all-history read.
+                                return { { message_id = "outgoing-final" } }, nil
+                            end,
+                        }
+                    end,
+                }
+            end
+
+            ctx.turn_state.span_anchor_known = true
+            ctx.turn_state.span_from_id = "outgoing-predecessor"
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            test.eq(last_limit, 1, "completed-span lookup must remain bounded")
+            ctx.reader.messages = default_messages
+
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+
+            test.eq(transitions[2].phase, "deactivate")
+            test.eq(transitions[2].refs.deactivation_range.from_id, "outgoing-predecessor")
+            test.eq(transitions[2].refs.deactivation_range.to_id, "outgoing-final")
+            test.eq(transitions[3].phase, "activate")
+            test.is_nil(transitions[3].refs.deactivation_range,
+                "the successor must not inherit the outgoing range")
+        end)
+
+        it("uses an open start only for a first completed turn", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local default_messages = ctx.reader.messages
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.reader.messages = function()
+                return {
+                    all = function() return {}, nil end,
+                    last = function()
+                        return { all = function() return { { message_id = "first-final" } }, nil end }
+                    end,
+                }
+            end
+
+            ctx.turn_state.span_anchor_known = true
+            ctx.turn_state.span_from_id = nil
+            ctx.turn_state.span_open_start = true
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            ctx.reader.messages = default_messages
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+
+            local range = transitions[2].refs.deactivation_range
+            test.eq(range.to_id, "first-final")
+            test.is_nil(range.from_id, "first turn has no exclusive predecessor")
+        end)
+
+        for _, lookup in ipairs({ "malformed", "unavailable" }) do
+            it("does not reuse an earlier completed end when the current lookup is " .. lookup, function()
+                local first = lifecycle_agent("agent:one", "binding:one")
+                local second = lifecycle_agent("agent:two", "binding:two")
+                local ctx, transitions, controls = lifecycle_context(first)
+                test.is_nil(select(2, user_step(ctx)))
+                local default_messages = ctx.reader.messages
+                ctx.lifecycle_state.completed_turn_span = {
+                    agent_id = ctx.lifecycle_state.active_agent_id, model = ctx.lifecycle_state.active_model,
+                    revision = ctx.lifecycle_state.active_revision,
+                    from_id = "original-predecessor", to_id = "earlier-final",
+                }
+                ctx.turn_state.span_anchor_known = true
+                ctx.turn_state.span_from_id = "later-predecessor"
+                ctx.reader.messages = function()
+                    return { all = function() return {}, nil end, last = function()
+                        return { all = function()
+                            if lookup == "unavailable" then return nil, "history unavailable" end
+                            return { {} }, nil
+                        end }
+                    end }
+                end
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                test.is_nil(ctx.lifecycle_state.completed_turn_span.to_id)
+                test.eq(ctx.lifecycle_state.completed_turn_span.from_id, "original-predecessor")
+                ctx.reader.messages = default_messages
+                controls.set_agent(second)
+                ctx.config.agent_id = second.id
+                test.is_nil(select(2, user_step(ctx)))
+                test.is_nil(transitions[2].refs, "the outgoing agent has no known complete end")
+            end)
+        end
+
+        it("recovers the original anchor after a completion with an unknown end", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.lifecycle_state.completed_turn_span = {
+                agent_id = ctx.lifecycle_state.active_agent_id, model = ctx.lifecycle_state.active_model,
+                revision = ctx.lifecycle_state.active_revision,
+                from_id = "original-predecessor", to_id = "earlier-final",
+            }
+            ctx.turn_state.span_anchor_known = true
+            ctx.reader.messages = function()
+                return { all = function() return {}, nil end,
+                    last = function() return { all = function() return { {} }, nil end } end }
+            end
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span.to_id)
+            ctx.turn_state = { active = true, span_anchor_known = false }
+            ctx.reader.messages = function()
+                return { all = function() return {}, nil end,
+                    last = function() return { all = function() return { { message_id = "recovered-final" } }, nil end } end }
+            end
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.eq(span.from_id, "original-predecessor", "a failed lookup must not lose the activation anchor")
+            test.eq(span.to_id, "recovered-final")
+        end)
+
+        it("does not expose a range when the bounded history lookup is malformed", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local default_messages = ctx.reader.messages
+
+            test.is_nil(select(2, user_step(ctx)))
+            ctx.reader.messages = function()
+                return {
+                    all = function() return {}, nil end,
+                    last = function() return { all = function() return { {} }, nil end } end,
+                }
+            end
+            ctx.turn_state.span_anchor_known = true
+            ctx.turn_state.span_from_id = "known-predecessor"
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span)
+            ctx.reader.messages = default_messages
+
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(transitions[2].refs,
+                "an invalid final row must not be treated as an open-history anchor")
+        end)
+
+        it("retains the first admitted user span across consecutive completed turns", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            ctx.lifecycle_state = { active_agent_id = first.id, active_model = first.model }
+            local history = { { message_id = "before-facts" } }
+            local admitted = 0
+            ctx.reader.messages = function()
+                return {
+                    last = function()
+                        return { all = function() return { history[#history] }, nil end }
+                    end,
+                    all = function() return history, nil end,
+                    from_checkpoint = function(self) return self end,
+                    count = function() return #history, nil end,
+                }
+            end
+            ctx.writer.admit_message = function()
+                admitted = admitted + 1
+                local id = "source-user-" .. tostring(admitted)
+                history[#history + 1] = { message_id = id }
+                return id, nil, false
+            end
+            ctx.upstream.message_received = function() end
+
+            local first_input, first_err = message_handlers.handle_message(ctx, {
+                data = { text = "fact: keep the migration key" }, request_id = "source-request-1",
+            })
+            test.is_nil(first_err)
+            test.eq(first_input.message_id, "source-user-1")
+            history[#history + 1] = { message_id = "first-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+
+            local second_input, second_err = message_handlers.handle_message(ctx, {
+                data = { text = "brief handoff" }, request_id = "source-request-2",
+            })
+            test.is_nil(second_err)
+            test.eq(second_input.message_id, "source-user-2")
+            history[#history + 1] = { message_id = "second-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.eq(span.from_id, "before-facts")
+            test.eq(span.to_id, "second-answer")
+        end)
+
+        it("retains an open first-history anchor across consecutive admitted turns", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local ctx = lifecycle_context(first)
+            ctx.lifecycle_state = { active_agent_id = first.id, active_model = first.model }
+            local history = {}
+            local admitted = 0
+            ctx.reader.messages = function()
+                return {
+                    last = function()
+                        return { all = function()
+                            local last = history[#history]
+                            return last and { last } or {}, nil
+                        end }
+                    end,
+                    all = function() return history, nil end,
+                    from_checkpoint = function(self) return self end,
+                    count = function() return #history, nil end,
+                }
+            end
+            ctx.writer.admit_message = function()
+                admitted = admitted + 1
+                local id = "first-history-user-" .. tostring(admitted)
+                history[#history + 1] = { message_id = id }
+                return id, nil, false
+            end
+            ctx.upstream.message_received = function() end
+
+            test.is_nil(select(2, message_handlers.handle_message(ctx, {
+                data = { text = "fact: first history key" }, request_id = "first-history-request-1",
+            })))
+            history[#history + 1] = { message_id = "first-history-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(ctx.lifecycle_state.completed_turn_span.from_id)
+
+            test.is_nil(select(2, message_handlers.handle_message(ctx, {
+                data = { text = "brief handoff" }, request_id = "first-history-request-2",
+            })))
+            history[#history + 1] = { message_id = "second-history-answer" }
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+
+            local span = ctx.lifecycle_state.completed_turn_span
+            test.is_nil(span.from_id, "first-history range must remain open")
+            test.eq(span.to_id, "second-history-answer")
         end)
 
         it("recovers the active agent for a switch when only its ID was retained", function()
@@ -2169,6 +2660,92 @@ local function define_tests()
             test.eq(ctx.lifecycle_state.active_agent_id, first.id)
             test.eq(ctx.lifecycle_state.active_agent, first)
         end)
+
+        it("receipts a reported non-strict deactivation failure without blocking the switch", function()
+            local first = lifecycle_agent("agent:one", "binding:one")
+            local second = lifecycle_agent("agent:two", "binding:two")
+            local ctx, transitions, controls = lifecycle_context(first)
+            local receipts = {}
+            message_handlers._report_lifecycle_errors = function(receipt_ctx, phase, agent, lifecycle_errors)
+                receipts[#receipts + 1] = {
+                    session_id = receipt_ctx.session_id,
+                    phase = phase,
+                    agent_id = agent.id,
+                    error = lifecycle_errors[1].error,
+                }
+            end
+
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            controls.reject_non_strict("deactivate")
+            ctx.config.agent_id = second.id
+
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_nil(result.failed)
+            test.eq(#transitions, 3)
+            test.eq(ctx.lifecycle_state.active_agent_id, second.id)
+            test.eq(#receipts, 1)
+            test.eq(receipts[1].session_id, ctx.session_id)
+            test.eq(receipts[1].phase, "deactivate")
+            test.eq(receipts[1].agent_id, first.id)
+            test.eq(receipts[1].error, "non-strict lifecycle failure")
+        end)
+
+        local function native_failure_switch(strict: boolean): (any, any, any, any)
+            local first = lifecycle_agent("agent:one", "app.lifecycle_receipts:binding")
+            first.bindings.lifecycle[1].id = "receipt-binding"
+            first.bindings.lifecycle[1].trait_id = "trait:receipt"
+            first.bindings.lifecycle[1].phases = { "deactivate" }
+            first.bindings.lifecycle[1].strict = strict
+            local second = fake_agent(nil)
+            second.id = "agent:two"
+            local ctx, _, controls = lifecycle_context(first)
+            local receipts = {}
+            -- Exercise the published Agent lifecycle runtime and a native
+            -- contract binding rather than the lifecycle_context double.
+            message_handlers._lifecycle_runtime = nil
+            message_handlers._report_lifecycle_errors = function(receipt_ctx, phase, agent, lifecycle_errors)
+                receipts[#receipts + 1] = {
+                    session_id = receipt_ctx.session_id,
+                    phase = phase,
+                    agent_id = agent.id,
+                    errors = lifecycle_errors,
+                }
+                if default_lifecycle_error_report then
+                    default_lifecycle_error_report(receipt_ctx, phase, agent, lifecycle_errors)
+                end
+            end
+            test.is_nil(select(2, user_step(ctx)))
+            controls.set_agent(second)
+            ctx.config.agent_id = second.id
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            return ctx, result, receipts, first
+        end
+
+        it("reports a real non-strict lifecycle binding error and completes the switch", function()
+            local ctx, result, receipts = native_failure_switch(false)
+            test.is_nil(result.failed)
+            test.eq(ctx.lifecycle_state.active_agent_id, "agent:two")
+            test.eq(#receipts, 1)
+            test.eq(receipts[1].session_id, ctx.session_id)
+            test.eq(receipts[1].phase, "deactivate")
+            test.eq(receipts[1].agent_id, "agent:one")
+            test.eq(#receipts[1].errors, 1)
+            test.eq(receipts[1].errors[1].binding_id, "receipt-binding")
+            test.eq(receipts[1].errors[1].trait_id, "trait:receipt")
+            test.eq(receipts[1].errors[1].strict, false)
+            test.contains(receipts[1].errors[1].error, "lifecycle receipt failure")
+        end)
+
+        it("keeps a real strict lifecycle binding error fatal to the switch", function()
+            local ctx, result, receipts, first = native_failure_switch(true)
+            test.contains(result.failed, "lifecycle receipt failure")
+            test.eq(ctx.lifecycle_state.active_agent_id, first.id)
+            test.eq(ctx.lifecycle_state.active_agent, first)
+            test.eq(#receipts, 0, "a strict failure retains its existing fatal path")
+        end)
     end)
 
     describe("failed queue boundary", function()
@@ -2194,6 +2771,163 @@ local function define_tests()
             test.is_true((ctx.turn_state :: any).failed)
             test.eq((persisted :: any).status, consts.STATUS.FAILED)
             test.is_false((persisted :: any).meta.interaction.can_send)
+        end)
+    end)
+
+    describe("outgoing context checkpoint", function()
+        local original_checkpoint, original_context_type
+        before_each(function()
+            original_checkpoint = session_handlers.create_checkpoint
+            original_context_type = output.ERROR_TYPE.CONTEXT_WINDOW
+        end)
+        after_each(function()
+            session_handlers.create_checkpoint = original_checkpoint
+            output.ERROR_TYPE.CONTEXT_WINDOW = original_context_type
+        end)
+
+        it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local checkpoints, builds = 0, 0
+            ctx.prepare_attention_prompt = function()
+                builds = builds + 1
+                return { get_messages = function() return { { role = "user", content = checkpoints == 0 and "large tool result" or "task and summary" } } end }
+            end
+            session_handlers.create_checkpoint = function(context, op)
+                test.eq(context, ctx)
+                test.eq(op.checkpoint_function_id, "wippy.session.funcs:checkpoint")
+                test.eq(op.trigger_tokens, 150000)
+                test.eq(op.checkpoint_id, "msg-user")
+                checkpoints = checkpoints + 1
+                return { completed = true }
+            end
+            agent.step = function(_self, _builder, options)
+                test.not_nil(options.checkpoint)
+                test.eq(options.checkpoint.token_threshold, THRESHOLD)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000, context_window = 200000 })
+                test.is_nil(err)
+                test.eq(replacement:get_messages()[1].content, "task and summary")
+                test.eq(checkpoints, 1)
+                return { result = "done" }
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(builds, 2)
+        end)
+
+        it("keeps pending steering outside the summarized boundary", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local arrived = false
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function()
+                    local rows = {{message_id = "completed-tool", type = consts.MSG_TYPE.FUNCTION,
+                        metadata = {status = consts.FUNC_STATUS.SUCCESS}}}
+                    if arrived then rows[#rows + 1] = {message_id = "pending-steering", type = consts.MSG_TYPE.USER,
+                        metadata = {input = {state = "pending"}}} end
+                    return rows
+                end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function(_, op)
+                test.eq(op.checkpoint_id, "completed-tool")
+                test.eq(op.source_id, "msg-user")
+                test.is_true(op.exclusive)
+                return {completed = true}
+            end
+            agent.step = function(_, _, options)
+                arrived = true
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(err)
+                test.not_nil(replacement)
+                return {result = "done"}
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("does not summarize an unsettled tool round", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            ctx.reader.messages = function() return {
+                from_checkpoint = function(self) return self end,
+                all = function() return {{message_id = "pending-tool", type = consts.MSG_TYPE.FUNCTION,
+                    metadata = {status = consts.FUNC_STATUS.PENDING}}} end,
+            } end
+            ctx.prepare_attention_prompt = function() return {get_messages = function() return {} end} end
+            session_handlers.create_checkpoint = function() error("must not summarize pending tools") end
+            agent.step = function(_, _, options)
+                local replacement, err = options.checkpoint.compact({estimated_prompt_tokens = 150000})
+                test.is_nil(replacement)
+                test.eq(err, "Cannot checkpoint an unsettled tool round")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "Cannot checkpoint an unsettled tool round")
+        end)
+
+        it("preserves explicit disabled checkpoint policy", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent, { checkpoint = { enabled = false } })
+            agent.step = function(_self, _builder, options)
+                test.is_nil(options.checkpoint)
+                return { result = "done" }
+            end
+            session_handlers.create_checkpoint = function() error("disabled checkpoint") end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+        end)
+
+        it("preserves typed context admission details in the failed turn", function()
+            local agent = fake_agent(nil)
+            local details = { error_type = "context_window", estimated_prompt_tokens = 300, context_window = 200 }
+            agent.step = function() return nil, "Prompt exceeds the model context window", details end
+            local ctx, captured = mock_ctx(agent)
+            output.ERROR_TYPE.CONTEXT_WINDOW = nil
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.not_nil(result.failed)
+            test.eq(captured.message_errors[1].code, "context_window")
+            local system = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(system[1].metadata.error_details, details)
+        end)
+
+        it("propagates checkpoint errors before dispatch", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            session_handlers.create_checkpoint = function() return nil, "checkpoint failed" end
+            agent.step = function(_self, _builder, options)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                test.is_nil(replacement)
+                test.eq(err, "checkpoint failed")
+                return nil, err
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.contains(result.failed, "checkpoint failed")
+        end)
+    end)
+
+    describe("usage context", function()
+        it("passes the session identifier on initial and continued steps", function()
+            local agent = fake_agent(nil)
+            local original_step = agent.step
+            local seen = {}
+            agent.step = function(self, builder, options)
+                seen[#seen + 1] = options
+                return original_step(self, builder, options)
+            end
+            local ctx = mock_ctx(agent)
+            test.is_nil(select(2, user_step(ctx)))
+            test.is_nil(select(2, continue_step(ctx)))
+            test.eq(#seen, 2)
+            test.eq(seen[1].context_id, ctx.session_id)
+            test.eq(seen[2].context_id, ctx.session_id)
         end)
     end)
 
@@ -2718,7 +3452,7 @@ local function define_tests()
     end)
 
     describe("agent handoff", function()
-        local function handoff_fixture()
+        local function handoff_fixture(admit_first_user)
             local steps = { router = 0, help = 0 }
             local router = fake_agent(nil)
             router.id = "agent:router"
@@ -2774,6 +3508,7 @@ local function define_tests()
                     end,
                     execute = function(_self, _context, tools)
                         if ctx.stop_in_handoff then bus:request_stop() end
+                        ctx.handoff_settled = true
                         return { ["call-1"] = { result = { _control = { config = { agent = help.id } } },
                             tool_call = tools["call-1"] } }
                     end,
@@ -2782,8 +3517,40 @@ local function define_tests()
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, message_handlers.agent_step)
             bus:mount_op_handler(consts.OP_TYPE.PROCESS_TOOLS, message_handlers.process_tools)
             bus:mount_op_handler(consts.OP_TYPE.AGENT_CONTINUE, message_handlers.agent_continue)
-            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
-                message_id = "msg-user", request_id = "req-1", from_user = true })
+            if admit_first_user then
+                local history = {}
+                ctx.reader.messages = function()
+                    return {
+                        from_checkpoint = function(self) return self end,
+                        all = function() return history, nil end,
+                        last = function()
+                            return { all = function()
+                                if ctx.handoff_settled then
+                                    -- The settled tool result is the final outgoing row.
+                                    return { { message_id = "handoff-tool-result" } }, nil
+                                end
+                                local last = history[#history]
+                                return last and { last } or {}, nil
+                            end }
+                        end,
+                        count = function() return #history, nil end,
+                    }
+                end
+                ctx.writer.admit_message = function()
+                    history[#history + 1] = { message_id = "msg-user", type = consts.MSG_TYPE.USER,
+                        data = "fact from the first routed user turn" }
+                    return "msg-user", nil, false
+                end
+                ctx.upstream.message_received = function() end
+                local accepted, accept_err = message_handlers.handle_message(ctx, {
+                    data = { text = "fact from the first routed user turn" }, request_id = "req-1",
+                })
+                assert(not accept_err)
+                assert(bus:queue_op(accepted.next_ops[1]))
+            else
+                bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP,
+                    message_id = "msg-user", request_id = "req-1", from_user = true })
+            end
             return ctx, captured, bus, steps, interactions, announced,
                 function() tool_caller.new = original_new end
         end
@@ -2852,6 +3619,81 @@ local function define_tests()
             test.eq(answers[#answers].content, "Here is the answer from the help agent.")
             test.is_false(interactions[1].can_send)
             test.is_true(interactions[#interactions].can_send)
+        end)
+
+        it("bounds deferred deactivation after a first-turn tool handoff", function()
+            local ctx, _captured, bus, steps, _interactions, _announced, restore = handoff_fixture(true)
+            local router = ctx.agent_ctx:get_current_agent()
+            router.bindings = { lifecycle = { { binding = "binding:router" } } }
+            local transitions = {}
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "deactivate" then transitions[#transitions + 1] = payload end
+                    return { applied = 1, messages = {} }, nil
+                end,
+            }
+
+            local ok, err = bus:run()
+            restore()
+            message_handlers._lifecycle_runtime = nil
+            test.is_nil(err)
+            test.is_true(ok)
+            test.eq(steps.router, 1)
+            test.eq(steps.help, 1)
+            test.eq(#transitions, 1)
+            test.eq(transitions[1].agent.id, "agent:router")
+            test.eq(transitions[1].refs.deactivation_range.to_id, "handoff-tool-result")
+            test.is_nil(transitions[1].refs.deactivation_range.from_id,
+                "the first admitted source turn has a valid open history start")
+        end)
+
+        it("does not attribute the retired agent history to its mid-turn successor", function()
+            local ctx, _captured, bus, _steps, _interactions, _announced, restore = handoff_fixture(true)
+            local router = ctx.agent_ctx:get_current_agent()
+            router.bindings = { lifecycle = { { binding = "binding:router" } } }
+            local switch = ctx.agent_ctx.switch_to_agent
+            local latest = nil
+            ctx.agent_ctx.switch_to_agent = function(self, id)
+                local ok, err = switch(self, id)
+                local successor = self:get_current_agent()
+                successor.bindings = { lifecycle = { { binding = "binding:help" } } }
+                local step = successor.step
+                successor.step = function(...)
+                    local result = step(...)
+                    latest = "help-final"
+                    return result
+                end
+                return ok, err
+            end
+            local messages = ctx.reader.messages
+            ctx.reader.messages = function(...)
+                local query = messages(...)
+                query.last = function()
+                    return { all = function()
+                        return { { message_id = latest or (ctx.handoff_settled and "handoff-tool-result" or "msg-user") } }, nil
+                    end }
+                end
+                return query
+            end
+            local transitions = {}
+            message_handlers._lifecycle_runtime = {
+                apply = function(_bindings, payload)
+                    if payload.phase == "deactivate" then transitions[#transitions + 1] = payload end
+                    return { applied = 1, messages = {} }, nil
+                end,
+            }
+            local ok, err = bus:run()
+            restore()
+            test.is_nil(err)
+            test.is_true(ok)
+            test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+            test.is_nil(select(2, message_handlers.deactivate_current_agent(ctx, "session_finished")))
+            message_handlers._lifecycle_runtime = nil
+            test.eq(#transitions, 2)
+            test.eq(transitions[2].agent.id, "agent:help")
+            test.eq(transitions[2].refs.deactivation_range.to_id, "help-final")
+            test.eq(transitions[2].refs.deactivation_range.from_id, "handoff-tool-result",
+                "the successor range starts after the predecessor's settled tool result")
         end)
 
         it("does not start the new agent when Stop lands in the handoff round", function()

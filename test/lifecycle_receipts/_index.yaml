@@ -1,0 +1,15 @@
+version: "1.0"
+namespace: app.lifecycle_receipts
+
+entries:
+  - name: fail
+    kind: function.lua
+    source: file://fixtures.lua
+    method: fail
+
+  - name: binding
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:lifecycle
+        methods:
+          apply: app.lifecycle_receipts:fail

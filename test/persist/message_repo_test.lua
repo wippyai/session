@@ -814,6 +814,9 @@ local function define_tests()
         end)
 
         it("orders historical dates exactly across fractions, offsets, ties and every cursor direction", function()
+            local db = sql.get(consts.get_db_resource())
+            assert(db)
+            local sqlite = db:type() == "sqlite"
             local dates = {
                 "2099-01-01T00:00:00Z", "2099-01-01T00:00:00.000000001Z",
                 "2099-01-01T00:00:00.1Z", "2099-01-01T00:00:00.100000000Z",
@@ -821,10 +824,19 @@ local function define_tests()
                 "2099-01-01T00:00:00.9Z", "2099-01-01T00:00:00.999999999Z",
                 "2099-01-01T00:00:01Z", "2099-01-01T00:00:01.000Z", "2099-01-01T00:00:01.000000001Z",
             }
+            if not sqlite then
+                -- PostgreSQL stores native timestamps at microsecond precision;
+                -- SQLite's historical text rows retain offsets and nanoseconds.
+                dates = {
+                    "2099-01-01T00:00:00Z", "2099-01-01T00:00:00.000001Z",
+                    "2099-01-01T00:00:00.1Z", "2099-01-01T00:00:00.100000Z",
+                    "2099-01-01T00:00:00.100001Z", "2099-01-01T00:00:00.11Z",
+                    "2099-01-01T00:00:00.9Z", "2099-01-01T00:00:00.999999Z",
+                    "2099-01-01T00:00:01Z", "2099-01-01T00:00:01.000000Z", "2099-01-01T00:00:01.000001Z",
+                }
+            end
             local prefix = uuid.v7() .. "-"
             local ids, insert_errors = {}, {}
-            local db = sql.get(consts.get_db_resource())
-            assert(db)
             for index, date in ipairs(dates) do
                 ids[index] = prefix .. string.format("%02d", index)
                 local _, err = db:execute(
@@ -839,8 +851,11 @@ local function define_tests()
             local typed, typed_err = message_repo.list_by_type(test_data.session_id, "function", 3, 1)
             local latest, latest_err = message_repo.get_latest(test_data.session_id)
             local all, all_err = message_repo.list_all_by_session(test_data.session_id)
-            local plan, plan_err = db:query("EXPLAIN QUERY PLAN SELECT message_id FROM messages WHERE session_id = $1 ORDER BY "
-                .. message_order.SQLITE_DATE .. " DESC, message_id DESC LIMIT 3", {test_data.session_id})
+            local plan, plan_err
+            if sqlite then
+                plan, plan_err = db:query("EXPLAIN QUERY PLAN SELECT message_id FROM messages WHERE session_id = $1 ORDER BY "
+                    .. message_order.SQLITE_DATE .. " DESC, message_id DESC LIMIT 3", {test_data.session_id})
+            end
             local _, cleanup_err = db:execute("DELETE FROM messages WHERE session_id = $1 AND message_id LIKE $2",
                 {test_data.session_id, prefix .. "%"})
             db:release()
@@ -852,7 +867,11 @@ local function define_tests()
             test.eq(#after, #dates)
             for index, row in ipairs(after) do
                 test.eq(row.message_id, ids[index])
-                test.eq(row.date, dates[index], "stored/output timestamp must not be rewritten")
+                local expected = dates[index]
+                if not sqlite then
+                    expected = assert(time.parse(time.RFC3339NANO, expected)):utc():format(time.RFC3339NANO)
+                end
+                test.eq(row.date, expected, "stored/output timestamp must preserve the backend's precision")
             end
             for index = 1, 3 do
                 test.eq(tail[index].message_id, ids[#ids - 3 + index])
@@ -865,11 +884,13 @@ local function define_tests()
             test.is_true(forward.has_more)
             test.eq(forward.prev_cursor, ids[6])
             test.eq(backward.next_cursor, ids[4])
-            local details = {}
-            for _, row in ipairs(plan) do details[#details + 1] = row.detail end
-            local description = table.concat(details, " ")
-            test.contains(description, "idx_messages_chronology")
-            test.is_false(description:find("TEMP B-TREE", 1, true) ~= nil)
+            if sqlite then
+                local details = {}
+                for _, row in ipairs(plan) do details[#details + 1] = row.detail end
+                local description = table.concat(details, " ")
+                test.contains(description, "idx_messages_chronology")
+                test.is_false(description:find("TEMP B-TREE", 1, true) ~= nil)
+            end
             test.eq(message_order.date("postgres"), "date", "native PostgreSQL comparison stays unchanged")
         end)
 
