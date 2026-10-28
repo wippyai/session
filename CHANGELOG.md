@@ -9,6 +9,17 @@
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
 
+## [0.6.16](https://github.com/wippyai/session/compare/v0.6.15...v0.6.16) (2026-10-28)
+
+### Bug Fixes
+
+* Persist and publish standalone artifact references immediately while a tool call is running, preserving their place in conversation history ([#103](https://github.com/wippyai/session/pull/103)).
+* Carry inline artifact references as server-owned `presentation.artifact_refs` metadata on the next terminal assistant record and live CONTENT update. Preserve references across tool rounds and truncated responses, clear them for a new turn, and reject model-supplied presentation references ([#97](https://github.com/wippyai/session/pull/97)).
+
+### Client compatibility
+
+* Inline fallback display requires a renderer that consumes `presentation.artifact_refs` and deduplicates references against successfully rendered authored artifact tags. This backend release does not add that renderer; existing clients continue using authored tags and standalone artifact messages.
+
 ## [0.6.15](https://github.com/wippyai/session/compare/v0.6.14...v0.6.15) (2026-10-27)
 
 
