@@ -270,8 +270,13 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             request_id = payload_data.request_id }
     elseif payload_data.command == consts.COMMANDS.ARTIFACT then
         if payload_data.artifact_id then
-            op = { type = consts.OP_TYPE.REFERENCE_ARTIFACT,
-                artifact_id = payload_data.artifact_id, request_id = payload_data.request_id }
+            if bus.state == "closed" or bus.state == "draining_finish" then
+                ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), "Session is finishing")
+            else
+                reference_artifact(ctx, { artifact_id = payload_data.artifact_id,
+                    request_id = payload_data.request_id })
+            end
+            return true
         elseif payload_data.artifacts then
             op = { type = consts.OP_TYPE.CONTROL_ARTIFACTS,
                 artifacts = payload_data.artifacts, request_id = payload_data.request_id }
@@ -606,7 +611,6 @@ local function run(args: SessionArgs)
     bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, session_handlers.check_background_triggers)
     bus:mount_op_handler(consts.OP_TYPE.EXECUTE_FUNCTION, session_handlers.execute_function)
     bus:mount_op_handler(consts.OP_TYPE.HANDLE_CONTEXT, control_handlers.handle_context_command)
-    bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, reference_artifact)
 
     if args.create then
 
