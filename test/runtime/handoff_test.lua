@@ -524,6 +524,71 @@ local function run_stream_stop()
     if cleanup_err then error(cleanup_err) end
 end
 
+local function run_artifact_scenario()
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("scenario", { hold_handoff = true, parent = process.pid() })
+    local session_id, context_id, artifact_id = uuid.v7(), uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    observed = {}
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, "Runtime artifact", "test", {}, {
+        agent_id = "app.runtime:router", model = "session-runtime-router",
+    }))
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "artifact-input", data = { text = "Please hand off this request." },
+        }))
+        local held = receive_until(function(topic) return topic == "fixture:handoff_ready" end, "running tool call")
+        local persistence = assert(writer.new(session_id))
+        assert(persistence:create_artifact(artifact_id, consts.ARTIFACT_TYPES.VIEW_REF, "Progress", "{}",
+            { page_id = "app.runtime:progress" }))
+        assert(process.send("session." .. session_id, consts.TOPICS.COMMAND, {
+            command = consts.COMMANDS.ARTIFACT, artifact_id = artifact_id,
+        }))
+        local announced = receive_until(function(_, payload)
+            return payload.type == consts.MSG_TYPE.ARTIFACT and payload.artifact_id == artifact_id
+        end, "artifact reference while the tool call runs")
+        local stored, call = nil, nil
+        for _, message in ipairs(assert(message_repo.list_all_by_session(session_id))) do
+            if message.type == consts.MSG_TYPE.ARTIFACT then stored = message end
+            if message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-handoff" then call = message end
+        end
+        test.not_nil(stored, "The artifact reference must be stored before the tool call returns")
+        test.eq(stored.message_id, announced.message_id)
+        test.eq(stored.metadata.artifact_id, artifact_id)
+        test.not_nil(call)
+        test.eq(call.metadata.status, consts.FUNC_STATUS.PENDING)
+        assert(process.send(held.pid, "fixture:release", true))
+        receive_until(function(topic, payload)
+            return topic == "session:" .. session_id and payload.status == consts.STATUS.IDLE
+        end, "completed turn")
+        close_process(pid, session_id)
+        local positions = {}
+        for index, message in ipairs(assert(message_repo.list_all_by_session(session_id))) do
+            if message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-handoff" then
+                positions.call = index
+            elseif message.type == consts.MSG_TYPE.ARTIFACT then
+                positions.artifact = index
+            elseif message.type == consts.MSG_TYPE.ASSISTANT and message.data == "The help agent completed the handoff." then
+                positions.answer = index
+            end
+        end
+        test.not_nil(positions.call)
+        test.not_nil(positions.artifact)
+        test.not_nil(positions.answer)
+        test.is_true(positions.call < positions.artifact and positions.artifact < positions.answer,
+            "The artifact reference must stay between the running call and the final answer")
+    end)
+    local _, cleanup_err = stop_active_process()
+    session_repo.delete(session_id)
+    context_repo.delete(context_id)
+    storage:release()
+    if not ok then error(failure) end
+    if cleanup_err then error(cleanup_err) end
+end
+
 local function define_checkpoint_tests()
     test.describe("Session checkpoint continuity through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
@@ -655,6 +720,10 @@ local function define_tests()
             test.not_nil(observed.exit.from)
             test.is_true(observed.row_present)
         end)
+    end)
+    test.describe("Session artifact references through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("renders an artifact announced by another process while a tool call is running", run_artifact_scenario)
     end)
 end
 
