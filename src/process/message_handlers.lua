@@ -525,6 +525,10 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.last_round_failed = false
     state.last_round_tools = nil
     state.route = nil
+    -- Presentation obligations belong only to the turn that created them.
+    -- An interrupted/cancelled turn must never render an old artifact in a
+    -- later user's answer.
+    state.pending_inline_artifacts = nil
     state.active = true
     return state
 end
@@ -938,6 +942,57 @@ local function error_text(err: any): string
         return err.message
     end
     return tostring(err)
+end
+
+-- Inline artifacts are created by a tool round, then normally referenced by
+-- the model in its following response. A terminal response carries the
+-- system-issued references as presentation metadata as well. The renderer owns
+-- placement: it preserves an authored component when it rendered one and
+-- mounts a missing reference outside the Markdown body.  Session must not
+-- append markup to model text: Markdown may legally end in an unterminated
+-- fence, quote, or HTML context.
+local function terminal_inline_artifact_presentation(ctx: SessionContext,
+    tool_call_count: number): (any?, {any}?)
+    local state = ctx.turn_state
+    local pending = state and state.pending_inline_artifacts
+    if type(pending) ~= "table" or #pending == 0 or tool_call_count > 0 then return nil, nil end
+
+    local refs = {}
+    local seen = {}
+    for _, artifact in ipairs(pending) do
+        local artifact_id = type(artifact) == "table" and artifact.artifact_id or nil
+        if type(artifact_id) == "string" and artifact_id ~= "" and not seen[artifact_id] then
+            refs[#refs + 1] = { artifact_id = artifact_id }
+            seen[artifact_id] = true
+        end
+    end
+    if #refs == 0 then return nil, nil end
+    return { artifact_refs = refs }, pending
+end
+
+local function commit_inline_artifacts(ctx: SessionContext, pending: {any}?)
+    if pending and ctx.turn_state and ctx.turn_state.pending_inline_artifacts == pending then
+        ctx.turn_state.pending_inline_artifacts = nil
+    end
+end
+
+local function queue_inline_artifacts(ctx: SessionContext, created_artifacts: any)
+    if type(created_artifacts) ~= "table" then return end
+    local pending = nil
+    for _, artifact in ipairs(created_artifacts) do
+        if type(artifact) == "table" and artifact.inline == true
+            and type(artifact.artifact_id) == "string" and artifact.artifact_id ~= "" then
+            pending = pending or {}
+            table.insert(pending, { artifact_id = artifact.artifact_id })
+        end
+    end
+    if pending and #pending > 0 then
+        local state = turn_state(ctx)
+        state.pending_inline_artifacts = state.pending_inline_artifacts or {}
+        for _, artifact in ipairs(pending) do
+            table.insert(state.pending_inline_artifacts, artifact)
+        end
+    end
 end
 
 -- Ends only the current turn after an agent, provider, or configuration failure; the
@@ -1487,6 +1542,8 @@ function message_handlers.agent_step(ctx, op)
     if result.truncated then
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
+        -- A truncated response is not terminal. Keep presentation refs for the
+        -- eventual tool-free answer rather than attaching them to partial text.
         if result.result and result.result ~= "" then
             local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
@@ -1612,7 +1669,11 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
-    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall or behavior_round then
+    local terminal_presentation, pending_inline_artifacts = terminal_inline_artifact_presentation(
+        ctx :: SessionContext, #unified_tool_calls)
+
+    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall
+        or behavior_round or terminal_presentation then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
         local metadata = {
@@ -1633,9 +1694,13 @@ function message_handlers.agent_step(ctx, op)
 
         if result.metadata then
             for k, v in pairs(result.metadata) do
-                metadata[k] = v
+                if k ~= "presentation" then metadata[k] = v end
             end
         end
+        -- This is server-owned presentation data, never model output.  It is
+        -- intentionally stored with the terminal assistant message so reloads
+        -- and live delivery use the same contract.
+        if terminal_presentation then metadata.presentation = terminal_presentation end
         if behavior_round then
             metadata.behavior_controls = behavior_controls
             metadata.behavior_control_state = "pending"
@@ -1672,6 +1737,7 @@ function message_handlers.agent_step(ctx, op)
             return nil, store_err
         end
         assistant_message_id = stored_id
+        commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts)
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
         result.call_message_types = call_message_types
@@ -1690,10 +1756,11 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        if result.result and result.result ~= "" then
+        if result.result and result.result ~= "" or terminal_presentation then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
-                using_tools = (#unified_tool_calls > 0)
+                using_tools = (#unified_tool_calls > 0),
+                presentation = terminal_presentation
             })
         end
     else
@@ -2131,6 +2198,9 @@ function message_handlers.process_tools(ctx, op)
                     if not ran or effect_err or not applied then
                         local reason = ran and (effect_err or "Control effect failed") or applied
                         return fail_remaining(index, reason)
+                    end
+                    if effect[1] == control_handlers.control_artifacts then
+                        queue_inline_artifacts(ctx, applied.created_artifacts)
                     end
                 end
             end

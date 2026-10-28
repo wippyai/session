@@ -3,6 +3,7 @@ local consts = require("consts")
 local message_handlers = require("message_handlers")
 local default_lifecycle_error_report = message_handlers._report_lifecycle_errors
 local session_handlers = require("session_handlers")
+local session = require("session")
 local command_bus = require("command_bus")
 local tool_caller = require("tool_caller")
 local control_handlers = require("control_handlers")
@@ -627,9 +628,15 @@ local function define_tests()
         it("dispatches after_persist for a stored truncated response", function()
             local ctx, captured = mock_ctx(lifecycle_agent({ result = "partial reasoning", truncated = true,
                 truncation_reason = "tool_calls" }))
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "pending-artifact" }},
+            }
             local phases = record_phases(captured)
 
-            local result, err = user_step(ctx)
+            local result, err = continue_step(ctx)
 
             test.is_nil(err)
             test.is_false(result.completed)
@@ -638,6 +645,8 @@ local function define_tests()
             test.eq(persisted.payload.refs.event_id, assistant.id)
             test.not_nil(persisted.stored[assistant.id])
             test.eq(persisted.payload.outcome.state, "continues")
+            test.is_nil(assistant.metadata.presentation)
+            test.eq(ctx.turn_state.pending_inline_artifacts[1].artifact_id, "pending-artifact")
         end)
 
         it("dispatches after_persist for retained text from a stopped response", function()
@@ -1065,6 +1074,352 @@ local function define_tests()
             local triggered, trigger_err = session_handlers.check_background_triggers(ctx, check)
             test.is_nil(trigger_err)
             test.is_true(triggered.checkpoint_triggered)
+        end)
+    end)
+
+    describe("inline artifact presentation", function()
+        it("does not accept presentation refs supplied in agent metadata", function()
+            local agent = fake_agent(nil)
+            agent.step = function()
+                return {
+                    result = "An ordinary answer.",
+                    metadata = {
+                        presentation = { artifact_refs = {{ artifact_id = "foreign-artifact" }} },
+                        provider_marker = "retained",
+                    },
+                }
+            end
+            local ctx, captured = mock_ctx(agent)
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.is_nil(answer.metadata.presentation)
+            test.eq(answer.metadata.provider_marker, "retained")
+            test.is_nil(captured.message_updates[#captured.message_updates].payload.presentation)
+        end)
+
+        it("persists and publishes server-owned refs when the model omits its inline tag", function()
+            local agent = fake_agent(nil)
+            local steps = 0
+            local ctx, captured = mock_ctx(agent)
+            local expected_tag = nil
+            ctx.writer.create_artifact = function() return true end
+            local function stored_rows()
+                local rows = {}
+                for _, row in ipairs(captured.stored) do
+                    table.insert(rows, {
+                        message_id = row.id,
+                        type = row.type,
+                        data = row.content,
+                        metadata = row.metadata,
+                    })
+                end
+                return rows, nil
+            end
+            ctx.reader.messages = function()
+                return { from_checkpoint = function(self) return self end, all = stored_rows }
+            end
+
+            agent.step = function(_self, builder)
+                steps = steps + 1
+                if steps == 1 then
+                    return { result = "", tool_calls = {{
+                        id = "create-chart", name = "CreateArtifact", arguments = "{}",
+                        registry_id = "kickside.agents.traits:create_artifact",
+                    }} }
+                end
+                local found_instruction = false
+                for _, message in ipairs(builder:get_messages()) do
+                    if message.role == "developer" and message.content and message.content[1]
+                        and message.content[1].text and message.content[1].text:find(expected_tag, 1, true) then
+                        found_instruction = true
+                    end
+                end
+                test.is_true(found_instruction,
+                    "the next same-turn model request must include the generated artifact tag instruction")
+                return { result = "Here are the observations." }
+            end
+
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    set_strategy = function() end,
+                    validate = function(_self, calls)
+                        return { [calls[1].id] = {
+                            valid = true, name = calls[1].name, args = {}, registry_id = calls[1].registry_id,
+                        } }, nil
+                    end,
+                    execute = function(_self, _context, tools)
+                        local call = tools["create-chart"]
+                        return { ["create-chart"] = { tool_call = call, result = {
+                            success = true,
+                            _control = { artifacts = {{
+                                title = "Quarterly chart", content = "<svg></svg>", instructions = true,
+                            }} },
+                        } } }
+                    end,
+                }
+            end
+
+            local ok, failure = pcall(function()
+                local first, first_err = user_step(ctx)
+                test.is_nil(first_err)
+                local tool_op = find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+                test.not_nil(tool_op)
+
+                local settled, settle_err = message_handlers.process_tools(ctx, tool_op)
+                test.is_nil(settle_err)
+                expected_tag = '<artifact id="' .. ctx.turn_state.pending_inline_artifacts[1].artifact_id .. '"/>'
+
+                -- A concurrently announced standalone artifact must not consume
+                -- or duplicate the inline references owned by this tool round.
+                local pending = ctx.turn_state.pending_inline_artifacts
+                session.reference_artifact(ctx, { artifact_id = "live-standalone", request_id = "live-ref" })
+                test.eq(ctx.turn_state.pending_inline_artifacts, pending)
+                local standalone = stored_of_type(captured, consts.MSG_TYPE.ARTIFACT)
+                test.eq(#standalone, 1)
+                test.eq(standalone[1].metadata.artifact_id, "live-standalone")
+
+                local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
+                test.not_nil(continuation)
+                local final, final_err = message_handlers.agent_continue(ctx, continuation)
+                test.is_nil(final_err)
+                test.is_true(final.completed)
+                test.eq(captured.response_batches[2].content, "Here are the observations.")
+                local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[2]
+                test.eq(#answer.metadata.presentation.artifact_refs, 1)
+                test.eq(answer.metadata.presentation.artifact_refs[1].artifact_id,
+                    expected_tag:match('id="([^"]+)"'))
+                test.is_nil(ctx.turn_state.pending_inline_artifacts)
+                local last_update = captured.message_updates[#captured.message_updates]
+                test.eq(last_update.type, consts.UPSTREAM_TYPES.CONTENT)
+                test.eq(last_update.payload.content, captured.response_batches[2].content)
+                test.eq(last_update.payload.presentation, answer.metadata.presentation)
+            end)
+            tool_caller.new = original_new
+            test.is_true(ok, tostring(failure))
+        end)
+
+        it("keeps authored placement in the model body and supplies the same ref for renderer deduplication", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local tag = '<artifact id="artifact-1"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            agent.step = function()
+                return {
+                    result = "The chart is below.\n\n" .. tag,
+                    metadata = { presentation = { artifact_refs = {{ artifact_id = "foreign-artifact" }} } },
+                }
+            end
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.response_batches[1].content, "The chart is below.\n\n" .. tag)
+            test.eq(captured.response_batches[1].calls[1], nil)
+            local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(answer.metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
+            test.eq(captured.message_updates[#captured.message_updates].payload.presentation,
+                answer.metadata.presentation)
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
+
+        it("does not put fallback markup inside an unterminated Markdown fence", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            -- Markdown parsers render every later line as code until a closing
+            -- fence. A text-appended tag would therefore be escaped and hidden.
+            local body = "```html\n<artifact id=\"artifact-1\"/>\nmodel stopped here"
+            ctx.turn_state = {
+                active = true, steps = 0, repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            agent.step = function() return { result = body, finish_reason = "stop" } end
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            -- The presentation owner receives the reference separately and can
+            -- mount it after Markdown, outside this still-open fence.
+            test.eq(captured.response_batches[1].content, body)
+            local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(answer.metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
+
+        it("publishes each pending artifact once in creation order", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }, { artifact_id = "artifact-2" }},
+            }
+            agent.step = function() return { result = "Both charts are ready." } end
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.response_batches[1].content, "Both charts are ready.")
+            local refs = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].metadata.presentation.artifact_refs
+            test.eq(refs[1].artifact_id, "artifact-1")
+            test.eq(refs[2].artifact_id, "artifact-2")
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
+
+        it("delivers refs even when a terminal model reply has no body", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            ctx.turn_state = {
+                active = true, steps = 0, repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            agent.step = function() return { result = "" } end
+
+            local result, err = continue_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1]
+            test.eq(answer.content, "")
+            test.eq(answer.metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
+            local update = captured.message_updates[#captured.message_updates]
+            test.eq(update.type, consts.UPSTREAM_TYPES.CONTENT)
+            test.eq(update.payload.content, "")
+            test.eq(update.payload.presentation, answer.metadata.presentation)
+        end)
+
+        it("holds fallback delivery until the terminal response after a tool round", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local tag = '<artifact id="artifact-1"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            local steps = 0
+            agent.step = function()
+                steps = steps + 1
+                if steps == 1 then
+                    return { result = "I created it here: " .. tag, tool_calls = {{
+                        id = "follow-up", name = "Lookup", arguments = "{}", registry_id = "app:lookup",
+                    }} }
+                end
+                return { result = "The follow-up is complete." }
+            end
+
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    set_strategy = function() end,
+                    validate = function(_self, calls)
+                        return { [calls[1].id] = {
+                            valid = true, name = calls[1].name, args = {}, registry_id = calls[1].registry_id,
+                        } }, nil
+                    end,
+                    execute = function(_self, _context, tools)
+                        return { ["follow-up"] = { tool_call = tools["follow-up"], result = "done" } }
+                    end,
+                }
+            end
+
+            local ok, failure = pcall(function()
+                local first, first_err = continue_step(ctx)
+                test.is_nil(first_err)
+                test.eq(captured.response_batches[1].content, "I created it here: " .. tag)
+                test.not_nil(ctx.turn_state.pending_inline_artifacts)
+
+                local tool_op = find_op(first.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+                local settled, settle_err = message_handlers.process_tools(ctx, tool_op)
+                test.is_nil(settle_err)
+                local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
+                local final, final_err = message_handlers.agent_continue(ctx, continuation)
+                test.is_nil(final_err)
+                test.is_true(final.completed)
+                test.eq(captured.response_batches[2].content, "The follow-up is complete.")
+                local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+                test.is_nil(answers[1].metadata.presentation)
+                test.eq(answers[2].metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
+            end)
+            tool_caller.new = original_new
+            test.is_true(ok, tostring(failure))
+        end)
+
+        it("does not carry an interrupted turn's artifact into a new user turn", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            ctx.turn_state = {
+                active = true,
+                steps = 1,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "old-artifact" }},
+            }
+            agent.step = function() return { result = "A new answer." } end
+
+            ctx.stop_requested = true
+            local finished, finish_err = message_handlers.finish_turn(ctx)
+            test.is_nil(finish_err)
+            test.is_true(finished.completed)
+            ctx.stop_requested = false
+
+            local result, err = message_handlers.agent_step(ctx, {
+                message_id = "new-user-message", request_id = "new-request", from_user = true,
+            })
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(captured.response_batches[1].content, "A new answer.")
+            test.is_nil(ctx.turn_state.pending_inline_artifacts)
+        end)
+
+        it("holds presentation refs across a truncated response", function()
+            local agent = fake_agent(nil)
+            local ctx, captured = mock_ctx(agent)
+            local tag = '<artifact id="artifact-1"/>'
+            ctx.turn_state = {
+                active = true,
+                steps = 0,
+                repeated_calls = 0,
+                pending_inline_artifacts = {{ artifact_id = "artifact-1" }},
+            }
+            local steps = 0
+            agent.step = function()
+                steps = steps + 1
+                if steps == 1 then return { result = "Partial: " .. tag, truncated = true } end
+                return { result = "Completed after retry." }
+            end
+
+            local partial, partial_err = continue_step(ctx)
+            test.is_nil(partial_err)
+            test.not_nil(ctx.turn_state.pending_inline_artifacts)
+            test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].content, "Partial: " .. tag)
+
+            local retry = find_op(partial.next_ops, consts.OP_TYPE.AGENT_STEP)
+            local final, final_err = message_handlers.agent_step(ctx, retry)
+            test.is_nil(final_err)
+            test.is_true(final.completed)
+            test.eq(captured.response_batches[1].content, "Completed after retry.")
+            local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.is_nil(answers[1].metadata.presentation)
+            test.eq(answers[2].metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
         end)
     end)
 

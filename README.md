@@ -289,7 +289,7 @@ An artifact carries two independent settings.
 | Setting | Field on `_control.artifacts[]` | Stored as |
 |---|---|---|
 | Render mode | `type` | the `kind` column |
-| Placement | `display_type` | `meta.display_type` |
+| Placement hint | `display_type` | `meta.display_type` |
 
 **Render mode** determines how a client draws the artifact. It is returned as
 `type` by `GET /artifact/{id}`.
@@ -304,29 +304,50 @@ An artifact carries two independent settings.
 Values are stored verbatim and are not validated. A value outside this set
 matches no renderer branch, and the artifact renders as nothing.
 
-**Placement** determines which messages this module writes, and therefore how
-the artifact reaches the thread.
+`display_type` is a stored placement hint. The `instructions` flag determines
+which messages this module writes and whether it queues an inline presentation
+reference.
 
-| `display_type` | Messages written | How it reaches the thread |
+| `instructions` | Messages written | How it reaches the thread |
 |---|---|---|
-| `standalone` | `type="artifact"` with `metadata.artifact_id`, plus `system` `artifact_created` | the client renders the artifact message |
-| `inline` | a `developer` message carrying an embed instruction, plus `system` | the agent pastes `<artifact id="…"/>` into its reply |
+| `false` | `type="artifact"` with `metadata.artifact_id`, plus `system` `artifact_created` | the client renders the artifact message |
+| `true` or omitted | a `developer` message carrying an embed instruction, plus `system` | a terminal assistant message carries `metadata.presentation.artifact_refs` for a compatible renderer |
 
-The reference tools derive placement from `instructions`: `true` → `inline`,
-otherwise `standalone`. The standalone artifact message is written only when
-`instructions` is exactly `false`; `nil` does not qualify.
+The standalone artifact message is written only when `instructions` is exactly
+`false`. Omitted instructions request inline delivery; setting `display_type`
+alone does not switch delivery to a standalone message.
 
-The two settings are independent — any combination is valid. A `standalone`
-placement with an `inline` render mode puts the content in its own message; a
-`standalone` render mode with an `inline` placement gives a chip embedded in the
-agent's reply.
+Render mode is independent of delivery. `instructions=false` with `type=inline`
+puts content in its own artifact message. Inline delivery with `type=standalone`
+provides a reference that a compatible client can present as a chip.
 
-Placement must not be mapped onto `type`. Returning `meta.display_type` as
-`type` for every kind was tried and reverted: it collapses the two settings into
-one, so a `standalone` placement can no longer carry inline content — the
-combination the reference tools produce by default. An author who wants a chip
-asks for the render mode directly (`type = "standalone"`) rather than getting it
-as a side effect of where the artifact is delivered.
+**Unreleased renderer contract:** the metadata fallback described here requires
+a renderer that consumes `presentation.artifact_refs` outside the Markdown body
+and deduplicates it against successfully rendered authored `<artifact>` tags.
+That companion and its live SQLite/PostgreSQL checks remain prerequisites for
+releasing this change. Older clients ignore the field and keep their existing
+behavior; this backend change alone does not make a missing tag visible.
+
+References belong to the creating turn. Session retains them through tool calls
+and truncated responses, then attaches them to the next tool-free terminal
+assistant record and its CONTENT update. Empty terminal text can still carry
+references. Starting a new turn discards pending references from an interrupted
+or cancelled turn. A stored truncated record still runs `after_persist` without
+consuming the references.
+
+The reserved metadata field has this shape:
+
+```json
+{"presentation":{"artifact_refs":[{"artifact_id":"generated-artifact-id"}]}}
+```
+
+Session derives these IDs from successful tool-created artifacts. Agent-supplied
+`metadata.presentation` is ignored; unrelated agent metadata is preserved. No
+markup is appended to model text, including unfinished Markdown fences.
+
+Keep the stored `type` and `display_type` separate when returning artifact
+metadata. To request a chip, set the render mode directly (`type="standalone"`).
+Changing the placement hint does not change how the client draws the content.
 
 ### Content modes
 
@@ -354,7 +375,7 @@ return {
         content      = "# Q3 …",       -- one content mode
         content_type = "text/markdown",
         type         = "standalone",   -- render mode; omitted ⇒ "inline"
-        display_type = "standalone",   -- placement
+        display_type = "standalone",   -- stored placement hint
         instructions = false,
         preview      = "",             -- shown before the artifact loads
         description  = nil,
