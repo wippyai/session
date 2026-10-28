@@ -9,6 +9,16 @@
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
 
+## [0.6.16](https://github.com/wippyai/session/compare/v0.6.15...v0.6.16) (2026-10-28)
+
+
+### Bug Fixes
+
+* render artifact references while a turn is running ([dcc8261](https://github.com/wippyai/session/commit/dcc82612c84c860426635b81861d25d15ad10f68))
+* render artifact references while a turn is running ([8865b53](https://github.com/wippyai/session/commit/8865b5323663c54c2e0a15540a9164e289d98e92))
+* **session:** carry inline artifacts as presentation metadata ([956ed97](https://github.com/wippyai/session/commit/956ed977fcf7772118f726127092691cddd2d46f))
+* **session:** preserve server-owned artifact presentation on current master ([f414c73](https://github.com/wippyai/session/commit/f414c7374ae9ec1bce4ac3ca294bb09c76bc00b5))
+
 ## [0.6.15](https://github.com/wippyai/session/compare/v0.6.14...v0.6.15) (2026-10-27)
 
 
