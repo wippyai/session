@@ -3,6 +3,7 @@ local consts = require("consts")
 local message_handlers = require("message_handlers")
 local default_lifecycle_error_report = message_handlers._report_lifecycle_errors
 local session_handlers = require("session_handlers")
+local session = require("session")
 local command_bus = require("command_bus")
 local tool_caller = require("tool_caller")
 local control_handlers = require("control_handlers")
@@ -1175,6 +1176,15 @@ local function define_tests()
                 test.is_nil(settle_err)
                 expected_tag = '<artifact id="' .. ctx.turn_state.pending_inline_artifacts[1].artifact_id .. '"/>'
 
+                -- A concurrently announced standalone artifact must not consume
+                -- or duplicate the inline references owned by this tool round.
+                local pending = ctx.turn_state.pending_inline_artifacts
+                session.reference_artifact(ctx, { artifact_id = "live-standalone", request_id = "live-ref" })
+                test.eq(ctx.turn_state.pending_inline_artifacts, pending)
+                local standalone = stored_of_type(captured, consts.MSG_TYPE.ARTIFACT)
+                test.eq(#standalone, 1)
+                test.eq(standalone[1].metadata.artifact_id, "live-standalone")
+
                 local continuation = find_op(settled.next_ops, consts.OP_TYPE.AGENT_CONTINUE)
                 test.not_nil(continuation)
                 local final, final_err = message_handlers.agent_continue(ctx, continuation)
@@ -1182,6 +1192,7 @@ local function define_tests()
                 test.is_true(final.completed)
                 test.eq(captured.response_batches[2].content, "Here are the observations.")
                 local answer = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[2]
+                test.eq(#answer.metadata.presentation.artifact_refs, 1)
                 test.eq(answer.metadata.presentation.artifact_refs[1].artifact_id,
                     expected_tag:match('id="([^"]+)"'))
                 test.is_nil(ctx.turn_state.pending_inline_artifacts)
