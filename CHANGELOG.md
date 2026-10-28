@@ -11,13 +11,14 @@
 
 ## [0.6.16](https://github.com/wippyai/session/compare/v0.6.15...v0.6.16) (2026-10-28)
 
-
 ### Bug Fixes
 
-* render artifact references while a turn is running ([dcc8261](https://github.com/wippyai/session/commit/dcc82612c84c860426635b81861d25d15ad10f68))
-* render artifact references while a turn is running ([8865b53](https://github.com/wippyai/session/commit/8865b5323663c54c2e0a15540a9164e289d98e92))
-* **session:** carry inline artifacts as presentation metadata ([956ed97](https://github.com/wippyai/session/commit/956ed977fcf7772118f726127092691cddd2d46f))
-* **session:** preserve server-owned artifact presentation on current master ([f414c73](https://github.com/wippyai/session/commit/f414c7374ae9ec1bce4ac3ca294bb09c76bc00b5))
+* Persist and publish standalone artifact references immediately while a tool call is running, preserving their place in conversation history ([#103](https://github.com/wippyai/session/pull/103)).
+* Carry inline artifact references as server-owned `presentation.artifact_refs` metadata on the next terminal assistant record and live CONTENT update. Preserve references across tool rounds and truncated responses, clear them for a new turn, and reject model-supplied presentation references ([#97](https://github.com/wippyai/session/pull/97)).
+
+### Client compatibility
+
+* Inline fallback display requires a renderer that consumes `presentation.artifact_refs` and deduplicates references against successfully rendered authored artifact tags. This backend release does not add that renderer; existing clients continue using authored tags and standalone artifact messages.
 
 ## [0.6.15](https://github.com/wippyai/session/compare/v0.6.14...v0.6.15) (2026-10-27)
 
