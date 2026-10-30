@@ -2,6 +2,7 @@ local sql = require("sql")
 local json = require("json")
 local time = require("time")
 local consts = require("consts")
+local message_order = require("message_order")
 
 type Session = {
     session_id: string,
@@ -282,7 +283,7 @@ function session_repo.list_by_user(user_id, limit, offset)
         )
         :from("sessions")
         :where("user_id = ?", user_id)
-        :order_by("last_message_date DESC")
+        :order_by(message_order.date(db:type(), "last_message_date") .. " DESC")
 
     if limit and limit > 0 then
         query = query:limit(limit)

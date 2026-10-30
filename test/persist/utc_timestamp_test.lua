@@ -36,15 +36,17 @@ end
 
 local function define_tests()
     test.describe("UTC persistence", function()
-        local context_id, session_id, created_before
+        local context_id, session_id, created_before, other_sessions
         test.before_all(function() wait_for_boot.run() end)
         test.before_each(function()
             context_id, session_id = uuid.v7(), uuid.v7()
+            other_sessions = {}
             assert(context_repo.create(context_id, "primary", "{}"))
             created_before = time.now():unix()
             assert(session_repo.create(session_id, security.actor():id(), context_id, "UTC persistence", "test"))
         end)
         test.after_each(function()
+            for _, id in ipairs(other_sessions) do test.not_nil((session_repo.delete(id))) end
             test.not_nil((session_repo.delete(session_id)))
             test.not_nil((context_repo.delete(context_id)))
         end)
@@ -93,6 +95,49 @@ local function define_tests()
             local id, epoch = uuid.v7(), 1720000000
             assert(session_contexts_repo.create(id, session_id, "note", "UTC context", epoch))
             test.eq(stored_epoch("session_contexts", "time", "id", id), epoch)
+        end)
+
+        test.it("orders existing offset session dates alongside UTC writes by instant", function()
+            local newer = uuid.v7()
+            assert(session_repo.create(newer, security.actor():id(), context_id, "Newer session", "test"))
+            other_sessions[#other_sessions + 1] = newer
+            local db = assert(sql.get(consts.get_db_resource()))
+            local old = db:type() == sql.type.POSTGRES and "2026-01-01T00:00:00Z" or "2026-01-01T05:30:00+05:30"
+            assert(db:execute("UPDATE sessions SET last_message_date = $1 WHERE session_id = $2", {old, session_id}))
+            assert(db:execute("UPDATE sessions SET last_message_date = $1 WHERE session_id = $2", {"2026-01-01T00:01:00Z", newer}))
+            db:release()
+            local rows = assert(session_repo.list_by_user(security.actor():id(), 1000, 0))
+            local positions = {}
+            for index, row in ipairs(rows) do positions[row.session_id] = index end
+            test.not_nil(positions[newer])
+            test.not_nil(positions[session_id])
+            test.is_true(positions[newer] < positions[session_id], "Session ordering compares wall time instead of instants")
+        end)
+
+        test.it("orders and paginates artifacts across existing offset and UTC dates", function()
+            local old, middle, newest = uuid.v7(), uuid.v7(), uuid.v7()
+            for _, id in ipairs({old, middle, newest}) do
+                assert(artifact_repo.create(id, session_id, "static", "Ordered artifact", "content", {}))
+            end
+            local db = assert(sql.get(consts.get_db_resource()))
+            local old_date = db:type() == sql.type.POSTGRES and "2026-01-01T00:00:00Z" or "2026-01-01T05:30:00+05:30"
+            for _, pair in ipairs({{old, old_date}, {middle, "2026-01-01T00:01:00Z"}, {newest, "2026-01-01T00:02:00Z"}}) do
+                assert(db:execute("UPDATE artifacts SET created_at = $1 WHERE artifact_id = $2", {pair[2], pair[1]}))
+            end
+            db:release()
+            local all = assert(artifact_repo.list_by_session(session_id))
+            test.eq(all[1].artifact_id, newest)
+            test.eq(all[3].artifact_id, old)
+            local kind = assert(artifact_repo.list_by_kind(session_id, "static"))
+            test.eq(kind[1].artifact_id, newest)
+            local cursor
+            for index, id in ipairs({newest, middle, old}) do
+                local page = assert(artifact_repo.list_by_user(security.actor():id(), session_id, 1, cursor))
+                test.eq(#page.artifacts, 1)
+                test.eq(page.artifacts[1].artifact_id, id)
+                test.eq(page.has_more, index < 3)
+                cursor = id
+            end
         end)
     end)
 end

@@ -49,6 +49,7 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:context_repo
   - name: context_repo
@@ -110,6 +111,7 @@ entries:
       - time
     imports:
       consts: wippy.session:consts
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:reader
   - name: reader

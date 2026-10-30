@@ -1,4 +1,4 @@
--- SQLite stores RFC3339Nano as text, whose variable-width fractions do not sort
+-- SQLite stores RFC3339Nano timestamps as text, whose variable-width fractions do not sort
 -- chronologically (".11Z" sorts before ".1Z"). Normalize only the comparison key:
 -- original dates, IDs and cursor contracts remain unchanged, including old rows.
 -- Strip fractions before SQLite's date conversion to avoid millisecond rounding,
@@ -16,10 +16,12 @@ message_order.SQLITE_DATE = [[
         ELSE '' END || '000000000', 1, 9))
 ]]
 
-function message_order.date(db_type: string): string
-    if db_type == "sqlite" then return message_order.SQLITE_DATE end
+-- Column names are constants supplied by the persistence repositories.
+function message_order.date(db_type: string, column: string?): string
+    column = column or "date"
+    if db_type == "sqlite" then return (message_order.SQLITE_DATE:gsub("date", column)) end
     -- PostgreSQL already compares native timestamps, not text.
-    return "date"
+    return column
 end
 
 -- Steering rows can be re-anchored after retrieval. Use the same chronological
