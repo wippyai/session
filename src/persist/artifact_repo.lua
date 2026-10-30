@@ -2,6 +2,7 @@ local sql = require("sql")
 local json = require("json")
 local time = require("time")
 local consts = require("consts")
+local message_order = require("message_order")
 local security = require("security")
 
 type Artifact = {
@@ -95,7 +96,7 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
         user_id = actor:id()
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local insert_query = sql.builder.insert("artifacts")
         :set_map({
@@ -250,7 +251,7 @@ function artifact_repo.update(artifact_id, updates)
     end
 
     -- Always update the updated_at timestamp
-    update_query = update_query:set("updated_at", time.now():format(time.RFC3339))
+    update_query = update_query:set("updated_at", time.now():utc():format(time.RFC3339))
 
     -- Add where clause
     update_query = update_query:where("artifact_id = ?", artifact_id)
@@ -286,7 +287,7 @@ function artifact_repo.list_by_session(session_id, limit, offset)
     local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "meta", "created_at", "updated_at")
         :from("artifacts")
         :where("session_id = ?", session_id)
-        :order_by("created_at DESC")
+        :order_by(message_order.date(db:type(), "created_at") .. " DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then
@@ -335,6 +336,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
     local db, err = get_db()
     if err then return nil, err end
 
+    local date_key = message_order.date(db:type(), "created_at")
     local cursor_created_at = nil
     if cursor_artifact_id then
         local cursor_filters = {
@@ -344,7 +346,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
         if session_id and session_id ~= "" then
             cursor_filters[#cursor_filters + 1] = sql.builder.expr("session_id = ?", session_id)
         end
-        local cursor_query = sql.builder.select("created_at", "artifact_id")
+        local cursor_query = sql.builder.select(date_key .. " AS created_at", "artifact_id")
             :from("artifacts")
             :where(sql.builder.and_(cursor_filters))
             :limit(1)
@@ -366,7 +368,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
     end
     if cursor_created_at and cursor_artifact_id then
         filters[#filters + 1] = sql.builder.expr(
-            "(created_at < ? OR (created_at = ? AND artifact_id < ?))",
+            "(" .. date_key .. " < ? OR (" .. date_key .. " = ? AND artifact_id < ?))",
             cursor_created_at,
             cursor_created_at,
             cursor_artifact_id
@@ -378,7 +380,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
         )
         :from("artifacts")
         :where(sql.builder.and_(filters))
-        :order_by("created_at DESC, artifact_id DESC")
+        :order_by(date_key .. " DESC, artifact_id DESC")
         :limit(limit + 1)
 
     local artifacts, query_err = query:run_with(db):query()
@@ -421,7 +423,7 @@ function artifact_repo.list_by_kind(session_id, kind, limit, offset)
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("kind = ?", kind)
         }))
-        :order_by("created_at DESC")
+        :order_by(message_order.date(db:type(), "created_at") .. " DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then
@@ -527,7 +529,7 @@ function artifact_repo.update_content(artifact_id, content)
     -- same value and one bump would be lost.
     local update_query = sql.builder.update("artifacts")
         :set("content", content)
-        :set("updated_at", time.now():format(time.RFC3339))
+        :set("updated_at", time.now():utc():format(time.RFC3339))
         :set("content_version", sql.builder.expr("content_version + 1"))
         :where("artifact_id = ?", artifact_id)
 
