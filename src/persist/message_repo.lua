@@ -850,7 +850,7 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         return nil, err
     end
 
-    local date_key = message_order.date(db:type())
+    local date_key = message_order.date(db:type(), "date")
 
     -- Default limit if not provided
     limit = limit or 500
@@ -953,7 +953,7 @@ function message_repo.list_after_message(session_id, after_message_id, limit: nu
 
     local date, anchor_err = anchor_date(db, session_id, after_message_id)
     if anchor_err then db:release(); return nil, anchor_err end
-    local date_key = message_order.date(db:type())
+    local date_key = message_order.date(db:type(), "date")
 
     -- Build the SELECT query
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
