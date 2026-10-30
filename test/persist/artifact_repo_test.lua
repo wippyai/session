@@ -20,7 +20,7 @@ local function insert_artifact(db, artifact_id, session_id, user_id, kind, title
         end
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
     local _, insert_err = db:execute(
         "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         { artifact_id, session_id, user_id, kind, title, content or "", meta_json, now, now }

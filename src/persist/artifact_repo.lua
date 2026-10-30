@@ -95,7 +95,7 @@ function artifact_repo.create(artifact_id, session_id, kind, title, content, met
         user_id = actor:id()
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local insert_query = sql.builder.insert("artifacts")
         :set_map({
@@ -250,7 +250,7 @@ function artifact_repo.update(artifact_id, updates)
     end
 
     -- Always update the updated_at timestamp
-    update_query = update_query:set("updated_at", time.now():format(time.RFC3339))
+    update_query = update_query:set("updated_at", time.now():utc():format(time.RFC3339))
 
     -- Add where clause
     update_query = update_query:where("artifact_id = ?", artifact_id)
@@ -527,7 +527,7 @@ function artifact_repo.update_content(artifact_id, content)
     -- same value and one bump would be lost.
     local update_query = sql.builder.update("artifacts")
         :set("content", content)
-        :set("updated_at", time.now():format(time.RFC3339))
+        :set("updated_at", time.now():utc():format(time.RFC3339))
         :set("content_version", sql.builder.expr("content_version + 1"))
         :where("artifact_id = ?", artifact_id)
 

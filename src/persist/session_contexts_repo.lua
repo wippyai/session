@@ -46,7 +46,7 @@ function session_contexts_repo.create(id, session_id, context_type, text, pTime)
     if pTime == nil then
         pTime = time.now():utc():format(time.RFC3339)
     else
-        pTime = time.unix(pTime, 0):format(time.RFC3339)
+        pTime = time.unix(pTime, 0):utc():format(time.RFC3339)
     end
 
     local db, err = get_db()

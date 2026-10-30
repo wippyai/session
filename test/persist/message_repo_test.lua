@@ -229,7 +229,7 @@ local function define_tests()
             if not db then error(db_err) end
             local _, insert_err = db:execute(
                 "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
-                { unrelated_id, test_data.session_id, time.now():format(time.RFC3339NANO),
+                { unrelated_id, test_data.session_id, time.now():utc():format(time.RFC3339NANO),
                     consts.MSG_TYPE.USER, "unrelated", "{malformed" })
             db:release()
             test.is_nil(insert_err)

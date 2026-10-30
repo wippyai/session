@@ -15,6 +15,14 @@
 
 </div>
 
+## Timestamp storage
+
+Session activity, messages, artifacts and session contexts store UTC timestamps.
+PostgreSQL's timestamp columns carry UTC wall time without an offset, so writers
+convert both the current time and explicit Unix timestamps to UTC before
+formatting. SQLite retains the same instant in its timestamp text. Runtime time
+zone settings do not change these stored instants.
+
 ## Session steering
 
 Sessions block new messages during an active turn by default. Add the

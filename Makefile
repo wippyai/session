@@ -5,6 +5,7 @@ TEST_CONFIG ?= $(abspath $(TEST_DIR))/.wippy.yaml
 TEST_DB ?= $(TEST_ARTIFACTS)/test.db
 TEST_BACKUP_DIR ?= $(TEST_ARTIFACTS)/backups
 TEST_FILTER ?=
+TEST_TIMEZONE ?= UTC
 POSTGRES_TEST_OVERRIDES ?=
 POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test
 FRAMEWORK_DIR ?=
@@ -27,7 +28,7 @@ BENCH_FRAMEWORK_REVISION ?= $(if $(FRAMEWORK_DIR),$(shell git -C "$(FRAMEWORK_DI
 
 test: clean
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
-	cd "$(TEST_DIR)" && WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test $(if $(filter 1,$(WIPPY_BENCH_EXACT_ALLOCATIONS)),--profiler) --config "$(TEST_CONFIG)" \
+	cd "$(TEST_DIR)" && TZ="$(TEST_TIMEZONE)" WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test $(if $(filter 1,$(WIPPY_BENCH_EXACT_ALLOCATIONS)),--profiler) --config "$(TEST_CONFIG)" \
 		-o "app:db:file=$(abspath $(TEST_DB))" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
@@ -42,7 +43,7 @@ test-runtime:
 test-postgres:
 	$(MAKE) install
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
-	cd "$(TEST_DIR)" && TZ=UTC WIPPY_TEST_REQUIRE_CASES=1 WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test --config "$(TEST_CONFIG)" \
+	cd "$(TEST_DIR)" && TZ="$(TEST_TIMEZONE)" WIPPY_TEST_REQUIRE_CASES=1 WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test --config "$(TEST_CONFIG)" \
 		-o "app:db:kind=db.sql.postgres" -o "app:db:host=$(PGHOST)" -o "app:db:port=$(PGPORT)" \
 		-o "app:db:database=$(PGDATABASE)" -o "app:db:username=$(PGUSER)" -o "app:db:password=$(PGPASSWORD)" \
 		-o "app:db:options.sslmode=disable" \

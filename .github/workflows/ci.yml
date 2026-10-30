@@ -155,3 +155,7 @@ jobs:
       - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
       - name: Verify PostgreSQL persistence and handoff
         run: make test-postgres-full
+      - name: Verify timestamp persistence outside UTC
+        run: |
+          make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.persist:utc_timestamp_test
+          make test-postgres TEST_TIMEZONE=America/New_York POSTGRES_TEST_FILTER=app.persist:utc_timestamp_test

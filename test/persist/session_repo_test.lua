@@ -459,12 +459,12 @@ local function define_tests()
             test.is_nil(err)
             test.not_nil(result)
             test.eq(result.session_id, test_data.session_id)
-            test.eq(result.last_message_date, time.unix(timestamp, 0):format(time.RFC3339))
+            test.eq(result.last_message_date, time.unix(timestamp, 0):utc():format(time.RFC3339))
             test.is_true(result.updated)
 
             -- Verify the update
             local session, err = session_repo.get(test_data.session_id)
-            test.eq(session.last_message_date, time.unix(timestamp, 0):format(time.RFC3339))
+            test.eq(session.last_message_date, time.unix(timestamp, 0):utc():format(time.RFC3339))
         end)
 
         it("should update multiple session fields at once", function()

@@ -144,7 +144,7 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
         return nil, err
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local query = sql.builder.insert("sessions")
         :set_map({
@@ -399,7 +399,7 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
         return current_state
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
     local next_revision = current_revision + 1
     local update = sql.builder.update('sessions'):set_map({
         attention_enabled = enabled,
@@ -531,7 +531,7 @@ function session_repo.update_session_meta(session_id, updates)
     -- Message persistence owns implicit recency updates. Metadata edits only
     -- change the date when the caller supplies one explicitly.
     if updates.last_message_date ~= nil then
-        local date = time.unix(updates.last_message_date, 0):format(time.RFC3339)
+        local date = time.unix(updates.last_message_date, 0):utc():format(time.RFC3339)
         update_query = update_query:set("last_message_date", date)
         result.last_message_date = date
     elseif updates.title == nil and updates.status == nil and updates.kind == nil

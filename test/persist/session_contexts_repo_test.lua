@@ -129,7 +129,7 @@ local function define_tests()
             test.eq(context.session_id, test_data.session_id)
             test.eq(context.type, "bookmark")
             test.eq(context.text, "This is a bookmark")
-            test.eq(context.time, time.unix(custom_time, 0):format(time.RFC3339))
+            test.eq(context.time, time.unix(custom_time, 0):utc():format(time.RFC3339))
         end)
 
         it("should list session contexts by session ID in ID order", function()

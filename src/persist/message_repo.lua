@@ -43,7 +43,7 @@ function message_repo.create_batch(session_id, rows)
     if err then return nil, err end
     local tx, begin_err = db:begin()
     if begin_err then db:release(); return nil, begin_err end
-    local now = time.now():format(time.RFC3339NANO)
+    local now = time.now():utc():format(time.RFC3339NANO)
     for _, row in ipairs(rows) do
         local metadata, encode_err = json.encode(row.metadata or {})
         if encode_err then tx:rollback(); db:release(); return nil, encode_err end
@@ -264,7 +264,7 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, r
         return nil, "Failed to begin transaction: " .. err
     end
 
-    local now = time.now():format(time.RFC3339NANO)
+    local now = time.now():utc():format(time.RFC3339NANO)
 
     local receipt_json, prior, receipt_err = stage_receipt(tx, session_id, request_id, request_hash, context_receipt)
     if prior or receipt_err then
@@ -374,7 +374,7 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
         return nil, reason
     end
 
-    local now = time.now():format(time.RFC3339NANO)
+    local now = time.now():utc():format(time.RFC3339NANO)
     local receipt_json, prior, receipt_err = stage_receipt(tx, session_id, request_id, request_hash, context_receipt)
     if prior then
         tx:rollback()
@@ -718,7 +718,7 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
         if needed then
             local metadata, encode_err = json.encode(boundary.metadata)
             if encode_err then return abort(encode_err) end
-            boundary_date = time.now():format(time.RFC3339NANO)
+            boundary_date = time.now():utc():format(time.RFC3339NANO)
             local _, insert_err = sql.builder.insert("messages"):set_map({
                 message_id = boundary.message_id, session_id = session_id, date = boundary_date,
                 type = consts.MSG_TYPE.DEVELOPER, data = boundary.data, metadata = metadata,
