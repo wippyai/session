@@ -3,6 +3,22 @@ namespace: app.persist
 
 # Suites for src/persist/.
 entries:
+  - name: utc_timestamp_test
+    kind: function.lua
+    meta: {type: test, suite: session}
+    source: file://utc_timestamp_test.lua
+    method: run
+    modules: [sql, time, uuid, security]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      artifact_repo: wippy.session.persist:artifact_repo
+      session_contexts_repo: wippy.session.persist:session_contexts_repo
+      wait_for_boot: app:wait_for_boot
+
   - name: checkpoint_repo_test
     kind: function.lua
     meta:
