@@ -2,7 +2,7 @@ organization: wippy
 module: session
 description: User sessions and conversation management
 license: Apache-2.0
-repository: https://github.com/wippyai/framework
+repository: https://github.com/wippyai/session
 homepage: https://wippy.ai
 keywords:
   - session

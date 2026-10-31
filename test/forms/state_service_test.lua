@@ -682,6 +682,41 @@ local function define_tests()
             test.contains(tostring(why), "process not found")
         end)
 
+        it("never treats a full tool-only history window as a finished reply", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            for i = 1, 55 do
+                ctx.writer:add_response("", {}, {
+                    { id = "review-call-" .. i, name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                        type = consts.MSG_TYPE.FUNCTION },
+                })
+            end
+            local status, body = get(artifact_id)
+            test.eq(status, 200)
+            test.eq(body.delivery, "interrupted", "no assistant or form reply completed after the accepted answer")
+        end)
+
+        it("finds a real reply beyond the first tool-only page", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            for i = 1, 55 do
+                ctx.writer:add_response("", {}, {
+                    { id = "review-long-call-" .. i, name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                        type = consts.MSG_TYPE.FUNCTION },
+                })
+            end
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Confirmed after the tool work.")
+            local status, body = get(artifact_id)
+            test.eq(status, 200)
+            test.eq(body.delivery, "complete")
+        end)
+
         it("counts only a finished reply as delivery", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)

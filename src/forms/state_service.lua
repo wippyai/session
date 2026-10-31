@@ -127,8 +127,9 @@ local function load_form(user_id, artifact_id)
     return artifact, form
 end
 
--- How many rows after an answer are read to look for the agent's reply.
-local REPLY_SCAN_LIMIT = 50
+-- Page size for the existing message-store cursor API. A full page is not
+-- evidence that the agent replied.
+local REPLY_PAGE_SIZE = 50
 
 -- A reply is assistant text, or a turn that ended by asking a new form. Tool
 -- calls alone are not: a turn that crashed or was stopped after one did not
@@ -176,13 +177,18 @@ local function delivery_of(submission, session_id)
     if not row then return "interrupted", nil end
     if message_repo.is_pending_answer(row) then return "pending", nil end
 
-    -- The newest rows after the answer (the answer row among them when few
-    -- follow). A full page means the conversation went on long after it.
-    local later, list_err = message_repo.list_after_message(session_id, row.message_id, REPLY_SCAN_LIMIT)
-    if not later then return nil, tostring(list_err) end
-    if #later >= REPLY_SCAN_LIMIT then return "complete", nil end
-    for _, candidate in ipairs(later) do
-        if candidate.message_id ~= row.message_id and is_reply(candidate) then return "complete", nil end
+    -- Read forward from the admitted answer through the store's existing
+    -- cursor API. Only a real reply supplies completion; tool-only pages
+    -- continue through the canonical cursor without a guessed row-count cutoff.
+    local cursor = row.message_id
+    while true do
+        local page, list_err = message_repo.list_by_session(session_id, REPLY_PAGE_SIZE, cursor, "after")
+        if not page then return nil, tostring(list_err) end
+        for _, candidate in ipairs(page.messages) do
+            if is_reply(candidate) then return "complete", nil end
+        end
+        if not page.has_more then break end
+        cursor = page.prev_cursor
     end
     -- A stored "running" status with no live session process is a stopped
     -- turn, not a running one (session_status).
