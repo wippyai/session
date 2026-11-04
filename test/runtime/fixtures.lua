@@ -31,6 +31,18 @@ local function generate(args)
             finish_reason = "stop",
         }
     end
+    local scripted = scenario.script and scenario.script[#requests]
+    if scripted then
+        if scripted.error then return nil, errors.new({ message = scripted.error, kind = "Internal", retryable = false }) end
+        local scripted_calls = scripted.calls or {}
+        return {
+            success = true,
+            result = { content = scripted.content or "Done.", tool_calls = scripted_calls },
+            tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+            finish_reason = #scripted_calls > 0 and "tool_call" or "stop",
+            metadata = scripted.metadata,
+        }
+    end
     local calls = {}
     local content = "The help agent completed the handoff."
     local prompt_tokens = 10
@@ -52,6 +64,16 @@ local function generate(args)
             if selected.channel ~= release then error("checkpoint release deadline exceeded") end
         end
     end
+    if args.model == "prefix" then
+        if #requests == 1 then
+            content = "Packing the document."
+            calls = {{ id = "prefix-edit", name = "checkpoint_edit", arguments = "{}" }}
+        elseif #requests == 2 then
+            content = "The document is packed."
+        else
+            content = "It is a packed handout."
+        end
+    end
     if args.model == "router" then
         content = "Transferring the request."
         calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }}
@@ -63,11 +85,17 @@ local function generate(args)
                 { id = "call-malformed", name = "malformed_effects", arguments = "{}" })
         end
     end
+    local metadata = nil
+    if args.model == "prefix" or scenario.thinking then
+        metadata = { thinking_blocks = {{ type = "thinking", thinking = "Reasoning " .. #requests .. ".",
+            signature = "signature-" .. #requests }} }
+    end
     return {
         success = true,
         result = { content = content, tool_calls = calls },
         tokens = { prompt_tokens = prompt_tokens, completion_tokens = 5, total_tokens = prompt_tokens + 5 },
         finish_reason = #calls > 0 and "tool_call" or "stop",
+        metadata = metadata,
     }
 end
 
@@ -86,7 +114,7 @@ local function handoff()
     return {
         message = "Handoff accepted.",
         _control = {
-            config = { agent = "app.runtime:help" },
+            config = { agent = scenario.handoff_target or "app.runtime:help" },
             context = { session = { set = { handoff_note = "Keep the earlier conversation." } } },
         },
     }
@@ -113,8 +141,26 @@ local function malformed_effects()
     return { message = "Malformed control.", _control = true }
 end
 
+-- Counts each phase so every note names the step it was sent with.
+local function prefix_lifecycle(payload)
+    local storage = state()
+    local key = "lifecycle_" .. tostring(payload.phase)
+    local count = (storage:get(key) or 0) + 1
+    storage:set(key, count)
+    if payload.phase == "activate" then
+        return { messages = {{ content = "Prefix agent activated." }} }
+    elseif payload.phase == "before_step" then
+        return { messages = {
+            { content = "Before step " .. count .. "." },
+            { role = "system", content = "Before step " .. count .. " system note." },
+        } }
+    end
+    return {}
+end
+
 return {
     generate = generate,
+    prefix_lifecycle = prefix_lifecycle,
     handoff = handoff,
     malformed_effects = malformed_effects,
     held_prompt = held_prompt,

@@ -561,6 +561,8 @@ entries:
       claude_mapper: wippy.llm.claude:mapper
       context_attachments: wippy.session:context_attachments
       google_mapper: wippy.llm.google:mapper
+      openai_mapper: wippy.llm.openai:mapper
+      bedrock_mapper: wippy.llm.bedrock:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test

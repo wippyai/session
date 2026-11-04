@@ -227,6 +227,98 @@ entries:
         methods:
           recall: app.runtime:checkpoint_recall
 
+  - name: prefix_model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-runtime-prefix
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.runtime:provider
+        provider_model: prefix
+
+  - name: prefix_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Pack the user's document with the edit tool, then answer.
+    tools: [app.runtime:checkpoint_edit]
+    traits:
+      - wippy.agent.traits:time_aware
+      - app.runtime:prefix_lifecycle_trait
+    memory_contract:
+      implementation_id: app.runtime:checkpoint_memory
+      options:
+        min_conversation_length: 1
+        recall_cooldown: 0
+
+  - name: parallel_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Run both edits, then answer.
+    tools: [app.runtime:checkpoint_edit]
+
+  - name: time_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Answer with the current time.
+    traits:
+      - wippy.agent.traits:time_aware
+
+  - name: prefix_lifecycle
+    kind: function.lua
+    source: file://fixtures.lua
+    method: prefix_lifecycle
+    modules: [store, time]
+
+  - name: prefix_lifecycle_binding
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:lifecycle
+        methods:
+          apply: app.runtime:prefix_lifecycle
+
+  - name: prefix_lifecycle_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      name: Prefix lifecycle notes
+    data:
+      behaviors:
+        - id: prefix_notes
+          kind: policy
+          handles: [activate, before_step]
+          handlers:
+            lifecycle: app.runtime:prefix_lifecycle_binding
+
+  - name: stable_prefix_runtime
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: stable_prefix
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+      framework_capabilities: app.runtime:framework_capabilities
+
   - name: failing_tool
     kind: function.lua
     meta:

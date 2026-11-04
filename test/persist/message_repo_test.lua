@@ -317,6 +317,72 @@ local function define_tests()
             for _, row in ipairs(rows) do message_repo.delete(row.message_id) end
         end)
 
+        it("commits step notes with the response in order, or none of them", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Step notes", "test"))
+            local ok, failure = pcall(function()
+                local session_writer = assert(writer.new(session_id))
+                local notes = {}
+                for index = 1, 40 do
+                    notes[index] = { type = index % 2 == 0 and consts.MSG_TYPE.SYSTEM or consts.MSG_TYPE.DEVELOPER,
+                        content = "Step note " .. index, metadata = { preserve_position = true } }
+                end
+                local assistant_id, call_ids, response_err = session_writer:add_response("answer", {},
+                    {{ id = "noted", name = "lookup", arguments = "{}", type = consts.MSG_TYPE.FUNCTION }}, notes)
+                test.is_nil(response_err)
+
+                local rows = assert(message_repo.list_all_by_session(session_id))
+                test.eq(#rows, 42, "the notes are part of the batch")
+                for index = 1, 40 do
+                    test.eq(rows[index].data, "Step note " .. index)
+                end
+                test.eq(rows[41].message_id, assistant_id)
+                test.eq(rows[42].message_id, (call_ids :: any).noted)
+
+                -- The second row has no type, so the insert fails after the first note went in.
+                local _, failed_ids, batch_err = session_writer:add_response("answer", {}, {}, {
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Orphan candidate", metadata = {} },
+                    { content = "Invalid note", metadata = {} },
+                })
+                test.is_nil(failed_ids)
+                test.not_nil(batch_err, "a row the batch cannot store fails it")
+                test.eq(#assert(message_repo.list_all_by_session(session_id)), 42, "the failed batch leaves no note")
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
+        end)
+
+        it("commits trailing rows after the response and notes on their own in one batch", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Trailing", "test"))
+            local ok, failure = pcall(function()
+                local session_writer = assert(writer.new(session_id))
+                local assistant_id = assert(session_writer:add_response("partial", {}, {},
+                    {{ type = consts.MSG_TYPE.DEVELOPER, content = "Before.", metadata = {} }},
+                    {{ type = consts.MSG_TYPE.DEVELOPER, content = "After.", metadata = {} }}))
+                assert(session_writer:add_notes({
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Activated.", metadata = {} },
+                    { type = consts.MSG_TYPE.SYSTEM, content = "Activated system.", metadata = {} },
+                }))
+                local rows = assert(message_repo.list_all_by_session(session_id))
+                test.eq(#rows, 5)
+                test.eq(rows[1].data, "Before.")
+                test.eq(rows[2].message_id, assistant_id)
+                test.eq(rows[3].data, "After.")
+                test.eq(rows[4].data, "Activated.")
+                test.eq(rows[5].data, "Activated system.")
+
+                local _, batch_err = session_writer:add_notes({
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Orphan candidate", metadata = {} },
+                    { content = "Invalid note", metadata = {} },
+                })
+                test.not_nil(batch_err)
+                test.eq(#assert(message_repo.list_all_by_session(session_id)), 5)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
+        end)
+
         it("rolls back the assistant if any call intent cannot be stored", function()
             local assistant_id = uuid.v7()
             local _, err = message_repo.create_batch(test_data.session_id, {

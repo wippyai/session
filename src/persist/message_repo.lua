@@ -562,6 +562,37 @@ function message_repo.list_all_by_session(session_id)
     return messages or {}
 end
 
+-- The time notes of one user turn, chronological. The patterns keep the turn's other
+-- rows and their payloads in the database; the decoded row decides the match.
+function message_repo.list_turn_notes(session_id: string?, source_id: string?): ({any}?, string?)
+    if not session_id or session_id == "" or not source_id or source_id == "" then
+        return nil, "Session ID and source ID are required"
+    end
+    local db, err = get_db()
+    if not db then return nil, err end
+    local candidates, query_err = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+        :from("messages")
+        :where("session_id = ?", session_id)
+        :where("type = ?", consts.MSG_TYPE.SYSTEM)
+        :where("metadata LIKE ?", '%"' .. consts.SYSTEM_ACTIONS.TURN_CONTEXT .. '"%')
+        :where("metadata LIKE ?", '%"' .. source_id .. '"%')
+        :order_by(message_order.date(db:type()) .. " ASC, message_id ASC")
+        :run_with(db):query()
+    db:release()
+    if query_err then return nil, "Failed to find turn note: " .. query_err end
+    local notes = {}
+    for _, message in ipairs(candidates or {}) do
+        local metadata, decode_err = json.decode(message.metadata :: string)
+        if decode_err then return nil, "Failed to decode message metadata: " .. decode_err end
+        if type(metadata) == "table" and metadata.source_id == source_id
+            and metadata.system_action == consts.SYSTEM_ACTIONS.TURN_CONTEXT then
+            message.metadata = metadata
+            notes[#notes + 1] = message
+        end
+    end
+    return notes, nil
+end
+
 function message_repo.list_pending_inputs(session_id)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"

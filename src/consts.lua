@@ -242,7 +242,9 @@ local consts = {
         TITLE_GENERATED = "title_generated",
         CHECKPOINT_CREATED = "checkpoint_created",
         TURN_LIMIT = "turn_limit",
-        TURN_FAILED = "turn_failed"
+        TURN_FAILED = "turn_failed",
+        TURN_CONTEXT = "turn_context",
+        LIFECYCLE_NOTE = "lifecycle_note"
     },
 
     -- Error Codes for Plugin
@@ -254,6 +256,7 @@ local consts = {
         INVALID_SESSION_ID = "invalid_session_id",
         SESSION_NOT_FOUND = "session_not_found",
         INVALID_MESSAGE_TYPE = "invalid_message_type",
+        EMPTY_MESSAGE = "empty_message",
         TOKEN_INVALID = "token_invalid",
         REQUEST_CONFLICT = "request_conflict",
         INVALID_FILE_REFERENCES = "invalid_file_references",

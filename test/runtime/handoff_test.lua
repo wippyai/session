@@ -18,6 +18,7 @@ local active_pid = nil
 local active_exit = nil
 local observed = {}
 local test_inbox, test_events
+local expected_session_errors = false
 
 local function receive_channels()
     if not test_inbox then test_inbox = process.inbox() end
@@ -48,7 +49,7 @@ local function receive_until(predicate, description)
                 session_id = payload.session_id, request_id = payload.request_id,
                 status = payload.status, code = payload.code}
             if #observed > 16 then table.remove(observed, 1) end
-            if payload.type == consts.UPSTREAM_TYPES.ERROR then
+            if payload.type == consts.UPSTREAM_TYPES.ERROR and not expected_session_errors then
                 timer:stop()
                 error("Session error: " .. tostring(payload.message or payload.code))
             end
@@ -589,6 +590,304 @@ local function run_artifact_scenario()
     if cleanup_err then error(cleanup_err) end
 end
 
+-- The request as a provider prefix sees it: cache markers are not part of it.
+local function provider_view(messages)
+    local view = {}
+    for _, message in ipairs(messages) do
+        if message.role ~= "cache_marker" then
+            local metadata = type(message.metadata) == "table" and message.metadata or {}
+            view[#view + 1] = json.encode({ role = message.role, content = message.content, name = message.name,
+                function_call = message.function_call, positional = metadata.preserve_position == true,
+                thinking = metadata.thinking_blocks })
+        end
+    end
+    return view
+end
+
+local function assert_prefix(earlier, later, description)
+    test.is_true(#later >= #earlier, description .. ": a later request must extend the earlier one")
+    for index, entry in ipairs(earlier) do
+        test.eq(later[index], entry, description .. ": request diverges at message " .. tostring(index))
+    end
+end
+
+local function send_and_settle(pid, session_id, request_id, text)
+    assert(process.send(pid, consts.TOPICS.MESSAGE, { request_id = request_id, data = { text = text } }))
+    receive_until(function(_, payload)
+        return payload.type == consts.UPSTREAM_TYPES.RECEIVED and payload.request_id == request_id
+    end, "accepted " .. request_id)
+    receive_until(function(topic, payload)
+        return topic == "session:" .. session_id and payload.status == consts.STATUS.IDLE
+    end, "completed " .. request_id)
+end
+
+local function with_session(title, config, scenario, body)
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("edits", 0)
+    storage:set("lifecycle_activate", 0)
+    storage:set("lifecycle_before_step", 0)
+    storage:set("checkpoints", 0)
+    scenario.parent = process.pid()
+    storage:set("scenario", scenario)
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    observed = {}
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, title, "test", {}, config))
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        body(pid, session_id, storage)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
+local function rows_of(session_id)
+    local rows, err = message_repo.list_all_by_session(session_id)
+    test.is_nil(err)
+    return rows
+end
+
+local function run_stable_prefix_scenario()
+    with_session("Stable prefix", { agent_id = "app.runtime:prefix_agent", model = "session-runtime-prefix" },
+        { prefix = true }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "prefix-first", "Pack the first document.")
+        send_and_settle(pid, session_id, "prefix-second", "Now summarize it.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3, "a tool round and its answer, then a second turn")
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "tool continuation")
+        assert_prefix(views[2], views[3], "next user turn")
+
+        local rows = rows_of(session_id)
+        local sequence, fingerprints = {}, {}
+        for index, row in ipairs(rows) do
+            local metadata = row.metadata or {}
+            if row.type == consts.MSG_TYPE.SYSTEM and not metadata.preserve_position then
+                sequence[#sequence + 1] = "system:" .. tostring(metadata.system_action)
+            elseif row.type == consts.MSG_TYPE.SYSTEM and metadata.lifecycle_phase then
+                test.is_true(metadata.preserve_position, "the lifecycle system note keeps its position")
+                test.eq(metadata.system_action, "lifecycle_note")
+                sequence[#sequence + 1] = row.data
+            elseif row.type == consts.MSG_TYPE.SYSTEM then
+                test.eq(metadata.system_action, "turn_context")
+                test.eq(metadata.source_id, rows[index - 1].type == consts.MSG_TYPE.USER and rows[index - 1].message_id
+                    or rows[index - 2].message_id, "the turn note follows its user message and any activation note")
+                test.contains(row.data, "The current date and time is ")
+                sequence[#sequence + 1] = "time"
+            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.memory_ids then
+                test.is_true(metadata.preserve_position, "the recall note keeps its position")
+                test.eq(metadata.memory_ids[1], "style")
+                sequence[#sequence + 1] = "recall"
+            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.lifecycle_phase then
+                test.is_true(metadata.preserve_position, "lifecycle note keeps its position")
+                sequence[#sequence + 1] = row.data
+            elseif row.type == consts.MSG_TYPE.DEVELOPER then
+                sequence[#sequence + 1] = "host"
+            elseif row.type == consts.MSG_TYPE.ASSISTANT then
+                test.not_nil(metadata.thinking_blocks)
+                test.eq(type(metadata.prefix_fingerprint), "string")
+                fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint
+                sequence[#sequence + 1] = "assistant"
+            else
+                sequence[#sequence + 1] = row.type
+            end
+        end
+        test.eq(table.concat(sequence, "|"), table.concat({
+            "system:agent_change", "host", "system:model_change", "host",
+            "user", "Prefix agent activated.", "time", "Before step 1.", "Before step 1 system note.", "recall", "assistant", "function",
+            "Before step 2.", "Before step 2 system note.", "recall", "assistant",
+            "user", "time", "Before step 3.", "Before step 3 system note.", "recall", "assistant",
+        }, "|"))
+        test.eq(fingerprints[1], fingerprints[2])
+        test.eq(fingerprints[2], fingerprints[3])
+
+        local thinking = 0
+        for _, message in ipairs(requests[3].messages) do
+            if message.role == "assistant" and message.metadata and message.metadata.thinking_blocks then
+                thinking = thinking + 1
+            end
+        end
+        test.eq(thinking, 2, "blocks bound to the unchanged prefix are replayed")
+    end)
+end
+
+local function run_stale_thinking_scenario()
+    with_session("Stale thinking", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 }, { thinking = true }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "thinking-handoff", "Please hand off this request.")
+        send_and_settle(pid, session_id, "thinking-followup", "Anything else?")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(requests[3].model, "help")
+        local function blocks_on(request, text)
+            for _, message in ipairs(request.messages) do
+                if message.role == "assistant" then
+                    for _, part in ipairs(message.content or {}) do
+                        if part.text == text then return message.metadata and message.metadata.thinking_blocks end
+                    end
+                end
+            end
+            error("assistant message missing: " .. text)
+        end
+        test.not_nil(blocks_on(requests[2], "Transferring the request."),
+            "the current tool round keeps its blocks across the agent change")
+        test.is_nil(blocks_on(requests[3], "Transferring the request."),
+            "blocks produced under the router prefix are stripped once the round is over")
+        test.not_nil(blocks_on(requests[3], "The help agent completed the handoff."),
+            "blocks produced under the current prefix are kept")
+
+        local fingerprints = {}
+        for _, row in ipairs(rows_of(session_id)) do
+            local metadata = row.metadata or {}
+            test.is_false(row.type == consts.MSG_TYPE.SYSTEM and metadata.preserve_position == true,
+                "an agent without turn context gets no turn note")
+            test.is_nil(metadata.memory_ids, "an agent without a memory contract gets no recall")
+            if row.type == consts.MSG_TYPE.ASSISTANT then fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint end
+        end
+        test.eq(#fingerprints, 3)
+        test.is_false(fingerprints[1] == fingerprints[2], "the agent change changes the prefix")
+        test.eq(fingerprints[2], fingerprints[3])
+    end)
+end
+
+local function request_has(request, text)
+    local found = 0
+    for _, message in ipairs(request.messages) do
+        for _, part in ipairs(message.content or {}) do
+            if type(part.text) == "string" and part.text:find(text, 1, true) then found = found + 1 end
+        end
+    end
+    return found
+end
+
+local TIME_NOTE = "The current date and time is "
+
+local function run_opening_compaction_scenario()
+    with_session("Opening compaction", { agent_id = "app.runtime:time_agent", model = "session-runtime-prefix",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 1 },
+        { script = {{ content = "It is noon." }} }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "compaction-first", "What time is it?")
+        local requests = storage:get("requests")
+        test.is_true(storage:get("checkpoints") >= 1, "the opening step compacts before dispatch")
+        test.eq(request_has(requests[1], TIME_NOTE), 1, "the compacted opening request keeps the time note")
+    end)
+end
+
+local function run_time_successor_scenario()
+    with_session("Time successor", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 },
+        { handoff_target = "app.runtime:time_agent", script = {
+            { content = "Handing off.", calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }} },
+            { content = "It is noon." },
+            { content = "Still noon." },
+        } }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "successor-first", "Hand off. What time is it?")
+        send_and_settle(pid, session_id, "successor-second", "And now?")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(request_has(requests[1], TIME_NOTE), 0)
+        test.eq(request_has(requests[2], TIME_NOTE), 1, "the time-aware successor gets this turn's note")
+        test.eq(request_has(requests[3], TIME_NOTE), 2, "the next user turn adds its own note")
+    end)
+end
+
+local function run_failed_activation_scenario()
+    with_session("Failed activation", { agent_id = "app.runtime:prefix_agent", model = "session-runtime-prefix" },
+        { script = {{ error = "provider down" }, { content = "Recovered." }} }, function(pid, session_id, storage)
+        expected_session_errors = true
+        send_and_settle(pid, session_id, "activation-first", "First.")
+        expected_session_errors = false
+        send_and_settle(pid, session_id, "activation-second", "Second.")
+        local requests = storage:get("requests")
+        test.eq(storage:get("lifecycle_activate"), 1)
+        test.eq(request_has(requests[1], "Prefix agent activated."), 1)
+        test.eq(request_has(requests[2], "Prefix agent activated."), 1, "the note outlives the failed step")
+    end)
+end
+
+-- A response whose thinking is interleaved with its two tool calls.
+local function parallel_response(first_id, second_id, second_name)
+    return {
+        content = "AB",
+        calls = { { id = first_id, name = "checkpoint_edit", arguments = "{}" },
+            { id = second_id, name = second_name or "checkpoint_edit", arguments = "{}" } },
+        metadata = {
+            thinking_blocks = { { type = "thinking", thinking = "", signature = "s1", position = 1 },
+                { type = "thinking", thinking = "", signature = "s2", position = 4 } },
+            content_positions = { { type = "text", text = "A", position = 2 }, { type = "tool_use", id = first_id, position = 3 },
+                { type = "text", text = "B", position = 5 }, { type = "tool_use", id = second_id, position = 6 } },
+        },
+    }
+end
+
+local function roles_of(request)
+    local roles = {}
+    for _, message in ipairs(request.messages) do
+        if message.role ~= "cache_marker" and message.role ~= "system" and message.role ~= "developer" then
+            roles[#roles + 1] = message.role
+        end
+    end
+    return table.concat(roles, ",")
+end
+
+local function run_parallel_round_scenario()
+    with_session("Parallel round", { agent_id = "app.runtime:parallel_agent", model = "session-runtime-prefix" },
+        { script = { parallel_response("p1", "p2"), { content = "Second round.", calls = {
+            { id = "p3", name = "checkpoint_edit", arguments = "{}" } } }, { content = "Done." } } },
+        function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "parallel-first", "Run both.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(roles_of(requests[2]), "user,assistant,function_call,function_call,function_result,function_result")
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "first round")
+        assert_prefix(views[2], views[3], "second round")
+    end)
+end
+
+local function run_parallel_handoff_scenario()
+    local response = parallel_response("p1", "call-handoff", "handoff")
+    response.calls[1].name = "failing_tool"
+    with_session("Parallel handoff", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 },
+        { script = { response, { content = "Answer." } } }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "parallel-handoff", "Hand off.")
+        local requests = storage:get("requests")
+        test.eq(requests[2].model, "help")
+        local blocks = nil
+        for _, message in ipairs(requests[2].messages) do
+            if message.role == "assistant" then blocks = message.metadata and message.metadata.thinking_blocks end
+        end
+        test.not_nil(blocks, "the successor continues the round with its blocks")
+        test.eq(#blocks, 2)
+    end)
+end
+
+local function define_stable_prefix_tests()
+    test.describe("Session stable request prefix through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("replays a parallel round in one assistant turn across requests", run_parallel_round_scenario)
+        test.it("keeps a parallel round's blocks across a handoff", run_parallel_handoff_scenario)
+        test.it("keeps the time note when the opening step compacts", run_opening_compaction_scenario)
+        test.it("notes the turn for a time-aware successor after a handoff", run_time_successor_scenario)
+        test.it("keeps an activation note when the provider fails", run_failed_activation_scenario)
+        test.it("replays turn, lifecycle and recall notes so each request extends the previous one",
+            run_stable_prefix_scenario)
+        test.it("strips thinking produced under another prefix and keeps the current round", run_stale_thinking_scenario)
+    end)
+end
+
 local function define_checkpoint_tests()
     test.describe("Session checkpoint continuity through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
@@ -762,4 +1061,5 @@ local function define_benchmark()
 end
 
 return { readiness = test.run_cases(define_readiness_tests), run = test.run_cases(define_tests), checkpoint = test.run_cases(define_checkpoint_tests),
+    stable_prefix = test.run_cases(define_stable_prefix_tests),
     benchmark = test.run_cases(define_benchmark) }
