@@ -255,6 +255,15 @@ entries:
         min_conversation_length: 1
         recall_cooldown: 0
 
+  - name: time_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Answer with the current time.
+    traits:
+      - wippy.agent.traits:time_aware
+
   - name: prefix_lifecycle
     kind: function.lua
     source: file://fixtures.lua

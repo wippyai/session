@@ -102,6 +102,15 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
             get_full_context = function(_self) return {}, nil end,
             get_context = function(_self, _key) return nil end,
             reset = function(_self) return true end,
+            get_turn_note = function(_self, source_id)
+                for _, row in ipairs(captured.stored) do
+                    if row.type == consts.MSG_TYPE.SYSTEM and row.metadata.source_id == source_id
+                        and row.metadata.system_action == consts.SYSTEM_ACTIONS.TURN_CONTEXT then
+                        return row, nil
+                    end
+                end
+                return nil, nil
+            end,
         },
         writer = {
             add_message = function(_self, msg_type, content, metadata)
@@ -112,8 +121,12 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
                 end
                 return id, nil
             end,
-            add_response = function(self, content, metadata, calls, notes)
-                table.insert(captured.response_batches, {content = content, calls = calls, notes = notes})
+            add_notes = function(self, notes)
+                for _, note in ipairs(notes) do self:add_message(note.type, note.content, note.metadata) end
+                return true, nil
+            end,
+            add_response = function(self, content, metadata, calls, notes, trailing)
+                table.insert(captured.response_batches, {content = content, calls = calls, notes = notes, trailing = trailing})
                 for _, note in ipairs(notes or {}) do
                     self:add_message(note.type, note.content, note.metadata)
                 end
@@ -125,6 +138,9 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
                         function_name = call.name,
                         status = consts.FUNC_STATUS.PENDING
                     })
+                end
+                for _, row in ipairs(trailing or {}) do
+                    self:add_message(row.type, row.content, row.metadata)
                 end
                 return assistant_id, ids, nil
             end,
@@ -4220,14 +4236,212 @@ local function define_tests()
 
             test.is_nil(err)
             test.not_nil(replacement_view, "the step reaches compaction")
-            local count = #replacement_view
-            test.eq(replacement_view[count - 1], (json.encode({ role = "developer",
-                content = {{ type = "text", text = "Agent activated." }}, positional = true })))
-            test.eq(replacement_view[count], (json.encode({ role = "system",
+            test.eq(replacement_view[#replacement_view], (json.encode({ role = "system",
                 content = {{ type = "text", text = "Step system note." }}, positional = true })))
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
-            test.eq(captured.stored[1].content, "Agent activated.", "the notes persist once, with the output")
-            test.eq(captured.stored[2].content, "Step system note.")
+            test.eq(captured.stored[1].content, "Agent activated.", "stored when it fired")
+            test.eq(captured.stored[2].content, "Step system note.", "persisted once, with the output")
+        end)
+
+        describe("stored text and notes", function()
+            local function has_row(captured: any, text: string): boolean
+                for _, row in ipairs(captured.stored) do
+                    if row.content == text then return true end
+                end
+                return false
+            end
+
+            it("stores no whitespace model text", function()
+                local outcomes = {
+                    { result = "  \n", truncated = true, truncation_reason = "tool_calls" },
+                    { stopped = true, result = "  \n", finish_reason = "cancelled" },
+                    { result = "  \n" },
+                }
+                for _, outcome in ipairs(outcomes) do
+                    local agent = fake_agent(nil)
+                    agent.step = function() return outcome end
+                    local ctx, captured = mock_ctx(agent)
+                    user_step(ctx)
+                    test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 0, "blank text is no output")
+                end
+            end)
+
+            it("stores an empty assistant row for a tool round with whitespace text", function()
+                local agent = fake_agent(nil)
+                agent.step = function() return tool_response({ result = "  \n" }) end
+                local ctx, captured = mock_ctx(agent)
+                user_step(ctx)
+                test.eq(stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)[1].content, "")
+                test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 1)
+            end)
+
+            it("stores no whitespace lifecycle note", function()
+                local agent = fake_agent(nil)
+                agent.bindings = { lifecycle = {{ binding = "app:lifecycle" }} }
+                agent.step = function() return { result = "Answer." } end
+                message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                    if payload.phase == "before_step" then
+                        return { applied = 1, messages = {{ role = "system", content = "  \n" }} }, nil
+                    end
+                    return { applied = 1, messages = {} }, nil
+                end }
+                local ctx, captured = mock_ctx(agent)
+                user_step(ctx)
+                test.is_false(has_row(captured, "  \n"))
+                test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            end)
+
+            it("keeps only known binding metadata on a lifecycle note", function()
+                local agent = fake_agent(nil)
+                agent.bindings = { lifecycle = {{ binding = "app:lifecycle" }} }
+                agent.step = function() return { result = "Answer." } end
+                message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                    if payload.phase == "before_step" then
+                        return { applied = 1, messages = {{ content = "Guidance.", metadata = {
+                            memory_ids = { "mem-1" }, input = { state = "pending" }, thinking_blocks = {{ type = "thinking" }},
+                            source_id = "forged", preserve_position = false, system_action = "forged",
+                            lifecycle_phase = "forged", unknown = true,
+                        } }} }, nil
+                    end
+                    return { applied = 1, messages = {} }, nil
+                end }
+                local ctx, captured = mock_ctx(agent)
+                user_step(ctx)
+                local metadata = captured.stored[1].metadata
+                test.eq(captured.stored[1].content, "Guidance.")
+                test.is_nil(metadata.input, "a note must not carry steering metadata")
+                test.is_nil(metadata.thinking_blocks)
+                test.is_nil(metadata.unknown)
+                test.eq(metadata.memory_ids[1], "mem-1")
+                test.eq(metadata.source_id, "msg-user")
+                test.is_true(metadata.preserve_position)
+                test.eq(metadata.system_action, "lifecycle_note")
+                test.eq(metadata.lifecycle_phase, "before_step")
+            end)
+
+            it("commits the truncation notice with truncated text", function()
+                local agent = fake_agent(nil)
+                agent.step = function() return { result = "partial", truncated = true, truncation_reason = "tool_calls" } end
+                local ctx, captured = mock_ctx(agent)
+                local batch_rows = 0
+                local add_response = ctx.writer.add_response
+                ctx.writer.add_response = function(self, content, metadata, calls, notes, trailing)
+                    batch_rows = #(trailing or {})
+                    return add_response(self, content, metadata, calls, notes, trailing)
+                end
+                user_step(ctx)
+                test.eq(batch_rows, 1, "the notice is part of the batch")
+                test.eq(captured.stored[2].content, output.TRUNCATION_MSG)
+                test.eq(#stored_of_type(captured, consts.MSG_TYPE.DEVELOPER), 1)
+            end)
+
+            it("rejects an empty user message without attachments", function()
+                for _, text in ipairs({ "", "   \n" }) do
+                    local errors = {}
+                    local ctx, captured = mock_ctx(fake_agent(nil))
+                    ctx.upstream.command_error = function(_self, request_id, code)
+                        errors[#errors + 1] = { request_id = request_id, code = code }
+                    end
+                    ctx.writer.admit_message = function(self, kind, content, metadata)
+                        return self:add_message(kind, content, metadata)
+                    end
+                    local result = message_handlers.handle_message(ctx, { request_id = "req-blank", data = { text = text } })
+                    test.is_true(result.rejected)
+                    test.eq(result.error, consts.ERROR_CODES.EMPTY_MESSAGE)
+                    test.eq(errors[1].code, consts.ERROR_CODES.EMPTY_MESSAGE)
+                    test.eq(#captured.stored, 0)
+                    test.eq(#(result.next_ops or {}), 0)
+                end
+            end)
+        end)
+
+        describe("activation notes", function()
+            local function activating_agent(step: any): any
+                local agent = fake_agent(nil)
+                agent.bindings = { lifecycle = {{ binding = "app:lifecycle" }} }
+                agent.step = step
+                return agent
+            end
+
+            local function arm_activation()
+                message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                    if payload.phase == "activate" then
+                        return { applied = 1, messages = {{ content = "Agent activated." }} }, nil
+                    end
+                    return { applied = 1, messages = {} }, nil
+                end }
+            end
+
+            local cases = {
+                { name = "the provider fails", step = function() return nil, "provider unavailable" end },
+                { name = "a truncated step has no text", step = function()
+                    return { result = "", truncated = true, truncation_reason = "tool_calls" }
+                end },
+                { name = "Stop discards the output", step = function()
+                    return { stopped = true, result = "", finish_reason = "cancelled" }
+                end },
+            }
+            for _, case in ipairs(cases) do
+                it("keeps the note when " .. case.name, function()
+                    local ctx, captured = mock_ctx(activating_agent(case.step))
+                    serve_history(ctx, captured)
+                    arm_activation()
+
+                    user_step(ctx)
+
+                    local notes = {}
+                    for _, row in ipairs(captured.stored) do
+                        if row.content == "Agent activated." then notes[#notes + 1] = row end
+                    end
+                    test.eq(#notes, 1, "activate fires once, so its note outlives the discarded output")
+                    test.eq(notes[1].metadata.lifecycle_phase, "activate")
+                    test.is_true(notes[1].metadata.preserve_position)
+                end)
+            end
+
+            it("replays the stored note once on the next step", function()
+                local requests = {}
+                local ctx, captured = mock_ctx(activating_agent(function(_self, builder)
+                    requests[#requests + 1] = provider_view(builder:get_messages())
+                    return tool_response()
+                end), { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+                serve_history(ctx, captured)
+                arm_activation()
+
+                user_step(ctx)
+                continue_step(ctx)
+
+                local function count(view)
+                    local found = 0
+                    for _, entry in ipairs(view) do
+                        if entry:find("Agent activated.", 1, true) then found = found + 1 end
+                    end
+                    return found
+                end
+                test.eq(count(requests[1]), 1)
+                test.eq(count(requests[2]), 1)
+                assert_prefix(requests[1], requests[2])
+            end)
+        end)
+
+        it("notes a mid-turn handoff to a time-aware successor once", function()
+            local agent = fake_agent(nil)
+            agent.agent_options = { turn_context = { time = { timezone = "UTC" } } }
+            agent.step = function() return { result = "Successor answer." } end
+            local ctx, captured = mock_ctx(agent)
+            serve_history(ctx, captured)
+            ctx.turn_state = { active = true, steps = 1, repeated_calls = 0, message_id = "msg-user", handoff = true }
+            ctx.upstream.update_session = function() end
+            ctx.request_input_policy = function() return {}, nil end
+
+            local _, err = continue_step(ctx)
+            test.is_nil(err)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 1, "the successor learns the time")
+            test.eq(captured.stored[1].metadata.system_action, "turn_context")
+
+            ctx.turn_state.handoff = true
+            continue_step(ctx)
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.SYSTEM), 1, "a stored note is not written again")
         end)
 
         it("adds no turn note when the agent declares no turn context", function()

@@ -31,6 +31,17 @@ local function generate(args)
             finish_reason = "stop",
         }
     end
+    local scripted = scenario.script and scenario.script[#requests]
+    if scripted then
+        if scripted.error then return nil, errors.new({ message = scripted.error, kind = "Internal", retryable = false }) end
+        local scripted_calls = scripted.calls or {}
+        return {
+            success = true,
+            result = { content = scripted.content or "Done.", tool_calls = scripted_calls },
+            tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+            finish_reason = #scripted_calls > 0 and "tool_call" or "stop",
+        }
+    end
     local calls = {}
     local content = "The help agent completed the handoff."
     local prompt_tokens = 10
@@ -102,7 +113,7 @@ local function handoff()
     return {
         message = "Handoff accepted.",
         _control = {
-            config = { agent = "app.runtime:help" },
+            config = { agent = scenario.handoff_target or "app.runtime:help" },
             context = { session = { set = { handoff_note = "Keep the earlier conversation." } } },
         },
     }

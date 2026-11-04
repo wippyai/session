@@ -273,19 +273,22 @@ refresh the dependency lock from the published packages.
   keeps its notes; a step whose output is discarded discards them too. Assistant
   rows no longer carry `memory_ids` or `memory_count`.
 - **Turn context.** When the agent declares `agent_options.turn_context` (the
-  `time_aware` trait), the session renders the note once when a user message
-  opens a turn and stores it as a system row with `metadata.preserve_position`
-  and `metadata.system_action = "turn_context"`. The row follows that message
-  and any rows written while recovered behavior controls settle at the start of
-  the step, and precedes the step's other notes. Tool continuation steps add
-  none. A note that cannot render (an unknown timezone) fails the turn.
-  The row is written once the turn has passed activation, lifecycle validation
-  and the Stop gate, so a turn that ends at those gates leaves no note. It is
-  written before the model call, so it stays when the provider fails or Stop
-  arrives during the call. A retried turn or a reopened session finds the stored
-  row and replays its minute. The prompt builder renders system rows that carry
-  `preserve_position` in place; other system rows (turn and agent-change
-  notices) stay out of the prompt.
+  `time_aware` trait), the session renders the note once for a turn and stores it
+  as a system row with `metadata.preserve_position` and
+  `metadata.system_action = "turn_context"`. A user message that opens a turn
+  renders it; so does a mid-turn handoff to a time-aware successor, when the turn
+  has no note yet. The row follows that message, any rows written while recovered
+  behavior controls settle at the start of the step, and any activation notes. It
+  precedes the step's other notes. Tool continuation steps add none. A note that
+  cannot render (an unknown timezone) fails the turn. The row is written once the
+  turn has passed activation, lifecycle validation and the Stop gate, so a turn
+  that ends at those gates leaves no note. It is written before the model call, so
+  it stays when the provider fails or Stop arrives during the call. A retried turn
+  or a reopened session finds the stored row and replays its minute. When a
+  checkpoint removes the request and the excerpt of the request is restored, the
+  note is restored with it. The prompt builder renders system rows that carry
+  `preserve_position` in place; other system rows (turn and agent-change notices)
+  stay out of the prompt.
 - **Thinking blocks.** Assistant rows store the step's `prefix_fingerprint`
   next to their `thinking_blocks`. Every step passes `drop_stale_thinking =
   true` with a predicate that keeps blocks only when the row's fingerprint and
@@ -293,15 +296,24 @@ refresh the dependency lock from the published packages.
   row and the rows written after it, but their blocks followed history the
   checkpoint removed. The current tool round always keeps its blocks.
 - **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
-  positional notes after the history and committed in one batch with the step
-  output, once, where they were first sent: developer messages as developer rows
-  and system messages as system rows, each with `metadata.preserve_position` (so
-  the builder never merges them with a neighbour), `metadata.lifecycle_phase` and
-  `metadata.system_action = "lifecycle_note"`. They are appended, never rebuilt,
-  so `before_step` adds one set of notes per step and an activation note stays in
-  the history after the step that activated the agent. Notes of a discarded output
-  are discarded with it. A lifecycle message in the user or assistant role fails
-  the step: a host note must not speak as either party.
+  positional notes after the history and stored once, where they were first sent:
+  developer messages as developer rows and system messages as system rows, each
+  with `metadata.preserve_position`, `metadata.lifecycle_phase` and
+  `metadata.system_action = "lifecycle_note"`. A binding's own metadata contributes
+  only `memory_ids`. `before_step` notes commit in one batch with the step output
+  and are discarded with a discarded output, so each step adds one set. `activate`
+  fires once, so its notes are stored when they fire and outlive a step whose
+  output is discarded; a later checkpoint folds them into its summary like any other
+  row. A lifecycle message in the user or assistant role fails the step: a host
+  note must not speak as either party.
+- **Stored rows.** A row renders as itself on every request. Developer rows render
+  in place on every driver instead of joining the top-level instructions, and
+  adjacent rows of one role never merge. Model text and lifecycle notes are stored
+  only when they contain a non-space character. A tool round with blank text stores
+  an empty assistant row, and a blank assistant row stays out of the prompt unless
+  it holds the thinking blocks of its round. A user message with no text, files or
+  attachments is rejected with `empty_message`; with attachments, the empty text
+  part is omitted. Rows stored blank by earlier versions render as nothing.
 
 Positional notes are ordinary rows outside the prompt too. The checkpoint
 summarizer reads them as `[SYSTEM]` and `[DEVELOPER]` lines, and they count toward
@@ -317,16 +329,27 @@ These history edits change the prefix by design:
 - A developer or system message a client injects is stored when it arrives. If a
   request is in flight, it lands before that request's output.
 - Stop returns steering applied by the interrupted step to pending, and removes it
-  from the prompt until a later step applies it again.
+  from the prompt until a later step applies it again. The Stop boundary row commits
+  with the Stop, so it precedes the notes and text the cancelled step stores
+  afterwards.
+- A memory addition changes the session context memory in the top-level system
+  prompt, which also changes the prefix fingerprint. Memory stays there because it
+  must survive checkpoints and can be deleted or cleared, which a positional row
+  could not do.
+- The restored excerpt of a request, with its turn note, leaves the prompt when the
+  next user turn starts.
+- A step whose output is discarded (a provider failure, Stop with no text, a
+  truncated step with no text, which stores only the truncation notice) discards
+  the `before_step` and recall notes it sent, so they do not replay.
 
 The prompt cache restarts at the edited message and the API drops the thinking
 blocks after it.
 
 After upgrading, stored conversations restart their cache once: earlier steps
-sent lifecycle notes that were never stored, and their assistant rows carry no
-`prefix_fingerprint`, so their thinking blocks are stripped from the next
-request (except those of a tool round in progress). Recall notes stored by
-earlier versions stay where they were written.
+sent lifecycle notes that were never stored, stored rows that used to merge now
+render separately, and assistant rows carry no `prefix_fingerprint`, so their
+thinking blocks are stripped from the next request (except those of a tool round
+in progress). Recall notes stored by earlier versions stay where they were written.
 
 ## Durable behavior controls
 

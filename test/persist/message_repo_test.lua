@@ -352,6 +352,37 @@ local function define_tests()
             if not ok then error(failure) end
         end)
 
+        it("commits trailing rows after the response and notes on their own in one batch", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Trailing", "test"))
+            local ok, failure = pcall(function()
+                local session_writer = assert(writer.new(session_id))
+                local assistant_id = assert(session_writer:add_response("partial", {}, {},
+                    {{ type = consts.MSG_TYPE.DEVELOPER, content = "Before.", metadata = {} }},
+                    {{ type = consts.MSG_TYPE.DEVELOPER, content = "After.", metadata = {} }}))
+                assert(session_writer:add_notes({
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Activated.", metadata = {} },
+                    { type = consts.MSG_TYPE.SYSTEM, content = "Activated system.", metadata = {} },
+                }))
+                local rows = assert(message_repo.list_all_by_session(session_id))
+                test.eq(#rows, 5)
+                test.eq(rows[1].data, "Before.")
+                test.eq(rows[2].message_id, assistant_id)
+                test.eq(rows[3].data, "After.")
+                test.eq(rows[4].data, "Activated.")
+                test.eq(rows[5].data, "Activated system.")
+
+                local _, batch_err = session_writer:add_notes({
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Orphan candidate", metadata = {} },
+                    { content = "Invalid note", metadata = {} },
+                })
+                test.not_nil(batch_err)
+                test.eq(#assert(message_repo.list_all_by_session(session_id)), 5)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
+        end)
+
         it("rolls back the assistant if any call intent cannot be stored", function()
             local assistant_id = uuid.v7()
             local _, err = message_repo.create_batch(test_data.session_id, {

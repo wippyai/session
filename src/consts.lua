@@ -256,6 +256,7 @@ local consts = {
         INVALID_SESSION_ID = "invalid_session_id",
         SESSION_NOT_FOUND = "session_not_found",
         INVALID_MESSAGE_TYPE = "invalid_message_type",
+        EMPTY_MESSAGE = "empty_message",
         TOKEN_INVALID = "token_invalid",
         REQUEST_CONFLICT = "request_conflict",
         INVALID_FILE_REFERENCES = "invalid_file_references",

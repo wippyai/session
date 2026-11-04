@@ -294,10 +294,19 @@ local NOTE_TYPES = {
     developer = consts.MSG_TYPE.DEVELOPER,
 }
 
+-- Model text and notes are stored only when they say something; providers
+-- reject whitespace-only text blocks on every later request.
+local function has_text(value: any): boolean
+    return type(value) == "string" and value:find("%S") ~= nil
+end
+
+-- What a note may carry from its source; every other key is host state.
+local NOTE_METADATA_KEYS = { "memory_ids" }
+
 local function note_metadata(source: any, op: any, positional: boolean): table
     local metadata = {}
     if type(source) == "table" then
-        for key, value in pairs(source) do metadata[key] = value end
+        for _, key in ipairs(NOTE_METADATA_KEYS) do metadata[key] = source[key] end
     end
     metadata.source_id = op.message_id
     if positional then metadata.preserve_position = true end
@@ -314,7 +323,7 @@ local function lifecycle_notes(result: table?, phase: string, agent: any, op: an
     for _, message in ipairs(result.messages) do
         if type(message) == "table" then
             local content = message.content or message.text or message.data
-            if type(content) == "string" and content ~= "" then
+            if has_text(content) then
                 local role = message.role or message.type or "developer"
                 local note_type = NOTE_TYPES[role]
                 if not note_type then
@@ -362,21 +371,6 @@ local function append_notes(builder: any, notes: {StepNote})
             builder:add_developer(note.content, note.metadata)
         end
     end
-end
-
--- True when history already holds the note of this user turn. A retried turn or
--- a reopened session replays the stored note and its minute.
-local function turn_note_stored(ctx: SessionContext, message_id: string): (boolean?, string?)
-    local rows, err = ctx.reader:messages():after(message_id):all()
-    if err then return nil, err end
-    for _, row in ipairs(rows or {}) do
-        local metadata = row.metadata
-        if row.type == consts.MSG_TYPE.SYSTEM and type(metadata) == "table" and metadata.source_id == message_id
-            and metadata.system_action == consts.SYSTEM_ACTIONS.TURN_CONTEXT then
-            return true, nil
-        end
-    end
-    return false, nil
 end
 
 local function current_agent(ctx: AttentionToolContext): any?
@@ -1259,6 +1253,13 @@ function message_handlers.handle_message(ctx, op)
         return acknowledge_duplicate(accepted_message.message_id, accepted_message)
     end
 
+    if not has_text(data.text) and not (attachments and #attachments > 0)
+        and not (data.file_uuids and #data.file_uuids > 0) then
+        local code = consts.ERROR_CODES.EMPTY_MESSAGE
+        if op.request_id then ctx.upstream:command_error(op.request_id, code, "Message has no text or attachments") end
+        return { completed = true, rejected = true, error = code }
+    end
+
     local active = ctx.turn_state and ctx.turn_state.active == true or false
     local interaction = input_policy.resolve(ctx, current_agent(ctx))
     if not interaction.can_send then
@@ -1402,19 +1403,21 @@ function message_handlers.agent_step(ctx, op)
         if policy_err then return nil, policy_err end
     end
 
-    -- A user message that opens a turn gets one time note. It is rendered here
-    -- so a bad configuration fails before any side effect, and stored only once
-    -- the turn has passed its gates.
+    -- A turn gets one time note, from the first agent that declares time context:
+    -- the one the user message reached, or a successor after a handoff. It is
+    -- rendered here so a bad configuration fails before any side effect, and
+    -- stored only once the turn has passed its gates. A retried turn or a reopened
+    -- session replays the stored note and its minute.
     local turn_note = nil
-    if op.from_user then
+    if op.from_user or handed_off then
         local note, note_err = turn_context.render(agent.agent_options, time.now())
         if note_err then
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
                 "Failed to render turn context: " .. tostring(note_err))
         end
         if note then
-            local stored, stored_err = turn_note_stored(ctx, op.message_id)
-            if stored == nil then return nil, stored_err end
+            local stored, stored_err = ctx.reader:get_turn_note(op.message_id)
+            if stored_err then return nil, stored_err end
             if not stored then turn_note = note end
         end
     end
@@ -1442,9 +1445,16 @@ function message_handlers.agent_step(ctx, op)
     if activate_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_err)
     end
-    local step_notes, activate_notes_err = lifecycle_notes(activate_result, lifecycle_runtime.PHASE.ACTIVATE, agent, op)
-    if not step_notes then
+    -- Activation fires once, so its notes are stored when they fire: they outlive
+    -- a step whose output is discarded.
+    local activation_notes, activate_notes_err = lifecycle_notes(activate_result, lifecycle_runtime.PHASE.ACTIVATE, agent, op)
+    if not activation_notes then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_notes_err)
+    end
+    if #activation_notes > 0 then
+        local stored, store_err = ctx.writer:add_notes(activation_notes)
+        if not stored then return nil, store_err end
+        append_notes(builder, activation_notes)
     end
 
     local before_result, before_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.BEFORE_STEP, agent, {
@@ -1461,11 +1471,10 @@ function message_handlers.agent_step(ctx, op)
     if before_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_err)
     end
-    local before_notes, before_notes_err = lifecycle_notes(before_result, lifecycle_runtime.PHASE.BEFORE_STEP, agent, op)
-    if not before_notes then
+    local step_notes, before_notes_err = lifecycle_notes(before_result, lifecycle_runtime.PHASE.BEFORE_STEP, agent, op)
+    if not step_notes then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_notes_err)
     end
-    for _, note in ipairs(before_notes) do table.insert(step_notes, note) end
 
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     ctx.input_apply_batch = input_updates
@@ -1617,7 +1626,7 @@ function message_handlers.agent_step(ctx, op)
         if after_err then
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
         end
-        if type(result.result) == "string" and result.result ~= "" then
+        if has_text(result.result) then
             local stored_id, _, store_err = ctx.writer:add_response(result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
@@ -1670,7 +1679,8 @@ function message_handlers.agent_step(ctx, op)
         if token_err then return nil, token_err end
         -- A truncated response is not terminal. Keep presentation refs for the
         -- eventual tool-free answer rather than attaching them to partial text.
-        if result.result and result.result ~= "" then
+        local truncation_notice = { type = consts.MSG_TYPE.DEVELOPER, content = (output :: any).TRUNCATION_MSG, metadata = {} }
+        if has_text(result.result) then
             local stored_id, _, store_err = ctx.writer:add_response(result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
@@ -1678,7 +1688,7 @@ function message_handlers.agent_step(ctx, op)
                 tokens = result.tokens,
                 truncated = true,
                 memory_recall_error = memory_recall_error
-            }, {}, step_notes)
+            }, {}, step_notes, { truncation_notice })
             if store_err then
                 return nil, store_err
             end
@@ -1689,9 +1699,10 @@ function message_handlers.agent_step(ctx, op)
                 content = result.result,
                 using_tools = false
             })
+        else
+            ctx.writer:add_message(truncation_notice.type, truncation_notice.content, truncation_notice.metadata)
         end
 
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, (output :: any).TRUNCATION_MSG, {})
         if is_turn_blocked(ctx) then
             return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
         end
@@ -1798,7 +1809,8 @@ function message_handlers.agent_step(ctx, op)
     local terminal_presentation, pending_inline_artifacts = terminal_inline_artifact_presentation(
         ctx :: SessionContext, #unified_tool_calls)
 
-    if (result.result and result.result ~= "") or (#unified_tool_calls > 0)
+    local output_text = has_text(result.result) and result.result or ""
+    if output_text ~= "" or (#unified_tool_calls > 0)
         or behavior_round or terminal_presentation then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
@@ -1856,7 +1868,7 @@ function message_handlers.agent_step(ctx, op)
             })
             call_message_types[call.id] = call_type
         end
-        local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents, step_notes)
+        local stored_id, call_message_ids, store_err = ctx.writer:add_response(output_text, metadata, intents, step_notes)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
@@ -1881,9 +1893,9 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        if result.result and result.result ~= "" or terminal_presentation then
+        if output_text ~= "" or terminal_presentation then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
-                content = result.result,
+                content = output_text,
                 using_tools = (#unified_tool_calls > 0),
                 presentation = terminal_presentation
             })
@@ -1937,7 +1949,7 @@ function message_handlers.agent_step(ctx, op)
             message_id = op.message_id,
             response_id = response_id,
             request_id = op.request_id,
-            has_text_response = (result.result and result.result ~= ""),
+            has_text_response = output_text ~= "",
             ui_action_runtime = op.ui_action_runtime,
         })
     end

@@ -390,6 +390,21 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
         end
     end
 
+    -- A stored row renders as itself on every request. The builder merges adjacent
+    -- messages of one role and drivers hoist unpositioned developer messages into
+    -- the top-level instructions; either would edit what an earlier request sent.
+    local function in_place(metadata: table?): table
+        local copy = {}
+        for key, value in pairs(metadata or {}) do copy[key] = value end
+        copy.preserve_position = true
+        return copy
+    end
+
+    -- A row stored blank renders as nothing; providers reject empty text blocks.
+    local function has_text(value: any): boolean
+        return type(value) == "string" and value:find("%S") ~= nil
+    end
+
     local function add_message(msg, render_steering)
         local metadata: table = msg.metadata or {}
 
@@ -401,11 +416,14 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
         if msg.type == consts.MSG_TYPE.SYSTEM then
             -- Positional system notes (turn context, lifecycle) render where they
             -- were sent; other system rows are host records for the client.
-            if metadata.preserve_position == true then
+            if metadata.preserve_position == true and has_text(msg.data) then
                 builder:add_system(msg.data :: string, metadata)
             end
         elseif msg.type == consts.MSG_TYPE.USER then
-            local user_parts = { prompt_builder._prompt.text(msg.data :: string) }
+            local user_parts = {}
+            if has_text(msg.data) then
+                table.insert(user_parts, prompt_builder._prompt.text(msg.data :: string))
+            end
             if include_context_attachments and metadata.context_attachments then
                 local required, required_count, required_versions = {}, 0, {}
                 for _, attachment in ipairs(metadata.context_attachments) do
@@ -444,7 +462,7 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                     table.insert(user_parts, part)
                 end
             end
-            builder:add_message(prompt_builder._prompt.ROLE.USER, user_parts)
+            builder:add_message(prompt_builder._prompt.ROLE.USER, user_parts, nil, { preserve_position = true })
 
             if include_files and metadata.file_uuids and #metadata.file_uuids > 0 then
                 local file_info = {}
@@ -470,7 +488,7 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                             file.filename, file.type, file.size, file.uuid
                         )
                     end
-                    builder:add_developer(files_text)
+                    builder:add_developer(files_text, { preserve_position = true })
                 end
             end
 
@@ -478,10 +496,17 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                 builder:add_cache_marker("checkpoint_" .. msg.message_id)
             end
         elseif msg.type == consts.MSG_TYPE.ASSISTANT then
-            -- Always use add_assistant and let prompt library handle thinking blocks internally
-            builder:add_assistant(msg.data :: string, metadata)
+            -- Always use add_assistant and let prompt library handle thinking blocks internally.
+            -- A row with no text stays only for the thinking blocks of its tool round.
+            if has_text(msg.data) then
+                builder:add_assistant(msg.data :: string, in_place(metadata))
+            elseif type(metadata.thinking_blocks) == "table" and #metadata.thinking_blocks > 0 then
+                builder:add_assistant("", in_place(metadata))
+            end
         elseif msg.type == consts.MSG_TYPE.DEVELOPER then
-            builder:add_developer(msg.data :: string, metadata)
+            if has_text(msg.data) then
+                builder:add_developer(msg.data :: string, in_place(metadata))
+            end
         elseif
             msg.type == consts.MSG_TYPE.FUNCTION
             or msg.type == consts.MSG_TYPE.PRIVATE_FUNCTION
@@ -554,8 +579,8 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                 end
             end
         elseif msg.type == consts.MSG_TYPE.ARTIFACT then
-            if msg.data and msg.data ~= "" then
-                builder:add_developer("Artifact: " .. msg.data, metadata)
+            if has_text(msg.data) then
+                builder:add_developer("Artifact: " .. msg.data, in_place(metadata))
             end
         end
     end
@@ -694,7 +719,20 @@ function prompt_builder.from_session(session, options)
     if anchor then
         local request, request_err = checkpoint_request(session, messages, anchor)
         if request_err then return nil, "Failed to load checkpoint request: " .. request_err end
-        if request then table.insert(checkpoint_prefix, request) end
+        if request then
+            table.insert(checkpoint_prefix, request)
+            -- The note of the source turn stays with its excerpt, unless the
+            -- retained history already holds it.
+            local note, note_err = session:get_turn_note(request.message_id)
+            if note_err then return nil, "Failed to load turn note: " .. note_err end
+            if note then
+                local retained = false
+                for _, message in ipairs(messages) do
+                    if message.message_id == note.message_id then retained = true end
+                end
+                if not retained then table.insert(checkpoint_prefix, note) end
+            end
+        end
         table.insert(checkpoint_prefix, {
             message_id = "checkpoint-resume:" .. tostring(anchor.message_id),
             type = consts.MSG_TYPE.DEVELOPER,

@@ -18,6 +18,7 @@ local active_pid = nil
 local active_exit = nil
 local observed = {}
 local test_inbox, test_events
+local expected_session_errors = false
 
 local function receive_channels()
     if not test_inbox then test_inbox = process.inbox() end
@@ -48,7 +49,7 @@ local function receive_until(predicate, description)
                 session_id = payload.session_id, request_id = payload.request_id,
                 status = payload.status, code = payload.code}
             if #observed > 16 then table.remove(observed, 1) end
-            if payload.type == consts.UPSTREAM_TYPES.ERROR then
+            if payload.type == consts.UPSTREAM_TYPES.ERROR and not expected_session_errors then
                 timer:stop()
                 error("Session error: " .. tostring(payload.message or payload.code))
             end
@@ -626,6 +627,7 @@ local function with_session(title, config, scenario, body)
     storage:set("edits", 0)
     storage:set("lifecycle_activate", 0)
     storage:set("lifecycle_before_step", 0)
+    storage:set("checkpoints", 0)
     scenario.parent = process.pid()
     storage:set("scenario", scenario)
     local session_id, context_id = uuid.v7(), uuid.v7()
@@ -678,7 +680,8 @@ local function run_stable_prefix_scenario()
                 sequence[#sequence + 1] = row.data
             elseif row.type == consts.MSG_TYPE.SYSTEM then
                 test.eq(metadata.system_action, "turn_context")
-                test.eq(rows[index - 1].type, consts.MSG_TYPE.USER, "the turn note follows its user message")
+                test.eq(metadata.source_id, rows[index - 1].type == consts.MSG_TYPE.USER and rows[index - 1].message_id
+                    or rows[index - 2].message_id, "the turn note follows its user message and any activation note")
                 test.contains(row.data, "The current date and time is ")
                 sequence[#sequence + 1] = "time"
             elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.memory_ids then
@@ -701,7 +704,7 @@ local function run_stable_prefix_scenario()
         end
         test.eq(table.concat(sequence, "|"), table.concat({
             "system:agent_change", "host", "system:model_change", "host",
-            "user", "time", "Prefix agent activated.", "Before step 1.", "Before step 1 system note.", "recall", "assistant", "function",
+            "user", "Prefix agent activated.", "time", "Before step 1.", "Before step 1 system note.", "recall", "assistant", "function",
             "Before step 2.", "Before step 2 system note.", "recall", "assistant",
             "user", "time", "Before step 3.", "Before step 3 system note.", "recall", "assistant",
         }, "|"))
@@ -757,9 +760,67 @@ local function run_stale_thinking_scenario()
     end)
 end
 
+local function request_has(request, text)
+    local found = 0
+    for _, message in ipairs(request.messages) do
+        for _, part in ipairs(message.content or {}) do
+            if type(part.text) == "string" and part.text:find(text, 1, true) then found = found + 1 end
+        end
+    end
+    return found
+end
+
+local TIME_NOTE = "The current date and time is "
+
+local function run_opening_compaction_scenario()
+    with_session("Opening compaction", { agent_id = "app.runtime:time_agent", model = "session-runtime-prefix",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 1 },
+        { script = {{ content = "It is noon." }} }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "compaction-first", "What time is it?")
+        local requests = storage:get("requests")
+        test.is_true(storage:get("checkpoints") >= 1, "the opening step compacts before dispatch")
+        test.eq(request_has(requests[1], TIME_NOTE), 1, "the compacted opening request keeps the time note")
+    end)
+end
+
+local function run_time_successor_scenario()
+    with_session("Time successor", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 },
+        { handoff_target = "app.runtime:time_agent", script = {
+            { content = "Handing off.", calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }} },
+            { content = "It is noon." },
+            { content = "Still noon." },
+        } }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "successor-first", "Hand off. What time is it?")
+        send_and_settle(pid, session_id, "successor-second", "And now?")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(request_has(requests[1], TIME_NOTE), 0)
+        test.eq(request_has(requests[2], TIME_NOTE), 1, "the time-aware successor gets this turn's note")
+        test.eq(request_has(requests[3], TIME_NOTE), 2, "the next user turn adds its own note")
+    end)
+end
+
+local function run_failed_activation_scenario()
+    with_session("Failed activation", { agent_id = "app.runtime:prefix_agent", model = "session-runtime-prefix" },
+        { script = {{ error = "provider down" }, { content = "Recovered." }} }, function(pid, session_id, storage)
+        expected_session_errors = true
+        send_and_settle(pid, session_id, "activation-first", "First.")
+        expected_session_errors = false
+        send_and_settle(pid, session_id, "activation-second", "Second.")
+        local requests = storage:get("requests")
+        test.eq(storage:get("lifecycle_activate"), 1)
+        test.eq(request_has(requests[1], "Prefix agent activated."), 1)
+        test.eq(request_has(requests[2], "Prefix agent activated."), 1, "the note outlives the failed step")
+    end)
+end
+
 local function define_stable_prefix_tests()
     test.describe("Session stable request prefix through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
+        test.it("keeps the time note when the opening step compacts", run_opening_compaction_scenario)
+        test.it("notes the turn for a time-aware successor after a handoff", run_time_successor_scenario)
+        test.it("keeps an activation note when the provider fails", run_failed_activation_scenario)
         test.it("replays turn, lifecycle and recall notes so each request extends the previous one",
             run_stable_prefix_scenario)
         test.it("strips thinking produced under another prefix and keeps the current round", run_stale_thinking_scenario)

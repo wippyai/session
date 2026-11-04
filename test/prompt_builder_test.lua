@@ -5,6 +5,7 @@ local consts = require("consts")
 local prompt_builder = require("prompt_builder")
 local claude_mapper = require("claude_mapper")
 local google_mapper = require("google_mapper")
+local openai_mapper = require("openai_mapper")
 local context_attachments = require("context_attachments")
 
 local function define_tests()
@@ -69,7 +70,8 @@ local function define_tests()
             }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
             test.is_nil(err)
             local messages = builder:get_messages()
-            test.eq(messages[#messages].content[1].text, "earlier instruction\n\nlatest instruction")
+            test.eq(messages[#messages - 1].content[1].text, "earlier instruction")
+            test.eq(messages[#messages].content[1].text, "latest instruction")
         end)
     end)
     describe("foundation error feedback", function()
@@ -164,6 +166,176 @@ local function define_tests()
         end)
     end)
     describe("Prompt Builder", function()
+        describe("stored row rendering", function()
+            local function build(rows)
+                local builder, err = prompt_builder.build(rows, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                return builder:get_messages()
+            end
+
+            it("renders every stored developer row in place", function()
+                local built = build({
+                    { message_id = "d-1", type = consts.MSG_TYPE.DEVELOPER, data = "Agent changed.", metadata = {} },
+                    { message_id = "d-2", type = consts.MSG_TYPE.DEVELOPER, data = "Model changed.", metadata = {} },
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "Question.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ARTIFACT, data = "Report", metadata = {} },
+                    { message_id = "d-3", type = consts.MSG_TYPE.DEVELOPER, data = "Artifact instructions.",
+                        metadata = { system_action = "artifact_instructions" } },
+                })
+                test.eq(#built, 5, "adjacent rows do not merge")
+                local instructions = openai_mapper.extract_instructions(built)
+                test.is_true(instructions == nil or instructions == "", "stored rows never join the instructions")
+                test.eq(built[5].content[1].text, "Artifact instructions.")
+            end)
+
+            it("keeps the files note in place", function()
+                local resolve_file = prompt_builder._resolve_file
+                prompt_builder._resolve_file = function()
+                    return { size = 1, mime_type = "text/plain", metadata = { filename = "a.txt" } }
+                end
+                local builder = assert(prompt_builder.build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "See file.", metadata = { file_uuids = { "f-1" } } },
+                }, {}, {}, { include_contexts = false, cache_markers = false }))
+                prompt_builder._resolve_file = resolve_file
+                test.is_true(builder:get_messages()[2].metadata.preserve_position)
+            end)
+
+            it("keeps adjacent user and assistant rows as stored", function()
+                local built = build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "First.", metadata = {} },
+                    { message_id = "u-2", type = consts.MSG_TYPE.USER, data = "Second.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "One.", metadata = {} },
+                    { message_id = "a-2", type = consts.MSG_TYPE.ASSISTANT, data = "Two.", metadata = {} },
+                })
+                test.eq(#built, 4)
+                test.eq(built[1].content[1].text, "First.", "an earlier row keeps its bytes")
+                test.eq(built[3].content[1].text, "One.")
+            end)
+
+            it("skips rows stored blank", function()
+                local built = build({
+                    { message_id = "u-0", type = consts.MSG_TYPE.USER, data = "Real.", metadata = {} },
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "", metadata = {} },
+                    { message_id = "u-2", type = consts.MSG_TYPE.USER, data = "  \n", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "  ", metadata = {} },
+                    { message_id = "a-2", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                        presentation = { artifact_refs = {} } } },
+                    { message_id = "d-1", type = consts.MSG_TYPE.DEVELOPER, data = "  ", metadata = {} },
+                    { message_id = "s-1", type = consts.MSG_TYPE.SYSTEM, data = "\n", metadata = { preserve_position = true } },
+                    { message_id = "r-1", type = consts.MSG_TYPE.ARTIFACT, data = " ", metadata = {} },
+                })
+                test.eq(#built, 1)
+                test.eq(built[1].content[1].text, "Real.")
+            end)
+
+            it("renders an empty assistant row out of the provider request", function()
+                local built = build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "Make it.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                        presentation = { artifact_refs = {} } } },
+                    { message_id = "u-2", type = consts.MSG_TYPE.USER, data = "Then?", metadata = {} },
+                })
+                test.is_nil((json.encode(claude_mapper.map_messages(built)):find("intercepted", 1, true)),
+                    "history carries no invented text")
+                test.is_nil((json.encode(openai_mapper.map_messages(built)):find("output_text", 1, true)),
+                    "no empty output_text item")
+            end)
+
+            it("keeps thinking blocks of a tool round with no text", function()
+                local blocks = {{ type = "thinking", thinking = "plan", signature = "sig" }}
+                local built = build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "Go.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "  ", metadata = { thinking_blocks = blocks } },
+                })
+                test.eq(#built, 2)
+                test.eq(built[2].metadata.thinking_blocks[1].signature, "sig")
+                test.eq(built[2].content[1].text, "", "whitespace never reaches a provider")
+            end)
+
+            it("omits the empty user part when attachments carry the message", function()
+                prompt_builder._context_attachments = {
+                    supports = function() return true end,
+                    render = function() return {{ type = "text", text = "Attached context." }}, {} end,
+                }
+                local builder = assert(prompt_builder.build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "  ", metadata = {
+                        context_attachments = {{ attachment_id = "c-1", kind = "example.note", version = 1 }} } },
+                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false }))
+                prompt_builder._context_attachments = context_attachments
+                local parts = builder:get_messages()[1].content
+                test.eq(#parts, 1)
+                test.eq(parts[1].text, "Attached context.")
+            end)
+        end)
+
+        describe("checkpoint request turn note", function()
+            local note_row = { message_id = "note-1", type = consts.MSG_TYPE.SYSTEM,
+                data = "The current date and time is Monday, January 1, 2024 at 00:00 UTC.",
+                metadata = { preserve_position = true, source_id = "request-1", system_action = "turn_context" } }
+
+            local function session_with(rows, boundary)
+                local query = {}
+                function query:from_checkpoint() return self end
+                function query:all() return rows, nil end
+                return {
+                    messages = function() return query end,
+                    contexts = function() return { all = function() return {}, nil end } end,
+                    state = function() return {} end,
+                    get_context = function(_self, key)
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then return "anchor" end
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY then return boundary end
+                        return nil
+                    end,
+                    get_message = function(_self, id)
+                        return { message_id = id, type = consts.MSG_TYPE.USER, data = "What time is it?", metadata = {} }, nil
+                    end,
+                    get_turn_note = function(_self, source_id)
+                        test.eq(source_id, "request-1")
+                        return note_row, nil
+                    end,
+                }
+            end
+
+            local function texts(session)
+                local builder = assert(prompt_builder.from_session(session, { include_files = false, cache_markers = false }))
+                local out = {}
+                for _, message in ipairs(builder:get_messages()) do out[#out + 1] = message.role .. ":" .. message.content[1].text end
+                return out
+            end
+
+            it("keeps the note with the excerpt after compacting the opening step", function()
+                local out = texts(session_with({}, { checkpoint_id = "anchor", exclusive = true, source_id = "request-1" }))
+                test.eq(out[1], "user:What time is it?")
+                test.eq(out[2], "system:" .. note_row.data)
+                test.contains(out[3], "resumed from a checkpoint")
+                test.eq(#out, 3)
+            end)
+
+            it("keeps the note after an inclusive mid-turn checkpoint", function()
+                local out = texts(session_with({
+                    { message_id = "anchor", type = consts.MSG_TYPE.ASSISTANT, data = "Working.",
+                        metadata = { source_id = "request-1" } },
+                }))
+                test.eq(out[2], "system:" .. note_row.data)
+                test.eq(out[#out], "assistant:Working.")
+            end)
+
+            it("renders a note still in the history once", function()
+                local out = texts(session_with({
+                    { message_id = "anchor", type = consts.MSG_TYPE.ASSISTANT, data = "Working.",
+                        metadata = { source_id = "request-1" } },
+                    note_row,
+                }))
+                local found = 0
+                for _, entry in ipairs(out) do
+                    if entry == "system:" .. note_row.data then found = found + 1 end
+                end
+                test.eq(found, 1)
+            end)
+        end)
+
         describe("system rows", function()
             it("renders positional system notes in place and leaves host records out", function()
                 local messages = {
@@ -1584,6 +1756,7 @@ local function define_tests()
                     messages = function(_self) return query end,
                     contexts = function(_self) return { all = function() return {}, nil end } end,
                     state = function(_self) return { meta = {}, config = {} } end,
+                    get_turn_note = function() return nil, nil end,
                     get_context = function(_self, key)
                         if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then
                             return checkpoint_id
@@ -1595,7 +1768,7 @@ local function define_tests()
 
             local function assistant_anchor_window()
                 return {
-                    { message_id = "asst-9", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {} },
+                    { message_id = "asst-9", type = consts.MSG_TYPE.ASSISTANT, data = "Working.", metadata = {} },
                     {
                         message_id = "fn-9",
                         type = consts.MSG_TYPE.FUNCTION,
