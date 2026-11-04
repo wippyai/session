@@ -672,7 +672,12 @@ local function run_stable_prefix_scenario()
             local metadata = row.metadata or {}
             if row.type == consts.MSG_TYPE.SYSTEM and not metadata.preserve_position then
                 sequence[#sequence + 1] = "system:" .. tostring(metadata.system_action)
+            elseif row.type == consts.MSG_TYPE.SYSTEM and metadata.lifecycle_phase then
+                test.is_true(metadata.preserve_position, "the lifecycle system note keeps its position")
+                test.eq(metadata.system_action, "lifecycle_note")
+                sequence[#sequence + 1] = row.data
             elseif row.type == consts.MSG_TYPE.SYSTEM then
+                test.eq(metadata.system_action, "turn_context")
                 test.eq(rows[index - 1].type, consts.MSG_TYPE.USER, "the turn note follows its user message")
                 test.contains(row.data, "The current date and time is ")
                 sequence[#sequence + 1] = "time"
@@ -696,9 +701,9 @@ local function run_stable_prefix_scenario()
         end
         test.eq(table.concat(sequence, "|"), table.concat({
             "system:agent_change", "host", "system:model_change", "host",
-            "user", "time", "Prefix agent activated.", "Before step 1.", "recall", "assistant", "function",
-            "Before step 2.", "recall", "assistant",
-            "user", "time", "Before step 3.", "recall", "assistant",
+            "user", "time", "Prefix agent activated.", "Before step 1.", "Before step 1 system note.", "recall", "assistant", "function",
+            "Before step 2.", "Before step 2 system note.", "recall", "assistant",
+            "user", "time", "Before step 3.", "Before step 3 system note.", "recall", "assistant",
         }, "|"))
         test.eq(fingerprints[1], fingerprints[2])
         test.eq(fingerprints[2], fingerprints[3])

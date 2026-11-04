@@ -170,7 +170,7 @@ local function define_tests()
                     { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "What time is it?", metadata = {} },
                     { message_id = "note-1", type = consts.MSG_TYPE.SYSTEM,
                         data = "The current date and time is Tuesday, November 3, 2026 at 09:41 UTC.",
-                        metadata = { preserve_position = true, source_id = "user-1" } },
+                        metadata = { preserve_position = true, source_id = "user-1", system_action = "turn_context" } },
                     { message_id = "record-1", type = consts.MSG_TYPE.SYSTEM, data = "Turn failed.",
                         metadata = { system_action = consts.SYSTEM_ACTIONS.TURN_FAILED } },
                     { message_id = "assistant-1", type = consts.MSG_TYPE.ASSISTANT, data = "It is 09:41.", metadata = {} },

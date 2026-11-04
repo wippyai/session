@@ -73,6 +73,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
 
     local empty_query = {
         from_checkpoint = function(self) return self end,
+        after = function(self, _message_id) return self end,
         all = function(_self) return {}, nil end,
         count = function(_self) return 0, nil end,
     }
@@ -111,8 +112,11 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
                 end
                 return id, nil
             end,
-            add_response = function(self, content, metadata, calls)
-                table.insert(captured.response_batches, {content = content, calls = calls})
+            add_response = function(self, content, metadata, calls, notes)
+                table.insert(captured.response_batches, {content = content, calls = calls, notes = notes})
+                for _, note in ipairs(notes or {}) do
+                    self:add_message(note.type, note.content, note.metadata)
+                end
                 local assistant_id = self:add_message(consts.MSG_TYPE.ASSISTANT, content, metadata)
                 local ids = {}
                 for _, call in ipairs(calls) do
@@ -1416,7 +1420,7 @@ local function define_tests()
             local final, final_err = message_handlers.agent_step(ctx, retry)
             test.is_nil(final_err)
             test.is_true(final.completed)
-            test.eq(captured.response_batches[1].content, "Completed after retry.")
+            test.eq(captured.response_batches[2].content, "Completed after retry.")
             local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
             test.is_nil(answers[1].metadata.presentation)
             test.eq(answers[2].metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
@@ -2001,27 +2005,32 @@ local function define_tests()
             test.eq(result.next_ops[1].type, consts.OP_TYPE.AGENT_STEP)
         end)
 
-        it("stores no step output when a context note cannot be stored", function()
-            local agent = fake_agent(nil)
-            agent.step = function()
-                return { result = "", tool_calls = {{ id = "call-1", name = "pack_document",
-                    arguments = "{}", registry_id = "app:pack_document" }},
-                    context_notes = {{ role = "developer", content = {{ type = "text", text = "remember this" }},
-                        metadata = { memory_ids = { "mem-1" }, preserve_position = true } }} }
-            end
-            local ctx, captured = mock_ctx(agent)
-            local original_add = ctx.writer.add_message
-            ctx.writer.add_message = function(self, kind, content, metadata)
-                if kind == consts.MSG_TYPE.DEVELOPER then return nil, "memory disk unavailable" end
-                return original_add(self, kind, content, metadata)
-            end
+        it("leaves no notes and no output when the step batch fails", function()
+            local note = { role = "developer", content = {{ type = "text", text = "remember this" }},
+                metadata = { memory_ids = { "mem-1" }, preserve_position = true } }
+            local outcomes = {
+                { result = "", tool_calls = {{ id = "call-1", name = "pack_document",
+                    arguments = "{}", registry_id = "app:pack_document" }}, context_notes = { note } },
+                { result = "partial", truncated = true, truncation_reason = "tool_calls", context_notes = { note } },
+                { stopped = true, result = "streamed", finish_reason = "cancelled", context_notes = { note } },
+            }
+            for _, outcome in ipairs(outcomes) do
+                local agent = fake_agent(nil)
+                agent.step = function() return outcome end
+                local ctx, captured = mock_ctx(agent)
+                ctx.writer.add_response = function() return nil, nil, "batch disk unavailable" end
+                local original_add = ctx.writer.add_message
+                ctx.writer.add_message = function(self, kind, content, metadata)
+                    if kind == consts.MSG_TYPE.ASSISTANT then return nil, "batch disk unavailable" end
+                    return original_add(self, kind, content, metadata)
+                end
 
-            local result, err = user_step(ctx)
+                local result, err = user_step(ctx)
 
-            test.is_nil(result)
-            test.eq(err, "memory disk unavailable")
-            test.eq(#captured.response_batches, 0)
-            test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 0)
+                test.is_nil(result)
+                test.eq(err, "batch disk unavailable")
+                test.eq(#captured.stored, 0, "a failed batch leaves nothing behind")
+            end
         end)
 
         it("records cancellation for every call when stop arrives during the model step", function()
@@ -3886,6 +3895,7 @@ local function define_tests()
         local function serve_history(ctx: any, captured: any)
             local query = {}
             function query:from_checkpoint() return self end
+            function query:after(_message_id) return self end
             function query:count() return #captured.stored + 1, nil end
             function query:all()
                 local rows = {{ message_id = "msg-user", type = consts.MSG_TYPE.USER,
@@ -4049,11 +4059,175 @@ local function define_tests()
             test.eq(captured.stored[1].type, consts.MSG_TYPE.SYSTEM)
             test.contains(notes[1].content, "The current date and time is ")
             test.is_true(notes[1].metadata.preserve_position)
+            test.eq(notes[1].metadata.system_action, "turn_context")
+            test.eq(notes[1].metadata.source_id, "msg-user")
             local first = provider_view(requests[1])
             test.eq(first[#first], (json.encode({ role = "system", content = {{ type = "text", text = notes[1].content }},
                 positional = true })), "the note follows the user message in the first request")
             test.contains(first[#first - 1], "Pack the document.")
             assert_prefix(first, provider_view(requests[2]))
+        end)
+
+        describe("turn note gates", function()
+            local function time_agent(): (any, any)
+                local calls = { steps = 0 }
+                local agent = fake_agent(nil)
+                agent.agent_options = { turn_context = { time = { timezone = "UTC" } } }
+                agent.bindings = { lifecycle = {{ binding = "app:lifecycle" }} }
+                agent.step = function()
+                    calls.steps = calls.steps + 1
+                    return tool_response()
+                end
+                return agent, calls
+            end
+
+            local function turn_notes(captured: any): {any}
+                local notes = {}
+                for _, row in ipairs(stored_of_type(captured, consts.MSG_TYPE.SYSTEM)) do
+                    if row.metadata.preserve_position then notes[#notes + 1] = row end
+                end
+                return notes
+            end
+
+            local gates = {
+                { name = "activation fails", arm = function()
+                    return function(phase) if phase == "activate" then return nil, "activation failed" end end
+                end },
+                { name = "before_step fails", arm = function()
+                    return function(phase) if phase == "before_step" then return nil, "before_step failed" end end
+                end },
+                { name = "a lifecycle message has an invalid role", arm = function()
+                    return function(phase)
+                        if phase == "before_step" then
+                            return { applied = 1, messages = {{ role = "user", content = "Speaks as user." }} }
+                        end
+                    end
+                end },
+                { name = "Stop arrives during lifecycle", arm = function(ctx)
+                    return function(phase) if phase == "before_step" then ctx.stop_requested = true end end
+                end },
+                { name = "Stop commits at the input gate", arm = function(ctx)
+                    ctx.stop_commit_channel = { receive = function() ctx.stop_requested = true end }
+                    return function() end
+                end },
+            }
+
+            for _, gate in ipairs(gates) do
+                it("leaves no note when " .. gate.name .. " and notes the retry once", function()
+                    local agent, calls = time_agent()
+                    local ctx, captured = mock_ctx(agent)
+                    serve_history(ctx, captured)
+                    local armed = gate.arm(ctx)
+                    message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                        local result, err
+                        if armed then result, err = armed(payload.phase) end
+                        if err then return { applied = 0, skipped = 0, errors = {} }, err end
+                        return result or { applied = 1, messages = {} }, nil
+                    end }
+
+                    user_step(ctx)
+
+                    test.eq(calls.steps, 0, "the gate holds the request")
+                    test.eq(#turn_notes(captured), 0, "a turn stopped at a gate leaves no note")
+
+                    armed = nil
+                    ctx.stop_requested = false
+                    if ctx.turn_state.failed then ctx.turn_state = nil end
+                    user_step(ctx)
+
+                    test.eq(calls.steps, 1)
+                    test.eq(#turn_notes(captured), 1, "the retry that reaches the model notes the turn")
+                end)
+            end
+
+            it("does not note a retried turn twice", function()
+                local requests = {}
+                local failed = false
+                local agent = time_agent()
+                agent.step = function(_self, builder)
+                    requests[#requests + 1] = provider_view(builder:get_messages())
+                    if not failed then
+                        failed = true
+                        return nil, "provider unavailable"
+                    end
+                    return tool_response()
+                end
+                local ctx, captured = mock_ctx(agent)
+                serve_history(ctx, captured)
+                message_handlers._lifecycle_runtime = { apply = function()
+                    return { applied = 1, messages = {} }, nil
+                end }
+
+                user_step(ctx)
+                ctx.turn_state = nil
+                user_step(ctx)
+
+                test.eq(#turn_notes(captured), 1)
+                assert_prefix(requests[1], requests[2])
+            end)
+
+            it("replays the stored minute after a restart", function()
+                local stored_note = "The current date and time is Monday, January 1, 2024 at 00:00 UTC. "
+                    .. "Use this temporal context when relevant to your responses."
+                local request
+                local agent = time_agent()
+                agent.step = function(_self, builder)
+                    request = provider_view(builder:get_messages())
+                    return tool_response()
+                end
+                local ctx, captured = mock_ctx(agent)
+                table.insert(captured.stored, { id = "stored-note", type = consts.MSG_TYPE.SYSTEM, content = stored_note,
+                    metadata = { preserve_position = true, source_id = "msg-user", system_action = "turn_context" } })
+                serve_history(ctx, captured)
+                message_handlers._lifecycle_runtime = { apply = function()
+                    return { applied = 1, messages = {} }, nil
+                end }
+
+                user_step(ctx)
+
+                test.eq(#turn_notes(captured), 1, "the reopened turn renders no new note")
+                test.eq(captured.stored[1].content, stored_note)
+                test.contains(table.concat(request, "\n"), "Monday, January 1, 2024 at 00:00 UTC")
+            end)
+        end)
+
+        it("sends step notes on a compaction replacement", function()
+            local replacement_view
+            local agent = fake_agent(nil)
+            agent.bindings = { lifecycle = {{ binding = "app:lifecycle" }} }
+            agent.agent_options = { checkpoint = { function_id = "app:summary", token_threshold = THRESHOLD } }
+            agent.step = function(_self, _builder, options)
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                test.is_nil(err)
+                replacement_view = provider_view(replacement:get_messages())
+                return { result = "done" }
+            end
+            message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                if payload.phase == "activate" then
+                    return { applied = 1, messages = {{ content = "Agent activated." }} }, nil
+                elseif payload.phase == "before_step" then
+                    return { applied = 1, messages = {{ role = "system", content = "Step system note." }} }, nil
+                end
+                return { applied = 1, messages = {} }, nil
+            end }
+            local ctx, captured = mock_ctx(agent)
+            serve_history(ctx, captured)
+            local create_checkpoint = session_handlers.create_checkpoint
+            session_handlers.create_checkpoint = function() return { completed = true } end
+
+            local _, err = user_step(ctx)
+            session_handlers.create_checkpoint = create_checkpoint
+
+            test.is_nil(err)
+            test.not_nil(replacement_view, "the step reaches compaction")
+            local count = #replacement_view
+            test.eq(replacement_view[count - 1], (json.encode({ role = "developer",
+                content = {{ type = "text", text = "Agent activated." }}, positional = true })))
+            test.eq(replacement_view[count], (json.encode({ role = "system",
+                content = {{ type = "text", text = "Step system note." }}, positional = true })))
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+            test.eq(captured.stored[1].content, "Agent activated.", "the notes persist once, with the output")
+            test.eq(captured.stored[2].content, "Step system note.")
         end)
 
         it("adds no turn note when the agent declares no turn context", function()
@@ -4125,6 +4299,7 @@ local function define_tests()
                     test.is_true(row.metadata.preserve_position, "notes keep their conversation position")
                     local recall = string.find(tostring(row.content), "Recalled", 1, true) ~= nil
                     test.eq(row.metadata.lifecycle_phase, (not recall) and (index == 1 and "activate" or "before_step") or nil)
+                    test.eq(row.metadata.system_action, (not recall) and "lifecycle_note" or nil)
                 end
             end
             local first = provider_view(requests[1])

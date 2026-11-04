@@ -23,8 +23,8 @@ local function run(args: any)
             local instance, err = open_writer(...)
             if not instance then return nil, err end
             local add_response = instance.add_response
-            instance.add_response = function(self, content, metadata, intents)
-                local id, ids, store_err = add_response(self, content, metadata, intents)
+            instance.add_response = function(self, content, metadata, intents, notes)
+                local id, ids, store_err = add_response(self, content, metadata, intents, notes)
                 if id and #intents > 0 then
                     assert(process.send(fixture.reply_pid, 'tool_intent_persisted', {}))
                     time.sleep('300ms')

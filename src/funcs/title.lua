@@ -26,6 +26,23 @@ local PROMPTS = {
     secondary = "Generate a concise title that reflects the user's overall focus across this extended conversation. Consider the progression from previous checkpoints to current activity. The title should be 3-8 words long, capture the evolved main theme, be clear and specific, use sentence case, and not use quotation marks. Respond with ONLY the title."
 }
 
+-- A title describes the conversation; positional notes (the time of a turn,
+-- lifecycle guidance) are context sent to the model, not what it was about.
+local function add_conversation_part(parts: {string}, msg: any)
+    if msg.type == "user" then
+        table.insert(parts, "User: " .. (msg.data or ""))
+    elseif msg.type == "assistant" and msg.data and msg.data ~= "" then
+        local content = msg.data:sub(1, CONFIG.max_assistant_content)
+        if #msg.data > CONFIG.max_assistant_content then
+            content = content .. "..."
+        end
+        table.insert(parts, "Assistant: " .. content)
+    elseif msg.type == "system" and msg.data and msg.data ~= ""
+        and not (msg.metadata and msg.metadata.preserve_position) then
+        table.insert(parts, "System: " .. (msg.data or ""))
+    end
+end
+
 local function handle(args)
     if not args.session_id then
         return nil, "session_id is required"
@@ -55,17 +72,7 @@ local function handle(args)
         end
 
         for _, msg in ipairs(all_messages) do
-            if msg.type == "user" then
-                table.insert(conversation_parts, "User: " .. (msg.data or ""))
-            elseif msg.type == "assistant" and msg.data and msg.data ~= "" then
-                local content = msg.data:sub(1, CONFIG.max_assistant_content)
-                if #msg.data > CONFIG.max_assistant_content then
-                    content = content .. "..."
-                end
-                table.insert(conversation_parts, "Assistant: " .. content)
-            elseif msg.type == "system" and msg.data and msg.data ~= "" then
-                table.insert(conversation_parts, "System: " .. (msg.data or ""))
-            end
+            add_conversation_part(conversation_parts, msg)
         end
     else
         title_prompt:add_system(PROMPTS.secondary)
@@ -93,17 +100,7 @@ local function handle(args)
             title_prompt:add_user("Recent activity since last checkpoint:")
 
             for _, msg in ipairs(messages_after_checkpoint) do
-                if msg.type == "user" then
-                    table.insert(conversation_parts, "User: " .. (msg.data or ""))
-                elseif msg.type == "assistant" and msg.data and msg.data ~= "" then
-                    local content = msg.data:sub(1, CONFIG.max_assistant_content)
-                    if #msg.data > CONFIG.max_assistant_content then
-                        content = content .. "..."
-                    end
-                    table.insert(conversation_parts, "Assistant: " .. content)
-                elseif msg.type == "system" and msg.data and msg.data ~= "" then
-                    table.insert(conversation_parts, "System: " .. (msg.data or ""))
-                end
+                add_conversation_part(conversation_parts, msg)
             end
         end
     end

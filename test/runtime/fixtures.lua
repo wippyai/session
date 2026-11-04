@@ -138,7 +138,10 @@ local function prefix_lifecycle(payload)
     if payload.phase == "activate" then
         return { messages = {{ content = "Prefix agent activated." }} }
     elseif payload.phase == "before_step" then
-        return { messages = {{ content = "Before step " .. count .. "." }} }
+        return { messages = {
+            { content = "Before step " .. count .. "." },
+            { role = "system", content = "Before step " .. count .. " system note." },
+        } }
     end
     return {}
 end

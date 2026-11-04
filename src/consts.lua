@@ -242,7 +242,9 @@ local consts = {
         TITLE_GENERATED = "title_generated",
         CHECKPOINT_CREATED = "checkpoint_created",
         TURN_LIMIT = "turn_limit",
-        TURN_FAILED = "turn_failed"
+        TURN_FAILED = "turn_failed",
+        TURN_CONTEXT = "turn_context",
+        LIFECYCLE_NOTE = "lifecycle_note"
     },
 
     -- Error Codes for Plugin

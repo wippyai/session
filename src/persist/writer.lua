@@ -229,7 +229,9 @@ function session_writer:stop_with_input_rollback(updates, session_updates, bound
     return result, err
 end
 
-function session_writer:add_response(content, metadata, calls)
+-- Commits one step atomically: the notes the request sent, in order, then the
+-- assistant row and its pending calls.
+function session_writer:add_response(content, metadata, calls, notes)
     calls = calls or {}
     local seen_call_ids = {}
     for _, call in ipairs(calls) do
@@ -243,11 +245,15 @@ function session_writer:add_response(content, metadata, calls)
         seen_call_ids[call.id] = true
     end
 
+    local rows = {}
+    for _, note in ipairs(notes or {}) do
+        local note_id, note_err = uuid.v7()
+        if note_err then return nil, nil, note_err end
+        table.insert(rows, { message_id = note_id, type = note.type, data = note.content, metadata = note.metadata })
+    end
     local assistant_id, id_err = uuid.v7()
     if id_err then return nil, nil, id_err end
-    local rows = {{
-        message_id = assistant_id, type = "assistant", data = content, metadata = metadata
-    }}
+    table.insert(rows, { message_id = assistant_id, type = "assistant", data = content, metadata = metadata })
     local call_ids = {}
     for _, call in ipairs(calls) do
         local row_id, row_err = uuid.v7()

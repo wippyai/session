@@ -281,8 +281,8 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
 end
 
 -- A note sent with a step: a lifecycle message or a context note the agent
--- returned. The step sends it after the history, and the host persists it there
--- together with the step output, so the next request replays it in place.
+-- returned. The step sends it after the history, and the host commits it there
+-- in one batch with the step output, so the next request replays it in place.
 type StepNote = {
     type: string,
     content: string,
@@ -323,6 +323,7 @@ local function lifecycle_notes(result: table?, phase: string, agent: any, op: an
                 end
                 local metadata = note_metadata(message.metadata, op, true)
                 metadata.lifecycle_phase = phase
+                metadata.system_action = consts.SYSTEM_ACTIONS.LIFECYCLE_NOTE
                 table.insert(notes, { type = note_type, content = content, metadata = metadata })
             end
         end
@@ -363,12 +364,19 @@ local function append_notes(builder: any, notes: {StepNote})
     end
 end
 
-local function persist_notes(ctx: SessionContext, notes: {StepNote}): string?
-    for _, note in ipairs(notes) do
-        local _, err = ctx.writer:add_message(note.type, note.content, note.metadata)
-        if err then return err end
+-- True when history already holds the note of this user turn. A retried turn or
+-- a reopened session replays the stored note and its minute.
+local function turn_note_stored(ctx: SessionContext, message_id: string): (boolean?, string?)
+    local rows, err = ctx.reader:messages():after(message_id):all()
+    if err then return nil, err end
+    for _, row in ipairs(rows or {}) do
+        local metadata = row.metadata
+        if row.type == consts.MSG_TYPE.SYSTEM and type(metadata) == "table" and metadata.source_id == message_id
+            and metadata.system_action == consts.SYSTEM_ACTIONS.TURN_CONTEXT then
+            return true, nil
+        end
     end
-    return nil
+    return false, nil
 end
 
 local function current_agent(ctx: AttentionToolContext): any?
@@ -1394,18 +1402,20 @@ function message_handlers.agent_step(ctx, op)
         if policy_err then return nil, policy_err end
     end
 
-    -- The turn context is rendered once, when the user message opens the turn,
-    -- and persisted right after it; every later request replays it unchanged.
-    if op.from_user and state.steps == 1 then
+    -- A user message that opens a turn gets one time note. It is rendered here
+    -- so a bad configuration fails before any side effect, and stored only once
+    -- the turn has passed its gates.
+    local turn_note = nil
+    if op.from_user then
         local note, note_err = turn_context.render(agent.agent_options, time.now())
         if note_err then
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
                 "Failed to render turn context: " .. tostring(note_err))
         end
         if note then
-            local _, write_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, note,
-                { preserve_position = true, source_id = op.message_id })
-            if write_err then return nil, write_err end
+            local stored, stored_err = turn_note_stored(ctx, op.message_id)
+            if stored == nil then return nil, stored_err end
+            if not stored then turn_note = note end
         end
     end
 
@@ -1456,7 +1466,6 @@ function message_handlers.agent_step(ctx, op)
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_notes_err)
     end
     for _, note in ipairs(before_notes) do table.insert(step_notes, note) end
-    append_notes(builder, step_notes)
 
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     ctx.input_apply_batch = input_updates
@@ -1474,6 +1483,16 @@ function message_handlers.agent_step(ctx, op)
     end
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     publish_applied_inputs(ctx, input_updates)
+    if turn_note then
+        -- Written before the model call, since continuation steps of this turn
+        -- replay it even when this step's output is discarded.
+        local metadata = { preserve_position = true, source_id = op.message_id,
+            system_action = consts.SYSTEM_ACTIONS.TURN_CONTEXT }
+        local _, write_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, turn_note, metadata)
+        if write_err then return nil, write_err end
+        builder:add_system(turn_note, metadata)
+    end
+    append_notes(builder, step_notes)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
@@ -1599,15 +1618,13 @@ function message_handlers.agent_step(ctx, op)
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
         end
         if type(result.result) == "string" and result.result ~= "" then
-            local notes_store_err = persist_notes(ctx, step_notes)
-            if notes_store_err then return nil, notes_store_err end
-            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, _, store_err = ctx.writer:add_response(result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
                 stopped = true,
                 memory_recall_error = memory_recall_error
-            })
+            }, {}, step_notes)
             if store_err then return nil, store_err end
             local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
             if persist_err then return nil, persist_err end
@@ -1654,16 +1671,14 @@ function message_handlers.agent_step(ctx, op)
         -- A truncated response is not terminal. Keep presentation refs for the
         -- eventual tool-free answer rather than attaching them to partial text.
         if result.result and result.result ~= "" then
-            local notes_store_err = persist_notes(ctx, step_notes)
-            if notes_store_err then return nil, notes_store_err end
-            local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+            local stored_id, _, store_err = ctx.writer:add_response(result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
                 tokens = result.tokens,
                 truncated = true,
                 memory_recall_error = memory_recall_error
-            })
+            }, {}, step_notes)
             if store_err then
                 return nil, store_err
             end
@@ -1841,12 +1856,7 @@ function message_handlers.agent_step(ctx, op)
             })
             call_message_types[call.id] = call_type
         end
-        local notes_store_err = persist_notes(ctx, step_notes)
-        if notes_store_err then
-            ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, notes_store_err)
-            return nil, notes_store_err
-        end
-        local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
+        local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents, step_notes)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
