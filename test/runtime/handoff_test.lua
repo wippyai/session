@@ -680,7 +680,8 @@ local function run_stable_prefix_scenario()
                 test.is_true(metadata.preserve_position, "the recall note keeps its position")
                 test.eq(metadata.memory_ids[1], "style")
                 sequence[#sequence + 1] = "recall"
-            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.lifecycle_phase then
+            elseif row.type == consts.MSG_TYPE.HOST_NOTE then
+                test.eq(metadata.role, "developer")
                 test.is_true(metadata.preserve_position, "lifecycle note keeps its position")
                 sequence[#sequence + 1] = row.data
             elseif row.type == consts.MSG_TYPE.DEVELOPER then

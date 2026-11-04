@@ -1060,6 +1060,32 @@ local function define_tests()
             test.is_nil(result)
             test.contains(tostring(err), "Message ID is required")
         end)
+
+        it("keeps host notes out of client listings, counts and the latest message", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Host notes", "test"))
+            local ok, failure = pcall(function()
+                local question = uuid.v7()
+                assert(message_repo.create(question, session_id, consts.MSG_TYPE.USER, "Question.", {}))
+                assert(message_repo.create(uuid.v7(), session_id, consts.MSG_TYPE.HOST_NOTE, "Lifecycle user note.",
+                    { role = "user", lifecycle_phase = "before_step" }))
+                local answer = uuid.v7()
+                assert(message_repo.create(answer, session_id, consts.MSG_TYPE.ASSISTANT, "Answer.", {}))
+                assert(message_repo.create(uuid.v7(), session_id, consts.MSG_TYPE.HOST_NOTE, "Lifecycle assistant note.",
+                    { role = "assistant", lifecycle_phase = "before_step" }))
+
+                local page = assert(message_repo.list_by_session(session_id))
+                test.eq(#page.messages, 2)
+                test.eq(page.messages[1].message_id, question)
+                test.eq(page.messages[2].message_id, answer)
+                local history = assert(message_repo.list_by_session(session_id, nil, nil, nil, true))
+                test.eq(#history.messages, 4, "prompt history keeps host notes")
+                test.eq(message_repo.count_by_session(session_id), 2)
+                test.eq(assert(message_repo.get_latest(session_id)).message_id, answer)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
+        end)
     end)
 end
 

@@ -285,16 +285,12 @@ end
 -- together with the step output, so the next request replays it in place.
 type StepNote = {
     type: string,
+    role: string,
     content: string,
     metadata: table,
 }
 
-local NOTE_TYPES = {
-    system = consts.MSG_TYPE.SYSTEM,
-    user = consts.MSG_TYPE.USER,
-    assistant = consts.MSG_TYPE.ASSISTANT,
-    developer = consts.MSG_TYPE.DEVELOPER,
-}
+local NOTE_ROLES = { system = true, user = true, assistant = true, developer = true }
 
 local function note_metadata(source: any, op: any, positional: boolean): table
     local metadata = {}
@@ -315,11 +311,16 @@ local function lifecycle_notes(result: table?, phase: string, op: any): {StepNot
         if type(message) == "table" then
             local content = message.content or message.text or message.data
             if type(content) == "string" and content ~= "" then
-                local note_type = NOTE_TYPES[message.role or message.type] or consts.MSG_TYPE.DEVELOPER
-                local positional = note_type == consts.MSG_TYPE.SYSTEM or note_type == consts.MSG_TYPE.DEVELOPER
-                local metadata = note_metadata(message.metadata, op, positional)
+                local role = message.role or message.type
+                if not NOTE_ROLES[role] then role = "developer" end
+                -- Every role keeps its position: the builder merges adjacent
+                -- unpositioned messages of one role, which the next request
+                -- would then render differently.
+                local metadata = note_metadata(message.metadata, op, true)
+                metadata.role = role
                 metadata.lifecycle_phase = phase
-                table.insert(notes, { type = note_type, content = content, metadata = metadata })
+                table.insert(notes, { type = consts.MSG_TYPE.HOST_NOTE, role = role, content = content,
+                    metadata = metadata })
             end
         end
     end
@@ -333,17 +334,17 @@ local function context_notes(result: any, op: any): ({StepNote}?, string?)
         return notes, nil
     end
     for index, message in ipairs(result.context_notes) do
-        local note_type = type(message) == "table" and NOTE_TYPES[message.role] or nil
+        local role = type(message) == "table" and message.role or nil
         local content = type(message) == "table" and message.content or nil
         if type(content) == "table" and #content == 1 and type(content[1]) == "table"
             and content[1].type == "text" then
             content = content[1].text
         end
-        if (note_type ~= consts.MSG_TYPE.DEVELOPER and note_type ~= consts.MSG_TYPE.SYSTEM)
-            or type(content) ~= "string" then
+        if (role ~= "developer" and role ~= "system") or type(content) ~= "string" then
             return nil, "Context note " .. tostring(index) .. " is not a single-text developer or system message"
         end
-        table.insert(notes, { type = note_type :: string, content = content,
+        local note_type = role == "system" and consts.MSG_TYPE.SYSTEM or consts.MSG_TYPE.DEVELOPER
+        table.insert(notes, { type = note_type, role = role :: string, content = content,
             metadata = note_metadata(message.metadata, op, true) })
     end
     return notes, nil
@@ -351,11 +352,11 @@ end
 
 local function append_notes(builder: any, notes: {StepNote})
     for _, note in ipairs(notes) do
-        if note.type == consts.MSG_TYPE.SYSTEM then
+        if note.role == "system" then
             builder:add_system(note.content, note.metadata)
-        elseif note.type == consts.MSG_TYPE.USER then
-            builder:add_user(note.content)
-        elseif note.type == consts.MSG_TYPE.ASSISTANT then
+        elseif note.role == "user" then
+            builder:add_user(note.content, note.metadata)
+        elseif note.role == "assistant" then
             builder:add_assistant(note.content, note.metadata)
         else
             builder:add_developer(note.content, note.metadata)
@@ -771,7 +772,7 @@ local function prepare_pending_inputs(ctx, new_user_id)
                 return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
             end
             if input.state == "pending" then pending[#pending + 1] = message end
-        elseif message.message_id ~= new_user_id then
+        elseif message.message_id ~= new_user_id and message.type ~= consts.MSG_TYPE.HOST_NOTE then
             anchor_id = message.message_id
         end
     end

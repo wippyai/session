@@ -404,6 +404,19 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
             if metadata.preserve_position == true then
                 builder:add_system(msg.data :: string, metadata)
             end
+        elseif msg.type == consts.MSG_TYPE.HOST_NOTE then
+            local role = metadata.role
+            if role == "system" then
+                builder:add_system(msg.data :: string, metadata)
+            elseif role == "developer" then
+                builder:add_developer(msg.data :: string, metadata)
+            elseif role == "user" then
+                builder:add_user(msg.data :: string, metadata)
+            elseif role == "assistant" then
+                builder:add_assistant(msg.data :: string, metadata)
+            else
+                return nil, "Host note " .. tostring(msg.message_id) .. " has no known role"
+            end
         elseif msg.type == consts.MSG_TYPE.USER then
             local user_parts = { prompt_builder._prompt.text(msg.data :: string) }
             if include_context_attachments and metadata.context_attachments then

@@ -286,12 +286,18 @@ refresh the dependency lock from the published packages.
   row and the rows written after it, but their blocks followed history the
   checkpoint removed. The current tool round always keeps its blocks.
 - **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
-  positional notes after the history and stored with the step output: system
-  and developer messages as positional rows, user and assistant messages as rows
-  of their role, each with `metadata.lifecycle_phase`. They are appended, never
-  rebuilt, so `before_step` adds one set of notes per step and an activation
-  note stays in the history after the step that activated the agent. Notes of a
-  discarded output are discarded with it.
+  positional notes after the history and stored with the step output as
+  `host_note` rows: `metadata.role` keeps the role they were sent with,
+  `metadata.lifecycle_phase` the phase, and every role carries
+  `preserve_position` so the builder never merges a note into a neighbouring
+  message. They are appended, never rebuilt, so `before_step` adds one set of
+  notes per step and an activation note stays in the history after the step
+  that activated the agent. Notes of a discarded output are discarded with it.
+  Host notes are prompt history, not conversation: the messages API, the
+  session's latest message and message count leave them out, and turn logic
+  (the checkpoint request lookup, steering anchors, titles and summaries) reads
+  only user and assistant rows, so a user-role note never counts as the user's
+  message.
 
 Two history edits change the prefix by design: a tool result marked `stale` is
 replaced with a withdrawal notice, and the attached-files note lists the

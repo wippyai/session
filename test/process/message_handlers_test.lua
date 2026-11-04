@@ -11,6 +11,7 @@ local output = require("output")
 local uuid = require("uuid")
 local json = require("json")
 local google_mapper = require("google_mapper")
+local prompt_builder = require("prompt_builder")
 
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
@@ -4115,13 +4116,13 @@ local function define_tests()
             local sequence = {}
             for _, row in ipairs(captured.stored) do sequence[#sequence + 1] = row.type .. ":" .. tostring(row.content) end
             test.eq(table.concat(sequence, "|"), table.concat({
-                "developer:Agent activated.", "developer:Step 1 guidance.", "system:Step 1 system note.",
+                "host_note:Agent activated.", "host_note:Step 1 guidance.", "host_note:Step 1 system note.",
                 "developer:Recalled 1", "assistant:", "function:{}",
-                "developer:Step 2 guidance.", "system:Step 2 system note.",
+                "host_note:Step 2 guidance.", "host_note:Step 2 system note.",
                 "developer:Recalled 2", "assistant:", "function:{}",
             }, "|"))
             for _, row in ipairs(captured.stored) do
-                if row.type == consts.MSG_TYPE.DEVELOPER or row.type == consts.MSG_TYPE.SYSTEM then
+                if row.type == consts.MSG_TYPE.DEVELOPER or row.type == consts.MSG_TYPE.HOST_NOTE then
                     test.is_true(row.metadata.preserve_position, "notes keep their conversation position")
                 end
             end
@@ -4133,6 +4134,73 @@ local function define_tests()
             first[#first + 1] = (json.encode({ role = "developer", content = {{ type = "text", text = "Recalled 1" }},
                 positional = true }))
             assert_prefix(first, replayed)
+        end)
+
+        it("keeps user and assistant lifecycle messages in the prompt but out of the conversation", function()
+            local requests, before_steps = {}, 0
+            local agent = fake_agent(nil)
+            agent.bindings = { lifecycle = {{ binding = "app:lifecycle", phases = { "before_step" } }} }
+            agent.step = function(_self, builder)
+                requests[#requests + 1] = builder:get_messages()
+                return tool_response()
+            end
+            message_handlers._lifecycle_runtime = { apply = function(_bindings, payload)
+                if payload.phase ~= "before_step" then return { applied = 1, messages = {} }, nil end
+                before_steps = before_steps + 1
+                return { applied = 1, messages = {
+                    { role = "user", content = "Lifecycle user note " .. before_steps .. "." },
+                    { role = "assistant", content = "Lifecycle assistant note " .. before_steps .. "." },
+                } }, nil
+            end }
+            local ctx, captured = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+            serve_history(ctx, captured)
+
+            user_step(ctx)
+            continue_step(ctx)
+
+            local roles = {}
+            for _, row in ipairs(captured.stored) do
+                test.is_false(row.type == consts.MSG_TYPE.USER, "a lifecycle note is not the user's message")
+                test.is_false(row.type == consts.MSG_TYPE.ASSISTANT and row.content ~= "",
+                    "a lifecycle note is not the agent's answer")
+                if row.type == consts.MSG_TYPE.HOST_NOTE then roles[#roles + 1] = row.metadata.role end
+            end
+            test.eq(table.concat(roles, ","), "user,assistant,user,assistant")
+            local replayed = table.concat(provider_view(requests[2]), "\n")
+            test.contains(replayed, (json.encode({ role = "user",
+                content = {{ type = "text", text = "Lifecycle user note 1." }}, positional = true })))
+            test.contains(replayed, (json.encode({ role = "assistant",
+                content = {{ type = "text", text = "Lifecycle assistant note 1." }}, positional = true })))
+            assert_prefix(provider_view(requests[1]), provider_view(requests[2]))
+
+            -- A checkpoint anchored before these rows restores its request: they are not a later user turn.
+            local rows = {{ message_id = "anchor", type = consts.MSG_TYPE.ASSISTANT, data = "Working.",
+                metadata = { source_id = "msg-request" } }}
+            for _, row in ipairs(captured.stored) do
+                rows[#rows + 1] = { message_id = row.id, type = row.type, data = row.content, metadata = row.metadata }
+            end
+            local query = {}
+            function query:from_checkpoint() return self end
+            function query:all() return rows, nil end
+            local session_reader = {
+                messages = function() return query end,
+                contexts = function() return { all = function() return {}, nil end } end,
+                state = function() return {} end,
+                get_context = function(_self, key)
+                    if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then return "anchor" end
+                    return nil
+                end,
+                get_message = function(_self, id)
+                    test.eq(id, "msg-request")
+                    return { message_id = id, type = consts.MSG_TYPE.USER, data = "Original task.", metadata = {} }, nil
+                end,
+            }
+            local built = assert(prompt_builder.from_session(session_reader, { include_files = false }))
+            local restored = false
+            for _, message in ipairs(built:get_messages()) do
+                if message.role == "user" and message.content[1].text == "Original task." then restored = true end
+            end
+            test.is_true(restored, "the checkpoint request is restored past lifecycle notes")
         end)
     end)
 end

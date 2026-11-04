@@ -181,6 +181,7 @@ entries:
       message_handlers: wippy.session.process:message_handlers
       output: wippy.llm:output
       google_mapper: wippy.llm.google:mapper
+      prompt_builder: wippy.session:prompt_builder
       session: wippy.session.process:session
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
