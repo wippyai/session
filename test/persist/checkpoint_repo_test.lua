@@ -72,6 +72,63 @@ local function define_tests()
             end
         end)
 
+        it("preserves the immutable generation checkpoint when merging checkpoint metadata", function()
+            assert(message_repo.update_metadata(message_id, { generation_checkpoint_id = "old-anchor" }))
+            assert(checkpoint_repo.commit(session_id, user_id,
+                { message_id = message_id, checkpoint_id = message_id }, "new summary",
+                { checkpoint_id = message_id, generation_checkpoint_id = message_id }, uuid.v7()))
+            local row = assert(message_repo.get(message_id))
+            test.eq(row.metadata.checkpoint_id, message_id)
+            test.eq(row.metadata.generation_checkpoint_id, "old-anchor", "checkpoint metadata cannot rewrite generation")
+        end)
+
+        it("marks an inclusive checkpoint anchor stale and keeps the current response current", function()
+            assert(message_repo.update_metadata(message_id, {
+                checkpoint_id = "old-anchor", generation_checkpoint_id = "old-anchor", prefix_fingerprint = "fp",
+                thinking_blocks = {{ type = "thinking", thinking = "plan", signature = "sig" }},
+            }))
+            local seen
+            local agent = { id = "test:thinking", model = "test-model", agent_options = {},
+                step = function(_self, _builder, options)
+                    seen = options
+                    return { result = "Current response", prefix_fingerprint = "fp",
+                        metadata = { thinking_blocks = {{ type = "thinking", thinking = "new plan", signature = "new-sig" }} } }
+                end }
+            local ctx = { session_id = session_id, user_id = user_id,
+                config = { agent_id = agent.id, model = agent.model, checkpoint_function_id = "test:summary" },
+                reader = assert(reader.open(session_id)), writer = assert(writer.new(session_id)), lifecycle_state = {},
+                agent_ctx = { load_agent = function() return agent end, get_current_agent = function() return agent end },
+                upstream = { response_beginning = function() end, send_message_update = function() end,
+                    invalidate_message = function() end, message_error = function() end,
+                    update_session = function() end, session_error = function() end } }
+            local saved_funcs = session_handlers._funcs
+            session_handlers._funcs = { new = function() return {
+                with_context = function(self) return self end,
+                call = function() return { summary = "Compacted history" } end,
+            } end }
+            local ran, result, err = pcall(session_handlers.create_checkpoint, ctx,
+                { checkpoint_id = message_id, message_id = message_id })
+            session_handlers._funcs = saved_funcs
+            test.is_true(ran, tostring(result))
+            test.is_nil(err)
+            test.is_true(result.completed)
+            local request_id = uuid.v7()
+            assert(message_repo.create(request_id, session_id, consts.MSG_TYPE.USER, "Continue", {}))
+            ctx.reader = assert(reader.open(session_id))
+            local step, step_err = message_handlers.agent_step(ctx, { message_id = request_id, from_user = true })
+            test.is_nil(step_err)
+            test.is_true(step.completed)
+            local rows = assert(ctx.reader:messages():from_checkpoint():all())
+            test.eq(rows[1].message_id, message_id, "the inclusive anchor remains in history")
+            test.eq(rows[1].metadata.checkpoint_id, message_id)
+            test.eq(rows[1].metadata.generation_checkpoint_id, "old-anchor")
+            test.is_false(seen.thinking_is_current(rows[1], "fp"), "the inclusive checkpoint anchor is stale")
+            local current = rows[#rows]
+            test.eq(current.type, consts.MSG_TYPE.ASSISTANT)
+            test.eq(current.metadata.generation_checkpoint_id, message_id)
+            test.is_true(seen.thinking_is_current(current, "fp"), "the current response stays current")
+        end)
+
         it("persists fallback binding diagnostics through the checkpoint handler and a fresh message read", function()
             local saved_runtime, saved_funcs = session_handlers._checkpoint_runtime, session_handlers._funcs
             session_handlers._checkpoint_runtime = { create = function()

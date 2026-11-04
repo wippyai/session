@@ -47,7 +47,9 @@ function checkpoint_repo.commit(session_id, user_id, op, summary, message_metada
     if decode_err or type(context) ~= "table" then return abort(decode_err or "Invalid primary context") end
     local metadata, metadata_err = json.decode(messages[1].metadata or "{}")
     if metadata_err or type(metadata) ~= "table" then return abort(metadata_err or "Invalid message metadata") end
-    for key, value in pairs(message_metadata) do metadata[key] = value end
+    for key, value in pairs(message_metadata) do
+        if key ~= "generation_checkpoint_id" then metadata[key] = value end
+    end
     meta.checkpoints = type(meta.checkpoints) == "table" and meta.checkpoints or {}
     local already_recorded = false
     for _, checkpoint in ipairs(meta.checkpoints) do
