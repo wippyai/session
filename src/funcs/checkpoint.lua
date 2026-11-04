@@ -33,7 +33,6 @@ local SUMMARY_BUDGET_SHARE = 0.8
 -- Admission counts request structure too, which the sections below do not measure.
 local INPUT_SLACK = 0.9
 local BYTES_PER_TOKEN = 4
-local TOOL_RESULTS_SHARE = 0.2
 
 local function positive_number(value: any, fallback: number): number
     local n = tonumber(value)
@@ -47,16 +46,18 @@ local function config_from_args(args)
     local options = type(args.options) == "table" and args.options or {}
     local model = type(options.model) == "string" and options.model ~= "" and options.model or CONFIG.model
     local card = llm.resolve_model(model)
+    local context_window = card and tonumber(card.max_tokens)
     local max_tokens = positive_number(options.max_tokens, CONFIG.max_tokens)
     local output_limit = card and tonumber(card.output_tokens)
     if output_limit and output_limit > 0 then max_tokens = math.min(max_tokens, output_limit) end
     return {
         model = model,
-        context_window = card and tonumber(card.max_tokens),
+        context_window = context_window,
         temperature = tonumber(options.temperature) or CONFIG.temperature,
         max_tokens = max_tokens,
         max_tool_result_chars = positive_number(options.max_tool_result_chars, CONFIG.max_tool_result_chars),
-        max_conversation_chars = positive_number(options.max_conversation_chars, CONFIG.max_conversation_chars),
+        max_conversation_chars = positive_number(options.max_conversation_chars,
+            context_window and context_window > 0 and math.huge or CONFIG.max_conversation_chars),
         max_tool_results = positive_number(options.max_tool_results, CONFIG.max_tool_results),
         max_tool_results_chars = positive_number(options.max_tool_results_chars, CONFIG.max_tool_results_chars),
     }
@@ -89,7 +90,7 @@ end
 
 -- Section budgets from the window of the resolved model. fixed_chars is the input
 -- that is sent whole. Models without a window keep the configured budgets.
-local function section_budgets(cfg: any, fixed_chars: number): (number?, number?, string?)
+local function section_budgets(cfg: any, fixed_chars: number, conversation_length: number): (number?, number?, string?)
     local window = cfg.context_window
     if not window or window <= 0 then
         return cfg.max_conversation_chars, cfg.max_tool_results_chars, nil
@@ -98,8 +99,8 @@ local function section_budgets(cfg: any, fixed_chars: number): (number?, number?
     if available <= 0 then
         return nil, nil, "Summarizer input does not fit the context window of " .. tostring(cfg.model)
     end
-    local results = math.min(cfg.max_tool_results_chars, math.floor(available * TOOL_RESULTS_SHARE))
-    return math.min(cfg.max_conversation_chars, available - results), results, nil
+    local results = math.min(cfg.max_tool_results_chars, math.max(0, available - conversation_length))
+    return math.min(cfg.max_conversation_chars, available), results, nil
 end
 
 local function checkpoint_prompt(template, max_tokens)
@@ -302,18 +303,25 @@ local function handle(args)
 
     local fixed_chars = #system_text + #(previous_text or "") + #conversation_heading + #(files_text or "")
         + #(patterns_text or "") + #instruction
-    local conversation_chars, results_chars, budget_err = section_budgets(cfg, fixed_chars)
+    local conversation_text = table.concat(conversation_parts, "\n")
+    local conversation_chars, results_chars, budget_err = section_budgets(cfg, fixed_chars, #conversation_text)
     if budget_err then return nil, budget_err end
+
+    local conversation_dropped
+    conversation_text, conversation_dropped = clamp_transcript(conversation_text, conversation_chars :: number)
+    if conversation_dropped > 0 then
+        return nil, "Summarizer conversation exceeds its input budget"
+    end
 
     local summary_prompt = prompt.new()
     summary_prompt:add_system(system_text)
     if previous_text then summary_prompt:add_user(previous_text) end
     summary_prompt:add_user(conversation_heading)
-    summary_prompt:add_user((clamp_transcript(table.concat(conversation_parts, "\n"), conversation_chars :: number)))
+    summary_prompt:add_user(conversation_text)
 
     if files_text then summary_prompt:add_user(files_text) end
 
-    if #tool_results > 0 then
+    if #tool_results > 0 and (results_chars :: number) > 0 then
         local results_text = clamp_transcript(table.concat(newest(tool_results, cfg.max_tool_results), "\n"),
             results_chars :: number)
         summary_prompt:add_user("\n===KEY TOOL RESULTS===\n" .. results_text)

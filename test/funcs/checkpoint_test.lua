@@ -111,6 +111,13 @@ local function define_tests()
             end
         end
 
+        local function section(text: string, heading: string): string?
+            local _, start = text:find(heading, 1, true)
+            if not start then return nil end
+            local ending = text:find("\n\n\n===", start + 1, true)
+            return text:sub(start + 1, ending and ending - 1 or -1)
+        end
+
         local function capture(response: any?): any
             local captured = { chars = 0, text = "" }
             llm.generate = function(prompt_input, options)
@@ -122,6 +129,9 @@ local function define_tests()
                 end
                 captured.text = table.concat(parts, "\n")
                 captured.chars = #captured.text
+                captured.conversation = section(captured.text, "===FULL CONVERSATION TO CHECKPOINT===\n\n")
+                    or section(captured.text, "===NEW CONVERSATION SINCE CHECKPOINT===\n\n")
+                captured.results = section(captured.text, "\n===KEY TOOL RESULTS===\n")
                 return response or { result = "Summary.", finish_reason = "stop" }, nil
             end
             return captured
@@ -254,7 +264,7 @@ local function define_tests()
             end
         end)
 
-        it("sizes the request to the window of the resolved model", function()
+        it("rejects a conversation that exceeds the resolved model input budget", function()
             session_with(oversized_rows(), "Previous summary.")
             local captured = capture()
             llm.resolve_model = function(identifier)
@@ -262,21 +272,185 @@ local function define_tests()
                 return { max_tokens = 10000 }, nil
             end
 
-            assert(checkpoint.handle({ session_id = "s1" }))
+            local result, err = checkpoint.handle({ session_id = "s1" })
 
-            test.eq(captured.calls, 1)
-            test.ok(captured.chars / 4 + 3000 <= 10000, "estimate plus reservation fits: " .. captured.chars)
-            test.contains(captured.text, "Previous summary.")
+            test.is_nil(result, "an oversized conversation must not produce a checkpoint")
+            test.contains(tostring(err), "conversation exceeds its input budget")
+            test.is_nil(captured.calls, "the summarizer must not receive an incomplete conversation")
         end)
 
-        it("fits a 200k window with the default budgets when no window resolves", function()
+        it("rejects a conversation that exceeds the default input budget when no window resolves", function()
             session_with(oversized_rows())
             local captured = capture()
             llm.resolve_model = function() return nil, "no model" end
 
-            assert(checkpoint.handle({ session_id = "s1" }))
+            local result, err = checkpoint.handle({ session_id = "s1" })
 
-            test.ok(captured.chars / 4 + 3000 <= 200000, "defaults fit a 200k window: " .. captured.chars)
+            test.is_nil(result, "the fallback budget must not discard conversation history")
+            test.contains(tostring(err), "conversation exceeds its input budget")
+            test.is_nil(captured.calls)
+        end)
+
+        for _, limit in ipairs({ "max_tool_results_chars", "max_tool_results" }) do
+            it("summarizes when duplicate tool results exceed " .. limit, function()
+                session_with({
+                    { type = "function", data = "{}", metadata = {
+                        function_name = "first", status = "success", result = "first fact" } },
+                    { type = "function", data = "{}", metadata = {
+                        function_name = "last", status = "success", result = "last fact" } },
+                })
+                local captured = capture()
+                llm.resolve_model = function() return { max_tokens = 200000 }, nil end
+
+                local result, err = checkpoint.handle({ session_id = "s1", options = { [limit] = 1 } })
+
+                test.is_nil(err, "duplicate tool results may be dropped")
+                test.eq(result.summary, "Summary.")
+                test.eq(captured.calls, 1)
+                test.contains(captured.conversation, "[TOOL_RESULT]: first fact")
+                test.contains(captured.conversation, "[TOOL_RESULT]: last fact")
+                test.is_nil((captured.results:find("first_result:", 1, true)))
+                if limit == "max_tool_results" then
+                    test.eq(captured.results, "last_result: last fact")
+                else
+                    test.contains(captured.results, "earlier characters of this section omitted")
+                end
+            end)
+        end
+
+        it("summarizes 150 tool calls and repeats only the newest 100 results", function()
+            local rows = {}
+            for index = 1, 150 do
+                rows[index] = { type = "function", data = "{}", metadata = {
+                    function_name = "lookup", status = "success", result = string.format("fact %03d", index) } }
+            end
+            session_with(rows, "Previous summary.")
+            local captured = capture()
+            llm.resolve_model = function() return { max_tokens = 200000 }, nil end
+
+            local result, err = checkpoint.handle({ session_id = "s1" })
+
+            test.is_nil(err)
+            test.eq(result.summary, "Summary.")
+            test.eq(captured.calls, 1)
+            test.contains(captured.text, "Previous summary.")
+            local expected = {}
+            for index = 1, 150 do
+                local fact = string.format("fact %03d", index)
+                test.contains(captured.conversation, "[TOOL_RESULT]: " .. fact)
+                if index > 50 then expected[#expected + 1] = "lookup_result: " .. fact end
+            end
+            test.eq(captured.results, table.concat(expected, "\n"))
+        end)
+
+        for _, scenario in ipairs({
+            { remaining = 400, name = "summarizes a conversation that leaves only a reduced results budget" },
+            { remaining = 0, name = "summarizes a conversation that leaves no results budget" },
+            { remaining = -1, name = "rejects a conversation one byte over the available window input" },
+        }) do
+            it(scenario.name, function()
+                local rows = {
+                    { type = "user", data = "Remember the blue door.", metadata = {} },
+                    { type = "function", data = "{}", metadata = {
+                        function_name = "lookup", status = "success", result = string.rep("tool result line\n", 100) } },
+                }
+                session_with(rows)
+                local captured = capture()
+                llm.resolve_model = function() return { max_tokens = 10000 }, nil end
+                assert(checkpoint.handle({ session_id = "s1" }))
+
+                local original_results = captured.results
+                -- Five user sections have four double-newline joins, plus the system separator.
+                local separator_chars = 4 * 2 + 1
+                local fixed_chars = captured.chars - #captured.conversation
+                    - #"\n===KEY TOOL RESULTS===\n" - #original_results - separator_chars
+                local available = math.floor((10000 - 3000) * 4 * 0.9) - fixed_chars
+                rows[1].data = rows[1].data .. string.rep("x", available - #captured.conversation - scenario.remaining)
+                captured = capture()
+
+                local result, err = checkpoint.handle({ session_id = "s1" })
+
+                if scenario.remaining < 0 then
+                    test.is_nil(result)
+                    test.contains(tostring(err), "conversation exceeds its input budget")
+                    test.is_nil(captured.calls)
+                    return
+                end
+                test.is_nil(err)
+                test.eq(result.summary, "Summary.")
+                test.eq(captured.calls, 1)
+                test.eq(#captured.conversation, available - scenario.remaining)
+                test.contains(captured.conversation, rows[1].data)
+                test.contains(captured.conversation, rows[2].metadata.result)
+                test.ok(captured.chars / 4 + 3000 <= 10000, "estimate plus reservation fits")
+                if scenario.remaining == 0 then
+                    test.is_nil(captured.results)
+                    test.is_nil((captured.text:find("===KEY TOOL RESULTS===", 1, true)))
+                else
+                    test.not_nil(captured.results)
+                    test.ok(#captured.results < #original_results)
+                    test.contains(captured.results, "earlier characters of this section omitted")
+                    test.contains(captured.results, "tool result line")
+                end
+            end)
+        end
+
+        for _, capped in ipairs({ false, true }) do
+            it(capped and "honors an explicit conversation cap with a resolved 1M window"
+                or "summarizes a 600000-byte transcript with a resolved 1M window", function()
+                session_with({{ type = "user", data = string.rep("x", 600000 - #"[USER]: "), metadata = {} }})
+                local captured = capture()
+                llm.resolve_model = function() return { max_tokens = 1000000 }, nil end
+
+                local result, err = checkpoint.handle({ session_id = "s1",
+                    options = capped and { max_conversation_chars = 500000 } or {} })
+
+                if capped then
+                    test.is_nil(result)
+                    test.contains(tostring(err), "conversation exceeds its input budget")
+                    test.is_nil(captured.calls)
+                else
+                    test.is_nil(err)
+                    test.eq(result.summary, "Summary.")
+                    test.eq(captured.calls, 1)
+                    test.eq(#captured.conversation, 600000)
+                    test.ok(captured.chars / 4 + 3000 <= 1000000, "estimate plus reservation fits")
+                end
+            end)
+        end
+
+        it("rejects an oversized transcript even when its newest lines fit", function()
+            local lines = {}
+            for i = 1, 100 do
+                lines[i] = string.format("[TOOL_RESULT]: attempt %03d", i)
+            end
+            local transcript = table.concat(lines, "\n")
+            local text, dropped = checkpoint.clamp_transcript(transcript, 300)
+
+            test.gt(dropped, 0)
+            test.is_true(string.find(text, "attempt 100", 1, true) ~= nil, "the newest line must survive")
+            test.is_true(string.find(text, "attempt 001", 1, true) == nil, "the oldest line must go")
+            test.is_true(string.find(text, "earlier characters of this section omitted", 1, true) ~= nil)
+            test.is_nil((string.find(text, "previous checkpoint covers", 1, true)), "nothing else holds the dropped text")
+            test.is_true(string.find(text, "\n[TOOL_RESULT]: attempt", 1, true) ~= nil, "the cut lands on a line boundary")
+
+            session_with({{ type = "user", data = transcript, metadata = {} }})
+            local captured = capture()
+            llm.resolve_model = function() return { max_tokens = 200000 }, nil end
+
+            local result, err = checkpoint.handle({ session_id = "s1", options = { max_conversation_chars = 300 } })
+
+            test.is_nil(result, "keeping the newest lines is insufficient for a checkpoint")
+            test.contains(tostring(err), "conversation exceeds its input budget")
+            test.is_nil(captured.calls)
+
+            local complete, complete_err = checkpoint.handle({ session_id = "s1",
+                options = { max_conversation_chars = #"[USER]: " + #transcript } })
+
+            test.is_nil(complete_err)
+            test.eq(complete.summary, "Summary.", "a transcript exactly within the budget still summarizes")
+            test.eq(captured.calls, 1)
+            test.contains(captured.text, transcript)
         end)
 
         it("fails without a request when the window cannot hold the fixed input", function()
@@ -315,23 +489,6 @@ local function define_tests()
             local text, dropped = checkpoint.clamp_transcript("line 1\nline 2", 100)
             test.eq(text, "line 1\nline 2")
             test.eq(dropped, 0)
-        end)
-
-        it("keeps the newest lines of an oversized transcript and says how much it dropped", function()
-            local lines = {}
-            for i = 1, 100 do
-                lines[i] = string.format("[TOOL_RESULT]: attempt %03d", i)
-            end
-            local transcript = table.concat(lines, "\n")
-
-            local text, dropped = checkpoint.clamp_transcript(transcript, 300)
-
-            test.gt(dropped, 0)
-            test.is_true(string.find(text, "attempt 100", 1, true) ~= nil, "the newest line must survive")
-            test.is_true(string.find(text, "attempt 001", 1, true) == nil, "the oldest line must go")
-            test.is_true(string.find(text, "earlier characters of this section omitted", 1, true) ~= nil)
-            test.is_nil((string.find(text, "previous checkpoint covers", 1, true)), "nothing else holds the dropped text")
-            test.is_true(string.find(text, "\n[TOOL_RESULT]: attempt", 1, true) ~= nil, "the cut lands on a line boundary")
         end)
 
         it("keeps the newest tool results", function()

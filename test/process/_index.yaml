@@ -175,12 +175,15 @@ entries:
       - uuid
       - json
     imports:
+      checkpoint: wippy.session.funcs:checkpoint
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       control_handlers: wippy.session.process:control_handlers
+      llm: wippy.llm:llm
       message_handlers: wippy.session.process:message_handlers
       output: wippy.llm:output
       google_mapper: wippy.llm.google:mapper
+      reader: wippy.session.persist:reader
       session: wippy.session.process:session
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
