@@ -212,8 +212,8 @@ function session_reader:get_turn_note(source_id)
     return nil, nil
 end
 
-function session_reader:list_all_messages()
-    return session._message_repo.list_all_by_session(self.session_id)
+function session_reader:newest_non_input_id(excluded_id)
+    return session._message_repo.newest_non_input_id(self.session_id, excluded_id)
 end
 
 function session_reader:list_behavior_rounds()

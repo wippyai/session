@@ -1726,7 +1726,6 @@ local function define_tests()
                 end
                 return rows, nil
             end
-            ctx.reader.list_all_messages = read_rows
             ctx.reader.messages = function()
                 return { from_checkpoint = function(self) return self end, all = read_rows }
             end
@@ -1867,7 +1866,8 @@ local function define_tests()
                     data = "earlier instruction", metadata = { input = {state = "pending"} } },
             }
             local applied = nil
-            ctx.reader.list_all_messages = function() return rows, nil end
+            ctx.reader.list_pending_inputs = function() return { rows[2], rows[3] }, nil end
+            ctx.reader.newest_non_input_id = function() return "anchor", nil end
             ctx.writer.apply_inputs = function(_self, updates)
                 applied = updates
                 return true

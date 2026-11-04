@@ -8,6 +8,8 @@ local message_repo = require("message_repo")
 local reader = require("reader")
 local writer = require("writer")
 local json = require("json")
+local message_handlers = require("message_handlers")
+local message_order = require("message_order")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local wait_for_boot = require("wait_for_boot")
@@ -253,6 +255,153 @@ local function define_tests()
             session_repo.delete(session_id)
             context_repo.delete(context_id)
             test.contains(json.encode(plan), "idx_messages_session_date")
+        end)
+
+        describe("newest non-input row", function()
+            local context_id, session_id
+            before_each(function()
+                context_id, session_id = uuid.v7(), uuid.v7()
+                test.not_nil(context_repo.create(context_id, "primary", "anchor test"))
+                test.not_nil(session_repo.create(session_id, user_id, context_id, "Anchor", "test"))
+            end)
+            after_each(function()
+                session_repo.delete(session_id)
+                context_repo.delete(context_id)
+            end)
+
+            local function add(kind, text, metadata)
+                local id = uuid.v7()
+                test.not_nil(message_repo.create(id, session_id, kind, text, metadata or {}))
+                return id
+            end
+
+            -- The definition the query replaces: the last row without steering metadata.
+            local function by_full_read(excluded)
+                local anchor = nil
+                for _, row in ipairs(assert(message_repo.list_all_by_session(session_id))) do
+                    local metadata = type(row.metadata) == "table" and row.metadata or nil
+                    if not (metadata and metadata.input ~= nil) and row.message_id ~= excluded then
+                        anchor = row.message_id
+                    end
+                end
+                return anchor
+            end
+
+            local function assert_matches(excluded, expected)
+                local found, err = assert(reader.open(session_id)):newest_non_input_id(excluded)
+                test.is_nil(err)
+                test.eq(found, expected)
+                test.eq(found, by_full_read(excluded))
+            end
+
+            it("is empty without a qualifying row", function()
+                assert_matches(nil, nil)
+                local only = add("user", "Only.")
+                assert_matches(only, nil)
+                add("user", "Steering.", { input = { state = "pending" } })
+                assert_matches(only, nil)
+            end)
+
+            it("skips steering and the new user row, and keeps rows with a nested input key", function()
+                local tool = add("function", "{}", { function_name = "t", status = "success",
+                    result = { input = { state = "pending" } } })
+                assert_matches(nil, tool)
+                local steering = add("user", "Steering.", { input = { state = "pending" } })
+                assert_matches(nil, tool)
+                local request = add("user", "Request.")
+                assert_matches(nil, request)
+                assert_matches(request, tool)
+                test.not_nil(steering)
+            end)
+
+            it("pages past a tail of steering rows longer than one page", function()
+                local answer = add("assistant", "Answer.")
+                for index = 1, 45 do add("user", "Steering " .. index, { input = { state = "pending" } }) end
+                assert_matches(nil, answer)
+            end)
+
+            it("orders rows that share one date by id", function()
+                local rows = {}
+                for index = 1, 3 do
+                    rows[index] = { message_id = uuid.v7(), type = "assistant", data = "Row " .. index, metadata = {} }
+                end
+                assert(message_repo.create_batch(session_id, rows))
+                assert_matches(nil, rows[3].message_id)
+                assert_matches(rows[3].message_id, rows[2].message_id)
+            end)
+
+            it("reaches the newest rows through a session index", function()
+                local db = assert(sql.get(consts.get_db_resource()))
+                local statement = "SELECT message_id, metadata FROM messages WHERE session_id = '" .. session_id
+                    .. "' ORDER BY " .. message_order.date(db:type()) .. " DESC, message_id DESC LIMIT 21"
+                local plan, expected
+                if db:type() == sql.type.POSTGRES then
+                    local tx = assert(db:begin())
+                    assert(tx:execute("SET LOCAL enable_seqscan = off"))
+                    plan = assert(tx:query("EXPLAIN " .. statement))
+                    tx:rollback()
+                    expected = "idx_messages_session_date"
+                else
+                    plan = assert(db:query("EXPLAIN QUERY PLAN " .. statement))
+                    expected = "idx_messages_chronology"
+                end
+                db:release()
+                test.contains(json.encode(plan), expected)
+            end)
+
+            it("runs a full agent step after a checkpoint without reading the archive", function()
+                for index = 1, 30 do add("assistant", "Archived " .. index) end
+                local checkpoint = add("assistant", "The checkpoint anchor.")
+                local newest = add("assistant", "Inside the window.")
+                local steering = add("user", "Steer now.", { input = { state = "pending" } })
+                local request = add("user", "The next request.")
+                local session_writer = assert(writer.new(session_id))
+                assert(session_writer:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, checkpoint))
+                local session_reader = assert(reader.open(session_id))
+
+                local sent = {}
+                local agent = { id = "agent:steps", model = "model:test", tool_wrappers = {}, agent_options = {},
+                    step = function(_self, builder)
+                        for _, message in ipairs(builder:get_messages()) do
+                            for _, part in ipairs(message.content or {}) do sent[#sent + 1] = part.text end
+                        end
+                        return { result = "Answer." }
+                    end }
+                local ctx = {
+                    session_id = session_id, user_id = user_id, lifecycle_state = {},
+                    config = { agent_id = agent.id, model = agent.model },
+                    reader = session_reader, writer = session_writer,
+                    upstream = {
+                        response_beginning = function() end, send_message_update = function() end,
+                        invalidate_message = function() end, message_error = function() end,
+                        update_session = function() end, session_error = function() end,
+                    },
+                    agent_ctx = { load_agent = function() return agent, nil end,
+                        get_current_agent = function() return agent end },
+                }
+
+                local list_all = message_repo.list_all_by_session
+                local loaded = 0
+                message_repo.list_all_by_session = function(...)
+                    loaded = loaded + 1
+                    return list_all(...)
+                end
+                local ok, result, err = pcall(message_handlers.agent_step, ctx,
+                    { message_id = request, request_id = "req-anchor", from_user = true })
+                message_repo.list_all_by_session = list_all
+
+                test.is_true(ok, tostring(result))
+                test.is_nil(err)
+                test.is_true(result.completed)
+                test.eq(loaded, 0, "an agent step after a checkpoint does not read the archive")
+                local stored = assert(message_repo.get(steering))
+                test.eq(stored.metadata.input.state, "applied")
+                test.eq(stored.metadata.input.after_message_id, newest, "steering anchors after the newest row")
+                local text = table.concat(sent, "\n")
+                test.contains(text, "Steer now.")
+                test.contains(text, "The next request.")
+                test.is_nil((text:find("Archived 1", 1, true)))
+            end)
         end)
 
         it("preserves malformed steering rows and fails the scan visibly", function()

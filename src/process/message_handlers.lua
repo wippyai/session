@@ -672,11 +672,6 @@ local function take_over_handoff(ctx: any): boolean
     return true
 end
 
-local function all_messages(ctx)
-    if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
-    return ctx.reader:messages():all()
-end
-
 -- Lifecycle deactivation is deliberately deferred until the successor takes a
 -- real turn. Keep the completed outgoing turn bounded independently of the
 -- moving checkpoint cursor, so a lifecycle consumer neither loses its source
@@ -762,21 +757,11 @@ deactivation_refs = function(state)
 end
 
 local function prepare_pending_inputs(ctx, new_user_id)
-    local messages, read_err = all_messages(ctx)
-    if not messages then return nil, read_err or "Failed to read pending inputs" end
-    local pending, anchor_id = {}, nil
-    for _, message in ipairs(messages) do
-        local metadata = type(message.metadata) == "table" and message.metadata or nil
-        local input = metadata and metadata.input
-        if input ~= nil then
-            if not input_metadata.validate(message) then
-                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
-            end
-            if input.state == "pending" then pending[#pending + 1] = message end
-        elseif message.message_id ~= new_user_id then
-            anchor_id = message.message_id
-        end
-    end
+    local pending, read_err = ctx.reader:list_pending_inputs()
+    if not pending then return nil, read_err or "Failed to read pending inputs" end
+    if #pending == 0 then return {} end
+    local anchor_id, anchor_err = ctx.reader:newest_non_input_id(new_user_id)
+    if anchor_err then return nil, anchor_err end
     message_order.sort(pending)
     local updates = {}
     for _, message in ipairs(pending) do

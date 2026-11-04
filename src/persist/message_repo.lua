@@ -563,6 +563,7 @@ function message_repo.list_all_by_session(session_id)
 end
 
 local STEERING_ANCHOR_BATCH = 200
+local NEWEST_ROW_PAGE = 20
 
 -- The rows that carry steering metadata, chronological, and the set of their
 -- anchors that still exist. Archived payloads stay in the database: the session
@@ -983,6 +984,28 @@ function message_repo.list_by_session(session_id, limit, cursor, direction)
         next_cursor = next_cursor,
         prev_cursor = prev_cursor
     }
+end
+
+-- The newest row without steering metadata, other than excluded_id. Reads newest
+-- pages until one qualifies. A pattern cannot decide this in SQL: nested tool results
+-- may hold an "input" key, so the top-level key is checked on the decoded row.
+function message_repo.newest_non_input_id(session_id: string?, excluded_id: string?): (string?, string?)
+    local cursor = nil
+    while true do
+        local page, err = message_repo.list_by_session(session_id, NEWEST_ROW_PAGE, cursor, "before")
+        if not page then return nil, err end
+        for index = #page.messages, 1, -1 do
+            local message = page.messages[index]
+            local metadata = message.metadata
+            if type(metadata) == "string" and metadata ~= "" then
+                return nil, "Failed to decode metadata of message " .. tostring(message.message_id)
+            end
+            local input = type(metadata) == "table" and metadata.input or nil
+            if input == nil and message.message_id ~= excluded_id then return message.message_id, nil end
+        end
+        if not page.has_more then return nil, nil end
+        cursor = page.next_cursor
+    end
 end
 
 function message_repo.list_after_message(session_id, after_message_id, limit: number?, exclude_anchor: boolean?)

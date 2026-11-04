@@ -172,6 +172,8 @@ entries:
       message_repo: wippy.session.persist:message_repo
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
+      message_handlers: wippy.session.process:message_handlers
+      message_order: wippy.session.persist:message_order
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       wait_for_boot: app:wait_for_boot
