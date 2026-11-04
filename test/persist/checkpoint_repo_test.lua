@@ -310,6 +310,7 @@ local function define_tests()
             llm._usage_tracker = false
             llm._providers = {
                 driver_declares_legacy_reasoning_flag = function() return false end,
+                driver_output_policy = function() return nil, nil end,
                 open = function() return {generate = function(_, args)
                     generated = generated + 1
                     local encoded = json.encode(args.messages)

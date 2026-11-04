@@ -6,6 +6,7 @@ local prompt_builder = require("prompt_builder")
 local claude_mapper = require("claude_mapper")
 local google_mapper = require("google_mapper")
 local openai_mapper = require("openai_mapper")
+local bedrock_mapper = require("bedrock_mapper")
 local context_attachments = require("context_attachments")
 
 local function define_tests()
@@ -166,6 +167,170 @@ local function define_tests()
         end)
     end)
     describe("Prompt Builder", function()
+        describe("parallel tool rounds", function()
+            local function T(signature) return { type = "thinking", thinking = "", signature = signature } end
+            local function X(text) return { type = "text", text = text } end
+            local function U(id) return { type = "tool_use", id = id, name = "search", input = { tag = id } } end
+
+            local function call_row(id, status)
+                local settled = status ~= consts.FUNC_STATUS.PENDING
+                return { message_id = "row-" .. id, type = consts.MSG_TYPE.FUNCTION, data = json.encode({ tag = id }),
+                    metadata = { function_name = "search", call_id = id, status = status or consts.FUNC_STATUS.SUCCESS,
+                        result = settled and ("result " .. id) or nil } }
+            end
+
+            -- Rows as a session stores one model response: the assistant row, then its calls.
+            local function response_rows(blocks)
+                local response = claude_mapper.format_success_response({ content = blocks, stop_reason = "tool_use",
+                    usage = { input_tokens = 1, output_tokens = 1 } }, "m", {})
+                local metadata = {}
+                for key, value in pairs(response.metadata) do metadata[key] = value end
+                metadata.prefix_fingerprint = "fp"
+                local rows = {
+                    { message_id = "user", type = consts.MSG_TYPE.USER, data = "Question.", metadata = {} },
+                    { message_id = "assistant", type = consts.MSG_TYPE.ASSISTANT, data = response.result.content, metadata = metadata },
+                }
+                for _, call in ipairs(response.result.tool_calls) do rows[#rows + 1] = call_row(call.id) end
+                return rows
+            end
+
+            local function build(rows)
+                return assert(prompt_builder.build(rows, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                }))
+            end
+
+            local function claude_wire(messages)
+                local parts = {}
+                for _, message in ipairs(claude_mapper.map_messages(messages).messages) do
+                    if message.role == "assistant" then
+                        for _, block in ipairs(message.content) do
+                            if block.type == "thinking" then parts[#parts + 1] = "T:" .. block.signature
+                            elseif block.type == "text" then parts[#parts + 1] = "X:" .. block.text
+                            elseif block.type == "tool_use" then parts[#parts + 1] = "U:" .. block.id end
+                        end
+                        parts[#parts + 1] = "|"
+                    else
+                        for _, block in ipairs(message.content) do
+                            if block.type == "tool_result" then parts[#parts + 1] = "R:" .. block.tool_use_id end
+                        end
+                    end
+                end
+                return table.concat(parts, " ")
+            end
+
+            local function bedrock_wire(messages)
+                local parts = {}
+                for _, message in ipairs(bedrock_mapper.map_messages(messages).messages) do
+                    if message.role == "assistant" then
+                        for _, block in ipairs(message.content) do
+                            if block.reasoningContent then parts[#parts + 1] = "T:" .. block.reasoningContent.reasoningText.signature
+                            elseif block.text then parts[#parts + 1] = "X:" .. block.text
+                            elseif block.toolUse then parts[#parts + 1] = "U:" .. block.toolUse.toolUseId end
+                        end
+                        parts[#parts + 1] = "|"
+                    else
+                        for _, block in ipairs(message.content) do
+                            if block.toolResult then parts[#parts + 1] = "R:" .. block.toolResult.toolUseId end
+                        end
+                    end
+                end
+                return table.concat(parts, " ")
+            end
+
+            for _, case in ipairs({
+                { name = "s1 A c1 s2 B c2", blocks = { T("s1"), X("A"), U("c1"), T("s2"), X("B"), U("c2") },
+                    wire = "T:s1 X:A U:c1 T:s2 X:B U:c2 | R:c1 R:c2" },
+                { name = "s1 c1 s2 c2", blocks = { T("s1"), U("c1"), T("s2"), U("c2") },
+                    wire = "T:s1 U:c1 T:s2 U:c2 | R:c1 R:c2" },
+                { name = "s1 c1 s2 c2 s3 c3", blocks = { T("s1"), U("c1"), T("s2"), U("c2"), T("s3"), U("c3") },
+                    wire = "T:s1 U:c1 T:s2 U:c2 T:s3 U:c3 | R:c1 R:c2 R:c3" },
+                { name = "c1 s1 c2", blocks = { U("c1"), T("s1"), U("c2") },
+                    wire = "U:c1 T:s1 U:c2 | R:c1 R:c2" },
+            }) do
+                it("replays " .. case.name .. " in response order", function()
+                    local messages = build(response_rows(case.blocks)):get_messages()
+                    test.eq(claude_wire(messages), case.wire)
+                    test.eq(bedrock_wire(messages), case.wire)
+                end)
+            end
+
+            it("keeps a round's blocks on the assistant turn a handoff continues from", function()
+                local rows = response_rows({ T("s1"), X("A"), U("c1"), T("s2"), U("c2") })
+                rows[#rows + 1] = { message_id = "changed", type = consts.MSG_TYPE.DEVELOPER,
+                    data = "Configuration changed.", metadata = {} }
+                local builder = build(rows)
+                local _, err = builder:drop_stale_thinking(function() return false end)
+                test.is_nil(err)
+                test.eq(claude_wire(builder:get_messages()), "T:s1 X:A U:c1 T:s2 U:c2 | R:c1 R:c2")
+                test.eq(bedrock_wire(builder:get_messages()), "T:s1 X:A U:c1 T:s2 U:c2 | R:c1 R:c2")
+                builder:mark_stale_thinking(function() return false end)
+                test.not_nil(claude_mapper.map_messages(builder:get_messages()).stale_thinking,
+                    "the kept blocks are bound as stale, so a thinking-capable driver can let the provider drop them")
+            end)
+
+            it("extends the previous request when per-round rows arrive across a crash", function()
+                local function view(rows)
+                    local out = {}
+                    for _, message in ipairs(build(rows):get_messages()) do
+                        out[#out + 1] = json.encode({ role = message.role, content = message.content,
+                            call = message.function_call, id = message.function_call_id })
+                    end
+                    return out
+                end
+                local rows = response_rows({ T("s1"), X("A"), U("c1"), T("s2"), U("c2") })
+                -- One result written, the other recovered as interrupted after a restart.
+                rows[4].metadata.status = consts.FUNC_STATUS.ERROR
+                rows[4].metadata.result = "interrupted, outcome unknown"
+                local first = view(rows)
+                rows[#rows + 1] = { message_id = "boundary", type = consts.MSG_TYPE.DEVELOPER,
+                    data = "The preceding turn is interrupted.", metadata = { preserve_position = true } }
+                rows[#rows + 1] = { message_id = "next", type = consts.MSG_TYPE.USER, data = "Continue.", metadata = {} }
+                local second = view(rows)
+                rows[#rows + 1] = { message_id = "answer", type = consts.MSG_TYPE.ASSISTANT, data = "Next round.", metadata = {} }
+                rows[#rows + 1] = call_row("c3")
+                local third = view(rows)
+                for _, pair in ipairs({ { first, second }, { second, third } }) do
+                    for index, entry in ipairs(pair[1]) do
+                        test.eq(pair[2][index], entry, "request diverges at message " .. index)
+                    end
+                end
+            end)
+
+            it("keeps a pending call of the group valid", function()
+                local rows = response_rows({ T("s1"), U("c1"), T("s2"), U("c2") })
+                rows[3] = call_row("c1", consts.FUNC_STATUS.PENDING)
+                local roles, results = {}, {}
+                for _, message in ipairs(build(rows):get_messages()) do
+                    roles[#roles + 1] = message.role
+                    if message.role == "function_result" then results[#results + 1] = message.content[1].text end
+                end
+                test.eq(table.concat(roles, ","), "user,assistant,function_call,function_call,function_result,function_result")
+                test.eq(results[1], "incomplete")
+                test.eq(results[2], "result c2")
+            end)
+
+            it("closes the group at the next row and leaves calls without an assistant row alone", function()
+                local rows = response_rows({ T("s1"), U("c1"), T("s2"), U("c2") })
+                rows[#rows + 1] = { message_id = "note", type = consts.MSG_TYPE.DEVELOPER, data = "Note.", metadata = {} }
+                rows[#rows + 1] = call_row("c9")
+                local roles = {}
+                for _, message in ipairs(build(rows):get_messages()) do roles[#roles + 1] = message.role end
+                test.eq(table.concat(roles, ","),
+                    "user,assistant,function_call,function_call,function_result,function_result,developer,function_call,function_result")
+            end)
+
+            it("renders steering anchored inside a group after the results it follows", function()
+                local rows = response_rows({ T("s1"), U("c1"), T("s2"), U("c2") })
+                rows[#rows + 1] = { message_id = "steer", type = consts.MSG_TYPE.USER, data = "Also this.",
+                    metadata = { input = { state = "applied", after_message_id = "row-c2" } } }
+                local roles = {}
+                for _, message in ipairs(build(rows):get_messages()) do roles[#roles + 1] = message.role end
+                test.eq(table.concat(roles, ","),
+                    "user,assistant,function_call,function_call,function_result,function_result,user")
+            end)
+        end)
+
         describe("stored row rendering", function()
             local function build(rows)
                 local builder, err = prompt_builder.build(rows, {}, {}, {
