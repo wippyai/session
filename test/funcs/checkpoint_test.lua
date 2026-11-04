@@ -201,6 +201,41 @@ local function define_tests()
             test.contains(captured.text, "[TOOL_ERROR]: tool failure text")
         end)
 
+        for _, call_type in ipairs({ "function", "private_function", "delegation" }) do
+            for _, invalidation in ipairs({
+                { name = "boolean", stale = true },
+                { name = "reason", stale = "The observed interface revision changed.", summary = "Previous summary." },
+            }) do
+                it("replaces stale " .. call_type .. " results in both sections with the " .. invalidation.name .. " notice", function()
+                    local withdrawn = "obsolete_" .. call_type .. "_state"
+                    session_with({
+                        { type = call_type, data = '{"query":"observed state"}', metadata = {
+                            function_name = "inspect_state", status = "success", stale = invalidation.stale,
+                            result = call_type == "function" and withdrawn or { state = withdrawn } } },
+                        { type = call_type, data = "{}", metadata = {
+                            function_name = "inspect_current_state", status = "success", stale = false,
+                            result = "current state" } },
+                    }, invalidation.summary)
+                    local captured = capture()
+                    llm.resolve_model = function() return { max_tokens = 200000 }, nil end
+
+                    assert(checkpoint.handle({ session_id = "s1" }))
+
+                    local notice = "STALE INFO: this result was withdrawn by the tool that produced " ..
+                        "it and no longer describes the current state." ..
+                        (invalidation.name == "reason" and (" " .. invalidation.stale) or "") ..
+                        " Do not answer from it. Call the tool again if you need this."
+                    test.is_nil((captured.text:find(withdrawn, 1, true)),
+                        "summarizer request contains withdrawn value: " .. withdrawn)
+                    test.contains(captured.text, "[TOOL_RESULT]: " .. notice)
+                    test.contains(captured.text, "inspect_state_result: " .. notice)
+                    test.contains(captured.text, '[TOOL_ARGUMENTS]: {"query":"observed state"}')
+                    test.contains(captured.text, "[TOOL_RESULT]: current state")
+                    test.contains(captured.text, "inspect_current_state_result: current state")
+                end)
+            end
+        end
+
         it("bounds arguments and results of every call type by the result budget", function()
             session_with({
                 { type = "delegation", data = string.rep("a", 500), metadata = {

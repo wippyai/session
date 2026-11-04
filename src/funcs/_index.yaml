@@ -59,6 +59,7 @@ entries:
       text_clamp: wippy.session:text_clamp
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
+      tool_result: wippy.session:tool_result
     method: handle
 
   # wippy.session.funcs:title

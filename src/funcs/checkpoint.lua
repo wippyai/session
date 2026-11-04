@@ -3,6 +3,7 @@ local session = require("session")
 local llm = require("llm")
 local prompt = require("prompt")
 local text_clamp = require("text_clamp")
+local tool_result = require("tool_result")
 
 type CheckpointResult = {
     success: boolean,
@@ -194,8 +195,11 @@ local function add_call_parts(msg: any, cfg: any, parts: {string}, patterns: {[s
     if type(msg.data) == "string" and msg.data ~= "" then
         table.insert(parts, "[TOOL_ARGUMENTS]: " .. bounded(msg.data, cfg.max_tool_result_chars))
     end
-    if metadata.result == nil then return end
-    local result_text = type(metadata.result) == "table" and json.encode(metadata.result) or tostring(metadata.result)
+    local result_text = tool_result.withdrawal_notice(metadata.stale)
+    if not result_text then
+        if metadata.result == nil then return end
+        result_text = type(metadata.result) == "table" and json.encode(metadata.result) or tostring(metadata.result)
+    end
     local failed = status == "error" or status == "cancelled"
     table.insert(parts, (failed and "[TOOL_ERROR]: " or "[TOOL_RESULT]: ") .. bounded(result_text, cfg.max_tool_result_chars))
     table.insert(results, function_name .. "_result: " .. text_clamp.head(result_text, math.floor(cfg.max_tool_result_chars)))

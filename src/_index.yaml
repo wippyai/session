@@ -518,6 +518,10 @@ entries:
     kind: library.lua
     source: file://text_clamp.lua
 
+  - name: tool_result
+    kind: library.lua
+    source: file://tool_result.lua
+
   - name: input_metadata
     kind: library.lua
     source: file://input_metadata.lua
@@ -542,6 +546,7 @@ entries:
       text_clamp: wippy.session:text_clamp
       input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order
+      tool_result: wippy.session:tool_result
 
   # wippy.session:context_attachments
   - name: context_attachments
