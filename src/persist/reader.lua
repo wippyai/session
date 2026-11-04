@@ -200,16 +200,9 @@ end
 
 -- The time note stored for the user turn that source_id opened, if any.
 function session_reader:get_turn_note(source_id)
-    local rows, err = self:messages():after(source_id):all()
-    if err then return nil, err end
-    for _, row in ipairs(rows or {}) do
-        local metadata = row.metadata
-        if row.type == consts.MSG_TYPE.SYSTEM and type(metadata) == "table" and metadata.source_id == source_id
-            and metadata.system_action == consts.SYSTEM_ACTIONS.TURN_CONTEXT then
-            return row, nil
-        end
-    end
-    return nil, nil
+    local rows, err = session._message_repo.list_turn_notes(self.session_id, source_id)
+    if not rows then return nil, err end
+    return rows[1], nil
 end
 
 function session_reader:list_all_messages()
