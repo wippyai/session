@@ -180,6 +180,25 @@ entries:
       test: wippy.test:test
     method: run_tests
 
+  - name: turn_note_test
+    kind: function.lua
+    meta:
+      name: Turn note lookup
+      type: test
+      suite: session
+    source: file://turn_note_test.lua
+    modules: [uuid, security, sql, json]
+    imports:
+      consts: wippy.session:consts
+      message_repo: wippy.session.persist:message_repo
+      message_order: wippy.session.persist:message_order
+      reader: wippy.session.persist:reader
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run
+
   - name: writer_lock_test
     kind: function.lua
     meta:
