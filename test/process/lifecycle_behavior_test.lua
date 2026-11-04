@@ -1,9 +1,29 @@
 local test = require("test")
 local traits = require("traits")
 local compiler = require("compiler")
+local session_handlers = require("session_handlers")
 
 local function define_tests()
     describe("agent behavior contract", function()
+        it("uses a compiled trait checkpoint threshold above the session default", function()
+            local compiled, err = compiler.compile({
+                id = "app:session_behavior_test_agent",
+                traits = { "app:lifecycle_behavior_trait" },
+            })
+            test.is_nil(err)
+            test.not_nil(compiled)
+            local function_id, threshold, options, available = session_handlers.resolve_checkpoint_config({
+                config = { token_checkpoint_threshold = 50000, checkpoint_function_id = "default:checkpoint" },
+            }, {
+                agent_options = compiled.agent_options,
+                checkpoint_bindings = compiled.bindings.checkpoint,
+            })
+            test.eq(threshold, 1200)
+            test.eq(function_id, "default:checkpoint")
+            test.eq(options.max_memory_chars, 2000)
+            test.is_true(available)
+        end)
+
         it("compiles new behaviors alongside legacy lifecycle and checkpoint bindings", function()
             local trait, discovery_err = traits.get_by_id("app:lifecycle_behavior_trait")
             test.is_nil(discovery_err)

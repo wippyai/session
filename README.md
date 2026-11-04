@@ -221,19 +221,24 @@ Agent 0.5.5 requires LLM 0.5.8 or later, so publish LLM before Agent and refresh
 Session's dependency lock from those published packages before release.
 
 When a checkpoint function or binding is configured, the session compares each
-model response's normalized `tokens.context_tokens` with
-`token_checkpoint_threshold`. It checks tool continuations too, and schedules
+model response's normalized `tokens.context_tokens` with the effective checkpoint
+`token_threshold`. It checks tool continuations too, and schedules
 the checkpoint before the next tool round and model step. The existing strict
 `>` threshold is unchanged; reaching the threshold exactly does not trigger it.
 
-Checkpoint options resolve in this order: trait defaults, explicit agent
-`agent_options.checkpoint`, then persisted session config. The existing
-`token_checkpoint_threshold` and `checkpoint_function_id` session fields override
-agent values; an optional `config.checkpoint` map overlays those fields last.
+Checkpoint options resolve in this order: session-wide defaults from
+`token_checkpoint_threshold` (default 50000) and `checkpoint_function_id`, then
+the agent's `agent_options.checkpoint` (trait behavior defaults followed by
+explicit agent values), then the persisted `config.checkpoint` map. A nil
+session-wide default sets nothing.
 That map is read from persisted host configuration, not accepted implicitly by
 the start token or `_control.config`. `enabled = false` disables scheduling;
-the existing zero/nonpositive session threshold remains disabled. Maps merge
+an effective zero/nonpositive threshold disables automatic scheduling. Maps merge
 recursively and lists replace, including an explicit empty list.
+
+Upgrade note: an app that sets both an app-wide threshold and a per-agent
+threshold now uses the per-agent threshold. Use `config.checkpoint` for an
+explicit session override.
 
 The scheduler captures detached effective options for each queued checkpoint,
 so later config changes cannot alter that operation. A trait checkpoint binding

@@ -86,10 +86,10 @@ end
 
 local function resolve_checkpoint_options(ctx, op): table
     local config = ctx.config or {}
-    local options = checkpoint_runtime.resolve_options(checkpoint_options_from_agent(op), {
+    local options = checkpoint_runtime.resolve_options({
         token_threshold = config.token_checkpoint_threshold,
         function_id = config.checkpoint_function_id,
-    })
+    }, checkpoint_options_from_agent(op))
     return checkpoint_runtime.resolve_options(options, config.checkpoint) or {}
 end
 
