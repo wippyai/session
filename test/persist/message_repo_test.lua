@@ -5,6 +5,8 @@ local json = require("json")
 local message_repo = require("message_repo")
 local message_order = require("message_order")
 local writer = require("writer")
+local reader = require("reader")
+local prompt_builder = require("prompt_builder")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local time = require("time")
@@ -315,6 +317,37 @@ local function define_tests()
                 test.eq(message_repo.get(id).metadata.status, consts.FUNC_STATUS.SUCCESS)
             end
             for _, row in ipairs(rows) do message_repo.delete(row.message_id) end
+        end)
+
+        it("reads a whole session before its first checkpoint and pages only API reads", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Long session", "test"))
+            local ok, failure = pcall(function()
+                local rows = {{ message_id = uuid.v7(), type = consts.MSG_TYPE.USER, data = "THE ORIGINAL TASK.", metadata = {} }}
+                for index = 2, 507 do
+                    rows[index] = { message_id = uuid.v7(), type = consts.MSG_TYPE.ASSISTANT,
+                        data = "Step " .. index, metadata = {} }
+                end
+                assert(message_repo.create_batch(session_id, rows))
+
+                local session_reader = assert(reader.open(session_id))
+                local all = assert(session_reader:messages():all())
+                test.eq(#all, 507, "all() means all")
+                test.eq(all[1].data, "THE ORIGINAL TASK.")
+                test.eq(all[507].data, "Step 507")
+
+                local from_checkpoint = assert(session_reader:messages():from_checkpoint():all())
+                test.eq(#from_checkpoint, 507)
+                local built = assert(prompt_builder.from_session(session_reader, { include_files = false, cache_markers = false }))
+                test.eq(built:get_messages()[1].content[1].text, "THE ORIGINAL TASK.", "the prompt keeps the task")
+
+                local page = assert(message_repo.list_by_session(session_id))
+                test.eq(#page.messages, 500, "paged reads keep their default")
+                test.is_true(page.has_more)
+                test.eq(#assert(session_reader:messages():last(10):all()), 10)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
         end)
 
         it("commits step notes with the response in order, or none of them", function()

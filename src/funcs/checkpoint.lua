@@ -2,6 +2,7 @@ local json = require("json")
 local session = require("session")
 local llm = require("llm")
 local prompt = require("prompt")
+local text_clamp = require("text_clamp")
 
 type CheckpointResult = {
     success: boolean,
@@ -18,9 +19,20 @@ local CONFIG = {
     temperature = 0.2,
     max_tokens = 3000,
     max_tool_result_chars = 2000,
-    max_conversation_chars = 600000,
-    max_tool_results = 100
+    -- Together these fit a 200k window at four bytes per token, with room for the
+    -- prompt, the previous checkpoint and the reservation, when no window resolves.
+    max_conversation_chars = 500000,
+    max_tool_results = 100,
+    max_tool_results_chars = 100000,
 }
+
+-- The summary is asked to stay under this share of max_tokens, so a normal summary
+-- finishes instead of being cut off at the limit.
+local SUMMARY_BUDGET_SHARE = 0.8
+-- Admission counts request structure too, which the sections below do not measure.
+local INPUT_SLACK = 0.9
+local BYTES_PER_TOKEN = 4
+local TOOL_RESULTS_SHARE = 0.2
 
 local function positive_number(value: any, fallback: number): number
     local n = tonumber(value)
@@ -39,6 +51,7 @@ local function config_from_args(args)
         max_tool_result_chars = positive_number(options.max_tool_result_chars, CONFIG.max_tool_result_chars),
         max_conversation_chars = positive_number(options.max_conversation_chars, CONFIG.max_conversation_chars),
         max_tool_results = positive_number(options.max_tool_results, CONFIG.max_tool_results),
+        max_tool_results_chars = positive_number(options.max_tool_results_chars, CONFIG.max_tool_results_chars),
     }
 end
 
@@ -50,14 +63,10 @@ local function clamp_transcript(text: string, max_chars: number): (string, numbe
 
     local cut = #text - limit
     local newline = string.find(text, "\n", cut, true)
-    if newline then
-        cut = newline
-    end
-
-    local kept = string.sub(text, cut + 1)
+    local kept = newline and string.sub(text, newline + 1) or text_clamp.tail(text, limit)
     local dropped = #text - #kept
-    return "[... " .. tostring(dropped) .. " earlier characters of this section omitted; "
-        .. "the previous checkpoint covers them ...]\n" .. kept, dropped
+    return "[... " .. tostring(dropped) .. " earlier characters of this section omitted "
+        .. "to fit the summarizer's input ...]\n" .. kept, dropped
 end
 
 local function newest(items: { string }, max_items: number): { string }
@@ -71,13 +80,29 @@ local function newest(items: { string }, max_items: number): { string }
     return kept
 end
 
+-- Section budgets from the window of the resolved model. fixed_chars is the input
+-- that is sent whole. Models without a window keep the configured budgets.
+local function section_budgets(cfg: any, fixed_chars: number): (number?, number?, string?)
+    local card = llm.resolve_model(cfg.model)
+    local window = card and tonumber(card.max_tokens)
+    if not window or window <= 0 then
+        return cfg.max_conversation_chars, cfg.max_tool_results_chars, nil
+    end
+    local available = math.floor((window - cfg.max_tokens) * BYTES_PER_TOKEN * INPUT_SLACK) - fixed_chars
+    if available <= 0 then
+        return nil, nil, "Summarizer input does not fit the context window of " .. tostring(cfg.model)
+    end
+    local results = math.min(cfg.max_tool_results_chars, math.floor(available * TOOL_RESULTS_SHARE))
+    return math.min(cfg.max_conversation_chars, available - results), results, nil
+end
+
 local function checkpoint_prompt(template, max_tokens)
     local rendered = template:gsub("3000", tostring(max_tokens))
     return rendered
 end
 
 local PROMPTS = {
-    initial = [[Create comprehensive checkpoint using ALL available tokens (~3000). This serves as memory, task tracker, and behavior monitor.
+    initial = [[Create comprehensive checkpoint in at most 3000 tokens. This serves as memory, task tracker, and behavior monitor.
 
 Structure your checkpoint to capture:
 
@@ -99,9 +124,9 @@ IMPORTANT: Flag any concerning patterns:
 Write densely but preserve clarity. Full sentences for complex context, bullet-style for task lists.
 Goal: Enable any AI to understand current state, avoid past mistakes, and continue effectively.
 Do not write information without need to do it, like dont write that no patterns were found if that is the case.
-USE ALL TOKENS to create actionable working memory.]],
+Finish within the budget: a checkpoint cut off before its end is discarded.]],
 
-    update = [[Merge previous checkpoint with new events. USE ALL 3000 tokens. Track both progress and problems.
+    update = [[Merge previous checkpoint with new events in at most 3000 tokens. Track both progress and problems.
 
 Previous checkpoint = working state. Update with:
 
@@ -124,7 +149,7 @@ CRITICAL FLAGS TO PRESERVE/ADD:
 
 Goal: Working memory that prevents repeated mistakes and tracks complex execution state.
 Write clearly - another AI should immediately understand what to do and what to avoid.
-USE FULL TOKEN BUDGET for complete operational context.
+Finish within the budget: a checkpoint cut off before its end is discarded.
 
 Avoid duplicating non-unique information in checkpoint.
 ]],
@@ -250,39 +275,44 @@ local function handle(args)
         return nil, "No conversation content found"
     end
 
-    local summary_prompt = prompt.new()
-    summary_prompt:add_system(checkpoint_prompt(existing_summary and PROMPTS.update or PROMPTS.initial, cfg.max_tokens))
-
-    if existing_summary then
-        summary_prompt:add_user("===PREVIOUS CHECKPOINT (PRESERVE AND BUILD ON THIS)===\n" .. existing_summary)
-        summary_prompt:add_user("\n===NEW CONVERSATION SINCE CHECKPOINT===")
-    else
-        summary_prompt:add_user("===FULL CONVERSATION TO CHECKPOINT===")
-    end
-
-    local conversation_text = clamp_transcript(table.concat(conversation_parts, "\n"), cfg.max_conversation_chars)
-    summary_prompt:add_user(conversation_text)
-
-    if #file_references > 0 then
-        summary_prompt:add_user("\n===FILE REFERENCES IN THIS SECTION===\n" .. table.concat(file_references, "\n"))
-    end
-
-    if #tool_results > 0 then
-        summary_prompt:add_user("\n===KEY TOOL RESULTS===\n" .. table.concat(newest(tool_results, cfg.max_tool_results), "\n"))
-    end
+    local summary_budget = math.floor(cfg.max_tokens * SUMMARY_BUDGET_SHARE)
+    local system_text = checkpoint_prompt(existing_summary and PROMPTS.update or PROMPTS.initial, summary_budget)
+    local previous_text = existing_summary and ("===PREVIOUS CHECKPOINT (PRESERVE AND BUILD ON THIS)===\n" .. existing_summary) or nil
+    local conversation_heading = existing_summary and "\n===NEW CONVERSATION SINCE CHECKPOINT===" or "===FULL CONVERSATION TO CHECKPOINT==="
+    local files_text = #file_references > 0
+        and ("\n===FILE REFERENCES IN THIS SECTION===\n" .. table.concat(file_references, "\n")) or nil
 
     local pattern_notes = {}
     for tool_name, call_count in pairs(tool_patterns) do
         table.insert(pattern_notes, tool_name .. " called " .. call_count .. " time(s)")
     end
-
-    if #pattern_notes > 0 then
-        summary_prompt:add_user("\n===TOOL USAGE PATTERNS===\n" .. table.concat(pattern_notes, "\n"))
-    end
+    local patterns_text = #pattern_notes > 0
+        and ("\n===TOOL USAGE PATTERNS===\n" .. table.concat(pattern_notes, "\n")) or nil
 
     local instruction = existing_summary and
-        "\n===INSTRUCTION===\nCreate updated checkpoint that preserves ALL previous understanding while adding new insights. Use up to " .. tostring(cfg.max_tokens) .. " tokens to build rich, helpful context." or
-        "\n===INSTRUCTION===\nCreate comprehensive checkpoint from this conversation. Use up to " .. tostring(cfg.max_tokens) .. " tokens to capture everything that helps AI understand and assist user."
+        "\n===INSTRUCTION===\nCreate updated checkpoint that preserves ALL previous understanding while adding new insights, in at most " .. tostring(summary_budget) .. " tokens." or
+        "\n===INSTRUCTION===\nCreate comprehensive checkpoint from this conversation, in at most " .. tostring(summary_budget) .. " tokens, capturing everything that helps AI understand and assist user."
+
+    local fixed_chars = #system_text + #(previous_text or "") + #conversation_heading + #(files_text or "")
+        + #(patterns_text or "") + #instruction
+    local conversation_chars, results_chars, budget_err = section_budgets(cfg, fixed_chars)
+    if budget_err then return nil, budget_err end
+
+    local summary_prompt = prompt.new()
+    summary_prompt:add_system(system_text)
+    if previous_text then summary_prompt:add_user(previous_text) end
+    summary_prompt:add_user(conversation_heading)
+    summary_prompt:add_user((clamp_transcript(table.concat(conversation_parts, "\n"), conversation_chars :: number)))
+
+    if files_text then summary_prompt:add_user(files_text) end
+
+    if #tool_results > 0 then
+        local results_text = clamp_transcript(table.concat(newest(tool_results, cfg.max_tool_results), "\n"),
+            results_chars :: number)
+        summary_prompt:add_user("\n===KEY TOOL RESULTS===\n" .. results_text)
+    end
+
+    if patterns_text then summary_prompt:add_user(patterns_text) end
 
     summary_prompt:add_user(instruction)
 
@@ -294,6 +324,10 @@ local function handle(args)
 
     if llm_err or not response or not response.result then
         return nil, "Failed to generate summary: " .. (llm_err or "no result")
+    end
+    -- A cut summary would replace the history it describes. The old anchor stays.
+    if response.finish_reason == llm.FINISH_REASON.LENGTH then
+        return nil, "Summary exceeded its output budget of " .. tostring(cfg.max_tokens) .. " tokens"
     end
 
     return {

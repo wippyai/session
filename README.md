@@ -250,6 +250,12 @@ input still occupies context even when `prompt_tokens` reports only a small
 uncached suffix. The LLM module normalizes provider accounting; the session does
 not add cache counters again.
 
+The default summarizer sizes its input to the context window of its resolved model
+and asks for a summary below `max_tokens`. A summary cut off at `max_tokens` is an
+error, so the previous checkpoint stays. When a checkpoint fails on a prompt that
+still fits the window, because only the soft threshold was crossed, the session
+sends the prompt as it is and tries again on the next step.
+
 The conversation carries rolling cache markers so a provider can reuse the
 stable history prefix on later requests. Caching is provider-dependent, can
 expire or miss, and cached reads still have a cost. Checkpointing shortens the

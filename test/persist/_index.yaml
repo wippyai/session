@@ -107,6 +107,8 @@ entries:
       message_repo: wippy.session.persist:message_repo
       message_order: wippy.session.persist:message_order
       writer: wippy.session.persist:writer
+      reader: wippy.session.persist:reader
+      prompt_builder: wippy.session:prompt_builder
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot

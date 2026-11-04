@@ -5,6 +5,7 @@ local fs = require("fs")
 local hash = require("hash")
 local time = require("time")
 local input_metadata = require("input_metadata")
+local text_clamp = require("text_clamp")
 local message_order = require("message_order")
 
 type BuildOptions = {
@@ -644,19 +645,12 @@ prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpo
 local CHECKPOINT_REQUEST_MAX_BYTES = 6000
 local CHECKPOINT_REQUEST_OMISSION = "\n\n[Middle of the original request omitted; see the checkpoint summary for the full task.]\n\n"
 
-local function continuation_byte(byte)
-    return byte ~= nil and byte >= 128 and byte < 192
-end
-
 local function checkpoint_request_excerpt(text)
     if #text <= CHECKPOINT_REQUEST_MAX_BYTES then return text end
     -- Keep the task at the start and restrictions often placed at the end.
     -- The budget includes the omission marker, and neither cut splits UTF-8.
     local edge_bytes = math.floor((CHECKPOINT_REQUEST_MAX_BYTES - #CHECKPOINT_REQUEST_OMISSION) / 2)
-    local head_end, tail_start = edge_bytes, #text - edge_bytes + 1
-    while continuation_byte(text:byte(head_end + 1)) do head_end = head_end - 1 end
-    while continuation_byte(text:byte(tail_start)) do tail_start = tail_start + 1 end
-    return text:sub(1, head_end) .. CHECKPOINT_REQUEST_OMISSION .. text:sub(tail_start)
+    return text_clamp.head(text, edge_bytes) .. CHECKPOINT_REQUEST_OMISSION .. text_clamp.tail(text, edge_bytes)
 end
 
 local function checkpoint_agent_message(session: any, messages: any): any

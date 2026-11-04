@@ -1012,6 +1012,10 @@ local function error_text(err: any): string
     if type(err) == "table" and type(err.message) == "string" then
         return err.message
     end
+    if type(err) == "table" then
+        local encoded = json.encode(err)
+        if encoded then return encoded end
+    end
     return tostring(err)
 end
 
@@ -1556,7 +1560,19 @@ function message_handlers.agent_step(ctx, op)
                     agent = { id = agent.id, model = agent.model },
                     agent_options = agent.agent_options,
                 })
-                if not checkpoint_result then return nil, checkpoint_err end
+                if not checkpoint_result then
+                    -- The threshold is a soft limit: a prompt that still fits is sent as
+                    -- it is, and the next step tries the checkpoint again.
+                    local reserved = tonumber(info.requested_output_tokens) or 0
+                    local window = tonumber(info.context_window)
+                    if window and window > 0 and (tonumber(info.estimated_prompt_tokens) or 0) + reserved > window then
+                        return nil, checkpoint_err
+                    end
+                    logger:warn("checkpoint failed; sending the current prompt", {
+                        session_id = ctx.session_id, error = error_text(checkpoint_err),
+                    })
+                    return builder
+                end
                 checkpoint_next_ops = checkpoint_result.next_ops or {}
                 local replacement, build_err
                 if type(ctx.prepare_attention_prompt) == "function" then
@@ -2266,7 +2282,7 @@ function message_handlers.process_tools(ctx, op)
 
         if result_data.error then
             local _, update_err = ctx.writer:update_message_meta(message_id, {
-                result = tostring(result_data.error),
+                result = error_text(result_data.error),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
                 call_id = call_id,
@@ -2279,7 +2295,7 @@ function message_handlers.process_tools(ctx, op)
                     message_id = message_id,
                     call_id = call_id,
                     function_name = result_data.tool_call.name,
-                    error = tostring(result_data.error)
+                    error = error_text(result_data.error)
                 })
             end
         else

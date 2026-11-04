@@ -46,6 +46,23 @@ local function define_tests()
             return table.concat(sent, "\n")
         end
 
+        it("clamps a long title on a character boundary", function()
+            local query = {}
+            function query:all() return {{ type = "user", data = "Doors.", metadata = {} }}, nil end
+            local contexts = {}
+            function contexts:type(_kind) return self end
+            function contexts:all() return {}, nil end
+            session.open = function()
+                return { messages = function() return query end, contexts = function() return contexts end }
+            end
+            llm.generate = function() return { result = "A" .. string.rep("я", 70) }, nil end
+
+            local result = assert(title.handle({ session_id = "session-title" }))
+
+            test.eq(#result.title, 99, "the cut drops the split character")
+            test.eq(result.title, "A" .. string.rep("я", 49))
+        end)
+
         for name, summaries in pairs({
             ["before a checkpoint"] = {},
             ["after a checkpoint"] = {{ text = "Earlier summary", time = "2026-11-03" }},

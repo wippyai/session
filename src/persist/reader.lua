@@ -325,12 +325,14 @@ function message_query:all()
     elseif self._type_filter then
         messages, err = session._message_repo.list_by_type(self._session_id, self._type_filter, self._limit, self
         ._offset)
-    else
+    elseif self._limit then
         local result
         result, err = session._message_repo.list_by_session(self._session_id, self._limit)
         if result then
             messages = result.messages
         end
+    else
+        messages, err = session._message_repo.list_all_by_session(self._session_id)
     end
 
     if err then
@@ -340,7 +342,7 @@ function message_query:all()
     -- Prompt queries retain pending input outside the usual history window.
     -- Explicitly paginated/type-filtered queries keep their normal semantics.
     -- prompt_builder hides pending input until the safe boundary.
-    if not self._type_filter and not self._limit and type(session._message_repo.list_all_by_session) == "function" then
+    if self._after_message_id and not self._type_filter and not self._limit then
         local pending, pending_err = session._message_repo.list_all_by_session(self._session_id)
         if pending_err then
             return nil, "Failed to fetch pending inputs: " .. pending_err

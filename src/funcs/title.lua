@@ -1,6 +1,7 @@
 local session = require("session")
 local llm = require("llm")
 local prompt = require("prompt")
+local text_clamp = require("text_clamp")
 
 type TitleResult = {
     success: boolean,
@@ -32,7 +33,7 @@ local function add_conversation_part(parts: {string}, msg: any)
     if msg.type == "user" then
         table.insert(parts, "User: " .. (msg.data or ""))
     elseif msg.type == "assistant" and msg.data and msg.data ~= "" then
-        local content = msg.data:sub(1, CONFIG.max_assistant_content)
+        local content = text_clamp.head(msg.data, CONFIG.max_assistant_content)
         if #msg.data > CONFIG.max_assistant_content then
             content = content .. "..."
         end
@@ -111,7 +112,7 @@ local function handle(args)
 
     local conversation_text = table.concat(conversation_parts, "\n")
     if #conversation_text > CONFIG.max_conversation_chars then
-        conversation_text = conversation_text:sub(1, CONFIG.max_conversation_chars) .. "..."
+        conversation_text = text_clamp.head(conversation_text, CONFIG.max_conversation_chars) .. "..."
     end
 
     title_prompt:add_user("Conversation to title:\n\n" .. conversation_text)
@@ -135,9 +136,7 @@ local function handle(args)
         return nil, "Generated title is empty"
     end
 
-    if #title > 100 then
-        title = title:sub(1, 100)
-    end
+    title = text_clamp.head(title, 100)
 
     return {
         success = true,
