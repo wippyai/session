@@ -10,6 +10,10 @@ local cleanup = require('context_cleanup')
 local consts = require('consts')
 local boot = require('wait_for_boot')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function define_tests()
     describe('Session context cleanup without active user sessions', function()
         local fixtures, worker_pid = {}, nil
@@ -56,7 +60,7 @@ local function define_tests()
             worker_pid = pid
         end
         local function sweep_result(deadline)
-            deadline = deadline or time.after('3s')
+            deadline = deadline or time.after(EVENT_DEADLINE)
             local inbox, events = process.inbox(), process.events()
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
@@ -79,7 +83,7 @@ local function define_tests()
         end
         local function stop()
             assert(process.cancel(worker_pid, '1s'))
-            local events, deadline = process.events(), time.after('2s')
+            local events, deadline = process.events(), time.after(EVENT_DEADLINE)
             while true do
                 local selected = channel.select({ events:case_receive(), deadline:case_receive() })
                 assert(selected.ok and selected.channel ~= deadline, 'cleanup cancellation timed out')
@@ -112,7 +116,7 @@ local function define_tests()
             test.eq(removed, 104)
             test.eq(remaining(), 0)
             stages(1); expire()
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             local result
             repeat
                 result = sweep_result(deadline)

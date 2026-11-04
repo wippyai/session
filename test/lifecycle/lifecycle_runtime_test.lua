@@ -12,6 +12,12 @@ local boot = require("boot")
 local framework_capabilities = require("framework_capabilities")
 local env = require("env")
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+-- Stop cancellation has a real latency requirement, independent of event waits.
+local STOP_LATENCY_SECONDS = 2
+
 local function scenario(reason: string, reconnect: boolean?, cancels_in_flight: boolean?)
     local explicit_stop = reason == "stop"
     -- Stop cancels the in-flight provider call, so no tool intent is produced.
@@ -38,7 +44,7 @@ local function scenario(reason: string, reconnect: boolean?, cancels_in_flight: 
     local exit: any = nil
     local terminal = {} :: {any}
     local function receive_until(predicate: any): any
-        local inbox, events, deadline = process.inbox(), process.events(), time.timer("12s")
+        local inbox, events, deadline = process.inbox(), process.events(), time.timer(EVENT_DEADLINE)
         local ok, value = pcall(function()
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:channel():case_receive() })
@@ -101,7 +107,7 @@ local function scenario(reason: string, reconnect: boolean?, cancels_in_flight: 
             local started = time.now()
             receive_until(function(_, data) return data.status == "idle" end)
             if cancelled then
-                test.is_true(time.now():sub(started):seconds() < 2, "Stop must cancel the provider call promptly")
+                test.is_true(time.now():sub(started):seconds() < STOP_LATENCY_SECONDS, "Stop must cancel the provider call promptly")
             end
             assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {}))
         end

@@ -18,12 +18,16 @@ local writer = require('writer')
 local handlers = require('session_handlers')
 local session_service = require('session_service')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function define_tests()
     describe('Context transport real process and SQL lifecycle', function()
         local workers, fixtures = {}, {}
         local original_funcs = handlers._funcs
         local function receive(topic, from, request_id)
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             local inbox, events = process.inbox(), process.events()
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
@@ -71,7 +75,7 @@ local function define_tests()
         end
         local function stop(pid)
             assert(process.send(pid, 'context_worker_stop', {}))
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             while true do
                 local selected = channel.select({ process.events():case_receive(), deadline:case_receive() })
                 assert(selected.channel ~= deadline and selected.ok, 'worker exit timed out')
@@ -102,7 +106,7 @@ local function define_tests()
             for pid, entry in pairs(workers) do
                 process.send(pid, entry == 'app:context_transport_worker' and 'context_worker_stop' or consts.TOPICS.FINISH_AND_EXIT, {})
             end
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             while next(workers) do
                 local selected = channel.select({ process.events():case_receive(), deadline:case_receive() })
                 assert(selected.channel ~= deadline and selected.ok, 'fixture worker cleanup timed out')
@@ -248,7 +252,7 @@ local function define_tests()
             assert(upstream.notify_external(session, { title = 'Stale old title' }))
             test.eq(receive(topic, pid).title, 'Named before open')
             assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {}))
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             while true do
                 local selected = channel.select({ process.events():case_receive(), deadline:case_receive() })
                 assert(selected.channel ~= deadline and selected.ok, 'session exit timed out')
@@ -273,7 +277,7 @@ local function define_tests()
             assert(session_service.delete({ session_id = session, user_id = actor }))
             local event = receive(topic, pid)
             test.is_true(event.deleted)
-            local timer = time.timer('3s')
+            local timer = time.timer(EVENT_DEADLINE)
             local exited = false
             while not exited do
                 local selected = channel.select({ process.events():case_receive(), timer:channel():case_receive() })
