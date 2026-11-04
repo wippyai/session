@@ -1,9 +1,8 @@
 name: CI
 
 on:
-  push:
-    branches: [master]
   pull_request:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

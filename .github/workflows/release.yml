@@ -4,17 +4,41 @@ on:
   push:
     branches: [master]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  checks:
+    name: Checks
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   release:
-    uses: wippyai/template-module/.github/workflows/reusable-release.yml@v1
-    with:
-      publish: false
-    secrets: inherit
+    name: Release Please
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Actions may not open pull requests with GITHUB_TOKEN in this repository;
+      # the release app opens the release PR, which also lets CI run on it.
+      - name: Mint release app token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Run Release Please
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
