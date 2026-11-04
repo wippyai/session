@@ -815,9 +815,70 @@ local function run_failed_activation_scenario()
     end)
 end
 
+-- A response whose thinking is interleaved with its two tool calls.
+local function parallel_response(first_id, second_id, second_name)
+    return {
+        content = "AB",
+        calls = { { id = first_id, name = "checkpoint_edit", arguments = "{}" },
+            { id = second_id, name = second_name or "checkpoint_edit", arguments = "{}" } },
+        metadata = {
+            thinking_blocks = { { type = "thinking", thinking = "", signature = "s1", position = 1 },
+                { type = "thinking", thinking = "", signature = "s2", position = 4 } },
+            content_positions = { { type = "text", text = "A", position = 2 }, { type = "tool_use", id = first_id, position = 3 },
+                { type = "text", text = "B", position = 5 }, { type = "tool_use", id = second_id, position = 6 } },
+        },
+    }
+end
+
+local function roles_of(request)
+    local roles = {}
+    for _, message in ipairs(request.messages) do
+        if message.role ~= "cache_marker" and message.role ~= "system" and message.role ~= "developer" then
+            roles[#roles + 1] = message.role
+        end
+    end
+    return table.concat(roles, ",")
+end
+
+local function run_parallel_round_scenario()
+    with_session("Parallel round", { agent_id = "app.runtime:parallel_agent", model = "session-runtime-prefix" },
+        { script = { parallel_response("p1", "p2"), { content = "Second round.", calls = {
+            { id = "p3", name = "checkpoint_edit", arguments = "{}" } } }, { content = "Done." } } },
+        function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "parallel-first", "Run both.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(roles_of(requests[2]), "user,assistant,function_call,function_call,function_result,function_result")
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "first round")
+        assert_prefix(views[2], views[3], "second round")
+    end)
+end
+
+local function run_parallel_handoff_scenario()
+    local response = parallel_response("p1", "call-handoff", "handoff")
+    response.calls[1].name = "failing_tool"
+    with_session("Parallel handoff", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 },
+        { script = { response, { content = "Answer." } } }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "parallel-handoff", "Hand off.")
+        local requests = storage:get("requests")
+        test.eq(requests[2].model, "help")
+        local blocks = nil
+        for _, message in ipairs(requests[2].messages) do
+            if message.role == "assistant" then blocks = message.metadata and message.metadata.thinking_blocks end
+        end
+        test.not_nil(blocks, "the successor continues the round with its blocks")
+        test.eq(#blocks, 2)
+    end)
+end
+
 local function define_stable_prefix_tests()
     test.describe("Session stable request prefix through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
+        test.it("replays a parallel round in one assistant turn across requests", run_parallel_round_scenario)
+        test.it("keeps a parallel round's blocks across a handoff", run_parallel_handoff_scenario)
         test.it("keeps the time note when the opening step compacts", run_opening_compaction_scenario)
         test.it("notes the turn for a time-aware successor after a handoff", run_time_successor_scenario)
         test.it("keeps an activation note when the provider fails", run_failed_activation_scenario)

@@ -314,6 +314,11 @@ refresh the dependency lock from the published packages.
   it holds the thinking blocks of its round. A user message with no text, files or
   attachments is rejected with `empty_message`; with attachments, the empty text
   part is omitted. Rows stored blank by earlier versions render as nothing.
+- **Parallel tool rounds.** The calls of one response render together after its
+  assistant row, then all their results, in the order the model produced them.
+  Calls with no assistant row before them keep a call and its result together. This
+  shape must ship in the first release that stores fingerprints: changing it later
+  edits the prefix of every fingerprinted row.
 
 Positional notes are ordinary rows outside the prompt too. The checkpoint
 summarizer reads them as `[SYSTEM]` and `[DEVELOPER]` lines, and they count toward
@@ -344,6 +349,9 @@ These history edits change the prefix by design:
 
 The prompt cache restarts at the edited message and the API drops the thinking
 blocks after it.
+
+After upgrading, a stored parallel round renders in the new shape, so its cache
+restarts once from that round. Its rows are not rewritten.
 
 After upgrading, stored conversations restart their cache once: earlier steps
 sent lifecycle notes that were never stored, stored rows that used to merge now

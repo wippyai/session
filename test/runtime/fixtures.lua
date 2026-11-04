@@ -40,6 +40,7 @@ local function generate(args)
             result = { content = scripted.content or "Done.", tool_calls = scripted_calls },
             tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
             finish_reason = #scripted_calls > 0 and "tool_call" or "stop",
+            metadata = scripted.metadata,
         }
     end
     local calls = {}
