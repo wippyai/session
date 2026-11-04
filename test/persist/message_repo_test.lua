@@ -140,6 +140,88 @@ local function define_tests()
             test.not_nil(created.date)
         end)
 
+        describe("metadata encoding", function()
+            local session_id
+            before_each(function()
+                session_id = uuid.v7()
+                assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Metadata", "test"))
+            end)
+            after_each(function()
+                session_repo.delete(session_id)
+            end)
+
+            local paths = {
+                { name = "create", write = function(id, metadata)
+                    return message_repo.create(id, session_id, "user", "Pending.", metadata)
+                end },
+                { name = "admit", write = function(id, metadata)
+                    return message_repo.admit(id, session_id, "user", "Pending.", metadata, {})
+                end },
+                { name = "create_batch", encodes_strings = true, write = function(id, metadata)
+                    return message_repo.create_batch(session_id, {
+                        { message_id = id, type = "user", data = "Pending.", metadata = metadata },
+                    })
+                end },
+                { name = "update_metadata", write = function(id, metadata)
+                    assert(message_repo.create(id, session_id, "user", "Pending.", {}))
+                    return message_repo.update_metadata(id, metadata, session_id)
+                end },
+                { name = "stop_with_input_rollback", encodes_strings = true, boundary = true,
+                    write = function(id, metadata)
+                        return message_repo.stop_with_input_rollback(session_id, {}, {}, {
+                            message_id = id, data = "Stopped.", metadata = metadata,
+                        })
+                    end },
+            }
+
+            local function stored_metadata(id)
+                local db = assert(sql.get(consts.get_db_resource()))
+                local rows, err = db:query("SELECT metadata FROM messages WHERE message_id = $1", { id })
+                db:release()
+                test.is_nil(err)
+                test.eq(#rows, 1)
+                return rows[1].metadata
+            end
+
+            for _, path in ipairs(paths) do
+                it("normalizes JSON strings in " .. path.name .. " and preserves ordinary metadata bytes", function()
+                    local function check_bytes(metadata, expected)
+                        local id = uuid.v7()
+                        assert(path.write(id, metadata))
+                        local stored = stored_metadata(id)
+                        assert(message_repo.delete(id))
+                        test.eq(stored, expected, "stored metadata bytes")
+                    end
+
+                    local ordinary = { model = "test-model", tokens = { prompt = 10, completion = 5 } }
+                    local ordinary_json = assert(json.encode(ordinary))
+                    check_bytes(ordinary, ordinary_json)
+                    if not path.encodes_strings then check_bytes(ordinary_json, ordinary_json) end
+                    local invalid = '{"broken":'
+                    check_bytes(invalid, path.encodes_strings and assert(json.encode(invalid)) or invalid)
+
+                    local id = uuid.v7()
+                    local raw = [=[{"\u0069nput":{"state":"pending"}}]=]
+                    if path.boundary then raw = [=[{"\u0069nterruption":{"reason":"stop"}}]=] end
+                    assert(path.write(id, raw))
+                    if not path.boundary then
+                        local pending = assert(message_repo.list_pending_inputs(session_id))
+                        test.eq(#pending, 1, "escaped input key reaches list_pending_inputs")
+                        test.eq(pending[1].message_id, id)
+                        test.eq(pending[1].data, "Pending.")
+                        test.eq(pending[1].metadata.input.state, "pending")
+                    end
+                    test.eq(stored_metadata(id), assert(json.encode(assert(json.decode(raw)))), "canonical JSON bytes")
+                    assert(message_repo.delete(id))
+
+                    check_bytes(ordinary_json, ordinary_json)
+                    check_bytes(" false ", "false")
+                    check_bytes(" null ", "null")
+                    check_bytes([=["\u0061"]=], '"a"')
+                end)
+            end
+        end)
+
         it("commits an assistant and all pending calls together and resolves them on recovery", function()
             local assistant_id = uuid.v7()
             local first_id = uuid.v7()

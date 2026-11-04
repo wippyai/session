@@ -26,6 +26,17 @@ type MessageList = {
 local message_repo = {}
 local context_staging = require('context_staging_repo')
 
+local function encode_metadata(metadata, encode_scalars)
+    if type(metadata) == "string" then
+        local decoded, decode_err = json.decode(metadata)
+        if not decode_err then return json.encode(decoded) end
+    end
+    if type(metadata) == "table" or encode_scalars then
+        return json.encode(metadata)
+    end
+    return metadata
+end
+
 local function same_receipt(stored, incoming)
     if type(stored) ~= 'table' or type(incoming) ~= 'table'
         or stored.actor_id ~= incoming.actor_id
@@ -45,7 +56,7 @@ function message_repo.create_batch(session_id, rows)
     if begin_err then db:release(); return nil, begin_err end
     local now = time.now():utc():format(time.RFC3339NANO)
     for _, row in ipairs(rows) do
-        local metadata, encode_err = json.encode(row.metadata or {})
+        local metadata, encode_err = encode_metadata(row.metadata or {}, true)
         if encode_err then tx:rollback(); db:release(); return nil, encode_err end
         local _, insert_err = sql.builder.insert("messages"):set_map({
             message_id = row.message_id, session_id = session_id, date = now,
@@ -238,18 +249,13 @@ function message_repo.create(message_id, session_id, msg_type, data, metadata, r
     local request_ok, request_err = validate_request(request_id, request_hash)
     if not request_ok then return nil, request_err end
 
-    -- Convert metadata to JSON if it's a table
     local metadata_json = nil
     if metadata then
-        if type(metadata) == "table" then
-            local encoded, err = json.encode(metadata)
-            if err then
-                return nil, "Failed to encode metadata: " .. err
-            end
-            metadata_json = encoded
-        else
-            metadata_json = metadata
+        local encoded, err = encode_metadata(metadata)
+        if err then
+            return nil, "Failed to encode metadata: " .. err
         end
+        metadata_json = encoded
     end
 
     local db, err = get_db()
@@ -360,7 +366,7 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
 
     local metadata_json = nil
     if metadata ~= nil then
-        metadata_json = type(metadata) == "table" and json.encode(metadata) or metadata
+        metadata_json = encode_metadata(metadata)
         if not metadata_json then return nil, "Failed to encode metadata" end
     end
 
@@ -851,7 +857,7 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
         local needed, boundary_err = needs_interruption_boundary(tx, session_id, message_order.date(db:type()))
         if boundary_err then return abort(boundary_err) end
         if needed then
-            local metadata, encode_err = json.encode(boundary.metadata)
+            local metadata, encode_err = encode_metadata(boundary.metadata, true)
             if encode_err then return abort(encode_err) end
             boundary_date = time.now():utc():format(time.RFC3339NANO)
             local _, insert_err = sql.builder.insert("messages"):set_map({
@@ -915,16 +921,9 @@ function message_repo.update_metadata(message_id, metadata, expected_session_id)
         metadata = message.metadata
     end
 
-    -- Convert metadata to JSON if it's a table
-    local metadata_json = nil
-    if type(metadata) == "table" then
-        local encoded, err = json.encode(metadata)
-        if err then
-            return nil, "Failed to encode metadata: " .. err
-        end
-        metadata_json = encoded
-    else
-        metadata_json = metadata
+    local metadata_json, encode_err = encode_metadata(metadata)
+    if encode_err then
+        return nil, "Failed to encode metadata: " .. encode_err
     end
 
     local db, err = get_db()
