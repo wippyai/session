@@ -290,11 +290,15 @@ refresh the dependency lock from the published packages.
   `preserve_position` in place; other system rows (turn and agent-change notices)
   stay out of the prompt.
 - **Thinking blocks.** Assistant rows store the step's `prefix_fingerprint`
-  next to their `thinking_blocks`. Every step passes `drop_stale_thinking =
-  true` with a predicate that keeps blocks only when the row's fingerprint and
-  `checkpoint_id` both match the current ones: a non-exclusive checkpoint keeps its anchor
-  row and the rows written after it, but their blocks followed history the
-  checkpoint removed. The current tool round always keeps its blocks.
+  and immutable `generation_checkpoint_id` next to their `thinking_blocks`.
+  The generation field records the checkpoint at response persistence, after any
+  in-step compaction; an empty string denotes no checkpoint yet. Checkpoints can
+  update an anchor's `checkpoint_id`, but cannot overwrite its generation field.
+  Every step passes `drop_stale_thinking = true` with a predicate that keeps blocks
+  only when the row's fingerprint and generation checkpoint match the current ones.
+  Rows without the generation field count as stale. An inclusive checkpoint keeps
+  its anchor row in history, but that row's earlier generation remains stale.
+  The current tool round always keeps its blocks.
 - **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
   positional notes after the history and stored once, where they were first sent:
   developer messages as developer rows and system messages as system rows, each

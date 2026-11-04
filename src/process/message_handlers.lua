@@ -1253,8 +1253,11 @@ function message_handlers.handle_message(ctx, op)
         return acknowledge_duplicate(accepted_message.message_id, accepted_message)
     end
 
-    if not has_text(data.text) and not (attachments and #attachments > 0)
-        and not (data.file_uuids and #data.file_uuids > 0) then
+    if not validate_file_references(data.file_uuids, ctx.user_id, ctx.session_id) then
+        return reject_file_references(ctx, op)
+    end
+    if not has_text(data.text) and not (type(attachments) == "table" and #attachments > 0)
+        and not (type(data.file_uuids) == "table" and #data.file_uuids > 0) then
         local code = consts.ERROR_CODES.EMPTY_MESSAGE
         if op.request_id then ctx.upstream:command_error(op.request_id, code, "Message has no text or attachments") end
         return { completed = true, rejected = true, error = code }
@@ -1267,10 +1270,6 @@ function message_handlers.handle_message(ctx, op)
             "Session is not accepting messages right now") end
         return { completed = true }
     end
-    if not validate_file_references(data.file_uuids, ctx.user_id, ctx.session_id) then
-        return reject_file_references(ctx, op)
-    end
-
     local input = active and { state = "pending" } or nil
     local metadata = { file_uuids = data.file_uuids, context_attachments = attachments }
     if input then metadata.input = input end
@@ -1510,12 +1509,12 @@ function message_handlers.agent_step(ctx, op)
         stop_check = step_stop_check(ctx),
         cancel = ctx.coordinator and ctx.coordinator.cancel,
         drop_stale_thinking = true,
-        -- Blocks stored under another checkpoint were produced after history
-        -- that compaction has since removed, so their prefix no longer exists.
+        -- Generation stays fixed when an inclusive checkpoint updates its anchor.
         thinking_is_current = function(message, fingerprint)
             local metadata = message.metadata or {}
             return metadata.prefix_fingerprint == fingerprint
-                and metadata.checkpoint_id == ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
+                and metadata.generation_checkpoint_id ~= nil
+                and metadata.generation_checkpoint_id == (ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or "")
         end,
     }
 
@@ -1632,6 +1631,7 @@ function message_handlers.agent_step(ctx, op)
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
                 stopped = true,
+                generation_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or "",
                 memory_recall_error = memory_recall_error
             }, {}, step_notes)
             if store_err then return nil, store_err end
@@ -1687,6 +1687,7 @@ function message_handlers.agent_step(ctx, op)
                 model = ctx.config.model,
                 tokens = result.tokens,
                 truncated = true,
+                generation_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or "",
                 memory_recall_error = memory_recall_error
             }, {}, step_notes, { truncation_notice })
             if store_err then
@@ -1834,6 +1835,7 @@ function message_handlers.agent_step(ctx, op)
         -- Thinking blocks in result.metadata are bound to this prefix; later
         -- steps keep them only while the prefix is unchanged.
         metadata.prefix_fingerprint = result.prefix_fingerprint
+        metadata.generation_checkpoint_id = current_checkpoint_id or ""
         -- This is server-owned presentation data, never model output.  It is
         -- intentionally stored with the terminal assistant message so reloads
         -- and live delivery use the same contract.

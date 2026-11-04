@@ -4033,6 +4033,60 @@ local function define_tests()
             end
         end)
 
+        it("records the generation checkpoint on every persisted assistant response", function()
+            for _, checkpoint in ipairs({ false, "checkpoint-2" }) do
+                for _, response in ipairs({
+                    tool_response({ prefix_fingerprint = "fp", metadata = { generation_checkpoint_id = "untrusted" } }),
+                    { result = "partial", truncated = true, truncation_reason = "tool_calls" },
+                    { result = "streamed", stopped = true },
+                }) do
+                    local seen
+                    local agent = fake_agent(nil)
+                    agent.step = function(_self, _builder, options)
+                        seen = options
+                        return response
+                    end
+                    local ctx, captured = mock_ctx(agent)
+                    ctx.reader.get_context = function(_self, key)
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then return checkpoint or nil end
+                        return nil
+                    end
+
+                    local _, err = user_step(ctx)
+
+                    test.is_nil(err)
+                    local rows = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+                    test.eq(#rows, 1)
+                    test.eq(rows[1].metadata.generation_checkpoint_id, checkpoint or "",
+                        "assistant generation checkpoint comes from the session")
+                    if response.prefix_fingerprint then
+                        test.is_true(seen.thinking_is_current(rows[1], "fp"), "the current round stays current")
+                    end
+                end
+            end
+        end)
+
+        it("rejects thinking on legacy rows without a generation checkpoint", function()
+            for _, checkpoint in ipairs({ false, "checkpoint-2" }) do
+                local seen
+                local agent = fake_agent(nil)
+                agent.step = function(_self, _builder, options)
+                    seen = options
+                    return tool_response()
+                end
+                local ctx = mock_ctx(agent)
+                ctx.reader.get_context = function(_self, key)
+                    if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then return checkpoint or nil end
+                    return nil
+                end
+                local _, err = user_step(ctx)
+                test.is_nil(err)
+                test.is_false(seen.thinking_is_current({ metadata = {
+                    prefix_fingerprint = "fp", checkpoint_id = checkpoint or nil,
+                } }, "fp"), "rows without generation_checkpoint_id are stale")
+            end
+        end)
+
         it("keeps thinking only under the fingerprint and checkpoint that produced it", function()
             local seen
             local agent = fake_agent(nil)
@@ -4049,11 +4103,11 @@ local function define_tests()
             user_step(ctx)
 
             local is_current = seen.thinking_is_current
-            test.is_true(is_current({ metadata = { prefix_fingerprint = "fp", checkpoint_id = "checkpoint-2" } }, "fp"))
-            test.is_false(is_current({ metadata = { prefix_fingerprint = "other", checkpoint_id = "checkpoint-2" } }, "fp"))
-            test.is_false(is_current({ metadata = { prefix_fingerprint = "fp", checkpoint_id = "checkpoint-1" } }, "fp"),
+            test.is_true(is_current({ metadata = { prefix_fingerprint = "fp", generation_checkpoint_id = "checkpoint-2" } }, "fp"))
+            test.is_false(is_current({ metadata = { prefix_fingerprint = "other", generation_checkpoint_id = "checkpoint-2" } }, "fp"))
+            test.is_false(is_current({ metadata = { prefix_fingerprint = "fp", generation_checkpoint_id = "checkpoint-1" } }, "fp"),
                 "compaction removed the history these blocks were produced after")
-            test.is_false(is_current({ metadata = { checkpoint_id = "checkpoint-2" } }, "fp"))
+            test.is_false(is_current({ metadata = { generation_checkpoint_id = "checkpoint-2" } }, "fp"))
         end)
 
         it("persists one positional time note after the user message of each turn", function()
@@ -4333,6 +4387,30 @@ local function define_tests()
                 test.eq(batch_rows, 1, "the notice is part of the batch")
                 test.eq(captured.stored[2].content, output.TRUNCATION_MSG)
                 test.eq(#stored_of_type(captured, consts.MSG_TYPE.DEVELOPER), 1)
+            end)
+
+            it("rejects malformed attachments on a blank message without throwing", function()
+                for _, field in ipairs({ "file_uuids", "context_attachments" }) do
+                    for _, value in ipairs({ 42, true, false, "invalid" }) do
+                        local errors = {}
+                        local ctx, captured = mock_ctx(fake_agent(nil))
+                        ctx.upstream.command_error = function(_self, request_id, code)
+                            errors[#errors + 1] = { request_id = request_id, code = code }
+                        end
+                        local data = { text = "", [field] = value }
+                        local result, err = message_handlers.handle_message(ctx, { request_id = "req-invalid", data = data })
+                        test.is_nil(err)
+                        test.is_true(result.rejected)
+                        test.is_true(result.completed)
+                        local code = field == "file_uuids" and consts.ERROR_CODES.INVALID_FILE_REFERENCES
+                            or consts.ERROR_CODES.INVALID_CONTEXT_ATTACHMENTS
+                        test.eq(#errors, 1)
+                        test.eq(errors[1].request_id, "req-invalid")
+                        test.eq(errors[1].code, code)
+                        test.eq(#captured.stored, 0)
+                        test.eq(#(result.next_ops or {}), 0)
+                    end
+                end
             end)
 
             it("rejects an empty user message without attachments", function()
