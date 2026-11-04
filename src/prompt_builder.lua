@@ -399,7 +399,11 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
         end
 
         if msg.type == consts.MSG_TYPE.SYSTEM then
-            -- for internal use only, use developer role for ongoing system messages
+            -- Positional system notes (turn context, lifecycle) render where they
+            -- were sent; other system rows are host records for the client.
+            if metadata.preserve_position == true then
+                builder:add_system(msg.data :: string, metadata)
+            end
         elseif msg.type == consts.MSG_TYPE.USER then
             local user_parts = { prompt_builder._prompt.text(msg.data :: string) }
             if include_context_attachments and metadata.context_attachments then

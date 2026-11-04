@@ -15,6 +15,8 @@ local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
 local message_order = require("message_order")
 local hash = require("hash")
+local turn_context = require("turn_context")
+local time = require("time")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -278,28 +280,95 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
     return result, nil
 end
 
-local function append_lifecycle_messages(builder: any, result: table?)
-    if not builder or type(result) ~= "table" or type(result.messages) ~= "table" then
-        return
-    end
+-- A note sent with a step: a lifecycle message or a context note the agent
+-- returned. The step sends it after the history, and the host persists it there
+-- together with the step output, so the next request replays it in place.
+type StepNote = {
+    type: string,
+    content: string,
+    metadata: table,
+}
 
+local NOTE_TYPES = {
+    system = consts.MSG_TYPE.SYSTEM,
+    user = consts.MSG_TYPE.USER,
+    assistant = consts.MSG_TYPE.ASSISTANT,
+    developer = consts.MSG_TYPE.DEVELOPER,
+}
+
+local function note_metadata(source: any, op: any, positional: boolean): table
+    local metadata = {}
+    if type(source) == "table" then
+        for key, value in pairs(source) do metadata[key] = value end
+    end
+    metadata.source_id = op.message_id
+    if positional then metadata.preserve_position = true end
+    return metadata
+end
+
+local function lifecycle_notes(result: table?, phase: string, op: any): {StepNote}
+    local notes: {StepNote} = {}
+    if type(result) ~= "table" or type(result.messages) ~= "table" then
+        return notes
+    end
     for _, message in ipairs(result.messages) do
         if type(message) == "table" then
             local content = message.content or message.text or message.data
             if type(content) == "string" and content ~= "" then
-                local role = message.role or message.type or "developer"
-                if role == "system" and type(builder.add_system) == "function" then
-                    builder:add_system(content)
-                elseif role == "user" and type(builder.add_user) == "function" then
-                    builder:add_user(content)
-                elseif role == "assistant" and type(builder.add_assistant) == "function" then
-                    builder:add_assistant(content, message.metadata)
-                elseif type(builder.add_developer) == "function" then
-                    builder:add_developer(content, message.metadata)
-                end
+                local note_type = NOTE_TYPES[message.role or message.type] or consts.MSG_TYPE.DEVELOPER
+                local positional = note_type == consts.MSG_TYPE.SYSTEM or note_type == consts.MSG_TYPE.DEVELOPER
+                local metadata = note_metadata(message.metadata, op, positional)
+                metadata.lifecycle_phase = phase
+                table.insert(notes, { type = note_type, content = content, metadata = metadata })
             end
         end
     end
+    return notes
+end
+
+-- Context notes are prompt messages the agent sent after the conversation.
+local function context_notes(result: any, op: any): ({StepNote}?, string?)
+    local notes: {StepNote} = {}
+    if type(result) ~= "table" or type(result.context_notes) ~= "table" then
+        return notes, nil
+    end
+    for index, message in ipairs(result.context_notes) do
+        local note_type = type(message) == "table" and NOTE_TYPES[message.role] or nil
+        local content = type(message) == "table" and message.content or nil
+        if type(content) == "table" and #content == 1 and type(content[1]) == "table"
+            and content[1].type == "text" then
+            content = content[1].text
+        end
+        if (note_type ~= consts.MSG_TYPE.DEVELOPER and note_type ~= consts.MSG_TYPE.SYSTEM)
+            or type(content) ~= "string" then
+            return nil, "Context note " .. tostring(index) .. " is not a single-text developer or system message"
+        end
+        table.insert(notes, { type = note_type :: string, content = content,
+            metadata = note_metadata(message.metadata, op, true) })
+    end
+    return notes, nil
+end
+
+local function append_notes(builder: any, notes: {StepNote})
+    for _, note in ipairs(notes) do
+        if note.type == consts.MSG_TYPE.SYSTEM then
+            builder:add_system(note.content, note.metadata)
+        elseif note.type == consts.MSG_TYPE.USER then
+            builder:add_user(note.content)
+        elseif note.type == consts.MSG_TYPE.ASSISTANT then
+            builder:add_assistant(note.content, note.metadata)
+        else
+            builder:add_developer(note.content, note.metadata)
+        end
+    end
+end
+
+local function persist_notes(ctx: SessionContext, notes: {StepNote}): string?
+    for _, note in ipairs(notes) do
+        local _, err = ctx.writer:add_message(note.type, note.content, note.metadata)
+        if err then return err end
+    end
+    return nil
 end
 
 local function current_agent(ctx: AttentionToolContext): any?
@@ -1277,15 +1346,6 @@ function message_handlers.agent_step(ctx, op)
     local input_updates, input_err = prepare_pending_inputs(ctx, op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
     local prompt_options = { input_overrides = input_updates }
-    local builder, err
-    if type(ctx.prepare_attention_prompt) == "function" then
-        builder, err = ctx.prepare_attention_prompt(prompt_options)
-    else
-        builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
-    end
-    if not builder then
-        return nil, "Failed to build prompt: " .. tostring(err)
-    end
 
     if not ctx.config.agent_id or ctx.config.agent_id == "" then
         return fail_turn(ctx, op, nil, response_id, consts.ERROR_CODES.AGENT_ERROR,
@@ -1334,6 +1394,31 @@ function message_handlers.agent_step(ctx, op)
         if policy_err then return nil, policy_err end
     end
 
+    -- The turn context is rendered once, when the user message opens the turn,
+    -- and persisted right after it; every later request replays it unchanged.
+    if op.from_user and state.steps == 1 then
+        local note, note_err = turn_context.render(agent.agent_options, time.now())
+        if note_err then
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Failed to render turn context: " .. tostring(note_err))
+        end
+        if note then
+            local _, write_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, note,
+                { preserve_position = true, source_id = op.message_id })
+            if write_err then return nil, write_err end
+        end
+    end
+
+    local builder, err
+    if type(ctx.prepare_attention_prompt) == "function" then
+        builder, err = ctx.prepare_attention_prompt(prompt_options)
+    else
+        builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+    end
+    if not builder then
+        return nil, "Failed to build prompt: " .. tostring(err)
+    end
+
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         return nil, "Failed to load session context: " .. tostring(ctx_err)
@@ -1347,7 +1432,7 @@ function message_handlers.agent_step(ctx, op)
     if activate_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_err)
     end
-    append_lifecycle_messages(builder, activate_result)
+    local step_notes = lifecycle_notes(activate_result, lifecycle_runtime.PHASE.ACTIVATE, op)
 
     local before_result, before_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.BEFORE_STEP, agent, {
         reason = "agent_step",
@@ -1363,7 +1448,10 @@ function message_handlers.agent_step(ctx, op)
     if before_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_err)
     end
-    append_lifecycle_messages(builder, before_result)
+    for _, note in ipairs(lifecycle_notes(before_result, lifecycle_runtime.PHASE.BEFORE_STEP, op)) do
+        table.insert(step_notes, note)
+    end
+    append_notes(builder, step_notes)
 
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     ctx.input_apply_batch = input_updates
@@ -1387,7 +1475,16 @@ function message_handlers.agent_step(ctx, op)
         context_id = ctx.session_id,
         context = session_context,
         stop_check = step_stop_check(ctx),
-        cancel = ctx.coordinator and ctx.coordinator.cancel
+        cancel = ctx.coordinator and ctx.coordinator.cancel,
+        persist_context_notes = true,
+        drop_stale_thinking = true,
+        -- Blocks stored under another checkpoint were produced after history
+        -- that compaction has since removed, so their prefix no longer exists.
+        thinking_is_current = function(message, fingerprint)
+            local metadata = message.metadata or {}
+            return metadata.prefix_fingerprint == fingerprint
+                and metadata.checkpoint_id == ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
+        end,
     }
 
     local checkpoint_op = {
@@ -1436,8 +1533,7 @@ function message_handlers.agent_step(ctx, op)
                     replacement, build_err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
                 end
                 if not replacement then return nil, build_err end
-                append_lifecycle_messages(replacement, activate_result)
-                append_lifecycle_messages(replacement, before_result)
+                append_notes(replacement, step_notes)
                 return replacement
             end,
         }
@@ -1474,6 +1570,13 @@ function message_handlers.agent_step(ctx, op)
                 memory_recall_error = memory_recall_error
             })
     end
+    local sent_notes, notes_err = context_notes(result, op)
+    if not sent_notes then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, notes_err, {
+            after_step = true, tokens = result.tokens, memory_recall_error = memory_recall_error })
+    end
+    for _, note in ipairs(sent_notes) do table.insert(step_notes, note) end
+
     if result.stopped then
         local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
             reason = REASON.STOP_REQUESTED,
@@ -1492,6 +1595,8 @@ function message_handlers.agent_step(ctx, op)
             return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
         end
         if type(result.result) == "string" and result.result ~= "" then
+            local notes_store_err = persist_notes(ctx, step_notes)
+            if notes_store_err then return nil, notes_store_err end
             local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
@@ -1545,6 +1650,8 @@ function message_handlers.agent_step(ctx, op)
         -- A truncated response is not terminal. Keep presentation refs for the
         -- eventual tool-free answer rather than attaching them to partial text.
         if result.result and result.result ~= "" then
+            local notes_store_err = persist_notes(ctx, step_notes)
+            if notes_store_err then return nil, notes_store_err end
             local stored_id, store_err = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
@@ -1672,7 +1779,7 @@ function message_handlers.agent_step(ctx, op)
     local terminal_presentation, pending_inline_artifacts = terminal_inline_artifact_presentation(
         ctx :: SessionContext, #unified_tool_calls)
 
-    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall
+    if (result.result and result.result ~= "") or (#unified_tool_calls > 0)
         or behavior_round or terminal_presentation then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
@@ -1684,10 +1791,6 @@ function message_handlers.agent_step(ctx, op)
             checkpoint_id = current_checkpoint_id
         }
 
-        if result.memory_recall then
-            metadata.memory_ids = result.memory_recall.memory_ids
-            metadata.memory_count = result.memory_recall.count
-        end
         if memory_recall_error then
             metadata.memory_recall_error = memory_recall_error
         end
@@ -1697,6 +1800,9 @@ function message_handlers.agent_step(ctx, op)
                 if k ~= "presentation" then metadata[k] = v end
             end
         end
+        -- Thinking blocks in result.metadata are bound to this prefix; later
+        -- steps keep them only while the prefix is unchanged.
+        metadata.prefix_fingerprint = result.prefix_fingerprint
         -- This is server-owned presentation data, never model output.  It is
         -- intentionally stored with the terminal assistant message so reloads
         -- and live delivery use the same contract.
@@ -1730,6 +1836,11 @@ function message_handlers.agent_step(ctx, op)
                 type = call_type
             })
             call_message_types[call.id] = call_type
+        end
+        local notes_store_err = persist_notes(ctx, step_notes)
+        if notes_store_err then
+            ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, notes_store_err)
+            return nil, notes_store_err
         end
         local stored_id, call_message_ids, store_err = ctx.writer:add_response(result.result or "", metadata, intents)
         if store_err then
@@ -1773,14 +1884,6 @@ function message_handlers.agent_step(ctx, op)
             if not marked then return nil, mark_err end
         end
         return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
-    end
-
-    if result.memory_prompt then
-        local memory_metadata = {}
-        if result.memory_prompt.metadata and result.memory_prompt.metadata.memory_ids then
-            memory_metadata.memory_ids = result.memory_prompt.metadata.memory_ids
-        end
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, result.memory_prompt.content, memory_metadata)
     end
 
     if #unified_tool_calls == 0 and behavior_round then

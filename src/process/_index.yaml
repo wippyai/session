@@ -154,6 +154,7 @@ entries:
       input_policy: wippy.session.process:input_policy
       control_handlers: wippy.session.process:control_handlers
       session_handlers: wippy.session.process:session_handlers
+      turn_context: wippy.agent:turn_context
 
   - name: input_policy
     kind: library.lua

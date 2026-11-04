@@ -256,6 +256,56 @@ expire or miss, and cached reads still have a cost. Checkpointing shortens the
 active prompt after a successful summary; neither mechanism is a hard spending
 limit or a preflight guarantee against one oversized tool result.
 
+## Stable request prefix
+
+Each request a session sends extends the previous one: everything sent before
+the model's output is stored where it was sent and replayed unchanged, so the
+provider cache and earlier thinking blocks stay valid. This requires Agent
+0.5.10 and LLM 0.5.13 or later; publish them before the Session release and
+refresh the dependency lock from the published packages.
+
+- **Memory recall.** The session passes `persist_context_notes = true`, so an
+  agent with a memory contract recalls memory. The returned
+  `context_notes` are stored, in order, as developer rows with
+  `metadata.preserve_position` and `metadata.memory_ids`, after the step's
+  lifecycle notes and before the step output. Truncated and cancelled text
+  keeps its notes; a step whose output is discarded discards them too. A note
+  that cannot be stored fails the step as a storage error. Assistant rows no
+  longer carry `memory_ids` or `memory_count`.
+- **Turn context.** When the agent declares `agent_options.turn_context` (the
+  `time_aware` trait), the session renders the note once when a user message
+  opens a turn and stores it as a system row with `metadata.preserve_position`
+  right after that message. Tool continuation steps add none. A note that
+  cannot render (an unknown timezone) fails the turn. The prompt builder renders
+  system rows that carry `preserve_position` in place; other system rows (turn
+  and agent-change notices) stay out of the prompt.
+- **Thinking blocks.** Assistant rows store the step's `prefix_fingerprint`
+  next to their `thinking_blocks`. Every step passes `drop_stale_thinking =
+  true` with a predicate that keeps blocks only when the row's fingerprint and
+  `checkpoint_id` both match the current ones: a non-exclusive checkpoint keeps its anchor
+  row and the rows written after it, but their blocks followed history the
+  checkpoint removed. The current tool round always keeps its blocks.
+- **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
+  positional notes after the history and stored with the step output: system
+  and developer messages as positional rows, user and assistant messages as rows
+  of their role, each with `metadata.lifecycle_phase`. They are appended, never
+  rebuilt, so `before_step` adds one set of notes per step and an activation
+  note stays in the history after the step that activated the agent. Notes of a
+  discarded output are discarded with it.
+
+Two history edits change the prefix by design: a tool result marked `stale` is
+replaced with a withdrawal notice, and the attached-files note lists the
+filename and size the upload has when the prompt is built (`Unknown filename`
+once the upload is gone); Attention attachments that expire are withdrawn the
+same way. The prompt cache restarts at the edited message and the API drops the
+thinking blocks after it.
+
+After upgrading, stored conversations restart their cache once: earlier steps
+sent lifecycle notes that were never stored, and their assistant rows carry no
+`prefix_fingerprint`, so their thinking blocks are stripped from the next
+request (except those of a tool round in progress). Recall notes stored by
+earlier versions stay where they were written.
+
 ## Durable behavior controls
 
 Opt-in trait behaviors can propose the shared declarative `_control` subset:

@@ -164,6 +164,32 @@ local function define_tests()
         end)
     end)
     describe("Prompt Builder", function()
+        describe("system rows", function()
+            it("renders positional system notes in place and leaves host records out", function()
+                local messages = {
+                    { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "What time is it?", metadata = {} },
+                    { message_id = "note-1", type = consts.MSG_TYPE.SYSTEM,
+                        data = "The current date and time is Tuesday, November 3, 2026 at 09:41 UTC.",
+                        metadata = { preserve_position = true, source_id = "user-1" } },
+                    { message_id = "record-1", type = consts.MSG_TYPE.SYSTEM, data = "Turn failed.",
+                        metadata = { system_action = consts.SYSTEM_ACTIONS.TURN_FAILED } },
+                    { message_id = "assistant-1", type = consts.MSG_TYPE.ASSISTANT, data = "It is 09:41.", metadata = {} },
+                }
+
+                local builder, err = prompt_builder.build(messages, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                })
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.eq(#built, 3)
+                test.eq(built[1].role, "user")
+                test.eq(built[2].role, "system")
+                test.eq(built[2].content[1].text, "The current date and time is Tuesday, November 3, 2026 at 09:41 UTC.")
+                test.is_true(built[2].metadata.preserve_position)
+                test.eq(built[3].role, "assistant")
+            end)
+        end)
         describe("provider_metadata in function calls", function()
             it("should pass provider_metadata to function call when present", function()
                 local messages = {

@@ -589,6 +589,178 @@ local function run_artifact_scenario()
     if cleanup_err then error(cleanup_err) end
 end
 
+-- The request as a provider prefix sees it: cache markers are not part of it.
+local function provider_view(messages)
+    local view = {}
+    for _, message in ipairs(messages) do
+        if message.role ~= "cache_marker" then
+            local metadata = type(message.metadata) == "table" and message.metadata or {}
+            view[#view + 1] = json.encode({ role = message.role, content = message.content, name = message.name,
+                function_call = message.function_call, positional = metadata.preserve_position == true,
+                thinking = metadata.thinking_blocks })
+        end
+    end
+    return view
+end
+
+local function assert_prefix(earlier, later, description)
+    test.is_true(#later >= #earlier, description .. ": a later request must extend the earlier one")
+    for index, entry in ipairs(earlier) do
+        test.eq(later[index], entry, description .. ": request diverges at message " .. tostring(index))
+    end
+end
+
+local function send_and_settle(pid, session_id, request_id, text)
+    assert(process.send(pid, consts.TOPICS.MESSAGE, { request_id = request_id, data = { text = text } }))
+    receive_until(function(_, payload)
+        return payload.type == consts.UPSTREAM_TYPES.RECEIVED and payload.request_id == request_id
+    end, "accepted " .. request_id)
+    receive_until(function(topic, payload)
+        return topic == "session:" .. session_id and payload.status == consts.STATUS.IDLE
+    end, "completed " .. request_id)
+end
+
+local function with_session(title, config, scenario, body)
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("edits", 0)
+    storage:set("lifecycle_activate", 0)
+    storage:set("lifecycle_before_step", 0)
+    scenario.parent = process.pid()
+    storage:set("scenario", scenario)
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    observed = {}
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, title, "test", {}, config))
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        body(pid, session_id, storage)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
+local function rows_of(session_id)
+    local rows, err = message_repo.list_all_by_session(session_id)
+    test.is_nil(err)
+    return rows
+end
+
+local function run_stable_prefix_scenario()
+    with_session("Stable prefix", { agent_id = "app.runtime:prefix_agent", model = "session-runtime-prefix" },
+        { prefix = true }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "prefix-first", "Pack the first document.")
+        send_and_settle(pid, session_id, "prefix-second", "Now summarize it.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3, "a tool round and its answer, then a second turn")
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "tool continuation")
+        assert_prefix(views[2], views[3], "next user turn")
+
+        local rows = rows_of(session_id)
+        local sequence, fingerprints = {}, {}
+        for index, row in ipairs(rows) do
+            local metadata = row.metadata or {}
+            if row.type == consts.MSG_TYPE.SYSTEM and not metadata.preserve_position then
+                sequence[#sequence + 1] = "system:" .. tostring(metadata.system_action)
+            elseif row.type == consts.MSG_TYPE.SYSTEM then
+                test.eq(rows[index - 1].type, consts.MSG_TYPE.USER, "the turn note follows its user message")
+                test.contains(row.data, "The current date and time is ")
+                sequence[#sequence + 1] = "time"
+            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.memory_ids then
+                test.is_true(metadata.preserve_position, "the recall note keeps its position")
+                test.eq(metadata.memory_ids[1], "style")
+                sequence[#sequence + 1] = "recall"
+            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.lifecycle_phase then
+                test.is_true(metadata.preserve_position, "lifecycle note keeps its position")
+                sequence[#sequence + 1] = row.data
+            elseif row.type == consts.MSG_TYPE.DEVELOPER then
+                sequence[#sequence + 1] = "host"
+            elseif row.type == consts.MSG_TYPE.ASSISTANT then
+                test.not_nil(metadata.thinking_blocks)
+                test.eq(type(metadata.prefix_fingerprint), "string")
+                fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint
+                sequence[#sequence + 1] = "assistant"
+            else
+                sequence[#sequence + 1] = row.type
+            end
+        end
+        test.eq(table.concat(sequence, "|"), table.concat({
+            "system:agent_change", "host", "system:model_change", "host",
+            "user", "time", "Prefix agent activated.", "Before step 1.", "recall", "assistant", "function",
+            "Before step 2.", "recall", "assistant",
+            "user", "time", "Before step 3.", "recall", "assistant",
+        }, "|"))
+        test.eq(fingerprints[1], fingerprints[2])
+        test.eq(fingerprints[2], fingerprints[3])
+
+        local thinking = 0
+        for _, message in ipairs(requests[3].messages) do
+            if message.role == "assistant" and message.metadata and message.metadata.thinking_blocks then
+                thinking = thinking + 1
+            end
+        end
+        test.eq(thinking, 2, "blocks bound to the unchanged prefix are replayed")
+    end)
+end
+
+local function run_stale_thinking_scenario()
+    with_session("Stale thinking", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 }, { thinking = true }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "thinking-handoff", "Please hand off this request.")
+        send_and_settle(pid, session_id, "thinking-followup", "Anything else?")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(requests[3].model, "help")
+        local function blocks_on(request, text)
+            for _, message in ipairs(request.messages) do
+                if message.role == "assistant" then
+                    for _, part in ipairs(message.content or {}) do
+                        if part.text == text then return message.metadata and message.metadata.thinking_blocks end
+                    end
+                end
+            end
+            error("assistant message missing: " .. text)
+        end
+        test.not_nil(blocks_on(requests[2], "Transferring the request."),
+            "the current tool round keeps its blocks across the agent change")
+        test.is_nil(blocks_on(requests[3], "Transferring the request."),
+            "blocks produced under the router prefix are stripped once the round is over")
+        test.not_nil(blocks_on(requests[3], "The help agent completed the handoff."),
+            "blocks produced under the current prefix are kept")
+
+        local fingerprints = {}
+        for _, row in ipairs(rows_of(session_id)) do
+            local metadata = row.metadata or {}
+            test.is_false(row.type == consts.MSG_TYPE.SYSTEM and metadata.preserve_position == true,
+                "an agent without turn context gets no turn note")
+            test.is_nil(metadata.memory_ids, "an agent without a memory contract gets no recall")
+            if row.type == consts.MSG_TYPE.ASSISTANT then fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint end
+        end
+        test.eq(#fingerprints, 3)
+        test.is_false(fingerprints[1] == fingerprints[2], "the agent change changes the prefix")
+        test.eq(fingerprints[2], fingerprints[3])
+    end)
+end
+
+local function define_stable_prefix_tests()
+    test.describe("Session stable request prefix through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("replays turn, lifecycle and recall notes so each request extends the previous one",
+            run_stable_prefix_scenario)
+        test.it("strips thinking produced under another prefix and keeps the current round", run_stale_thinking_scenario)
+    end)
+end
+
 local function define_checkpoint_tests()
     test.describe("Session checkpoint continuity through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
@@ -762,4 +934,5 @@ local function define_benchmark()
 end
 
 return { readiness = test.run_cases(define_readiness_tests), run = test.run_cases(define_tests), checkpoint = test.run_cases(define_checkpoint_tests),
+    stable_prefix = test.run_cases(define_stable_prefix_tests),
     benchmark = test.run_cases(define_benchmark) }

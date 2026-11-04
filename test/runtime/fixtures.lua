@@ -52,6 +52,16 @@ local function generate(args)
             if selected.channel ~= release then error("checkpoint release deadline exceeded") end
         end
     end
+    if args.model == "prefix" then
+        if #requests == 1 then
+            content = "Packing the document."
+            calls = {{ id = "prefix-edit", name = "checkpoint_edit", arguments = "{}" }}
+        elseif #requests == 2 then
+            content = "The document is packed."
+        else
+            content = "It is a packed handout."
+        end
+    end
     if args.model == "router" then
         content = "Transferring the request."
         calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }}
@@ -63,11 +73,17 @@ local function generate(args)
                 { id = "call-malformed", name = "malformed_effects", arguments = "{}" })
         end
     end
+    local metadata = nil
+    if args.model == "prefix" or scenario.thinking then
+        metadata = { thinking_blocks = {{ type = "thinking", thinking = "Reasoning " .. #requests .. ".",
+            signature = "signature-" .. #requests }} }
+    end
     return {
         success = true,
         result = { content = content, tool_calls = calls },
         tokens = { prompt_tokens = prompt_tokens, completion_tokens = 5, total_tokens = prompt_tokens + 5 },
         finish_reason = #calls > 0 and "tool_call" or "stop",
+        metadata = metadata,
     }
 end
 
@@ -113,8 +129,23 @@ local function malformed_effects()
     return { message = "Malformed control.", _control = true }
 end
 
+-- Counts each phase so every note names the step it was sent with.
+local function prefix_lifecycle(payload)
+    local storage = state()
+    local key = "lifecycle_" .. tostring(payload.phase)
+    local count = (storage:get(key) or 0) + 1
+    storage:set(key, count)
+    if payload.phase == "activate" then
+        return { messages = {{ content = "Prefix agent activated." }} }
+    elseif payload.phase == "before_step" then
+        return { messages = {{ content = "Before step " .. count .. "." }} }
+    end
+    return {}
+end
+
 return {
     generate = generate,
+    prefix_lifecycle = prefix_lifecycle,
     handoff = handoff,
     malformed_effects = malformed_effects,
     held_prompt = held_prompt,
