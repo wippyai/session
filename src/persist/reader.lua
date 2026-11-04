@@ -343,27 +343,24 @@ function message_query:all()
     -- Explicitly paginated/type-filtered queries keep their normal semantics.
     -- prompt_builder hides pending input until the safe boundary.
     if self._after_message_id and not self._type_filter and not self._limit then
-        local pending, pending_err = session._message_repo.list_all_by_session(self._session_id)
-        if pending_err then
-            return nil, "Failed to fetch pending inputs: " .. pending_err
+        local pending, existing_anchors, pending_err = session._message_repo.list_steering_inputs(self._session_id)
+        if not pending then
+            return nil, "Failed to fetch pending inputs: " .. tostring(pending_err)
         end
         messages = messages or {}
-        local seen, all_ids = {}, {}
+        local seen = {}
         local added = false
         for _, message in ipairs(messages) do
             seen[message.message_id] = true
         end
-        for _, message in ipairs(pending or {}) do
-            all_ids[message.message_id] = true
-        end
-        for _, message in ipairs(pending or {}) do
+        for _, message in ipairs(pending) do
             local metadata = message.metadata or {}
             local input = metadata.input
             local relevant = false
             if type(input) == "table" then
                 local anchor = input.after_message_id
                 relevant = input.state == "pending"
-                    or (input.state == "applied" and (not anchor or not all_ids[anchor]
+                    or (input.state == "applied" and (not anchor or not (existing_anchors :: any)[anchor]
                         or seen[anchor] or (self._after_message_id and anchor == self._after_message_id)))
             end
             if relevant and not seen[message.message_id] then

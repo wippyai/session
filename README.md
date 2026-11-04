@@ -250,8 +250,10 @@ input still occupies context even when `prompt_tokens` reports only a small
 uncached suffix. The LLM module normalizes provider accounting; the session does
 not add cache counters again.
 
-The default summarizer sizes its input to the context window of its resolved model
-and asks for a summary below `max_tokens`. A summary cut off at `max_tokens` is an
+The default summarizer sizes its input to the context window of its resolved model,
+caps `max_tokens` at that model's output limit, and asks for a summary below it. It
+reads the arguments and result of every call row that replays to the model,
+delegation and private calls included, within `max_tool_result_chars` per value. A summary cut off at `max_tokens` is an
 error, so the previous checkpoint stays. When a checkpoint fails on a prompt that
 still fits the window, because only the soft threshold was crossed, the session
 sends the prompt as it is and tries again on the next step.

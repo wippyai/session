@@ -162,6 +162,63 @@ local function define_tests()
             test.contains(captured.text, "2400 tokens")
         end)
 
+        it("caps the output budget at the output limit of the resolved model", function()
+            session_with({{ type = "user", data = "Hello.", metadata = {} }})
+            local captured = capture()
+            llm.resolve_model = function() return { max_tokens = 200000, output_tokens = 1000 }, nil end
+
+            assert(checkpoint.handle({ session_id = "s1" }))
+
+            test.eq(captured.max_tokens, 1000, "the wire limit and the prompt agree")
+            test.contains(captured.text, "800 tokens")
+            test.is_nil((captured.text:find("2400", 1, true)))
+            test.eq(checkpoint.config_from_args({ session_id = "s1", options = { max_tokens = 8000 } }).max_tokens, 1000)
+        end)
+
+        it("gives the summarizer every replayed call type", function()
+            session_with({
+                { type = "function", data = '{"query":"public"}', metadata = {
+                    function_name = "search", status = "success", result = "public result" } },
+                { type = "private_function", data = '{"query":"private"}', metadata = {
+                    function_name = "lookup", status = "success", result = { secret_state = "private result" } } },
+                { type = "delegation", data = '{"message":"delegate this"}', metadata = {
+                    function_name = "ask_specialist", status = "success", result = { data = "delegated answer" } } },
+                { type = "function", data = '{"query":"broken"}', metadata = {
+                    function_name = "search", status = "error", result = "tool failure text" } },
+                { type = "delegation", data = '{"message":"failed delegation"}', metadata = {
+                    function_name = "ask_specialist", status = "cancelled", result = "delegation cancelled" } },
+            })
+            local captured = capture()
+            llm.resolve_model = function() return { max_tokens = 200000 }, nil end
+
+            assert(checkpoint.handle({ session_id = "s1" }))
+
+            for _, expected in ipairs({ "public", "public result", "private", "private result", "delegate this",
+                "delegated answer", "tool failure text", "failed delegation", "delegation cancelled", "lookup",
+                "ask_specialist" }) do
+                test.contains(captured.text, expected)
+            end
+            test.contains(captured.text, "[TOOL_ERROR]: tool failure text")
+        end)
+
+        it("bounds arguments and results of every call type by the result budget", function()
+            session_with({
+                { type = "delegation", data = string.rep("a", 500), metadata = {
+                    function_name = "ask", status = "success", result = string.rep("r", 500) } },
+                { type = "private_function", data = string.rep("b", 500), metadata = {
+                    function_name = "lookup", status = "success", result = string.rep("s", 500) } },
+            })
+            local captured = capture()
+            llm.resolve_model = function() return { max_tokens = 200000 }, nil end
+
+            assert(checkpoint.handle({ session_id = "s1", options = { max_tool_result_chars = 50 } }))
+
+            for _, letter in ipairs({ "a", "b", "r", "s" }) do
+                test.contains(captured.text, string.rep(letter, 50))
+                test.is_nil((captured.text:find(string.rep(letter, 51), 1, true)))
+            end
+        end)
+
         it("sizes the request to the window of the resolved model", function()
             session_with(oversized_rows(), "Previous summary.")
             local captured = capture()

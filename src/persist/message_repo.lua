@@ -562,25 +562,73 @@ function message_repo.list_all_by_session(session_id)
     return messages or {}
 end
 
-function message_repo.list_pending_inputs(session_id)
+local STEERING_ANCHOR_BATCH = 200
+
+-- The rows that carry steering metadata, chronological, and the set of their
+-- anchors that still exist. Archived payloads stay in the database: the session
+-- index narrows the scan and the pattern preselects candidates. The row type stays
+-- out of the query because its single-column index spans every session.
+function message_repo.list_steering_inputs(session_id): ({any}?, {[string]: boolean}?, string?)
     if not session_id or session_id == "" then
-        return nil, "Session ID is required"
+        return nil, nil, "Session ID is required"
     end
-    local result, err = message_repo.list_all_by_session(session_id)
-    if err then
-        return nil, err
+    local db, err = get_db()
+    if not db then return nil, nil, err end
+    local candidates, query_err = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+        :from("messages")
+        :where("session_id = ?", session_id)
+        :where("metadata LIKE ?", '%"input"%')
+        :order_by(message_order.date(db:type()) .. " ASC, message_id ASC")
+        :run_with(db):query()
+    if query_err then
+        db:release()
+        return nil, nil, "Failed to list steering inputs: " .. query_err
     end
-    local pending = {}
-    for _, message in ipairs(result or {}) do
-        local metadata = message.metadata
-        local input = nil
-        if type(metadata) == "table" then input = metadata.input end
-        if input ~= nil then
-            if not input_metadata.validate(message) then
-                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
-            end
-            if input.state == "pending" then pending[#pending + 1] = message end
+    local rows, anchors = {}, {}
+    for _, message in ipairs(candidates or {}) do
+        local metadata, decode_err = json.decode(message.metadata :: string)
+        if decode_err then
+            db:release()
+            return nil, nil, "Failed to decode message metadata: " .. decode_err
         end
+        message.metadata = metadata
+        if type(metadata) == "table" and metadata.input ~= nil then
+            if not input_metadata.validate(message) then
+                db:release()
+                return nil, nil, "Malformed steering metadata on message " .. tostring(message.message_id)
+            end
+            rows[#rows + 1] = message
+            local anchor = metadata.input.after_message_id
+            if anchor then anchors[#anchors + 1] = anchor end
+        end
+    end
+    local existing = {}
+    for first = 1, #anchors, STEERING_ANCHOR_BATCH do
+        local batch, marks = {}, {}
+        for index = first, math.min(first + STEERING_ANCHOR_BATCH - 1, #anchors) do
+            batch[#batch + 1] = anchors[index]
+            marks[#marks + 1] = "?"
+        end
+        local found, anchor_err = sql.builder.select("message_id"):from("messages")
+            :where("session_id = ?", session_id)
+            :where("message_id IN (" .. table.concat(marks, ", ") .. ")", table.unpack(batch))
+            :run_with(db):query()
+        if anchor_err then
+            db:release()
+            return nil, nil, "Failed to read steering anchors: " .. anchor_err
+        end
+        for _, row in ipairs(found or {}) do existing[row.message_id] = true end
+    end
+    db:release()
+    return rows, existing, nil
+end
+
+function message_repo.list_pending_inputs(session_id)
+    local rows, _, err = message_repo.list_steering_inputs(session_id)
+    if not rows then return nil, err end
+    local pending = {}
+    for _, message in ipairs(rows) do
+        if message.metadata.input.state == "pending" then pending[#pending + 1] = message end
     end
     return pending
 end

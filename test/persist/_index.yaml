@@ -166,10 +166,12 @@ entries:
       type: test
       suite: session
     source: file://steering_persistence_test.lua
-    modules: [uuid, security, contract, sql]
+    modules: [uuid, security, contract, sql, json]
     imports:
       consts: wippy.session:consts
       message_repo: wippy.session.persist:message_repo
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       wait_for_boot: app:wait_for_boot

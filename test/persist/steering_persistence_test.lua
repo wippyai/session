@@ -5,6 +5,9 @@ local uuid = require("uuid")
 local security = require("security")
 local contract = require("contract")
 local message_repo = require("message_repo")
+local reader = require("reader")
+local writer = require("writer")
+local json = require("json")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local wait_for_boot = require("wait_for_boot")
@@ -177,6 +180,79 @@ local function define_tests()
             set_raw_metadata(invalid_id, '{}')
             test.is_nil(rejected)
             test.contains(invalid_err, "Malformed steering metadata")
+        end)
+
+        it("merges steering after a checkpoint without loading the archive", function()
+            local context_id, session_id = uuid.v7(), uuid.v7()
+            test.not_nil(context_repo.create(context_id, "primary", "archive test"))
+            test.not_nil(session_repo.create(session_id, user_id, context_id, "Archive", "test"))
+            local function add(kind, text, metadata)
+                local id = uuid.v7()
+                test.not_nil(message_repo.create(id, session_id, kind, text, metadata or {}))
+                return id
+            end
+            local archived = add("assistant", "Archived output.")
+            local anchored_in_archive = add("user", "Steering anchored in the archive.", {
+                input = { state = "applied", after_message_id = archived } })
+            local missing_anchor = add("user", "Steering whose anchor is gone.", {
+                input = { state = "applied", after_message_id = "gone" } })
+            local no_anchor = add("user", "Steering with no anchor.", { input = { state = "applied" } })
+            local archived_pending = add("user", "Pending from before the checkpoint.", { input = { state = "pending" } })
+            add("user", "An archived request.")
+            local tool_row = add("function", "{}", { function_name = "t", status = "success",
+                result = { input = { state = "pending" } } })
+            local checkpoint = add("assistant", "The checkpoint anchor.")
+            local at_checkpoint = add("user", "Steering at the anchor.", {
+                input = { state = "applied", after_message_id = checkpoint } })
+            local inside = add("assistant", "Inside the window.")
+            local at_inside = add("user", "Steering inside the window.", {
+                input = { state = "applied", after_message_id = inside } })
+            local session_writer = assert(writer.new(session_id))
+            assert(session_writer:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, checkpoint))
+
+            local list_all = message_repo.list_all_by_session
+            local loaded = 0
+            message_repo.list_all_by_session = function(...)
+                loaded = loaded + 1
+                return list_all(...)
+            end
+            local session_reader = assert(reader.open(session_id))
+            local rows, err = session_reader:messages():from_checkpoint():all()
+            local pending, pending_err = message_repo.list_pending_inputs(session_id)
+            message_repo.list_all_by_session = list_all
+
+            test.is_nil(err)
+            test.is_nil(pending_err)
+            test.eq(loaded, 0, "a prompt query does not read the archived rows")
+            local ids = {}
+            for _, row in ipairs(rows) do ids[row.message_id] = true end
+            for _, expected in ipairs({ missing_anchor, no_anchor, archived_pending, checkpoint, at_checkpoint, inside, at_inside }) do
+                test.is_true(ids[expected], "the window keeps " .. tostring(expected))
+            end
+            test.is_nil(ids[anchored_in_archive], "steering anchored in the archive stays there")
+            test.is_nil(ids[archived])
+            test.is_nil(ids[tool_row])
+            test.eq(#rows, 7)
+            test.eq(#pending, 1)
+            test.eq(pending[1].message_id, archived_pending)
+
+            -- The steering query reaches its rows through a session index on this database.
+            local db = assert(sql.get(consts.get_db_resource()))
+            local statement = "SELECT message_id, metadata FROM messages WHERE session_id = '" .. session_id
+                .. "' AND metadata LIKE '%\"input\"%'"
+            local plan
+            if db:type() == sql.type.POSTGRES then
+                local tx = assert(db:begin())
+                assert(tx:execute("SET LOCAL enable_seqscan = off"))
+                plan = assert(tx:query("EXPLAIN " .. statement))
+                tx:rollback()
+            else
+                plan = assert(db:query("EXPLAIN QUERY PLAN " .. statement))
+            end
+            db:release()
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+            test.contains(json.encode(plan), "idx_messages_session_date")
         end)
 
         it("preserves malformed steering rows and fails the scan visibly", function()
