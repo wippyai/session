@@ -11,6 +11,9 @@ local output = require("output")
 local uuid = require("uuid")
 local json = require("json")
 local google_mapper = require("google_mapper")
+local checkpoint = require("checkpoint")
+local llm = require("llm")
+local reader = require("reader")
 
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
@@ -850,6 +853,79 @@ local function define_tests()
             test.eq(#stored_of_type(captured, consts.MSG_TYPE.FUNCTION), 2)
         end)
     end)
+    describe("tool errors as tables", function()
+        it("records a raised table as text", function()
+            local ctx = mock_ctx(fake_agent(nil))
+            local updates, events = {}, {}
+            ctx.writer.update_message_meta = function(_self, _id, metadata)
+                updates[#updates + 1] = metadata
+                return true
+            end
+            ctx.upstream.send_message_update = function(_self, _id, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then events[#events + 1] = payload end
+            end
+            for _, raised in ipairs({
+                { error = { message = "Tool failed." }, expected = "Tool failed." },
+                { error = { code = "E_RAISED" }, expected = '{"code":"E_RAISED"}' },
+            }) do
+                local result = message_handlers.process_tools(ctx, {
+                    tool_calls = {{ id = "call-1", name = "failing", arguments = "{}", registry_id = "app:failing" }},
+                    call_message_ids = { ["call-1"] = "row-1" },
+                    call_message_types = { ["call-1"] = consts.MSG_TYPE.FUNCTION },
+                    validated_tools = { ["call-1"] = { valid = true, name = "failing", args = {}, registry_id = "app:failing" } },
+                    caller = { set_strategy = function() end, execute = function(_self, _context, validated)
+                        return { ["call-1"] = { error = raised.error, tool_call = validated["call-1"] } }
+                    end },
+                    agent = { id = "agent:documents", model = "model:test" },
+                    message_id = "msg-user", request_id = "req-1",
+                })
+                test.not_nil(result)
+                test.eq(updates[#updates].result, raised.expected, "the model reads the error, not a table address")
+                test.eq(events[#events].error, raised.expected)
+            end
+        end)
+    end)
+    describe("checkpoint failure on a prompt that fits", function()
+        local original_checkpoint = session_handlers.create_checkpoint
+        after_each(function() session_handlers.create_checkpoint = original_checkpoint end)
+
+        local function step_with(info: any): (any, any, any, any)
+            local outcome = {}
+            local agent = fake_agent(nil)
+            agent.step = function(_self, builder, options)
+                outcome.replacement, outcome.compact_err = options.checkpoint.compact(info)
+                outcome.builder = builder
+                return { result = "Answer." }
+            end
+            session_handlers.create_checkpoint = function() return nil, "summarizer unavailable" end
+            local ctx, captured = mock_ctx(agent)
+            local result, err = user_step(ctx)
+            return outcome, result, err, captured
+        end
+
+        it("sends the current prompt when only the soft threshold was crossed", function()
+            local outcome, result, err, captured = step_with({ estimated_prompt_tokens = 150000,
+                requested_output_tokens = 4096, context_window = 200000 })
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.is_nil(outcome.compact_err)
+            test.eq(outcome.replacement, outcome.builder, "the prompt that already fits is sent")
+            test.eq(#stored_of_type(captured, consts.MSG_TYPE.ASSISTANT), 1)
+        end)
+
+        it("sends the current prompt when the model declares no window", function()
+            local outcome = step_with({ estimated_prompt_tokens = 150000, requested_output_tokens = 4096 })
+            test.is_nil(outcome.compact_err)
+            test.eq(outcome.replacement, outcome.builder)
+        end)
+
+        it("fails when the prompt does not fit the window", function()
+            local outcome = step_with({ estimated_prompt_tokens = 199000,
+                requested_output_tokens = 4096, context_window = 200000 })
+            test.is_nil(outcome.replacement)
+            test.eq(outcome.compact_err, "summarizer unavailable")
+        end)
+    end)
     describe("behavior control settlement", function()
         it("finishes a queued cancellation without leaving a pending proposal", function()
             local agent = fake_agent()
@@ -1653,7 +1729,6 @@ local function define_tests()
                 end
                 return rows, nil
             end
-            ctx.reader.list_all_messages = read_rows
             ctx.reader.messages = function()
                 return { from_checkpoint = function(self) return self end, all = read_rows }
             end
@@ -1794,7 +1869,8 @@ local function define_tests()
                     data = "earlier instruction", metadata = { input = {state = "pending"} } },
             }
             local applied = nil
-            ctx.reader.list_all_messages = function() return rows, nil end
+            ctx.reader.list_pending_inputs = function() return { rows[2], rows[3] }, nil end
+            ctx.reader.newest_non_input_id = function() return "anchor", nil end
             ctx.writer.apply_inputs = function(_self, updates)
                 applied = updates
                 return true
@@ -2814,14 +2890,95 @@ local function define_tests()
 
     describe("outgoing context checkpoint", function()
         local original_checkpoint, original_context_type
+        local original_open, original_generate, original_resolve, original_funcs
         before_each(function()
             original_checkpoint = session_handlers.create_checkpoint
             original_context_type = output.ERROR_TYPE.CONTEXT_WINDOW
+            original_open, original_generate, original_resolve = reader.open, llm.generate, llm.resolve_model
+            original_funcs = session_handlers._funcs
         end)
         after_each(function()
             session_handlers.create_checkpoint = original_checkpoint
             output.ERROR_TYPE.CONTEXT_WINDOW = original_context_type
+            reader.open, llm.generate, llm.resolve_model = original_open, original_generate, original_resolve
+            session_handlers._funcs = original_funcs
         end)
+
+        for _, fits in ipairs({ true, false }) do
+            it("keeps the anchor after oversized summary input and " .. (fits and "sends a fitting prompt" or "fails an oversized prompt"), function()
+                local agent = fake_agent(nil)
+                local ctx, captured = mock_ctx(agent)
+                local anchor, summary = "old-anchor", "Previous summary."
+                local commits, generations, dispatches = 0, 0, 0
+                local rows = {{ message_id = "settled-tail", type = consts.MSG_TYPE.USER,
+                    data = "Remember the blue door.\n" .. string.rep("x", 30000), metadata = {} }}
+                ctx.reader.messages = function() return {
+                    from_checkpoint = function(self) return self end,
+                    all = function() return rows, nil end,
+                } end
+                ctx.reader.contexts = function() return {
+                    type = function(self) return self end,
+                    all = function() return {{ text = summary }}, nil end,
+                } end
+                ctx.reader.get_context = function(_, key)
+                    if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then return anchor end
+                end
+                ctx.writer.commit_checkpoint = function(_, op, text)
+                    commits = commits + 1
+                    anchor, summary = op.checkpoint_id, text
+                    return true
+                end
+                reader.open = function() return ctx.reader end
+                llm.resolve_model = function() return { max_tokens = 10000 }, nil end
+                llm.generate = function()
+                    generations = generations + 1
+                    return { result = "Incomplete summary.", finish_reason = "stop" }, nil
+                end
+                session_handlers._funcs = { new = function() return {
+                    with_context = function(self) return self end,
+                    call = function(_, _, args) return checkpoint.handle(args) end,
+                } end }
+                local builder = { get_messages = function()
+                    return {{ role = "user", content = rows[1].data }}
+                end }
+                local builds = 0
+                ctx.prepare_attention_prompt = function()
+                    builds = builds + 1
+                    return builder
+                end
+                local replacement, compact_err
+                agent.step = function(_, _, options)
+                    replacement, compact_err = options.checkpoint.compact({ estimated_prompt_tokens = 150000,
+                        requested_output_tokens = 4096, context_window = fits and 200000 or 100000 })
+                    if compact_err then return nil, compact_err end
+                    dispatches = dispatches + 1
+                    return { result = "done" }
+                end
+
+                local result, err = user_step(ctx)
+
+                test.is_nil(err)
+                test.eq(anchor, "old-anchor", "oversized summary input must preserve the old anchor")
+                test.eq(summary, "Previous summary.")
+                test.eq(commits, 0)
+                test.eq(generations, 0)
+                test.eq(builds, 1)
+                if fits then
+                    test.is_nil(compact_err)
+                    test.eq(replacement, builder, "the complete prompt proceeds unchanged")
+                    test.is_true(result.completed)
+                    test.is_nil(result.failed)
+                    test.eq(dispatches, 1)
+                    test.eq(#captured.message_errors, 0)
+                else
+                    test.is_nil(replacement)
+                    test.contains(tostring(compact_err), "conversation exceeds its input budget")
+                    test.contains(result.failed, "conversation exceeds its input budget")
+                    test.eq(dispatches, 0)
+                    test.eq(#captured.message_errors, 1, "the failed turn reports an error to the client")
+                end
+            end)
+        end
 
         it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
             local agent = fake_agent(nil)
@@ -2940,7 +3097,8 @@ local function define_tests()
             local ctx = mock_ctx(agent)
             session_handlers.create_checkpoint = function() return nil, "checkpoint failed" end
             agent.step = function(_self, _builder, options)
-                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                local replacement, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000,
+                    requested_output_tokens = 4096, context_window = 100000 })
                 test.is_nil(replacement)
                 test.eq(err, "checkpoint failed")
                 return nil, err

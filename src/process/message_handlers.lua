@@ -672,11 +672,6 @@ local function take_over_handoff(ctx: any): boolean
     return true
 end
 
-local function all_messages(ctx)
-    if type(ctx.reader.list_all_messages) == "function" then return ctx.reader:list_all_messages() end
-    return ctx.reader:messages():all()
-end
-
 -- Lifecycle deactivation is deliberately deferred until the successor takes a
 -- real turn. Keep the completed outgoing turn bounded independently of the
 -- moving checkpoint cursor, so a lifecycle consumer neither loses its source
@@ -762,21 +757,11 @@ deactivation_refs = function(state)
 end
 
 local function prepare_pending_inputs(ctx, new_user_id)
-    local messages, read_err = all_messages(ctx)
-    if not messages then return nil, read_err or "Failed to read pending inputs" end
-    local pending, anchor_id = {}, nil
-    for _, message in ipairs(messages) do
-        local metadata = type(message.metadata) == "table" and message.metadata or nil
-        local input = metadata and metadata.input
-        if input ~= nil then
-            if not input_metadata.validate(message) then
-                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
-            end
-            if input.state == "pending" then pending[#pending + 1] = message end
-        elseif message.message_id ~= new_user_id then
-            anchor_id = message.message_id
-        end
-    end
+    local pending, read_err = ctx.reader:list_pending_inputs()
+    if not pending then return nil, read_err or "Failed to read pending inputs" end
+    if #pending == 0 then return {} end
+    local anchor_id, anchor_err = ctx.reader:newest_non_input_id(new_user_id)
+    if anchor_err then return nil, anchor_err end
     message_order.sort(pending)
     local updates = {}
     for _, message in ipairs(pending) do
@@ -1011,6 +996,10 @@ end
 local function error_text(err: any): string
     if type(err) == "table" and type(err.message) == "string" then
         return err.message
+    end
+    if type(err) == "table" then
+        local encoded = json.encode(err)
+        if encoded then return encoded end
     end
     return tostring(err)
 end
@@ -1539,7 +1528,9 @@ function message_handlers.agent_step(ctx, op)
                         or message.type == consts.MSG_TYPE.DELEGATION) and metadata.status == consts.FUNC_STATUS.PENDING then
                         return nil, "Cannot checkpoint an unsettled tool round"
                     end
-                    if type(input) ~= "table" or input.state == "applied" then tail = message end
+                    -- Steering never anchors the cut: the exclusive boundary would
+                    -- leave it to the summary, out of the request that applies it.
+                    if type(input) ~= "table" then tail = message end
                 end
                 local anchor_id = tail and tail.message_id
                     or ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or op.message_id
@@ -1555,7 +1546,19 @@ function message_handlers.agent_step(ctx, op)
                     agent = { id = agent.id, model = agent.model },
                     agent_options = agent.agent_options,
                 })
-                if not checkpoint_result then return nil, checkpoint_err end
+                if not checkpoint_result then
+                    -- The threshold is a soft limit: a prompt that still fits is sent as
+                    -- it is, and the next step tries the checkpoint again.
+                    local reserved = tonumber(info.requested_output_tokens) or 0
+                    local window = tonumber(info.context_window)
+                    if window and window > 0 and (tonumber(info.estimated_prompt_tokens) or 0) + reserved > window then
+                        return nil, checkpoint_err
+                    end
+                    logger:warn("checkpoint failed; sending the current prompt", {
+                        session_id = ctx.session_id, error = error_text(checkpoint_err),
+                    })
+                    return builder
+                end
                 checkpoint_next_ops = checkpoint_result.next_ops or {}
                 local replacement, build_err
                 if type(ctx.prepare_attention_prompt) == "function" then
@@ -2268,7 +2271,7 @@ function message_handlers.process_tools(ctx, op)
 
         if result_data.error then
             local _, update_err = ctx.writer:update_message_meta(message_id, {
-                result = tostring(result_data.error),
+                result = error_text(result_data.error),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
                 call_id = call_id,
@@ -2281,7 +2284,7 @@ function message_handlers.process_tools(ctx, op)
                     message_id = message_id,
                     call_id = call_id,
                     function_name = result_data.tool_call.name,
-                    error = tostring(result_data.error)
+                    error = error_text(result_data.error)
                 })
             end
         else

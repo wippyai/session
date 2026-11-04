@@ -1,6 +1,10 @@
 local store = require("store")
 local time = require("time")
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+
 local function generate(_args)
     local storage = assert(store.get("app.lifecycle:state"))
     local count = (storage:get("count") or 0) + 1
@@ -11,7 +15,7 @@ local function generate(_args)
         local release = process.listen("lifecycle:release")
         local control = process.listen("lifecycle:control")
         assert(process.send(scenario.parent, "lifecycle:model_ready", { pid = process.pid() }))
-        local deadline = time.timer("10s")
+        local deadline = time.timer(EVENT_DEADLINE)
         local selected
         repeat
             selected = channel.select({ release:case_receive(), control:case_receive(), deadline:channel():case_receive() })

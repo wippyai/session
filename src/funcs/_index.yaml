@@ -56,8 +56,10 @@ entries:
       - json
     imports:
       prompt: wippy.llm:prompt
+      text_clamp: wippy.session:text_clamp
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
+      tool_result: wippy.session:tool_result
     method: handle
 
   # wippy.session.funcs:title
@@ -91,6 +93,7 @@ entries:
     modules: []
     imports:
       prompt: wippy.llm:prompt
+      text_clamp: wippy.session:text_clamp
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
     method: handle

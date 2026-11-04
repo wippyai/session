@@ -37,11 +37,21 @@ local function fixture(initial_rows: {FixtureMessage}?, while_running: string?):
         session_id = "s1", user_id = "u1", status = "idle", current_agent = agent,
         config = { agent_id = agent.id, model = agent.model }, lifecycle_state = {},
         reader = {
-            list_all_messages = function() return rows end,
+            newest_non_input_id = function(_self, excluded)
+                local anchor = nil
+                for _, row in ipairs(rows) do
+                    local input = row.metadata and row.metadata.input
+                    if input == nil and row.message_id ~= excluded then anchor = row.message_id end
+                end
+                return anchor, nil
+            end,
             list_pending_inputs = function()
                 local result = {}
                 for _, row in ipairs(rows) do
                     local input = row.metadata and row.metadata.input
+                    if input ~= nil and (type(input) ~= "table" or (input.state ~= "pending" and input.state ~= "applied")) then
+                        return nil, "Malformed steering metadata on message " .. tostring(row.message_id)
+                    end
                     if input and input.state == "pending" then result[#result + 1] = row end
                 end
                 return result

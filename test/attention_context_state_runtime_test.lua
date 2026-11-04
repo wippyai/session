@@ -6,13 +6,17 @@ local contexts = require('context_repo')
 local sessions = require('session_repo')
 local boot = require('wait_for_boot')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function define_tests()
     describe('Persisted per-session Attention context state', function()
         local workers, fixtures = {}, {}
 
         local function receive_result()
             local inbox, events = process.inbox(), process.events()
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
                 assert(selected.channel ~= deadline and selected.ok, 'attention state worker response timed out')
@@ -61,7 +65,7 @@ local function define_tests()
 
         after_each(function()
             for pid in pairs(workers) do process.send(pid, 'attention_state_stop', {}) end
-            local deadline = time.after('3s')
+            local deadline = time.after(EVENT_DEADLINE)
             while next(workers) do
                 local selected = channel.select({ process.events():case_receive(), deadline:case_receive() })
                 assert(selected.channel ~= deadline and selected.ok, 'attention state worker cleanup timed out')

@@ -501,7 +501,6 @@ local function define_tests()
             }
             ctx.prepare_attention_prompt = function() return { get_messages = function() return {} end } end
             ctx.reader = {
-                list_all_messages = function() return saved end,
                 list_pending_inputs = function() return {} end,
                 get_full_context = function() return {} end,
                 get_context = function() return nil end,

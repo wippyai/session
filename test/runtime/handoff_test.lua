@@ -14,6 +14,13 @@ local json = require("json")
 local env = require("env")
 local benchmark_report = require("benchmark_report")
 local framework_capabilities = require("framework_capabilities")
+
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+-- Stop cancellation has a real latency requirement, independent of event waits.
+local STOP_LATENCY_SECONDS = 2
+
 local active_pid = nil
 local active_exit = nil
 local observed = {}
@@ -28,7 +35,7 @@ end
 
 local function receive_until(predicate, description)
     local inbox, events = receive_channels()
-    local timer = time.timer("5s")
+    local timer = time.timer(EVENT_DEADLINE)
     local deadline = timer:channel()
     while true do
         local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
@@ -88,7 +95,7 @@ end
 
 local function wait_for_exit(pid, session_id)
     local _, events = receive_channels()
-    local timer = time.timer("5s")
+    local timer = time.timer(EVENT_DEADLINE)
     local deadline = timer:channel()
     while true do
         local selected = channel.select({ events:case_receive(), deadline:case_receive() })
@@ -121,7 +128,7 @@ local function stop_active_process()
     if not active_exit then
         local _, terminate_err = process.terminate(pid)
         local _, events = receive_channels()
-        local timer = time.timer("5s")
+        local timer = time.timer(EVENT_DEADLINE)
         local deadline = timer:channel()
         while not active_exit do
             local selected = channel.select({ events:case_receive(), deadline:case_receive() })
@@ -502,7 +509,7 @@ local function run_stream_stop()
             if topic == "session:" .. session_id and payload.status == "idle" then idle = true end
             return resolved and idle
         end, "idle session after Stop")
-        test.is_true(time.now():sub(started):seconds() < 2, "Stop must end the in-flight turn promptly")
+        test.is_true(time.now():sub(started):seconds() < STOP_LATENCY_SECONDS, "Stop must end the in-flight turn promptly")
         test.is_false((storage:get("stream_released")), "Stop must not wait for the model call")
         test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
 

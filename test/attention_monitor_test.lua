@@ -1,8 +1,12 @@
 local time = require('time')
 local test = require('test')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function receive(receive_channel)
-    local deadline = time.after('2s')
+    local deadline = time.after(EVENT_DEADLINE)
     local selected = channel.select({ receive_channel:case_receive(), deadline:case_receive() })
     assert(selected.channel ~= deadline, 'monitor fixture receive timed out')
     assert(selected.ok, 'monitor fixture channel closed')

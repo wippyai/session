@@ -5,6 +5,8 @@ local json = require("json")
 local message_repo = require("message_repo")
 local message_order = require("message_order")
 local writer = require("writer")
+local reader = require("reader")
+local prompt_builder = require("prompt_builder")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local time = require("time")
@@ -136,6 +138,88 @@ local function define_tests()
             test.eq(created.session_id, test_data.session_id)
             test.eq(created.type, "user")
             test.not_nil(created.date)
+        end)
+
+        describe("metadata encoding", function()
+            local session_id
+            before_each(function()
+                session_id = uuid.v7()
+                assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Metadata", "test"))
+            end)
+            after_each(function()
+                session_repo.delete(session_id)
+            end)
+
+            local paths = {
+                { name = "create", write = function(id, metadata)
+                    return message_repo.create(id, session_id, "user", "Pending.", metadata)
+                end },
+                { name = "admit", write = function(id, metadata)
+                    return message_repo.admit(id, session_id, "user", "Pending.", metadata, {})
+                end },
+                { name = "create_batch", encodes_strings = true, write = function(id, metadata)
+                    return message_repo.create_batch(session_id, {
+                        { message_id = id, type = "user", data = "Pending.", metadata = metadata },
+                    })
+                end },
+                { name = "update_metadata", write = function(id, metadata)
+                    assert(message_repo.create(id, session_id, "user", "Pending.", {}))
+                    return message_repo.update_metadata(id, metadata, session_id)
+                end },
+                { name = "stop_with_input_rollback", encodes_strings = true, boundary = true,
+                    write = function(id, metadata)
+                        return message_repo.stop_with_input_rollback(session_id, {}, {}, {
+                            message_id = id, data = "Stopped.", metadata = metadata,
+                        })
+                    end },
+            }
+
+            local function stored_metadata(id)
+                local db = assert(sql.get(consts.get_db_resource()))
+                local rows, err = db:query("SELECT metadata FROM messages WHERE message_id = $1", { id })
+                db:release()
+                test.is_nil(err)
+                test.eq(#rows, 1)
+                return rows[1].metadata
+            end
+
+            for _, path in ipairs(paths) do
+                it("normalizes JSON strings in " .. path.name .. " and preserves ordinary metadata bytes", function()
+                    local function check_bytes(metadata, expected)
+                        local id = uuid.v7()
+                        assert(path.write(id, metadata))
+                        local stored = stored_metadata(id)
+                        assert(message_repo.delete(id))
+                        test.eq(stored, expected, "stored metadata bytes")
+                    end
+
+                    local ordinary = { model = "test-model", tokens = { prompt = 10, completion = 5 } }
+                    local ordinary_json = assert(json.encode(ordinary))
+                    check_bytes(ordinary, ordinary_json)
+                    if not path.encodes_strings then check_bytes(ordinary_json, ordinary_json) end
+                    local invalid = '{"broken":'
+                    check_bytes(invalid, path.encodes_strings and assert(json.encode(invalid)) or invalid)
+
+                    local id = uuid.v7()
+                    local raw = [=[{"\u0069nput":{"state":"pending"}}]=]
+                    if path.boundary then raw = [=[{"\u0069nterruption":{"reason":"stop"}}]=] end
+                    assert(path.write(id, raw))
+                    if not path.boundary then
+                        local pending = assert(message_repo.list_pending_inputs(session_id))
+                        test.eq(#pending, 1, "escaped input key reaches list_pending_inputs")
+                        test.eq(pending[1].message_id, id)
+                        test.eq(pending[1].data, "Pending.")
+                        test.eq(pending[1].metadata.input.state, "pending")
+                    end
+                    test.eq(stored_metadata(id), assert(json.encode(assert(json.decode(raw)))), "canonical JSON bytes")
+                    assert(message_repo.delete(id))
+
+                    check_bytes(ordinary_json, ordinary_json)
+                    check_bytes(" false ", "false")
+                    check_bytes(" null ", "null")
+                    check_bytes([=["\u0061"]=], '"a"')
+                end)
+            end
         end)
 
         it("commits an assistant and all pending calls together and resolves them on recovery", function()
@@ -315,6 +399,37 @@ local function define_tests()
                 test.eq(message_repo.get(id).metadata.status, consts.FUNC_STATUS.SUCCESS)
             end
             for _, row in ipairs(rows) do message_repo.delete(row.message_id) end
+        end)
+
+        it("reads a whole session before its first checkpoint and pages only API reads", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Long session", "test"))
+            local ok, failure = pcall(function()
+                local rows = {{ message_id = uuid.v7(), type = consts.MSG_TYPE.USER, data = "THE ORIGINAL TASK.", metadata = {} }}
+                for index = 2, 507 do
+                    rows[index] = { message_id = uuid.v7(), type = consts.MSG_TYPE.ASSISTANT,
+                        data = "Step " .. index, metadata = {} }
+                end
+                assert(message_repo.create_batch(session_id, rows))
+
+                local session_reader = assert(reader.open(session_id))
+                local all = assert(session_reader:messages():all())
+                test.eq(#all, 507, "all() means all")
+                test.eq(all[1].data, "THE ORIGINAL TASK.")
+                test.eq(all[507].data, "Step 507")
+
+                local from_checkpoint = assert(session_reader:messages():from_checkpoint():all())
+                test.eq(#from_checkpoint, 507)
+                local built = assert(prompt_builder.from_session(session_reader, { include_files = false, cache_markers = false }))
+                test.eq(built:get_messages()[1].content[1].text, "THE ORIGINAL TASK.", "the prompt keeps the task")
+
+                local page = assert(message_repo.list_by_session(session_id))
+                test.eq(#page.messages, 500, "paged reads keep their default")
+                test.is_true(page.has_more)
+                test.eq(#assert(session_reader:messages():last(10):all()), 10)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
         end)
 
         it("commits step notes with the response in order, or none of them", function()

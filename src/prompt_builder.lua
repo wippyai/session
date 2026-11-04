@@ -5,7 +5,9 @@ local fs = require("fs")
 local hash = require("hash")
 local time = require("time")
 local input_metadata = require("input_metadata")
+local text_clamp = require("text_clamp")
 local message_order = require("message_order")
+local tool_result = require("tool_result")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -552,34 +554,10 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                     elseif metadata.status == consts.FUNC_STATUS.SUCCESS or
                         metadata.status == consts.FUNC_STATUS.ERROR or
                         metadata.status == consts.FUNC_STATUS.CANCELLED then
-                        -- A RESULT THAT HAS SINCE STOPPED BEING TRUE.
-                        --
-                        -- The conversation is rebuilt from these rows on every turn, so a tool
-                        -- result keeps being re-sent long after the thing it described has moved
-                        -- on. Usually that is right. It is the opposite when the result carries an
-                        -- IMAGE: the image is re-sent as a vision part every turn, and the model
-                        -- sees a picture of something that has since changed, with nothing
-                        -- attached to say so. It reads as perception rather than as a record with
-                        -- a date on it, and a model will answer from it without calling anything.
-                        --
-                        -- Only the tool that produced a result knows when it expires, and it
-                        -- cannot reach a prompt assembled here. So the producer marks its own row
-                        -- and this honours the mark.
-                        --
-                        -- The row is REPLACED, never dropped: providers reject a function call
-                        -- with no matching result, so the pair has to survive. Replacing the
-                        -- content is also what removes the image, since the image only exists
-                        -- because it is encoded in this content.
-                        local stale = metadata.stale
-                        if stale ~= nil and stale ~= false then
-                            local why = type(stale) == "string" and stale or ""
-                            builder:add_function_result(
-                                func_name,
-                                "STALE INFO: this result was withdrawn by the tool that produced " ..
-                                "it and no longer describes the current state." ..
-                                (why ~= "" and (" " .. why) or "") ..
-                                " Do not answer from it. Call the tool again if you need this.",
-                                llm_call_id)
+                        -- Providers require a result for every call, including withdrawn results.
+                        local notice = tool_result.withdrawal_notice(metadata.stale)
+                        if notice then
+                            builder:add_function_result(func_name, notice, llm_call_id)
                         else
                             local result_content = metadata.result
                             if type(result_content) == "table" then
@@ -669,19 +647,12 @@ prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpo
 local CHECKPOINT_REQUEST_MAX_BYTES = 6000
 local CHECKPOINT_REQUEST_OMISSION = "\n\n[Middle of the original request omitted; see the checkpoint summary for the full task.]\n\n"
 
-local function continuation_byte(byte)
-    return byte ~= nil and byte >= 128 and byte < 192
-end
-
 local function checkpoint_request_excerpt(text)
     if #text <= CHECKPOINT_REQUEST_MAX_BYTES then return text end
     -- Keep the task at the start and restrictions often placed at the end.
     -- The budget includes the omission marker, and neither cut splits UTF-8.
     local edge_bytes = math.floor((CHECKPOINT_REQUEST_MAX_BYTES - #CHECKPOINT_REQUEST_OMISSION) / 2)
-    local head_end, tail_start = edge_bytes, #text - edge_bytes + 1
-    while continuation_byte(text:byte(head_end + 1)) do head_end = head_end - 1 end
-    while continuation_byte(text:byte(tail_start)) do tail_start = tail_start + 1 end
-    return text:sub(1, head_end) .. CHECKPOINT_REQUEST_OMISSION .. text:sub(tail_start)
+    return text_clamp.head(text, edge_bytes) .. CHECKPOINT_REQUEST_OMISSION .. text_clamp.tail(text, edge_bytes)
 end
 
 local function checkpoint_agent_message(session: any, messages: any): any

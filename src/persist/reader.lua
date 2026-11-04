@@ -205,8 +205,8 @@ function session_reader:get_turn_note(source_id)
     return rows[1], nil
 end
 
-function session_reader:list_all_messages()
-    return session._message_repo.list_all_by_session(self.session_id)
+function session_reader:newest_non_input_id(excluded_id)
+    return session._message_repo.newest_non_input_id(self.session_id, excluded_id)
 end
 
 function session_reader:list_behavior_rounds()
@@ -318,12 +318,14 @@ function message_query:all()
     elseif self._type_filter then
         messages, err = session._message_repo.list_by_type(self._session_id, self._type_filter, self._limit, self
         ._offset)
-    else
+    elseif self._limit then
         local result
         result, err = session._message_repo.list_by_session(self._session_id, self._limit)
         if result then
             messages = result.messages
         end
+    else
+        messages, err = session._message_repo.list_all_by_session(self._session_id)
     end
 
     if err then
@@ -333,35 +335,27 @@ function message_query:all()
     -- Prompt queries retain pending input outside the usual history window.
     -- Explicitly paginated/type-filtered queries keep their normal semantics.
     -- prompt_builder hides pending input until the safe boundary.
-    if not self._type_filter and not self._limit and type(session._message_repo.list_all_by_session) == "function" then
-        local pending, pending_err = session._message_repo.list_all_by_session(self._session_id)
-        if pending_err then
-            return nil, "Failed to fetch pending inputs: " .. pending_err
-        end
+    if self._after_message_id and not self._type_filter and not self._limit then
         messages = messages or {}
-        local seen, all_ids = {}, {}
-        local added = false
+        local seen = {}
         for _, message in ipairs(messages) do
             seen[message.message_id] = true
         end
-        for _, message in ipairs(pending or {}) do
-            all_ids[message.message_id] = true
+        local after_id = self._after_message_id
+        local pending, pending_err = session._message_repo.list_steering_inputs(self._session_id, function(message, existing)
+            if seen[message.message_id] then return false end
+            local input = message.metadata.input
+            if type(input) ~= "table" then return false end
+            local anchor = input.after_message_id
+            return input.state == "pending"
+                or (input.state == "applied" and (not anchor or not existing[anchor] or seen[anchor] or anchor == after_id))
+        end)
+        if not pending then
+            return nil, "Failed to fetch pending inputs: " .. tostring(pending_err)
         end
-        for _, message in ipairs(pending or {}) do
-            local metadata = message.metadata or {}
-            local input = metadata.input
-            local relevant = false
-            if type(input) == "table" then
-                local anchor = input.after_message_id
-                relevant = input.state == "pending"
-                    or (input.state == "applied" and (not anchor or not all_ids[anchor]
-                        or seen[anchor] or (self._after_message_id and anchor == self._after_message_id)))
-            end
-            if relevant and not seen[message.message_id] then
-                table.insert(messages, message)
-                seen[message.message_id] = true
-                added = true
-            end
+        local added = #pending > 0
+        for _, message in ipairs(pending) do
+            table.insert(messages, message)
         end
         -- Repository results are already chronological. Only merged steering
         -- requires another sort; do not re-parse an unchanged history window.

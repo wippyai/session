@@ -1,6 +1,10 @@
 local store = require("store")
 local time = require("time")
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+
 local function state()
     local storage, err = store.get("app.runtime:state")
     if err then error(tostring(err)) end
@@ -19,10 +23,11 @@ local function generate(args)
         end
         local release = process.listen("fixture:stream_release")
         process.send(scenario.parent, "fixture:stream_ready", { pid = process.pid() })
-        local timer = time.timer("10s")
-        channel.select({ release:case_receive(), timer:channel():case_receive() })
+        local timer = time.timer(EVENT_DEADLINE)
+        local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
         timer:stop()
         process.unlisten(release)
+        if selected.channel ~= release then error("stream release deadline exceeded") end
         storage:set("stream_released", true)
         return {
             success = true,
@@ -57,7 +62,7 @@ local function generate(args)
         if scenario.hold_checkpoint and #requests == 3 then
             local release = process.listen("fixture:checkpoint_release")
             assert(process.send(scenario.parent, "fixture:checkpoint_ready", { pid = process.pid() }))
-            local timer = time.timer("5s")
+            local timer = time.timer(EVENT_DEADLINE)
             local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
             timer:stop()
             process.unlisten(release)
@@ -105,7 +110,7 @@ local function handoff()
     if scenario.stop or scenario.hold_handoff then
         local release = process.listen("fixture:release")
         process.send(scenario.parent, "fixture:handoff_ready", { pid = process.pid() })
-        local timer = time.timer("5s")
+        local timer = time.timer(EVENT_DEADLINE)
         local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
         timer:stop()
         process.unlisten(release)
@@ -125,7 +130,7 @@ local function held_prompt()
     if scenario and scenario.hold_prompt then
         local release = process.listen("fixture:prompt_release")
         process.send(scenario.parent, "fixture:prompt_ready", { pid = process.pid() })
-        local timer = time.timer("5s")
+        local timer = time.timer(EVENT_DEADLINE)
         local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
         timer:stop()
         process.unlisten(release)

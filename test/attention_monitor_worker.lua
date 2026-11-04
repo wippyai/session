@@ -1,9 +1,13 @@
 local time = require('time')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function run(args)
     local owner_pid = args.reply_pid
     local inbox = process.inbox()
-    local deadline = time.after('10s')
+    local deadline = time.after(EVENT_DEADLINE)
     local sent, send_err = process.send(owner_pid, 'attention_monitor_ready', {})
     if not sent then
         return nil, send_err

@@ -107,6 +107,8 @@ entries:
       message_repo: wippy.session.persist:message_repo
       message_order: wippy.session.persist:message_order
       writer: wippy.session.persist:writer
+      reader: wippy.session.persist:reader
+      prompt_builder: wippy.session:prompt_builder
       session_repo: wippy.session.persist:session_repo
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
@@ -164,10 +166,15 @@ entries:
       type: test
       suite: session
     source: file://steering_persistence_test.lua
-    modules: [uuid, security, contract, sql]
+    modules: [uuid, security, contract, sql, json]
     imports:
       consts: wippy.session:consts
       message_repo: wippy.session.persist:message_repo
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      message_handlers: wippy.session.process:message_handlers
+      session_handlers: wippy.session.process:session_handlers
+      message_order: wippy.session.persist:message_order
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       wait_for_boot: app:wait_for_boot

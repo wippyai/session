@@ -514,6 +514,14 @@ entries:
               { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "user_id": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] } } } } }
             format: application/schema+json
 
+  - name: text_clamp
+    kind: library.lua
+    source: file://text_clamp.lua
+
+  - name: tool_result
+    kind: library.lua
+    source: file://tool_result.lua
+
   - name: input_metadata
     kind: library.lua
     source: file://input_metadata.lua
@@ -535,8 +543,10 @@ entries:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
       context_attachments: wippy.llm:context_attachments
+      text_clamp: wippy.session:text_clamp
       input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order
+      tool_result: wippy.session:tool_result
 
   # wippy.session:context_attachments
   - name: context_attachments

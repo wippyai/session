@@ -250,6 +250,31 @@ input still occupies context even when `prompt_tokens` reports only a small
 uncached suffix. The LLM module normalizes provider accounting; the session does
 not add cache counters again.
 
+The default summarizer checks its input against the context window of its resolved model,
+caps `max_tokens` at that model's output limit, and asks for a summary below it. It
+reads the arguments and result of every call row that replays to the model,
+delegation and private calls included, within `max_tool_result_chars` per value.
+These per-row clamps remain in place. With a resolved window, the conversation can
+use all available input after the output reservation, safety margin, and fixed
+prompt sections. An explicit `options.max_conversation_chars` still caps it; the
+500,000-byte default applies only when no window resolves. If fitting the conversation
+requires dropping bytes, the checkpoint fails without generating a summary.
+
+Every tool result already appears in the conversation. The duplicate KEY TOOL RESULTS
+section keeps only the newest `max_tool_results` (100 by default) and clamps them to
+`max_tool_results_chars`. With a resolved window, it uses only the space left after
+the conversation, and is omitted when none remains. Dropping these duplicate results
+does not fail a checkpoint. A summary cut off at `max_tokens` is an error. On any
+checkpoint failure, the previous summary and history anchor stay unchanged.
+
+When a checkpoint fails on a prompt that still fits the agent model's window,
+including its output reservation, the session sends the full prompt as it is and
+tries again on the next step. If the prompt does not fit, the turn fails with a
+visible error. A long session using a small-window summarizer can therefore keep
+failing to compact while its history grows, eventually exhausting the agent's
+window. It preserves that history instead of silently forgetting its beginning.
+Use a summarizer with enough input capacity or checkpoint earlier to avoid this.
+
 The conversation carries rolling cache markers so a provider can reuse the
 stable history prefix on later requests. Caching is provider-dependent, can
 expire or miss, and cached reads still have a cost. Checkpointing shortens the
