@@ -836,14 +836,7 @@ local function anchor_date(db, session_id, message_id)
 end
 
 -- List messages by session ID with cursor-based pagination
--- Host notes are prompt history only; conversation queries leave them out.
-local function conversation_rows(query: any): any
-    return query:where("type <> ?", consts.MSG_TYPE.HOST_NOTE)
-end
-
--- Lists the conversation; prompt history passes include_host_notes.
-function message_repo.list_by_session(session_id: string?, limit: number?, cursor: string?, direction: string?,
-    include_host_notes: boolean?)
+function message_repo.list_by_session(session_id, limit, cursor, direction)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"
     end
@@ -869,7 +862,6 @@ function message_repo.list_by_session(session_id: string?, limit: number?, curso
     local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
-    if not include_host_notes then query = conversation_rows(query) end
 
     -- Add cursor-based condition if cursor is provided
     if cursor and cursor ~= "" then
@@ -1086,9 +1078,9 @@ function message_repo.get_latest(session_id)
     end
 
     -- Build the SELECT query
-    local query = conversation_rows(sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+    local query = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
         :from("messages")
-        :where("session_id = ?", session_id))
+        :where("session_id = ?", session_id)
         :order_by(message_order.date(db:type()) .. " DESC, message_id DESC")
         :limit(1)
 
@@ -1176,9 +1168,9 @@ function message_repo.count_by_session(session_id)
         return nil, err
     end
 
-    local query = conversation_rows(sql.builder.select("COUNT(*) as count")
+    local query = sql.builder.select("COUNT(*) as count")
         :from("messages")
-        :where("session_id = ?", session_id))
+        :where("session_id = ?", session_id)
 
     -- Execute the query
     local executor = query:run_with(db)

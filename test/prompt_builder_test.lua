@@ -164,43 +164,6 @@ local function define_tests()
         end)
     end)
     describe("Prompt Builder", function()
-        describe("host notes", function()
-            it("renders host notes in place with the role they were sent with", function()
-                local function host_note(id, role, text, positional)
-                    return { message_id = id, type = consts.MSG_TYPE.HOST_NOTE, data = text,
-                        metadata = { role = role, lifecycle_phase = "before_step", preserve_position = positional } }
-                end
-                local messages = {
-                    { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "Question.", metadata = {} },
-                    host_note("note-1", "developer", "Developer note.", true),
-                    host_note("note-2", "system", "System note.", true),
-                    host_note("note-3", "user", "User note.", true),
-                    host_note("note-4", "assistant", "Assistant note.", true),
-                }
-
-                local builder, err = prompt_builder.build(messages, {}, {}, {
-                    include_contexts = false, include_files = false, cache_markers = false,
-                })
-
-                test.is_nil(err)
-                local roles, texts = {}, {}
-                for _, message in ipairs(builder:get_messages()) do
-                    roles[#roles + 1] = message.role
-                    texts[#texts + 1] = message.content[1].text
-                end
-                test.eq(table.concat(roles, ","), "user,developer,system,user,assistant")
-                test.eq(table.concat(texts, "|"), "Question.|Developer note.|System note.|User note.|Assistant note.")
-            end)
-
-            it("fails the prompt for a host note without a known role", function()
-                local builder, err = prompt_builder.build({
-                    { message_id = "note-1", type = consts.MSG_TYPE.HOST_NOTE, data = "Note.", metadata = {} },
-                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
-
-                test.is_nil(builder)
-                test.contains(tostring(err), "note-1")
-            end)
-        end)
         describe("system rows", function()
             it("renders positional system notes in place and leaves host records out", function()
                 local messages = {

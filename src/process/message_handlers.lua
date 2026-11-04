@@ -285,12 +285,14 @@ end
 -- together with the step output, so the next request replays it in place.
 type StepNote = {
     type: string,
-    role: string,
     content: string,
     metadata: table,
 }
 
-local NOTE_ROLES = { system = true, user = true, assistant = true, developer = true }
+local NOTE_TYPES = {
+    system = consts.MSG_TYPE.SYSTEM,
+    developer = consts.MSG_TYPE.DEVELOPER,
+}
 
 local function note_metadata(source: any, op: any, positional: boolean): table
     local metadata = {}
@@ -302,29 +304,30 @@ local function note_metadata(source: any, op: any, positional: boolean): table
     return metadata
 end
 
-local function lifecycle_notes(result: table?, phase: string, op: any): {StepNote}
+-- Lifecycle messages are host notes: a user or assistant role would put words
+-- in either party's mouth, so the session accepts only developer and system.
+local function lifecycle_notes(result: table?, phase: string, agent: any, op: any): ({StepNote}?, string?)
     local notes: {StepNote} = {}
     if type(result) ~= "table" or type(result.messages) ~= "table" then
-        return notes
+        return notes, nil
     end
     for _, message in ipairs(result.messages) do
         if type(message) == "table" then
             local content = message.content or message.text or message.data
             if type(content) == "string" and content ~= "" then
-                local role = message.role or message.type
-                if not NOTE_ROLES[role] then role = "developer" end
-                -- Every role keeps its position: the builder merges adjacent
-                -- unpositioned messages of one role, which the next request
-                -- would then render differently.
+                local role = message.role or message.type or "developer"
+                local note_type = NOTE_TYPES[role]
+                if not note_type then
+                    return nil, string.format("Lifecycle %s message for agent %s has role '%s'; "
+                        .. "lifecycle messages must be developer or system notes", phase, tostring(agent.id), tostring(role))
+                end
                 local metadata = note_metadata(message.metadata, op, true)
-                metadata.role = role
                 metadata.lifecycle_phase = phase
-                table.insert(notes, { type = consts.MSG_TYPE.HOST_NOTE, role = role, content = content,
-                    metadata = metadata })
+                table.insert(notes, { type = note_type, content = content, metadata = metadata })
             end
         end
     end
-    return notes
+    return notes, nil
 end
 
 -- Context notes are prompt messages the agent sent after the conversation.
@@ -334,17 +337,17 @@ local function context_notes(result: any, op: any): ({StepNote}?, string?)
         return notes, nil
     end
     for index, message in ipairs(result.context_notes) do
-        local role = type(message) == "table" and message.role or nil
+        local note_type = type(message) == "table" and NOTE_TYPES[message.role] or nil
         local content = type(message) == "table" and message.content or nil
         if type(content) == "table" and #content == 1 and type(content[1]) == "table"
             and content[1].type == "text" then
             content = content[1].text
         end
-        if (role ~= "developer" and role ~= "system") or type(content) ~= "string" then
+        if (note_type ~= consts.MSG_TYPE.DEVELOPER and note_type ~= consts.MSG_TYPE.SYSTEM)
+            or type(content) ~= "string" then
             return nil, "Context note " .. tostring(index) .. " is not a single-text developer or system message"
         end
-        local note_type = role == "system" and consts.MSG_TYPE.SYSTEM or consts.MSG_TYPE.DEVELOPER
-        table.insert(notes, { type = note_type, role = role :: string, content = content,
+        table.insert(notes, { type = note_type :: string, content = content,
             metadata = note_metadata(message.metadata, op, true) })
     end
     return notes, nil
@@ -352,12 +355,8 @@ end
 
 local function append_notes(builder: any, notes: {StepNote})
     for _, note in ipairs(notes) do
-        if note.role == "system" then
+        if note.type == consts.MSG_TYPE.SYSTEM then
             builder:add_system(note.content, note.metadata)
-        elseif note.role == "user" then
-            builder:add_user(note.content, note.metadata)
-        elseif note.role == "assistant" then
-            builder:add_assistant(note.content, note.metadata)
         else
             builder:add_developer(note.content, note.metadata)
         end
@@ -772,7 +771,7 @@ local function prepare_pending_inputs(ctx, new_user_id)
                 return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
             end
             if input.state == "pending" then pending[#pending + 1] = message end
-        elseif message.message_id ~= new_user_id and message.type ~= consts.MSG_TYPE.HOST_NOTE then
+        elseif message.message_id ~= new_user_id then
             anchor_id = message.message_id
         end
     end
@@ -1433,7 +1432,10 @@ function message_handlers.agent_step(ctx, op)
     if activate_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_err)
     end
-    local step_notes = lifecycle_notes(activate_result, lifecycle_runtime.PHASE.ACTIVATE, op)
+    local step_notes, activate_notes_err = lifecycle_notes(activate_result, lifecycle_runtime.PHASE.ACTIVATE, agent, op)
+    if not step_notes then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_notes_err)
+    end
 
     local before_result, before_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.BEFORE_STEP, agent, {
         reason = "agent_step",
@@ -1449,9 +1451,11 @@ function message_handlers.agent_step(ctx, op)
     if before_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_err)
     end
-    for _, note in ipairs(lifecycle_notes(before_result, lifecycle_runtime.PHASE.BEFORE_STEP, op)) do
-        table.insert(step_notes, note)
+    local before_notes, before_notes_err = lifecycle_notes(before_result, lifecycle_runtime.PHASE.BEFORE_STEP, agent, op)
+    if not before_notes then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_notes_err)
     end
+    for _, note in ipairs(before_notes) do table.insert(step_notes, note) end
     append_notes(builder, step_notes)
 
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
@@ -1477,7 +1481,6 @@ function message_handlers.agent_step(ctx, op)
         context = session_context,
         stop_check = step_stop_check(ctx),
         cancel = ctx.coordinator and ctx.coordinator.cancel,
-        persist_context_notes = true,
         drop_stale_thinking = true,
         -- Blocks stored under another checkpoint were produced after history
         -- that compaction has since removed, so their prefix no longer exists.

@@ -264,9 +264,8 @@ provider cache and earlier thinking blocks stay valid. This requires Agent
 0.5.10 and LLM 0.5.13 or later; publish them before the Session release and
 refresh the dependency lock from the published packages.
 
-- **Memory recall.** The session passes `persist_context_notes = true`, so an
-  agent with a memory contract recalls memory. The returned
-  `context_notes` are stored, in order, as developer rows with
+- **Memory recall.** An agent with a memory contract recalls memory on each
+  eligible step and returns the recall note in `context_notes`. The notes are stored, in order, as developer rows with
   `metadata.preserve_position` and `metadata.memory_ids`, after the step's
   lifecycle notes and before the step output. Truncated and cancelled text
   keeps its notes; a step whose output is discarded discards them too. A note
@@ -286,18 +285,15 @@ refresh the dependency lock from the published packages.
   row and the rows written after it, but their blocks followed history the
   checkpoint removed. The current tool round always keeps its blocks.
 - **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
-  positional notes after the history and stored with the step output as
-  `host_note` rows: `metadata.role` keeps the role they were sent with,
-  `metadata.lifecycle_phase` the phase, and every role carries
-  `preserve_position` so the builder never merges a note into a neighbouring
-  message. They are appended, never rebuilt, so `before_step` adds one set of
-  notes per step and an activation note stays in the history after the step
-  that activated the agent. Notes of a discarded output are discarded with it.
-  Host notes are prompt history, not conversation: the messages API, the
-  session's latest message and message count leave them out, and turn logic
-  (the checkpoint request lookup, steering anchors, titles and summaries) reads
-  only user and assistant rows, so a user-role note never counts as the user's
-  message.
+  positional notes after the history and stored with the step output, once,
+  where they were first sent: developer messages as developer rows and system
+  messages as system rows, each with `metadata.preserve_position` (so the
+  builder never merges them with a neighbour) and `metadata.lifecycle_phase`.
+  They are appended, never rebuilt, so `before_step` adds one set of notes per
+  step and an activation note stays in the history after the step that
+  activated the agent. Notes of a discarded output are discarded with it. A
+  lifecycle message in the user or assistant role fails the step: a host note
+  must not speak as either party.
 
 Two history edits change the prefix by design: a tool result marked `stale` is
 replaced with a withdrawal notice, and the attached-files note lists the

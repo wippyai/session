@@ -313,7 +313,7 @@ function message_query:all()
         ._offset)
     else
         local result
-        result, err = session._message_repo.list_by_session(self._session_id, self._limit, nil, nil, true)
+        result, err = session._message_repo.list_by_session(self._session_id, self._limit)
         if result then
             messages = result.messages
         end

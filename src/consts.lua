@@ -125,10 +125,6 @@ local consts = {
         PRIVATE_FUNCTION = "private_function",
         ARTIFACT = "artifact",
         DELEGATION = "delegation",
-        -- Prompt history the host replays (lifecycle notes), rendered with
-        -- metadata.role. It is not conversation: clients never list it and
-        -- turn logic, which reads user and assistant rows, never sees it.
-        HOST_NOTE = "host_note",
     },
 
     -- Function Call Status
