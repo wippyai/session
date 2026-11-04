@@ -542,7 +542,66 @@ local function define_tests()
             session_handlers._funcs = nil
         end)
 
-        it("uses the session threshold and function above agent checkpoint settings", function()
+        it("resolves checkpoint defaults below agent and explicit session options", function()
+            local ctx = mock_checkpoint_ctx({})
+            local op = { agent_options = { checkpoint = { max_tokens = 1000 } } }
+            local function_id, threshold, options = session_handlers.resolve_checkpoint_config(ctx, op)
+            test.is_nil(function_id)
+            test.is_nil(threshold)
+            test.eq(options.max_tokens, 1000)
+
+            ctx.config.token_checkpoint_threshold = 50000
+            ctx.config.checkpoint_function_id = "default:checkpoint"
+            function_id, threshold, options = session_handlers.resolve_checkpoint_config(ctx, op)
+            test.eq(threshold, 50000)
+            test.eq(function_id, "default:checkpoint")
+            test.eq(options.max_tokens, 1000)
+
+            op.agent_options.checkpoint.token_threshold = 12000
+            op.agent_options.checkpoint.function_id = "agent:checkpoint"
+            function_id, threshold, options = session_handlers.resolve_checkpoint_config(ctx, op)
+            test.eq(threshold, 12000)
+            test.eq(function_id, "agent:checkpoint")
+            test.eq(options.max_tokens, 1000)
+
+            ctx.config.checkpoint = { token_threshold = 100, function_id = "session:checkpoint" }
+            function_id, threshold, options = session_handlers.resolve_checkpoint_config(ctx, op)
+            test.eq(threshold, 100)
+            test.eq(function_id, "session:checkpoint")
+            test.eq(options.max_tokens, 1000)
+            test.eq(op.agent_options.checkpoint.token_threshold, 12000)
+            test.eq(op.agent_options.checkpoint.function_id, "agent:checkpoint")
+        end)
+
+        it("resolves the checkpoint function at creation through all option layers", function()
+            local ctx = mock_checkpoint_ctx({ checkpoint_function_id = "default:checkpoint" })
+            local op = { checkpoint_id = "msg-1", agent_options = { checkpoint = { max_tokens = 1000 } } }
+            local captured
+            session_handlers._funcs = { new = function()
+                return {
+                    with_context = function(self) return self end,
+                    call = function(_, id, args)
+                        captured = { id = id, options = args.options }
+                        return { summary = "checkpoint" }
+                    end,
+                }
+            end }
+            local _, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(err)
+            test.eq(captured.id, "default:checkpoint")
+            op.agent_options.checkpoint.function_id = "agent:checkpoint"
+            _, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(err)
+            test.eq(captured.id, "agent:checkpoint")
+            test.eq(captured.options.max_tokens, 1000)
+            ctx.config.checkpoint = { function_id = "session:checkpoint" }
+            _, err = session_handlers.create_checkpoint(ctx, op)
+            test.is_nil(err)
+            test.eq(captured.id, "session:checkpoint")
+            test.eq(captured.options.max_tokens, 1000)
+        end)
+
+        it("uses the agent threshold and function above session checkpoint defaults", function()
             local ctx = mock_checkpoint_ctx({
                 token_checkpoint_threshold = 50000,
                 checkpoint_function_id = "host:checkpoint",
@@ -554,14 +613,14 @@ local function define_tests()
                 message_id = "msg-1", tokens = { context_tokens = 20000 },
                 agent_options = agent_options,
             })
-            test.is_true(result.skipped)
+            test.is_true(result.checkpoint_triggered)
             result = session_handlers.check_background_triggers(ctx, {
                 message_id = "msg-1", tokens = { context_tokens = 50001 },
                 agent_options = agent_options,
             })
             test.is_true(result.checkpoint_triggered)
-            test.eq(result.next_ops[1].checkpoint_function_id, "host:checkpoint")
-            test.eq(result.next_ops[1].checkpoint_options.token_threshold, 50000)
+            test.eq(result.next_ops[1].checkpoint_function_id, "agent:checkpoint")
+            test.eq(result.next_ops[1].checkpoint_options.token_threshold, 12000)
             test.eq(result.next_ops[1].checkpoint_options.max_tokens, 1000)
             test.eq(agent_options.checkpoint.token_threshold, 12000)
         end)
@@ -578,14 +637,18 @@ local function define_tests()
             test.eq(result.next_ops[1].checkpoint_function_id, "agent:checkpoint")
         end)
 
-        it("does not fall back to the agent threshold when the session disables checkpoints", function()
+        it("uses the agent threshold above a zero default but honors explicit session disabling", function()
             local ctx = mock_checkpoint_ctx({
                 token_checkpoint_threshold = 0, checkpoint_function_id = "host:checkpoint",
             })
-            local result = session_handlers.check_background_triggers(ctx, {
+            local op = {
                 message_id = "msg-1", tokens = { context_tokens = 50001 },
                 agent_options = { checkpoint = { token_threshold = 12000 } },
-            })
+            }
+            local result = session_handlers.check_background_triggers(ctx, op)
+            test.is_true(result.checkpoint_triggered)
+            ctx.config.checkpoint = { token_threshold = 0 }
+            result = session_handlers.check_background_triggers(ctx, op)
             test.is_true(result.skipped)
         end)
 
@@ -611,6 +674,8 @@ local function define_tests()
                 message_id = "msg-1", tokens = { context_tokens = 50001 }, agent_options = options,
             })
             options.checkpoint.max_tokens = 999999
+            options.checkpoint.token_threshold = 999999
+            options.checkpoint.function_id = "changed-agent:checkpoint"
             ctx.config.checkpoint_function_id = "changed:checkpoint"
             local captured
             session_handlers._funcs = { new = function()
@@ -624,8 +689,8 @@ local function define_tests()
             end }
             local _, err = session_handlers.create_checkpoint(ctx, trigger.next_ops[1])
             test.is_nil(err)
-            test.eq(captured.id, "host:checkpoint")
-            test.eq(captured.options.token_threshold, 50000)
+            test.eq(captured.id, "agent:checkpoint")
+            test.eq(captured.options.token_threshold, 12000)
             test.eq(captured.options.max_tokens, 1000)
         end)
 

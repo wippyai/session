@@ -2980,6 +2980,42 @@ local function define_tests()
             end)
         end
 
+        it("uses agent checkpoint options before dispatch with explicit session options last", function()
+            local agent = fake_agent(nil)
+            agent.agent_options = { checkpoint = {
+                token_threshold = 12000, function_id = "agent:checkpoint", max_tokens = 1000,
+            } }
+            local ctx = mock_ctx(agent)
+            local threshold, checkpoint_op
+            ctx.prepare_attention_prompt = function()
+                return { get_messages = function() return {} end }
+            end
+            session_handlers.create_checkpoint = function(_, op)
+                checkpoint_op = op
+                return { completed = true }
+            end
+            agent.step = function(_, _, options)
+                threshold = options.checkpoint.token_threshold
+                local _, err = options.checkpoint.compact({ estimated_prompt_tokens = 150000 })
+                test.is_nil(err)
+                return { result = "done" }
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(threshold, 12000)
+            test.eq(checkpoint_op.checkpoint_function_id, "agent:checkpoint")
+            test.eq(checkpoint_op.checkpoint_options.max_tokens, 1000)
+
+            ctx.config.checkpoint = { token_threshold = 100, function_id = "session:checkpoint" }
+            result, err = user_step(ctx)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(threshold, 100)
+            test.eq(checkpoint_op.checkpoint_function_id, "session:checkpoint")
+            test.eq(checkpoint_op.checkpoint_options.max_tokens, 1000)
+        end)
+
         it("runs the existing checkpoint and rebuilds the prompt before provider dispatch", function()
             local agent = fake_agent(nil)
             local ctx = mock_ctx(agent)
