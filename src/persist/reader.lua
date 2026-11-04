@@ -336,31 +336,26 @@ function message_query:all()
     -- Explicitly paginated/type-filtered queries keep their normal semantics.
     -- prompt_builder hides pending input until the safe boundary.
     if self._after_message_id and not self._type_filter and not self._limit then
-        local pending, existing_anchors, pending_err = session._message_repo.list_steering_inputs(self._session_id)
-        if not pending then
-            return nil, "Failed to fetch pending inputs: " .. tostring(pending_err)
-        end
         messages = messages or {}
         local seen = {}
-        local added = false
         for _, message in ipairs(messages) do
             seen[message.message_id] = true
         end
+        local after_id = self._after_message_id
+        local pending, pending_err = session._message_repo.list_steering_inputs(self._session_id, function(message, existing)
+            if seen[message.message_id] then return false end
+            local input = message.metadata.input
+            if type(input) ~= "table" then return false end
+            local anchor = input.after_message_id
+            return input.state == "pending"
+                or (input.state == "applied" and (not anchor or not existing[anchor] or seen[anchor] or anchor == after_id))
+        end)
+        if not pending then
+            return nil, "Failed to fetch pending inputs: " .. tostring(pending_err)
+        end
+        local added = #pending > 0
         for _, message in ipairs(pending) do
-            local metadata = message.metadata or {}
-            local input = metadata.input
-            local relevant = false
-            if type(input) == "table" then
-                local anchor = input.after_message_id
-                relevant = input.state == "pending"
-                    or (input.state == "applied" and (not anchor or not (existing_anchors :: any)[anchor]
-                        or seen[anchor] or (self._after_message_id and anchor == self._after_message_id)))
-            end
-            if relevant and not seen[message.message_id] then
-                table.insert(messages, message)
-                seen[message.message_id] = true
-                added = true
-            end
+            table.insert(messages, message)
         end
         -- Repository results are already chronological. Only merged steering
         -- requires another sort; do not re-parse an unchanged history window.

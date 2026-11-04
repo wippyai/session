@@ -12,6 +12,10 @@ local boot = require('wait_for_boot')
 local session_service = require('session_service')
 local relay_consts = require('relay_consts')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function define_tests(blocked_only, lifecycle_only)
     describe('Persisted interruption in the provider prompt', function()
         local session_id, context_id, plugin_pid, actor_id, label, hub_pid
@@ -38,11 +42,11 @@ local function define_tests(blocked_only, lifecycle_only)
         local function idle()
             receive(function(topic, data)
                 return topic == 'session:' .. session_id and data.status == consts.STATUS.IDLE
-            end, '3s')
+            end, EVENT_DEADLINE)
         end
         local function shutdown()
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.SHUTDOWN, {}))
-            receive(function(topic, event) return topic == 'exit' and event.from == plugin_pid end, '3s', 'plugin shutdown')
+            receive(function(topic, event) return topic == 'exit' and event.from == plugin_pid end, EVENT_DEADLINE, 'plugin shutdown')
         end
         local function start(interrupt)
             local actor = security.new_actor(actor_id, {})
@@ -54,13 +58,13 @@ local function define_tests(blocked_only, lifecycle_only)
                         cancel_before_tools = label == 'cancelled-call-settlement' },
                 }))
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.OPEN, { session_id = session_id, conn_pid = process.pid() }))
-            receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s', 'session opened')
+            receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, EVENT_DEADLINE, 'session opened')
         end
         local function send(text, request_id)
             assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.MESSAGE, {
                 session_id = session_id, conn_pid = process.pid(), data = { text = text }, request_id = request_id,
             }))
-            local request = receive(function(topic) return topic == 'provider_prompt' end, '3s', 'provider prompt')
+            local request = receive(function(topic) return topic == 'provider_prompt' end, EVENT_DEADLINE, 'provider prompt')
             local db = assert(sql.get('app:db'))
             local _, err = db:execute('INSERT INTO interruption_prompt_captures (label, request_id, payload) VALUES ($1, $2, $3)',
                 {label, request_id, assert(json.encode(request))})
@@ -106,11 +110,11 @@ local function define_tests(blocked_only, lifecycle_only)
                     session_id = session_id, conn_pid = process.pid(),
                     data = { command = consts.COMMANDS.STOP }, request_id = 'stop',
                 }))
-                receive(function(_, data) return data.request_id == 'stop' end, '3s')
+                receive(function(_, data) return data.request_id == 'stop' end, EVENT_DEADLINE)
             end
             if interrupt == 'crash' then
                 receive(function(topic, event) return topic == 'exit' and event.from == plugin_pid end,
-                    '3s', 'plugin exit after owner crash')
+                    EVENT_DEADLINE, 'plugin exit after owner crash')
                 start(nil)
             else
                 idle()
@@ -185,18 +189,18 @@ local function define_tests(blocked_only, lifecycle_only)
                 start(nil)
                 send('Perform the tool.', 'work')
                 assert(session_service.delete({ session_id = session_id, user_id = actor_id }))
-                receive(function(_, event) return event.deleted == true end, '3s')
+                receive(function(_, event) return event.deleted == true end, EVENT_DEADLINE)
                 local closed = receive(function(topic, event)
                     test.is_true(event.code ~= 'recovery_incomplete', 'deletion must not look like a failed live session')
                     return topic == consts.TOPICS.SESSION_CLOSED
-                end, '3s')
+                end, EVENT_DEADLINE)
                 test.eq(closed.reason, 'deleted')
                 test.eq(#closed.active_session_ids, 0)
                 test.is_nil((process.registry.lookup('session.' .. session_id)))
                 test.eq(select(2, sessions.get(session_id)), 'Session not found')
                 local exit = receive(function(topic, event)
                     return topic == 'exit' and event.from == plugin_pid
-                end, '3s')
+                end, EVENT_DEADLINE)
                 test.is_nil(exit.result and exit.result.error)
                 test.eq(exit.result.value.reason, 'no_active_sessions')
             end)
@@ -204,15 +208,15 @@ local function define_tests(blocked_only, lifecycle_only)
                 label = 'cancelled-call-settlement'
                 start(nil)
                 send('Perform the tool.', 'work')
-                receive(function(topic) return topic == 'tool_intent_persisted' end, '3s')
+                receive(function(topic) return topic == 'tool_intent_persisted' end, EVENT_DEADLINE)
                 assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.COMMAND, {
                     session_id = session_id, conn_pid = process.pid(),
                     data = { command = consts.COMMANDS.STOP }, request_id = 'stop',
                 }))
-                receive(function(_, data) return data.request_id == 'stop' end, '3s')
+                receive(function(_, data) return data.request_id == 'stop' end, EVENT_DEADLINE)
                 local event = receive(function(_, data)
                     return data.type == consts.UPSTREAM_TYPES.FUNCTION_ERROR and data.outcome == consts.FUNC_STATUS.CANCELLED
-                end, '3s')
+                end, EVENT_DEADLINE)
                 idle()
                 test.is_nil(event.status, 'the live event carries only outcome')
                 local row = assert(messages.get(event.message_id))
@@ -229,7 +233,7 @@ local function define_tests(blocked_only, lifecycle_only)
                 local first = send('Perform the tool.', 'work')
                 assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.SHUTDOWN, {}))
                 assert(process.send(plugin_pid, consts.PLUGIN_TOPICS.RESUME, {}))
-                receive(function(topic) return topic == 'provider_prompt' end, '3s')
+                receive(function(topic) return topic == 'provider_prompt' end, EVENT_DEADLINE)
                 idle()
                 local next_request = send('Perform only the new request.', 'followup')
                 test.eq(next_request.worker_pid, first.worker_pid)
@@ -250,18 +254,18 @@ local function define_tests(blocked_only, lifecycle_only)
                         config = { user_hub_host = 'app:processes' },
                     }))
                 assert(process.send(hub_pid, relay_consts.WS_TOPICS.JOIN, { client_pid = process.pid() }))
-                receive(function(topic) return topic == relay_consts.CLIENT_TOPICS.WELCOME end, '3s')
+                receive(function(topic) return topic == relay_consts.CLIENT_TOPICS.WELCOME end, EVENT_DEADLINE)
                 assert(process.send(hub_pid, relay_consts.WS_TOPICS.MESSAGE, (assert(json.encode({
                     type = 'session_open', session_id = session_id, request_id = 'open',
                 })))))
-                receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, '3s')
+                receive(function(topic) return topic == consts.TOPICS.SESSION_OPENED end, EVENT_DEADLINE)
                 assert(process.send(hub_pid, relay_consts.WS_TOPICS.MESSAGE, (assert(json.encode({
                     type = 'session_message', session_id = session_id, request_id = 'work', data = { text = 'Perform the tool.' },
                 })))))
-                receive(function(topic) return topic == 'provider_prompt' end, '3s')
+                receive(function(topic) return topic == 'provider_prompt' end, EVENT_DEADLINE)
                 assert(process.send(hub_pid, relay_consts.WS_TOPICS.LEAVE, { client_pid = process.pid() }))
-                receive(function(topic) return topic == 'provider_prompt' end, '3s')
-                local deadline = time.after('3s')
+                receive(function(topic) return topic == 'provider_prompt' end, EVENT_DEADLINE)
+                local deadline = time.after(EVENT_DEADLINE)
                 while true do
                     local page = assert(messages.list_by_session(session_id))
                     local tool, answer

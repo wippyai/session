@@ -593,75 +593,130 @@ function message_repo.list_turn_notes(session_id: string?, source_id: string?): 
     return notes, nil
 end
 
-local STEERING_ANCHOR_BATCH = 200
+local STEERING_BATCH = 200
 local NEWEST_ROW_PAGE = 20
 
--- The rows that carry steering metadata, chronological, and the set of their
--- anchors that still exist. Archived payloads stay in the database: the session
--- index narrows the scan and the pattern preselects candidates. The row type stays
--- out of the query because its single-column index spans every session.
-function message_repo.list_steering_inputs(session_id): ({any}?, {[string]: boolean}?, string?)
-    if not session_id or session_id == "" then
-        return nil, nil, "Session ID is required"
-    end
-    local db, err = get_db()
-    if not db then return nil, nil, err end
-    local candidates, query_err = sql.builder.select("message_id", "session_id", "date", "type", "data", "metadata")
+-- Candidate columns only, so nothing here pulls a row's data. Top-level steering is
+-- only valid on user rows, so tool rows that nest an "input" key are never selected.
+-- The date ordering keeps the planner on the session index, not the type index that
+-- spans every session.
+local function steering_candidates(db: any, session_id: string): ({any}?, string?)
+    local candidates, query_err = sql.builder.select("message_id", "session_id", "date", "type", "metadata")
         :from("messages")
         :where("session_id = ?", session_id)
+        :where("type = ?", consts.MSG_TYPE.USER)
         :where("metadata LIKE ?", '%"input"%')
         :order_by(message_order.date(db:type()) .. " ASC, message_id ASC")
         :run_with(db):query()
-    if query_err then
-        db:release()
-        return nil, nil, "Failed to list steering inputs: " .. query_err
-    end
-    local rows, anchors = {}, {}
+    if query_err then return nil, "Failed to list steering inputs: " .. query_err end
+    local rows = {}
     for _, message in ipairs(candidates or {}) do
         local metadata, decode_err = json.decode(message.metadata :: string)
-        if decode_err then
-            db:release()
-            return nil, nil, "Failed to decode message metadata: " .. decode_err
-        end
+        if decode_err then return nil, "Failed to decode message metadata: " .. decode_err end
         message.metadata = metadata
         if type(metadata) == "table" and metadata.input ~= nil then
             if not input_metadata.validate(message) then
-                db:release()
-                return nil, nil, "Malformed steering metadata on message " .. tostring(message.message_id)
+                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
             end
             rows[#rows + 1] = message
-            local anchor = metadata.input.after_message_id
-            if anchor then anchors[#anchors + 1] = anchor end
         end
     end
-    local existing = {}
-    for first = 1, #anchors, STEERING_ANCHOR_BATCH do
+    return rows, nil
+end
+
+local function in_batches(ids: {string}, visit: ({string}, string) -> string?): string?
+    for first = 1, #ids, STEERING_BATCH do
         local batch, marks = {}, {}
-        for index = first, math.min(first + STEERING_ANCHOR_BATCH - 1, #anchors) do
-            batch[#batch + 1] = anchors[index]
+        for index = first, math.min(first + STEERING_BATCH - 1, #ids) do
+            batch[#batch + 1] = ids[index]
             marks[#marks + 1] = "?"
         end
-        local found, anchor_err = sql.builder.select("message_id"):from("messages")
-            :where("session_id = ?", session_id)
-            :where("message_id IN (" .. table.concat(marks, ", ") .. ")", table.unpack(batch))
-            :run_with(db):query()
-        if anchor_err then
-            db:release()
-            return nil, nil, "Failed to read steering anchors: " .. anchor_err
-        end
-        for _, row in ipairs(found or {}) do existing[row.message_id] = true end
+        local visit_err = visit(batch, table.concat(marks, ", "))
+        if visit_err then return visit_err end
     end
+    return nil
+end
+
+local function existing_anchors(db: any, session_id: string, rows: {any}): ({[string]: boolean}?, string?)
+    local anchors = {}
+    for _, message in ipairs(rows) do
+        local anchor = message.metadata.input.after_message_id
+        if anchor then anchors[#anchors + 1] = anchor end
+    end
+    local existing = {}
+    local err = in_batches(anchors, function(batch, marks)
+        local found, query_err = sql.builder.select("message_id"):from("messages")
+            :where("session_id = ?", session_id)
+            :where("message_id IN (" .. marks .. ")", table.unpack(batch))
+            :run_with(db):query()
+        if query_err then return "Failed to read steering anchors: " .. query_err end
+        for _, row in ipairs(found or {}) do existing[row.message_id] = true end
+        return nil
+    end)
+    if err then return nil, err end
+    return existing, nil
+end
+
+-- Fetches the text of the rows a caller kept, a batch at a time.
+local function hydrate(db: any, session_id: string, rows: {any}): string?
+    local by_id, ids = {}, {}
+    for _, message in ipairs(rows) do
+        by_id[message.message_id] = message
+        ids[#ids + 1] = message.message_id
+    end
+    return in_batches(ids, function(batch, marks)
+        local found, query_err = sql.builder.select("message_id", "data"):from("messages")
+            :where("session_id = ?", session_id)
+            :where("message_id IN (" .. marks .. ")", table.unpack(batch))
+            :run_with(db):query()
+        if query_err then return "Failed to read steering inputs: " .. query_err end
+        for _, row in ipairs(found or {}) do by_id[row.message_id].data = row.data end
+        return nil
+    end)
+end
+
+-- Steering rows without their text. Candidates only; a caller decides what to load.
+function message_repo.list_steering_candidates(session_id: string?): ({any}?, string?)
+    if not session_id or session_id == "" then return nil, "Session ID is required" end
+    local db, err = get_db()
+    if not db then return nil, err end
+    local rows, rows_err = steering_candidates(db, session_id)
     db:release()
-    return rows, existing, nil
+    return rows, rows_err
+end
+
+-- The steering rows relevant(message, existing_anchors) keeps, chronological, with
+-- their text. Rows it rejects never load their data.
+function message_repo.list_steering_inputs(session_id: string?, relevant: (any, {[string]: boolean}) -> boolean): ({any}?, string?)
+    if not session_id or session_id == "" then return nil, "Session ID is required" end
+    local db, err = get_db()
+    if not db then return nil, err end
+    local rows, rows_err = steering_candidates(db, session_id)
+    if not rows then db:release(); return nil, rows_err end
+    local existing, anchors_err = existing_anchors(db, session_id, rows)
+    if not existing then db:release(); return nil, anchors_err end
+    local kept = {}
+    for _, message in ipairs(rows) do
+        if relevant(message, existing) then kept[#kept + 1] = message end
+    end
+    local hydrate_err = hydrate(db, session_id, kept)
+    db:release()
+    if hydrate_err then return nil, hydrate_err end
+    return kept, nil
 end
 
 function message_repo.list_pending_inputs(session_id)
-    local rows, _, err = message_repo.list_steering_inputs(session_id)
+    local rows, err = message_repo.list_steering_candidates(session_id)
     if not rows then return nil, err end
     local pending = {}
     for _, message in ipairs(rows) do
         if message.metadata.input.state == "pending" then pending[#pending + 1] = message end
     end
+    local db, db_err = get_db()
+    if not db then return nil, db_err end
+    local hydrate_err = hydrate(db, session_id, pending)
+    db:release()
+    if hydrate_err then return nil, hydrate_err end
     return pending
 end
 

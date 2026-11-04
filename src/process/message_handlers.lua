@@ -1529,7 +1529,9 @@ function message_handlers.agent_step(ctx, op)
                         or message.type == consts.MSG_TYPE.DELEGATION) and metadata.status == consts.FUNC_STATUS.PENDING then
                         return nil, "Cannot checkpoint an unsettled tool round"
                     end
-                    if type(input) ~= "table" or input.state == "applied" then tail = message end
+                    -- Steering never anchors the cut: the exclusive boundary would
+                    -- leave it to the summary, out of the request that applies it.
+                    if type(input) ~= "table" then tail = message end
                 end
                 local anchor_id = tail and tail.message_id
                     or ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or op.message_id

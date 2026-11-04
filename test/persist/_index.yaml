@@ -173,6 +173,7 @@ entries:
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
       message_handlers: wippy.session.process:message_handlers
+      session_handlers: wippy.session.process:session_handlers
       message_order: wippy.session.persist:message_order
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo

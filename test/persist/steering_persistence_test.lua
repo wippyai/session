@@ -10,9 +10,15 @@ local writer = require("writer")
 local json = require("json")
 local message_handlers = require("message_handlers")
 local message_order = require("message_order")
+local session_handlers = require("session_handlers")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local wait_for_boot = require("wait_for_boot")
+
+local function owner_id()
+    local actor = security.actor()
+    return actor and actor:id() or "owner"
+end
 
 local function define_tests()
     describe("durable steering inputs", function()
@@ -241,7 +247,8 @@ local function define_tests()
             -- The steering query reaches its rows through a session index on this database.
             local db = assert(sql.get(consts.get_db_resource()))
             local statement = "SELECT message_id, metadata FROM messages WHERE session_id = '" .. session_id
-                .. "' AND metadata LIKE '%\"input\"%'"
+                .. "' AND type = 'user' AND metadata LIKE '%\"input\"%' ORDER BY "
+                .. message_order.date(db:type()) .. " ASC, message_id ASC"
             local plan
             if db:type() == sql.type.POSTGRES then
                 local tx = assert(db:begin())
@@ -254,7 +261,9 @@ local function define_tests()
             db:release()
             session_repo.delete(session_id)
             context_repo.delete(context_id)
-            test.contains(json.encode(plan), "idx_messages_session_date")
+            test.contains(json.encode(plan), "idx_messages_")
+            test.is_nil((json.encode(plan):find("idx_messages_type (type=?)", 1, true)),
+                "the session index narrows the read")
         end)
 
         describe("newest non-input row", function()
@@ -328,6 +337,137 @@ local function define_tests()
                 assert(message_repo.create_batch(session_id, rows))
                 assert_matches(nil, rows[3].message_id)
                 assert_matches(rows[3].message_id, rows[2].message_id)
+            end)
+
+            -- The merge rule applied to a full read, the reference the targeted query must match.
+            local function reference_window(window_ids, after_id)
+                local all = assert(message_repo.list_all_by_session(session_id))
+                local exists, expected = {}, {}
+                for _, row in ipairs(all) do exists[row.message_id] = true end
+                for id in pairs(window_ids) do expected[id] = true end
+                for _, row in ipairs(all) do
+                    local input = type(row.metadata) == "table" and row.metadata.input or nil
+                    if type(input) == "table" then
+                        local anchor = input.after_message_id
+                        if input.state == "pending" or (input.state == "applied" and (not anchor or not exists[anchor]
+                            or window_ids[anchor] or anchor == after_id)) then
+                            expected[row.message_id] = true
+                        end
+                    end
+                end
+                return expected
+            end
+
+            it("selects steering without loading rows that only nest an input key", function()
+                local nested = {}
+                for index = 1, 30 do
+                    nested[index] = add("function", string.rep("p", 2000), { function_name = "t", status = "success",
+                        result = { input = { state = "pending" }, index = index } })
+                end
+                local archived = add("assistant", "Archived.")
+                local archived_steering = add("user", "Anchored in the archive.", {
+                    input = { state = "applied", after_message_id = archived } })
+                local user_nested = add("user", "Only nests the key.", {
+                    context_attachments = {{ attachment_id = "c1", input = "value" }} })
+                local missing = add("user", "Anchor gone.", { input = { state = "applied", after_message_id = "gone" } })
+                local bare = add("user", "No anchor.", { input = { state = "applied" } })
+                local pending = add("user", "Pending.", { input = { state = "pending" } })
+                local checkpoint = add("assistant", "Anchor.")
+                local at_checkpoint = add("user", "At the anchor.", {
+                    input = { state = "applied", after_message_id = checkpoint } })
+                local inside = add("assistant", "Inside.")
+                local at_inside = add("user", "Inside the window.", {
+                    input = { state = "applied", after_message_id = inside } })
+                assert(assert(writer.new(session_id)):set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, checkpoint))
+
+                local candidates = assert(message_repo.list_steering_candidates(session_id))
+                local candidate_ids = {}
+                for _, row in ipairs(candidates) do
+                    candidate_ids[row.message_id] = true
+                    test.is_nil(row.data, "candidates carry no payload")
+                end
+                for _, id in ipairs(nested) do test.is_nil(candidate_ids[id], "a tool row is never selected") end
+                test.is_nil(candidate_ids[user_nested], "a nested key on a user row is not steering")
+                test.eq(#candidates, 6)
+
+                local rows = assert(assert(reader.open(session_id)):messages():from_checkpoint():all())
+                local got = {}
+                for _, row in ipairs(rows) do
+                    got[row.message_id] = true
+                    test.not_nil(row.data, "rows the prompt uses carry their text")
+                end
+                local expected = reference_window({ [checkpoint] = true, [at_checkpoint] = true, [inside] = true, [at_inside] = true }, checkpoint)
+                for id in pairs(expected) do test.is_true(got[id], "reference row " .. id) end
+                for id in pairs(got) do test.is_true(expected[id], "extra row " .. id) end
+                test.is_nil(got[archived_steering], "archived steering stays out")
+                test.is_true(got[missing] and got[bare] and got[pending])
+
+                local pending_rows = assert(message_repo.list_pending_inputs(session_id))
+                test.eq(#pending_rows, 1)
+                test.eq(pending_rows[1].message_id, pending)
+                test.eq(pending_rows[1].data, "Pending.")
+            end)
+
+            it("writes the steering key in the form the query selects", function()
+                local id = add("user", "Pending.", { input = { state = "pending" } })
+                local db = assert(sql.get(consts.get_db_resource()))
+                local rows = assert(db:query("SELECT metadata FROM messages WHERE message_id = $1", { id }))
+                db:release()
+                test.contains(rows[1].metadata, '"input"')
+                test.eq(#assert(message_repo.list_steering_candidates(session_id)), 1)
+            end)
+
+            it("keeps steering sent during a tool when the next step compacts", function()
+                local request = add("user", "The request.")
+                local assistant = add("assistant", "Working.", { source_id = request })
+                local tool = add("function", "{}", { function_name = "t", call_id = "c1",
+                    status = "success", result = "Tool result." })
+                local steering = add("user", "STEERTEXT do the other thing.", { input = { state = "pending" } })
+                local session_writer = assert(writer.new(session_id))
+                local session_reader = assert(reader.open(session_id))
+                local cut, sent = nil, {}
+                local agent = { id = "agent:steps", model = "model:test", tool_wrappers = {}, agent_options = {},
+                    step = function(_self, _builder, options)
+                        local replacement, compact_err = options.checkpoint.compact({ estimated_prompt_tokens = 5000 })
+                        test.is_nil(compact_err)
+                        for _, message in ipairs(replacement:get_messages()) do
+                            for _, part in ipairs(message.content or {}) do sent[#sent + 1] = part.text or "" end
+                        end
+                        return { result = "Done." }
+                    end }
+                local ctx = {
+                    session_id = session_id, user_id = owner_id(), lifecycle_state = {},
+                    config = { agent_id = agent.id, model = agent.model, token_checkpoint_threshold = 1000,
+                        checkpoint_function_id = "app:summary" },
+                    reader = session_reader, writer = session_writer,
+                    turn_state = { active = true, steps = 1, repeated_calls = 0, message_id = request },
+                    upstream = {
+                        response_beginning = function() end, send_message_update = function() end,
+                        invalidate_message = function() end, message_error = function() end,
+                        update_session = function() end, session_error = function() end,
+                    },
+                    agent_ctx = { load_agent = function() return agent, nil end,
+                        get_current_agent = function() return agent end },
+                }
+                local create_checkpoint = session_handlers.create_checkpoint
+                session_handlers.create_checkpoint = function(_, op)
+                    cut = op.checkpoint_id
+                    local committed, commit_err = session_writer:commit_checkpoint(op, "Summary of the turn.", {})
+                    if not committed then return nil, commit_err end
+                    assert(session_reader:reset())
+                    return { completed = true }
+                end
+                local ok, result, err = pcall(message_handlers.agent_step, ctx,
+                    { message_id = request, request_id = "req-steer", from_user = false })
+                session_handlers.create_checkpoint = create_checkpoint
+
+                test.is_true(ok, tostring(result))
+                test.is_nil(err)
+                test.eq(result.completed, true)
+                test.eq(cut, tool, "the cut stays on the last settled row")
+                test.not_nil(assistant)
+                test.contains(table.concat(sent, "\n"), "STEERTEXT do the other thing.")
+                test.eq(assert(message_repo.get(steering)).metadata.input.after_message_id, tool)
             end)
 
             it("reaches the newest rows through a session index", function()
