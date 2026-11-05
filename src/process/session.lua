@@ -59,6 +59,19 @@ local function clone(value)
     return result
 end
 
+local function interruption_boundary(reason)
+    local id, err = uuid.v7()
+    if not id then return nil, err end
+    local detail = reason == "stop" and "The user cancels the preceding turn."
+        or "The preceding turn is interrupted before completion; its outcome may be unknown."
+    return {
+        message_id = id,
+        data = detail .. " Do not automatically resume that turn or carry out its remaining instructions. "
+            .. "Follow subsequent user messages as new requests, including an explicit request to continue.",
+        metadata = { preserve_position = true, interruption = { reason = reason } },
+    }
+end
+
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -87,18 +100,19 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
     local interaction = input_policy.snapshot(context, candidate, context.current_agent)
     local stop_gate = nil
     local stopped, stop_err
-    if context.input_apply_batch and type(context.writer.stop_with_input_rollback) == "function" then
+    if context.input_apply_batch then
         stop_gate = channel.new(1)
         context.stop_commit_channel = stop_gate
-        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch, {
+    end
+    local boundary, boundary_err
+    if running then boundary, boundary_err = interruption_boundary("stop") end
+    if not running or boundary then
+        stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch or {}, {
             status = context.status,
             meta = { interaction = interaction },
-        })
+        }, boundary)
     else
-        stopped, stop_err = context.writer:update_meta({
-            status = context.status,
-            meta = { interaction = interaction },
-        })
+        stop_err = boundary_err
     end
     if not stopped then
         local detail = tostring(stop_err or "Failed to persist Stop")
@@ -194,7 +208,9 @@ local function flush_held(ctx: any, run_agent: boolean, phase: string?)
     local steering_turn = phase == "turn_end" and message_handlers.ended_by_form(ctx)
 
     local admitted = {}
+    local anchor = nil
     local function admit(through_id)
+        if phase == "turn_end" and run_agent and not anchor then anchor = message_handlers.turn_anchor(ctx) end
         local rows, admit_err = answer_admission.admit_in_order(ctx, through_id)
         for _, row in ipairs(rows) do table.insert(admitted, row) end
         if admit_err then
@@ -241,7 +257,7 @@ local function flush_held(ctx: any, run_agent: boolean, phase: string?)
             return nil, start_err
         end
         if next_turn then
-            local started, turn_err = message_handlers.start_turn(ctx, next_turn)
+            local started, turn_err = message_handlers.start_turn(ctx, next_turn, anchor)
             if not started then
                 answer_admission.defer_publish(ctx, admitted)
                 return nil, turn_err
@@ -448,8 +464,13 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             request_id = payload_data.request_id }
     elseif payload_data.command == consts.COMMANDS.ARTIFACT then
         if payload_data.artifact_id then
-            op = { type = consts.OP_TYPE.REFERENCE_ARTIFACT,
-                artifact_id = payload_data.artifact_id, request_id = payload_data.request_id }
+            if bus.state == "closed" or bus.state == "draining_finish" then
+                ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), "Session is finishing")
+            else
+                reference_artifact(ctx, { artifact_id = payload_data.artifact_id,
+                    request_id = payload_data.request_id })
+            end
+            return true
         elseif payload_data.artifacts then
             op = { type = consts.OP_TYPE.CONTROL_ARTIFACTS,
                 artifacts = payload_data.artifacts, request_id = payload_data.request_id }
@@ -511,6 +532,15 @@ local function run(args: SessionArgs)
         local count, recovery_err = recover_calls()
         if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
         recovered_calls = count
+    end
+
+    local interrupted = session_data.status == consts.STATUS.RUNNING
+        or session_data.status == consts.STATUS.FAILED or session_data.status == consts.STATUS.ERROR
+    if not args.create and (interrupted or recovered_calls > 0) then
+        local boundary, boundary_err = interruption_boundary("recovery")
+        if not boundary then error("Failed to create recovery boundary: " .. tostring(boundary_err)) end
+        local committed, commit_err = session_writer:stop_with_input_rollback({}, {}, boundary)
+        if not committed then error("Failed to persist recovery boundary: " .. tostring(commit_err)) end
     end
 
     local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
@@ -613,7 +643,7 @@ local function run(args: SessionArgs)
         return context.current_agent
     end
     local initial_agent, initial_agent_err = active_agent()
-    if initial_agent_err then error("Failed to load initial agent: " .. tostring(initial_agent_err)) end
+    if initial_agent_err then error("Failed to load initial agent: " .. tostring(initial_agent_err), 0) end
     local initial_interaction = input_policy.snapshot(context, context, initial_agent)
     local initialized, initial_err = session_writer:update_meta({
         status = consts.STATUS.IDLE, meta = { interaction = initial_interaction },
@@ -790,7 +820,6 @@ local function run(args: SessionArgs)
     bus:mount_op_handler(consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS, session_handlers.check_background_triggers)
     bus:mount_op_handler(consts.OP_TYPE.EXECUTE_FUNCTION, session_handlers.execute_function)
     bus:mount_op_handler(consts.OP_TYPE.HANDLE_CONTEXT, control_handlers.handle_context_command)
-    bus:mount_op_handler(consts.OP_TYPE.REFERENCE_ARTIFACT, reference_artifact)
 
     if args.create then
 
@@ -843,6 +872,12 @@ local function run(args: SessionArgs)
     if args.recovery_notice or recovered_calls > 0 then
         session_upstream:session_error("recovery_incomplete",
             args.recovery_notice or "The previous turn stopped before completion. Send a new message to continue.")
+    end
+
+    if not args.create then
+        session_reader:reset()
+        local policies_ok, policies_err = message_handlers.recover_behavior_controls(context)
+        if not policies_ok then error("Failed to recover behavior policies: " .. tostring(policies_err)) end
     end
 
     session_upstream:update_session({
@@ -963,10 +998,36 @@ local function run(args: SessionArgs)
                 if type(notification.attention_context) == 'table' then
                     emit_attention_context(notification.attention_context)
                 end
+            elseif topic == consts.TOPICS.SESSION_UPDATED then
+                local changes = msg:payload():data()
+                if type(changes) == "table" then
+                    local refreshed, refresh_err, deleted = session_upstream:refresh_external(changes)
+                    if not refreshed then
+                        session_upstream:session_error("session_update_failed", tostring(refresh_err))
+                    elseif deleted then
+                        -- The row is authoritatively gone. Retire this owner;
+                        -- reconnect cannot cancel deletion. In-flight work keeps
+                        -- the same safe-boundary finish as other retirements.
+                        session_state.finishing = true
+                        finish_generation = finish_generation + 1
+                        finish_check_sent = false
+                        if bus:is_quiescent() then
+                            bus:finish()
+                        else
+                            pending_finish = true
+                        end
+                    end
+                end
             else
                 local payload_data = msg:payload():data()
                 local attention_handled = false
-                if type(payload_data) == 'table'
+                if session_state.finishing then
+                    if type(payload_data) == 'table' and payload_data.request_id then
+                        session_upstream:command_error(payload_data.request_id, "SESSION_FINISHING", "Session is finishing")
+                    end
+                    attention_handled = true
+                end
+                if not attention_handled and type(payload_data) == 'table'
                     and (topic == consts.TOPICS.MESSAGE or topic == consts.TOPICS.COMMAND) then
                     if payload_data.conn_pid then
                         attention_control:set_connection(payload_data.conn_pid)

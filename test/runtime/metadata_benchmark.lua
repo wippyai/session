@@ -9,6 +9,7 @@ local security = require("security")
 local uuid = require("uuid")
 local time = require("time")
 local env = require("env")
+local sql = require("sql")
 
 local function define_tests()
     test.describe("Persisted message metadata benchmark", function()
@@ -18,6 +19,21 @@ local function define_tests()
         end
         test.it("measures verified metadata patches with retained payloads", function()
             wait_for_boot.run()
+            local db = assert(sql.get("app:db"))
+            if db:type() == "postgres" then
+                local connections, count = {}, 0
+                for _ = 1, 4 do
+                    local rows = assert(db:query("SELECT pg_backend_pid() AS pid"))
+                    if not connections[rows[1].pid] then
+                        connections[rows[1].pid] = true
+                        count = count + 1
+                    end
+                end
+                db:release()
+                test.lt(count, 4, "the benchmark database must reuse connections between operations")
+            else
+                db:release()
+            end
             local payload_size = tonumber((env.get("WIPPY_BENCH_SIZE"))) or 128
             local warmup = tonumber((env.get("WIPPY_BENCH_WARMUP"))) or 100
             local samples = tonumber((env.get("WIPPY_BENCH_SAMPLES"))) or 100

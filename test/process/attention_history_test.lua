@@ -219,6 +219,18 @@ local function define_tests()
                 test.eq(updates[1].stale, 'Attention observation expired.')
             end
         end)
+        -- Every date is written in UTC, so the wall clock a timestamp column
+        -- returns with a "Z" suffix is the UTC one.
+        it('reads a Postgres row date, the server wall clock with a Z suffix, as server-local time', function()
+            local function postgres_date(at) return time.unix(at, 0):utc():format('2006-01-02T15:04:05') .. 'Z' end
+            local fresh, old = observation('fresh'), observation('old', 1, '{"name":"Cancel"}')
+            fresh.date = postgres_date(now - 1)
+            old.date = postgres_date(now - 31)
+            local _, updates = history.prepare({ user('first'), fresh, old }, now)
+            test.eq(#updates, 1)
+            test.eq(updates[1].message_id, 'old')
+            test.eq(updates[1].stale, 'Attention observation expired.')
+        end)
         it('reads an offset row date by its instant too', function()
             local fresh, old = observation('fresh'), observation('old', 1, '{"name":"Cancel"}')
             fresh.date = '2026-09-18T14:59:59.000000000+03:00'

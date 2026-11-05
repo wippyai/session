@@ -98,6 +98,7 @@ end
 
 local function seed_session()
     wait_for_boot.run()
+    wait_for_boot.ensure_user(TEST_ACTOR_ID)
     cleanup()
 
     -- The anchor is the message the last checkpoint was created at; the primary context
@@ -321,13 +322,13 @@ local function define_tests()
             message_repo.delete(later_id)
             test.eq(#errors, 0, table.concat(errors, "; "))
             test.is_nil(result_err)
-            local instructions = ""
+            local instructions = {}
             for _, message in ipairs(result.messages) do
                 for _, part in ipairs(message.content or {}) do
-                    if part.text and part.text:find("instruction", 1, true) then instructions = part.text end
+                    if part.text and part.text:find("instruction", 1, true) then table.insert(instructions, part.text) end
                 end
             end
-            test.eq(instructions, "Earlier instruction\n\nLatest instruction")
+            test.eq(table.concat(instructions, "|"), "Earlier instruction|Latest instruction")
         end)
 
         it("foundation: the next prompt includes a newly saved failure after a long history", function()

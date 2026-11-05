@@ -5,6 +5,8 @@ local consts = require("consts")
 local prompt_builder = require("prompt_builder")
 local claude_mapper = require("claude_mapper")
 local google_mapper = require("google_mapper")
+local openai_mapper = require("openai_mapper")
+local bedrock_mapper = require("bedrock_mapper")
 local context_attachments = require("context_attachments")
 
 local function define_tests()
@@ -69,7 +71,8 @@ local function define_tests()
             }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
             test.is_nil(err)
             local messages = builder:get_messages()
-            test.eq(messages[#messages].content[1].text, "earlier instruction\n\nlatest instruction")
+            test.eq(messages[#messages - 1].content[1].text, "earlier instruction")
+            test.eq(messages[#messages].content[1].text, "latest instruction")
         end)
     end)
     describe("foundation error feedback", function()
@@ -164,6 +167,366 @@ local function define_tests()
         end)
     end)
     describe("Prompt Builder", function()
+        describe("parallel tool rounds", function()
+            local function T(signature) return { type = "thinking", thinking = "", signature = signature } end
+            local function X(text) return { type = "text", text = text } end
+            local function U(id) return { type = "tool_use", id = id, name = "search", input = { tag = id } } end
+
+            local function call_row(id, status)
+                local settled = status ~= consts.FUNC_STATUS.PENDING
+                return { message_id = "row-" .. id, type = consts.MSG_TYPE.FUNCTION, data = json.encode({ tag = id }),
+                    metadata = { function_name = "search", call_id = id, status = status or consts.FUNC_STATUS.SUCCESS,
+                        result = settled and ("result " .. id) or nil } }
+            end
+
+            -- Rows as a session stores one model response: the assistant row, then its calls.
+            local function response_rows(blocks)
+                local response = claude_mapper.format_success_response({ content = blocks, stop_reason = "tool_use",
+                    usage = { input_tokens = 1, output_tokens = 1 } }, "m", {})
+                local metadata = {}
+                for key, value in pairs(response.metadata) do metadata[key] = value end
+                metadata.prefix_fingerprint = "fp"
+                local rows = {
+                    { message_id = "user", type = consts.MSG_TYPE.USER, data = "Question.", metadata = {} },
+                    { message_id = "assistant", type = consts.MSG_TYPE.ASSISTANT, data = response.result.content, metadata = metadata },
+                }
+                for _, call in ipairs(response.result.tool_calls) do rows[#rows + 1] = call_row(call.id) end
+                return rows
+            end
+
+            local function build(rows)
+                return assert(prompt_builder.build(rows, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                }))
+            end
+
+            local function claude_wire(messages)
+                local parts = {}
+                for _, message in ipairs(claude_mapper.map_messages(messages).messages) do
+                    if message.role == "assistant" then
+                        for _, block in ipairs(message.content) do
+                            if block.type == "thinking" then parts[#parts + 1] = "T:" .. block.signature
+                            elseif block.type == "text" then parts[#parts + 1] = "X:" .. block.text
+                            elseif block.type == "tool_use" then parts[#parts + 1] = "U:" .. block.id end
+                        end
+                        parts[#parts + 1] = "|"
+                    else
+                        for _, block in ipairs(message.content) do
+                            if block.type == "tool_result" then parts[#parts + 1] = "R:" .. block.tool_use_id end
+                        end
+                    end
+                end
+                return table.concat(parts, " ")
+            end
+
+            local function bedrock_wire(messages)
+                local parts = {}
+                for _, message in ipairs(bedrock_mapper.map_messages(messages).messages) do
+                    if message.role == "assistant" then
+                        for _, block in ipairs(message.content) do
+                            if block.reasoningContent then parts[#parts + 1] = "T:" .. block.reasoningContent.reasoningText.signature
+                            elseif block.text then parts[#parts + 1] = "X:" .. block.text
+                            elseif block.toolUse then parts[#parts + 1] = "U:" .. block.toolUse.toolUseId end
+                        end
+                        parts[#parts + 1] = "|"
+                    else
+                        for _, block in ipairs(message.content) do
+                            if block.toolResult then parts[#parts + 1] = "R:" .. block.toolResult.toolUseId end
+                        end
+                    end
+                end
+                return table.concat(parts, " ")
+            end
+
+            for _, case in ipairs({
+                { name = "s1 A c1 s2 B c2", blocks = { T("s1"), X("A"), U("c1"), T("s2"), X("B"), U("c2") },
+                    wire = "T:s1 X:A U:c1 T:s2 X:B U:c2 | R:c1 R:c2" },
+                { name = "s1 c1 s2 c2", blocks = { T("s1"), U("c1"), T("s2"), U("c2") },
+                    wire = "T:s1 U:c1 T:s2 U:c2 | R:c1 R:c2" },
+                { name = "s1 c1 s2 c2 s3 c3", blocks = { T("s1"), U("c1"), T("s2"), U("c2"), T("s3"), U("c3") },
+                    wire = "T:s1 U:c1 T:s2 U:c2 T:s3 U:c3 | R:c1 R:c2 R:c3" },
+                { name = "c1 s1 c2", blocks = { U("c1"), T("s1"), U("c2") },
+                    wire = "U:c1 T:s1 U:c2 | R:c1 R:c2" },
+            }) do
+                it("replays " .. case.name .. " in response order", function()
+                    local messages = build(response_rows(case.blocks)):get_messages()
+                    test.eq(claude_wire(messages), case.wire)
+                    test.eq(bedrock_wire(messages), case.wire)
+                end)
+            end
+
+            it("keeps a round's blocks on the assistant turn a handoff continues from", function()
+                local rows = response_rows({ T("s1"), X("A"), U("c1"), T("s2"), U("c2") })
+                rows[#rows + 1] = { message_id = "changed", type = consts.MSG_TYPE.DEVELOPER,
+                    data = "Configuration changed.", metadata = {} }
+                local builder = build(rows)
+                local _, err = builder:drop_stale_thinking(function() return false end)
+                test.is_nil(err)
+                test.eq(claude_wire(builder:get_messages()), "T:s1 X:A U:c1 T:s2 U:c2 | R:c1 R:c2")
+                test.eq(bedrock_wire(builder:get_messages()), "T:s1 X:A U:c1 T:s2 U:c2 | R:c1 R:c2")
+                builder:mark_stale_thinking(function() return false end)
+                test.not_nil(claude_mapper.map_messages(builder:get_messages()).stale_thinking,
+                    "the kept blocks are bound as stale, so a thinking-capable driver can let the provider drop them")
+            end)
+
+            it("extends the previous request when per-round rows arrive across a crash", function()
+                local function view(rows)
+                    local out = {}
+                    for _, message in ipairs(build(rows):get_messages()) do
+                        out[#out + 1] = json.encode({ role = message.role, content = message.content,
+                            call = message.function_call, id = message.function_call_id })
+                    end
+                    return out
+                end
+                local rows = response_rows({ T("s1"), X("A"), U("c1"), T("s2"), U("c2") })
+                -- One result written, the other recovered as interrupted after a restart.
+                rows[4].metadata.status = consts.FUNC_STATUS.ERROR
+                rows[4].metadata.result = "interrupted, outcome unknown"
+                local first = view(rows)
+                rows[#rows + 1] = { message_id = "boundary", type = consts.MSG_TYPE.DEVELOPER,
+                    data = "The preceding turn is interrupted.", metadata = { preserve_position = true } }
+                rows[#rows + 1] = { message_id = "next", type = consts.MSG_TYPE.USER, data = "Continue.", metadata = {} }
+                local second = view(rows)
+                rows[#rows + 1] = { message_id = "answer", type = consts.MSG_TYPE.ASSISTANT, data = "Next round.", metadata = {} }
+                rows[#rows + 1] = call_row("c3")
+                local third = view(rows)
+                for _, pair in ipairs({ { first, second }, { second, third } }) do
+                    for index, entry in ipairs(pair[1]) do
+                        test.eq(pair[2][index], entry, "request diverges at message " .. index)
+                    end
+                end
+            end)
+
+            it("keeps a pending call of the group valid", function()
+                local rows = response_rows({ T("s1"), U("c1"), T("s2"), U("c2") })
+                rows[3] = call_row("c1", consts.FUNC_STATUS.PENDING)
+                local roles, results = {}, {}
+                for _, message in ipairs(build(rows):get_messages()) do
+                    roles[#roles + 1] = message.role
+                    if message.role == "function_result" then results[#results + 1] = message.content[1].text end
+                end
+                test.eq(table.concat(roles, ","), "user,assistant,function_call,function_call,function_result,function_result")
+                test.eq(results[1], "incomplete")
+                test.eq(results[2], "result c2")
+            end)
+
+            it("closes the group at the next row and leaves calls without an assistant row alone", function()
+                local rows = response_rows({ T("s1"), U("c1"), T("s2"), U("c2") })
+                rows[#rows + 1] = { message_id = "note", type = consts.MSG_TYPE.DEVELOPER, data = "Note.", metadata = {} }
+                rows[#rows + 1] = call_row("c9")
+                local roles = {}
+                for _, message in ipairs(build(rows):get_messages()) do roles[#roles + 1] = message.role end
+                test.eq(table.concat(roles, ","),
+                    "user,assistant,function_call,function_call,function_result,function_result,developer,function_call,function_result")
+            end)
+
+            it("renders steering anchored inside a group after the results it follows", function()
+                local rows = response_rows({ T("s1"), U("c1"), T("s2"), U("c2") })
+                rows[#rows + 1] = { message_id = "steer", type = consts.MSG_TYPE.USER, data = "Also this.",
+                    metadata = { input = { state = "applied", after_message_id = "row-c2" } } }
+                local roles = {}
+                for _, message in ipairs(build(rows):get_messages()) do roles[#roles + 1] = message.role end
+                test.eq(table.concat(roles, ","),
+                    "user,assistant,function_call,function_call,function_result,function_result,user")
+            end)
+        end)
+
+        describe("stored row rendering", function()
+            local function build(rows)
+                local builder, err = prompt_builder.build(rows, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                return builder:get_messages()
+            end
+
+            it("renders every stored developer row in place", function()
+                local built = build({
+                    { message_id = "d-1", type = consts.MSG_TYPE.DEVELOPER, data = "Agent changed.", metadata = {} },
+                    { message_id = "d-2", type = consts.MSG_TYPE.DEVELOPER, data = "Model changed.", metadata = {} },
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "Question.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ARTIFACT, data = "Report", metadata = {} },
+                    { message_id = "d-3", type = consts.MSG_TYPE.DEVELOPER, data = "Artifact instructions.",
+                        metadata = { system_action = "artifact_instructions" } },
+                })
+                test.eq(#built, 5, "adjacent rows do not merge")
+                local instructions = openai_mapper.extract_instructions(built)
+                test.is_true(instructions == nil or instructions == "", "stored rows never join the instructions")
+                test.eq(built[5].content[1].text, "Artifact instructions.")
+            end)
+
+            it("keeps the files note in place", function()
+                local resolve_file = prompt_builder._resolve_file
+                prompt_builder._resolve_file = function()
+                    return { size = 1, mime_type = "text/plain", metadata = { filename = "a.txt" } }
+                end
+                local builder = assert(prompt_builder.build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "See file.", metadata = { file_uuids = { "f-1" } } },
+                }, {}, {}, { include_contexts = false, cache_markers = false }))
+                prompt_builder._resolve_file = resolve_file
+                test.is_true(builder:get_messages()[2].metadata.preserve_position)
+            end)
+
+            it("keeps adjacent user and assistant rows as stored", function()
+                local built = build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "First.", metadata = {} },
+                    { message_id = "u-2", type = consts.MSG_TYPE.USER, data = "Second.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "One.", metadata = {} },
+                    { message_id = "a-2", type = consts.MSG_TYPE.ASSISTANT, data = "Two.", metadata = {} },
+                })
+                test.eq(#built, 4)
+                test.eq(built[1].content[1].text, "First.", "an earlier row keeps its bytes")
+                test.eq(built[3].content[1].text, "One.")
+            end)
+
+            it("skips rows stored blank", function()
+                local built = build({
+                    { message_id = "u-0", type = consts.MSG_TYPE.USER, data = "Real.", metadata = {} },
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "", metadata = {} },
+                    { message_id = "u-2", type = consts.MSG_TYPE.USER, data = "  \n", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "  ", metadata = {} },
+                    { message_id = "a-2", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                        presentation = { artifact_refs = {} } } },
+                    { message_id = "d-1", type = consts.MSG_TYPE.DEVELOPER, data = "  ", metadata = {} },
+                    { message_id = "s-1", type = consts.MSG_TYPE.SYSTEM, data = "\n", metadata = { preserve_position = true } },
+                    { message_id = "r-1", type = consts.MSG_TYPE.ARTIFACT, data = " ", metadata = {} },
+                })
+                test.eq(#built, 1)
+                test.eq(built[1].content[1].text, "Real.")
+            end)
+
+            it("renders an empty assistant row out of the provider request", function()
+                local built = build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "Make it.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {
+                        presentation = { artifact_refs = {} } } },
+                    { message_id = "u-2", type = consts.MSG_TYPE.USER, data = "Then?", metadata = {} },
+                })
+                test.is_nil((json.encode(claude_mapper.map_messages(built)):find("intercepted", 1, true)),
+                    "history carries no invented text")
+                test.is_nil((json.encode(openai_mapper.map_messages(built)):find("output_text", 1, true)),
+                    "no empty output_text item")
+            end)
+
+            it("keeps thinking blocks of a tool round with no text", function()
+                local blocks = {{ type = "thinking", thinking = "plan", signature = "sig" }}
+                local built = build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "Go.", metadata = {} },
+                    { message_id = "a-1", type = consts.MSG_TYPE.ASSISTANT, data = "  ", metadata = { thinking_blocks = blocks } },
+                })
+                test.eq(#built, 2)
+                test.eq(built[2].metadata.thinking_blocks[1].signature, "sig")
+                test.eq(built[2].content[1].text, "", "whitespace never reaches a provider")
+            end)
+
+            it("omits the empty user part when attachments carry the message", function()
+                prompt_builder._context_attachments = {
+                    supports = function() return true end,
+                    render = function() return {{ type = "text", text = "Attached context." }}, {} end,
+                }
+                local builder = assert(prompt_builder.build({
+                    { message_id = "u-1", type = consts.MSG_TYPE.USER, data = "  ", metadata = {
+                        context_attachments = {{ attachment_id = "c-1", kind = "example.note", version = 1 }} } },
+                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false }))
+                prompt_builder._context_attachments = context_attachments
+                local parts = builder:get_messages()[1].content
+                test.eq(#parts, 1)
+                test.eq(parts[1].text, "Attached context.")
+            end)
+        end)
+
+        describe("checkpoint request turn note", function()
+            local note_row = { message_id = "note-1", type = consts.MSG_TYPE.SYSTEM,
+                data = "The current date and time is Monday, January 1, 2024 at 00:00 UTC.",
+                metadata = { preserve_position = true, source_id = "request-1", system_action = "turn_context" } }
+
+            local function session_with(rows, boundary)
+                local query = {}
+                function query:from_checkpoint() return self end
+                function query:all() return rows, nil end
+                return {
+                    messages = function() return query end,
+                    contexts = function() return { all = function() return {}, nil end } end,
+                    state = function() return {} end,
+                    get_context = function(_self, key)
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then return "anchor" end
+                        if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY then return boundary end
+                        return nil
+                    end,
+                    get_message = function(_self, id)
+                        return { message_id = id, type = consts.MSG_TYPE.USER, data = "What time is it?", metadata = {} }, nil
+                    end,
+                    get_turn_note = function(_self, source_id)
+                        test.eq(source_id, "request-1")
+                        return note_row, nil
+                    end,
+                }
+            end
+
+            local function texts(session)
+                local builder = assert(prompt_builder.from_session(session, { include_files = false, cache_markers = false }))
+                local out = {}
+                for _, message in ipairs(builder:get_messages()) do out[#out + 1] = message.role .. ":" .. message.content[1].text end
+                return out
+            end
+
+            it("keeps the note with the excerpt after compacting the opening step", function()
+                local out = texts(session_with({}, { checkpoint_id = "anchor", exclusive = true, source_id = "request-1" }))
+                test.eq(out[1], "user:What time is it?")
+                test.eq(out[2], "system:" .. note_row.data)
+                test.contains(out[3], "resumed from a checkpoint")
+                test.eq(#out, 3)
+            end)
+
+            it("keeps the note after an inclusive mid-turn checkpoint", function()
+                local out = texts(session_with({
+                    { message_id = "anchor", type = consts.MSG_TYPE.ASSISTANT, data = "Working.",
+                        metadata = { source_id = "request-1" } },
+                }))
+                test.eq(out[2], "system:" .. note_row.data)
+                test.eq(out[#out], "assistant:Working.")
+            end)
+
+            it("renders a note still in the history once", function()
+                local out = texts(session_with({
+                    { message_id = "anchor", type = consts.MSG_TYPE.ASSISTANT, data = "Working.",
+                        metadata = { source_id = "request-1" } },
+                    note_row,
+                }))
+                local found = 0
+                for _, entry in ipairs(out) do
+                    if entry == "system:" .. note_row.data then found = found + 1 end
+                end
+                test.eq(found, 1)
+            end)
+        end)
+
+        describe("system rows", function()
+            it("renders positional system notes in place and leaves host records out", function()
+                local messages = {
+                    { message_id = "user-1", type = consts.MSG_TYPE.USER, data = "What time is it?", metadata = {} },
+                    { message_id = "note-1", type = consts.MSG_TYPE.SYSTEM,
+                        data = "The current date and time is Tuesday, November 3, 2026 at 09:41 UTC.",
+                        metadata = { preserve_position = true, source_id = "user-1", system_action = "turn_context" } },
+                    { message_id = "record-1", type = consts.MSG_TYPE.SYSTEM, data = "Turn failed.",
+                        metadata = { system_action = consts.SYSTEM_ACTIONS.TURN_FAILED } },
+                    { message_id = "assistant-1", type = consts.MSG_TYPE.ASSISTANT, data = "It is 09:41.", metadata = {} },
+                }
+
+                local builder, err = prompt_builder.build(messages, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                })
+
+                test.is_nil(err)
+                local built = builder:get_messages()
+                test.eq(#built, 3)
+                test.eq(built[1].role, "user")
+                test.eq(built[2].role, "system")
+                test.eq(built[2].content[1].text, "The current date and time is Tuesday, November 3, 2026 at 09:41 UTC.")
+                test.is_true(built[2].metadata.preserve_position)
+                test.eq(built[3].role, "assistant")
+            end)
+        end)
         describe("provider_metadata in function calls", function()
             it("should pass provider_metadata to function call when present", function()
                 local messages = {
@@ -1544,15 +1907,21 @@ local function define_tests()
             -- A checkpoint taken mid-turn anchors on the agent's own message, so the window
             -- would open with an assistant turn. Providers expect the user's turn first, and
             -- the model should know why it sees tool traffic with no request above it.
-            local function mock_reader(messages, checkpoint_id)
+            local function mock_reader(messages, checkpoint_id, original, lookup_error)
                 local query = {
                     from_checkpoint = function(self) return self end,
                     all = function(_self) return messages, nil end,
                 }
                 return {
+                    get_message = function(_, id)
+                        if lookup_error then return nil, lookup_error end
+                        test.eq(id, "original-request")
+                        return original, nil
+                    end,
                     messages = function(_self) return query end,
                     contexts = function(_self) return { all = function() return {}, nil end } end,
                     state = function(_self) return { meta = {}, config = {} } end,
+                    get_turn_note = function() return nil, nil end,
                     get_context = function(_self, key)
                         if key == consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID then
                             return checkpoint_id
@@ -1564,7 +1933,7 @@ local function define_tests()
 
             local function assistant_anchor_window()
                 return {
-                    { message_id = "asst-9", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {} },
+                    { message_id = "asst-9", type = consts.MSG_TYPE.ASSISTANT, data = "Working.", metadata = {} },
                     {
                         message_id = "fn-9",
                         type = consts.MSG_TYPE.FUNCTION,
@@ -1573,6 +1942,208 @@ local function define_tests()
                     },
                 }
             end
+
+            it("restores the request exactly once across repeated assistant checkpoints", function()
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Complete the document task.", metadata = {} }
+                for i = 1, 3 do
+                    local window = assistant_anchor_window()
+                    window[1].message_id = "asst-" .. i
+                    window[1].metadata.source_id = original.message_id
+                    local built = assert(prompt_builder.from_session(mock_reader(window, "asst-" .. i, original), {
+                        include_files = false, cache_markers = false,
+                    })):get_messages()
+                    local count = 0
+                    for _, message in ipairs(built) do
+                        if message.role == "user" and message.content[1].text == original.data then count = count + 1 end
+                    end
+                    test.eq(count, 1)
+                end
+            end)
+
+            it("does not reload summarized file or required context attachments", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Finish the task.", metadata = {
+                        file_uuids = { "old-file" },
+                        context_attachments = {{ kind = "wippy.attention", version = 2, attachment_id = "old-context" }},
+                    } }
+                local previous_file = prompt_builder._resolve_file
+                local previous_context = prompt_builder._context_attachments
+                local reads = 0
+                prompt_builder._resolve_file = function() reads = reads + 1; error("must not reload file") end
+                prompt_builder._context_attachments = { supports = function() reads = reads + 1; return false end,
+                    render = function() reads = reads + 1; error("must not render old context") end }
+                local ok, builder, err = pcall(prompt_builder.from_session, mock_reader(window, "asst-9", original), {
+                    include_files = true, include_context_attachments = true, cache_markers = false,
+                })
+                prompt_builder._resolve_file = previous_file
+                prompt_builder._context_attachments = previous_context
+                test.is_true(ok)
+                test.is_nil(err)
+                test.not_nil(builder)
+                test.eq(reads, 0)
+            end)
+
+            it("keeps a later applied correction after the restored request when its anchor is absent", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                table.insert(window, 1, { message_id = "orphan-steering", type = consts.MSG_TYPE.USER,
+                    data = "Keep the appendix; do not delete it.", metadata = {
+                        input = { state = "applied", after_message_id = "unavailable-anchor" }
+                    } })
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Delete the appendix.", metadata = {} }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                local task_at, correction_at
+                for index, message in ipairs(built) do
+                    for _, part in ipairs(message.content or {}) do
+                        if part.text and part.text:find(original.data, 1, true) then task_at = index end
+                        if part.text and part.text:find("Keep the appendix", 1, true) then correction_at = index end
+                    end
+                end
+                test.not_nil(task_at)
+                test.not_nil(correction_at)
+                test.is_true(task_at <= correction_at, "restored task must precede its later correction: " .. json.encode(built))
+                if task_at == correction_at then
+                    test.is_true(built[task_at].content[1].text:find("Delete the appendix", 1, true)
+                        < built[task_at].content[1].text:find("Keep the appendix", 1, true))
+                end
+            end)
+
+            it("bounds restored requests while preserving both ends and UTF-8 boundaries", function()
+                for _, character in ipairs({ "x", "é", "界", "🙂" }) do
+                    local window = assistant_anchor_window()
+                    window[1].metadata.source_id = "original-request"
+                    local text = "Initial task.\n" .. string.rep(character, 7000) .. "\nFinal restriction."
+                    local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                        data = text, metadata = {} }
+                    local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                        include_files = false, cache_markers = false,
+                    })):get_messages()
+                    local excerpt = built[1].content[1].text
+                    test.ok(#excerpt <= 6000, "restored request exceeds its 6000-byte budget")
+                    test.contains(excerpt, "Initial task.")
+                    test.contains(excerpt, "Final restriction.")
+                    test.contains(excerpt, "omitted")
+                    test.eq(json.decode(assert(json.encode(excerpt))), excerpt, "excerpt must remain valid UTF-8")
+                    test.eq(original.data, text, "the stored request must remain unchanged")
+                end
+            end)
+
+            it("retains a request at the excerpt budget unchanged", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = string.rep("x", 6000), metadata = {} }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                test.eq(built[1].content[1].text, original.data)
+            end)
+
+            it("preserves Stop feedback and a new request without resurrecting the old task", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "stop", type = consts.MSG_TYPE.DEVELOPER,
+                    data = "The previous turn was stopped. Do not resume it.", metadata = {} }
+                window[#window + 1] = { message_id = "new", type = consts.MSG_TYPE.USER,
+                    data = "Start a different task.", metadata = {} }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", nil, "must not load old task"), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                test.eq(built[#built].role, "user")
+                test.eq(built[#built].content[1].text, "Start a different task.")
+            end)
+
+            it("retains the originating user text when a checkpoint drops it mid-turn", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Rebuild the Word handout and finish every edit.",
+                    metadata = { file_uuids = { "already-summarized-document" } } }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, original.data)
+                test.contains(built[2].content[1].text, "checkpoint")
+                test.eq(built[3].role, "assistant")
+                test.eq(built[#built].role, "function_result")
+                test.is_nil(window[1].metadata.file_uuids, "summarized attachments must not be reloaded")
+                test.eq(original.metadata.file_uuids[1], "already-summarized-document")
+            end)
+
+            it("does not restore an old request when a new user turn is visible", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "new-request", type = consts.MSG_TYPE.USER,
+                    data = "Answer only this new question.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", nil, "must not look up old work"), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local users = 0
+                for _, message in ipairs(assert(builder):get_messages()) do
+                    if message.role == "user" then
+                        users = users + 1
+                        test.eq(message.content[1].text, "Answer only this new question.")
+                    end
+                end
+                test.eq(users, 1)
+            end)
+
+            it("does not mistake pending steering for the active user request", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                window[#window + 1] = { message_id = "pending", type = consts.MSG_TYPE.USER,
+                    data = "Not yet admitted to a provider prompt.", metadata = { input = { state = "pending" } } }
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Finish the existing task.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local users = 0
+                for _, message in ipairs(assert(builder):get_messages()) do
+                    if message.role == "user" then
+                        users = users + 1
+                        test.eq(message.content[1].text, original.data)
+                    end
+                end
+                test.eq(users, 1)
+            end)
+
+            it("reports a failed originating-request lookup", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", nil, "database unavailable"))
+                test.is_nil(builder)
+                test.contains(err, "database unavailable")
+            end)
+
+            it("retains the original task when re-anchored steering sorts before the checkpoint", function()
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                table.insert(window, 1, { message_id = "steering", type = consts.MSG_TYPE.USER,
+                    data = "Also use landscape pages.", metadata = { input = { state = "applied", after_message_id = "fn-9" } } })
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = "Rebuild the handout.", metadata = {} }
+                local builder, err = prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })
+                test.is_nil(err)
+                local built = assert(builder):get_messages()
+                test.eq(built[1].role, "user")
+                test.eq(built[1].content[1].text, original.data)
+                test.eq(built[#built].role, "user")
+                test.eq(built[#built].content[1].text, "Also use landscape pages.")
+            end)
 
             it("opens with a developer note when the window anchors on an assistant message", function()
                 local builder, err = prompt_builder.from_session(mock_reader(assistant_anchor_window(), "asst-9"))

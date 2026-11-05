@@ -80,8 +80,17 @@ end
 
 -- The notice that a turn did not complete: after a failed exit, and for a
 -- turn the runtime interrupted (`interrupted`, stored idle).
-local function exit_error_payload(session_id, status, reason, interrupted)
+local function exit_error_payload(session_id, status, reason, interrupted, start_failure)
     if status ~= consts.STATUS.FAILED and not interrupted then return nil end
+    -- A session that exits before confirming start has not run any work.
+    if start_failure then
+        return {
+            type = consts.UPSTREAM_TYPES.ERROR,
+            session_id = session_id,
+            code = consts.ERROR_CODES.SESSION_SPAWN,
+            message = start_failure
+        }
+    end
     return {
         type = consts.UPSTREAM_TYPES.ERROR,
         session_id = session_id,
@@ -155,6 +164,12 @@ end
 -- repair error, the interaction and the admitted answer rows.
 local function settle_session(session_id: string, user_id: string, target_status: string, opts: any?)
     opts = opts or {}
+    local stored, read_err = session_repo.get(session_id, user_id)
+    -- Deleted sessions have no status or pending calls to recover. The owner
+    -- still releases its slot on EXIT, without publishing a phantom idle row.
+    if not stored and read_err == "Session not found" then
+        return nil, true, nil, nil, nil, nil
+    end
     local recovery_err = nil
     if opts.recover_calls then
         local _, err = recover_session_calls(session_id)
@@ -168,7 +183,6 @@ local function settle_session(session_id: string, user_id: string, target_status
             logger:warn("form answer admission failed", { session_id = session_id, error = tostring(admit_err) })
         end
     end
-    local stored, read_err = session_repo.get(session_id, user_id)
     if not stored then
         return target_status, false, read_err or "Session was not found", recovery_err, nil, admitted
     end
@@ -196,9 +210,9 @@ local function settle_interrupted(session_id: string, user_id: string, opts: any
 end
 
 -- Whether the plugin cancelled or terminated the session process to enforce
--- the user's Stop: the turn did not stop within the stop deadline (a model
--- call Stop cannot interrupt, for example), so the exit that follows is that
--- Stop, not a failure of the session.
+-- the user's Stop: the turn did not stop within the stop deadline (a model or
+-- tool call that ignores the cancellation, for example), so the exit that
+-- follows is that Stop, not a failure of the session.
 local function stop_enforced(session_info: any): boolean
     return type(session_info) == "table" and (tonumber(session_info.stop_escalation) or 0) >= 2
 end
@@ -1072,9 +1086,10 @@ local function run(args)
 
     -- Tells the user's clients how a session ended: the stored status and
     -- interaction, once they are committed.
-    local function report_final_status(session_id, target_status, stored, reason, interaction, interrupted)
-        if not state.user_hub_pid then return end
-        local error_update = exit_error_payload(session_id, target_status, reason, interrupted)
+    local function report_final_status(session_id, target_status, stored, reason, interaction, interrupted, start_failure)
+        -- A deleted session has no status to report.
+        if not state.user_hub_pid or not target_status then return end
+        local error_update = exit_error_payload(session_id, target_status, reason, interrupted, start_failure)
         if error_update then
             publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
         end
@@ -1353,12 +1368,14 @@ local function run(args)
                             break
                         end
 
+                        local start_failure = nil
                         if not session_info.open_notified then
                             local reason = "Session exited before confirming start"
                             if exit_error or (type(exit_result) == "table" and exit_result.error) then
                                 reason = exit_error or exit_result.error
                             end
-                            fail_start_requests(session_info, "Failed to create session: " .. tostring(reason))
+                            start_failure = "Failed to create session: " .. tostring(reason)
+                            fail_start_requests(session_info, start_failure)
                         end
 
                         clear_stop_deadline(session_info)
@@ -1376,6 +1393,7 @@ local function run(args)
                         local target_status, success, status_err, recovery_err, interaction, admitted =
                             finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error,
                                 state.user_hub_pid)
+                        if not target_status then err = "deleted" end
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err
@@ -1394,7 +1412,9 @@ local function run(args)
                         fire_session_end_hook(state.base_config.on_session_end_func_id, {
                             session_id = session_id,
                             user_id = state.user_id,
-                            status = target_status,
+                            -- Keep the hook's existing status contract even
+                            -- when the deleted row has no status to publish.
+                            status = target_status or status_after_exit(session_info, exit_result, exit_error),
                             reason = err,
                         })
 
@@ -1412,7 +1432,7 @@ local function run(args)
                         -- Session status update first, then the closed notification.
                         -- An enforced Stop is what the user asked for, so it
                         -- publishes the idle status without the recovery error.
-                        report_final_status(session_id, target_status, success, err, interaction, false)
+                        report_final_status(session_id, target_status, success, err, interaction, false, start_failure)
                         -- Open views of the forms answered during an enforced
                         -- Stop reload their delivery state once it says idle.
                         answer_admission.publish_admitted(admitted)

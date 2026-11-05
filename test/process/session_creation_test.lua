@@ -119,8 +119,13 @@ local function define_tests()
                     end
                     return true
                 end)
+                local bus_done_issued = false
                 mock("channel.new", function(capacity)
-                    if capacity == nil then return bus_done end
+                    -- session.run creates bus_done once; a running turn creates its cancel channel.
+                    if capacity == nil and not bus_done_issued then
+                        bus_done_issued = true
+                        return bus_done
+                    end
                     return original_channel_new(capacity)
                 end)
                 -- Delay the bus until ingress has admitted the message sent immediately on open.

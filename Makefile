@@ -35,6 +35,9 @@ TEST_CONFIG ?= $(abspath $(TEST_DIR))/.wippy.yaml
 TEST_DB ?= $(TEST_ARTIFACTS)/test.db
 TEST_BACKUP_DIR ?= $(TEST_ARTIFACTS)/backups
 TEST_FILTER ?=
+TEST_TIMEZONE ?= UTC
+POSTGRES_TEST_OVERRIDES ?=
+POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test app.forms:
 FRAMEWORK_DIR ?=
 PGHOST ?= localhost
 PGPORT ?= 5433
@@ -50,22 +53,14 @@ BENCH_METADATA_MEMORY_OPERATIONS ?= 2048
 BENCH_EXACT_ALLOCATIONS ?= 1
 BENCH_REVISION ?= $(shell git rev-parse HEAD)
 BENCH_FRAMEWORK_REVISION ?= $(if $(FRAMEWORK_DIR),$(shell git -C "$(FRAMEWORK_DIR)" rev-parse HEAD),locked)
-# The suites test-postgres runs, as entry id prefixes: every namespace of the
-# test workspace except two that are SQLite only by design. app.runtime holds
-# only the SQLite bootstrap test (it builds a workspace with sqlite3, bash and
-# make, and checks the SQLite backup) and the benchmarks, so just its handoff
-# suite is listed. app.migration probes the migrations on its own SQLite file,
-# which no database setting reaches. A prefix, not a list of suites, so a new
-# suite runs on PostgreSQL unless someone excludes it here.
-POSTGRES_SUITES ?= app: app.api: app.forms: app.funcs: app.lifecycle: app.persist: app.process: app.run_context: app.runtime:handoff_runtime
 UI_DIR ?= frontend/wippy-form
 UI_ANSWERS_DIR ?= frontend/wippy-form-answers
 
-.PHONY: test test-runtime test-postgres bench lint install prepare clean build-ui ui-dev ui-dev-answers test-ui lint-ui check-ui verify
+.PHONY: test test-runtime test-postgres test-postgres-full bench lint install prepare clean build-ui ui-dev ui-dev-answers test-ui lint-ui check-ui verify
 
 test: clean
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
-	cd "$(TEST_DIR)" && WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test $(if $(filter 1,$(WIPPY_BENCH_EXACT_ALLOCATIONS)),--profiler) --config "$(TEST_CONFIG)" \
+	cd "$(TEST_DIR)" && TZ="$(TEST_TIMEZONE)" WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test $(if $(filter 1,$(WIPPY_BENCH_EXACT_ALLOCATIONS)),--profiler) --config "$(TEST_CONFIG)" \
 		-o "app:db:file=$(abspath $(TEST_DB))" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
@@ -73,22 +68,28 @@ test: clean
 
 test-runtime: TEST_FILTER = app.runtime:handoff_runtime
 test-runtime:
-	@test -n "$(FRAMEWORK_DIR)" || { echo 'Set FRAMEWORK_DIR to use the required runtime test runner' >&2; exit 1; }
 	$(MAKE) install
 	WIPPY_TEST_REQUIRE_CASES=1 $(MAKE) test TEST_FILTER="$(TEST_FILTER)"
 
 # The caller supplies a fresh disposable database; this target never drops one.
 test-postgres:
-	@test -n "$(FRAMEWORK_DIR)" || { echo 'Set FRAMEWORK_DIR to use the required runtime test runner' >&2; exit 1; }
 	$(MAKE) install
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
-	cd "$(TEST_DIR)" && TZ=UTC WIPPY_TEST_REQUIRE_CASES=1 WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test --config "$(TEST_CONFIG)" \
+	cd "$(TEST_DIR)" && TZ="$(TEST_TIMEZONE)" WIPPY_TEST_REQUIRE_CASES=1 WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test --config "$(TEST_CONFIG)" \
 		-o "app:db:kind=db.sql.postgres" -o "app:db:host=$(PGHOST)" -o "app:db:port=$(PGPORT)" \
 		-o "app:db:database=$(PGDATABASE)" -o "app:db:username=$(PGUSER)" -o "app:db:password=$(PGPASSWORD)" \
 		-o "app:db:options.sslmode=disable" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
-		test -- $(POSTGRES_SUITES)
+		$(POSTGRES_TEST_OVERRIDES) \
+		$(if $(strip $(POSTGRES_TEST_FILTER)),test -- $(POSTGRES_TEST_FILTER))
+
+# Release validation executes every suite rather than only persistence handoff.
+# Benchmarks are opt-in workloads run by make bench; keep strict case checks
+# for every normal suite without treating intentionally skipped workloads as failures.
+test-postgres-full: POSTGRES_TEST_OVERRIDES = -o app.runtime:handoff_benchmark:meta.type=benchmark -o app.runtime:metadata_benchmark:meta.type=benchmark
+test-postgres-full: POSTGRES_TEST_FILTER =
+test-postgres-full: test-postgres
 
 bench:
 	@set -eu; run_benchmark() { \
@@ -148,3 +149,9 @@ check-ui:
 	node scripts/check-ui.mjs
 
 verify: install test lint test-ui lint-ui check-ui
+
+# Require the admission capability in either published dependencies or an explicit source composition.
+.PHONY: test-admission
+test-admission:
+	$(MAKE) install
+	WIPPY_TEST_REQUIRE_ADMISSION=1 $(MAKE) test TEST_FILTER=app.persist:checkpoint_repo_test

@@ -186,6 +186,139 @@ entries:
     method: handoff
     modules: [store, json, time]
 
+  - name: checkpoint_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-help
+    prompt: Finish the user's document task, using tool results and checkpoint progress.
+    tools: [app.runtime:checkpoint_edit]
+    memory_contract:
+      implementation_id: app.runtime:checkpoint_memory
+      options:
+        min_conversation_length: 2
+        recall_cooldown: 0
+
+  - name: checkpoint_edit
+    kind: function.lua
+    meta:
+      type: tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: checkpoint_edit
+    modules: [store, time]
+
+  - name: checkpoint_summary
+    kind: function.lua
+    source: file://fixtures.lua
+    method: checkpoint_summary
+    modules: [store, time]
+
+  - name: checkpoint_recall
+    kind: function.lua
+    source: file://fixtures.lua
+    method: checkpoint_recall
+    modules: [store, time]
+
+  - name: checkpoint_memory
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:memory
+        methods:
+          recall: app.runtime:checkpoint_recall
+
+  - name: prefix_model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-runtime-prefix
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.runtime:provider
+        provider_model: prefix
+
+  - name: prefix_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Pack the user's document with the edit tool, then answer.
+    tools: [app.runtime:checkpoint_edit]
+    traits:
+      - wippy.agent.traits:time_aware
+      - app.runtime:prefix_lifecycle_trait
+    memory_contract:
+      implementation_id: app.runtime:checkpoint_memory
+      options:
+        min_conversation_length: 1
+        recall_cooldown: 0
+
+  - name: parallel_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Run both edits, then answer.
+    tools: [app.runtime:checkpoint_edit]
+
+  - name: time_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Answer with the current time.
+    traits:
+      - wippy.agent.traits:time_aware
+
+  - name: prefix_lifecycle
+    kind: function.lua
+    source: file://fixtures.lua
+    method: prefix_lifecycle
+    modules: [store, time]
+
+  - name: prefix_lifecycle_binding
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:lifecycle
+        methods:
+          apply: app.runtime:prefix_lifecycle
+
+  - name: prefix_lifecycle_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      name: Prefix lifecycle notes
+    data:
+      behaviors:
+        - id: prefix_notes
+          kind: policy
+          handles: [activate, before_step]
+          handlers:
+            lifecycle: app.runtime:prefix_lifecycle_binding
+
+  - name: stable_prefix_runtime
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: stable_prefix
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+      framework_capabilities: app.runtime:framework_capabilities
+
   - name: failing_tool
     kind: function.lua
     meta:
@@ -208,6 +341,77 @@ entries:
     method: malformed_effects
     modules: [store, json, time]
 
+  - name: checkpoint_runtime
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: checkpoint
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+      framework_capabilities: app.runtime:framework_capabilities
+      agent: wippy.agent:agent
+      prompt: wippy.llm:prompt
+
+  - name: framework_capabilities
+    kind: library.lua
+    source: file://framework_capabilities.lua
+    imports:
+      agent: wippy.agent:agent
+      prompt: wippy.llm:prompt
+
+  - name: stream_model
+    kind: registry.entry
+    meta:
+      type: llm.model
+      name: session-runtime-stream
+      capabilities: [generate, tool_use]
+    max_tokens: 4096
+    output_tokens: 256
+    providers:
+      - id: app.runtime:provider
+        provider_model: stream
+
+  - name: streamer
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Session runtime streamer
+    model: session-runtime-stream
+    prompt: Answer the question.
+
+  - name: session_readiness
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-runtime
+      timeout: 60s
+    source: file://handoff_test.lua
+    method: readiness
+    modules: [store, security, uuid, time, json, env]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      wait_for_boot: app:wait_for_boot
+      benchmark_report: app.runtime:benchmark_report
+      framework_capabilities: app.runtime:framework_capabilities
+
   - name: handoff_runtime
     kind: function.lua
     meta:
@@ -227,8 +431,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       wait_for_boot: app:wait_for_boot
       benchmark_report: app.runtime:benchmark_report
-      agent: wippy.agent:agent
-      prompt: wippy.llm:prompt
+      framework_capabilities: app.runtime:framework_capabilities
 
   - name: handoff_benchmark
     kind: function.lua
@@ -249,8 +452,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       wait_for_boot: app:wait_for_boot
       benchmark_report: app.runtime:benchmark_report
-      agent: wippy.agent:agent
-      prompt: wippy.llm:prompt
+      framework_capabilities: app.runtime:framework_capabilities
 
   - name: metadata_benchmark
     kind: function.lua
@@ -260,7 +462,7 @@ entries:
       timeout: 180s
     source: file://metadata_benchmark.lua
     method: run
-    modules: [security, uuid, time, env]
+    modules: [security, uuid, time, env, sql]
     imports:
       test: wippy.test:test
       writer: wippy.session.persist:writer

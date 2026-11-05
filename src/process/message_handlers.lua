@@ -8,11 +8,15 @@ local context_attachments = require("context_attachments")
 local tool_caller = require("tool_caller")
 local output = require("output")
 local lifecycle_runtime = require("lifecycle_runtime")
+local lifecycle_controller = require("lifecycle_controller")
 local tools = require("tools")
 local control_handlers = require("control_handlers")
+local session_handlers = require("session_handlers")
 local answer_admission = require("answer_admission")
 local message_repo = require("message_repo")
-local logger = require("logger"):named("session.messages")
+local turn_context = require("turn_context")
+local time = require("time")
+local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
     session_id: string,
@@ -34,6 +38,7 @@ type SessionContext = {
     turn_generation: number?,
     interaction: any?,
     stop_commit_channel: any?,
+    coordinator: any?,
     input_apply_batch: any?,
     activate_attention_turn: any?,
     prepare_attention_prompt: any?,
@@ -65,9 +70,23 @@ type ToolWrapperExecutionContext = {
     run_context: table?,
 }
 
+local function report_lifecycle_errors(ctx, phase, agent, lifecycle_errors)
+    local first = lifecycle_errors[1]
+    logger:warn("lifecycle binding reported non-strict failure", {
+        session_id = ctx.session_id,
+        phase = phase,
+        agent_id = agent and agent.id,
+        error_count = #lifecycle_errors,
+        binding_id = type(first) == "table" and first.binding_id or nil,
+        trait_id = type(first) == "table" and first.trait_id or nil,
+        error = type(first) == "table" and tostring(first.error or "") or nil,
+    })
+end
+
 local message_handlers = {
     _prompt_builder = nil :: any,
     _lifecycle_runtime = nil :: { apply: (bindings: any, payload: any) -> (table?, string?) }?,
+    _report_lifecycle_errors = report_lifecycle_errors,
 }
 message_handlers._context_staging = require('context_staging_repo')
 
@@ -145,6 +164,7 @@ local REASON = {
     CONTEXT_LIMIT_REACHED = "context_limit_reached",
     MAX_ITERATIONS_REACHED = "max_iterations_reached",
     HOST_FAILED = "host_failed",
+    STOP_REQUESTED = "stop_requested",
     AGENT_SWITCH = "agent_switch",
     SESSION_FINISHED = "session_finished",
 }
@@ -246,29 +266,108 @@ local function apply_lifecycle(ctx: SessionContext, phase: string, agent: any?, 
         run_context = run_context_ref(ctx, agent_ref, host),
     } :: LifecyclePayload
 
-    return (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
-end
+    local result, err = (message_handlers._lifecycle_runtime or lifecycle_runtime).apply(agent.bindings, payload)
+    if err then return result, err end
 
-local function append_lifecycle_messages(builder: any, result: table?)
-    if not builder or type(result) ~= "table" or type(result.messages) ~= "table" then
-        return
+    -- Non-strict binding failures are intentionally non-fatal to the host. They
+    -- still need a structured receipt: otherwise a lifecycle provider can fail
+    -- invisibly and leave an operator with no boundary-level evidence.
+    if type(result) == "table" and type(result.errors) == "table" and #result.errors > 0 then
+        (message_handlers._report_lifecycle_errors or report_lifecycle_errors)(ctx, phase, agent, result.errors)
     end
 
+    return result, nil
+end
+
+-- A note sent with a step: a lifecycle message or a context note the agent
+-- returned. The step sends it after the history, and the host commits it there
+-- in one batch with the step output, so the next request replays it in place.
+type StepNote = {
+    type: string,
+    content: string,
+    metadata: table,
+}
+
+local NOTE_TYPES = {
+    system = consts.MSG_TYPE.SYSTEM,
+    developer = consts.MSG_TYPE.DEVELOPER,
+}
+
+-- Model text and notes are stored only when they say something; providers
+-- reject whitespace-only text blocks on every later request.
+local function has_text(value: any): boolean
+    return type(value) == "string" and value:find("%S") ~= nil
+end
+
+-- What a note may carry from its source; every other key is host state.
+local NOTE_METADATA_KEYS = { "memory_ids" }
+
+local function note_metadata(source: any, op: any, positional: boolean): table
+    local metadata = {}
+    if type(source) == "table" then
+        for _, key in ipairs(NOTE_METADATA_KEYS) do metadata[key] = source[key] end
+    end
+    metadata.source_id = op.message_id
+    if positional then metadata.preserve_position = true end
+    return metadata
+end
+
+-- Lifecycle messages are host notes: a user or assistant role would put words
+-- in either party's mouth, so the session accepts only developer and system.
+local function lifecycle_notes(result: table?, phase: string, agent: any, op: any): ({StepNote}?, string?)
+    local notes: {StepNote} = {}
+    if type(result) ~= "table" or type(result.messages) ~= "table" then
+        return notes, nil
+    end
     for _, message in ipairs(result.messages) do
         if type(message) == "table" then
             local content = message.content or message.text or message.data
-            if type(content) == "string" and content ~= "" then
+            if has_text(content) then
                 local role = message.role or message.type or "developer"
-                if role == "system" and type(builder.add_system) == "function" then
-                    builder:add_system(content)
-                elseif role == "user" and type(builder.add_user) == "function" then
-                    builder:add_user(content)
-                elseif role == "assistant" and type(builder.add_assistant) == "function" then
-                    builder:add_assistant(content, message.metadata)
-                elseif type(builder.add_developer) == "function" then
-                    builder:add_developer(content, message.metadata)
+                local note_type = NOTE_TYPES[role]
+                if not note_type then
+                    return nil, string.format("Lifecycle %s message for agent %s has role '%s'; "
+                        .. "lifecycle messages must be developer or system notes", phase, tostring(agent.id), tostring(role))
                 end
+                local metadata = note_metadata(message.metadata, op, true)
+                metadata.lifecycle_phase = phase
+                metadata.system_action = consts.SYSTEM_ACTIONS.LIFECYCLE_NOTE
+                table.insert(notes, { type = note_type, content = content, metadata = metadata })
             end
+        end
+    end
+    return notes, nil
+end
+
+-- Context notes are prompt messages the agent sent after the conversation.
+local function context_notes(result: any, op: any): ({StepNote}?, string?)
+    local notes: {StepNote} = {}
+    if type(result) ~= "table" or type(result.context_notes) ~= "table" then
+        return notes, nil
+    end
+    for index, message in ipairs(result.context_notes) do
+        local note_type = type(message) == "table" and NOTE_TYPES[message.role] or nil
+        local content = type(message) == "table" and message.content or nil
+        if type(content) == "table" and #content == 1 and type(content[1]) == "table"
+            and content[1].type == "text" then
+            content = content[1].text
+        end
+        if (note_type ~= consts.MSG_TYPE.DEVELOPER and note_type ~= consts.MSG_TYPE.SYSTEM)
+            or type(content) ~= "string" then
+            return nil, "Context note " .. tostring(index) .. " is not a single-text developer or system message"
+        end
+        table.insert(notes, { type = note_type :: string, content = content,
+            metadata = note_metadata(message.metadata, op, true) })
+    end
+    return notes, nil
+end
+
+local function append_notes(builder: any, notes: {StepNote})
+    for _, note in ipairs(notes) do
+        if note.type == consts.MSG_TYPE.SYSTEM then
+            builder:add_system(note.content, note.metadata)
+        else
+            builder:add_developer(note.content, note.metadata)
         end
     end
 end
@@ -291,6 +390,8 @@ local function current_agent(ctx: AttentionToolContext): any?
     return nil
 end
 
+local deactivation_refs
+
 function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: string?, outcome: table?): (table?, string?)
     ctx.lifecycle_state = ctx.lifecycle_state or {}
     local state = ctx.lifecycle_state
@@ -298,81 +399,97 @@ function message_handlers.deactivate_current_agent(ctx: SessionContext, reason: 
         return { applied = 0, skipped = 0 }, nil
     end
 
-    local agent = state.active_agent or current_agent(ctx)
-    if not agent then
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-        return { applied = 0, skipped = 0 }, nil
-    end
+    local fallback_agent = state.active_agent == nil and current_agent(ctx) or nil
+    local fallback_ref = agent_ref_from(ctx, fallback_agent)
 
-    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, agent, {
-        reason = reason or REASON.SESSION_FINISHED,
-        outcome = outcome or {
-            state = OUTCOME.COMPLETED,
-            reason = reason or REASON.SESSION_FINISHED
-        }
+    local transition, err = lifecycle_controller.deactivate(state, {
+        fallback = fallback_agent and {
+            id = fallback_ref.id,
+            model = fallback_ref.model,
+            agent = fallback_agent,
+            variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+        } or nil,
+        payload = function(_phase, _descriptor)
+            local payload = {
+                reason = reason or REASON.SESSION_FINISHED,
+                outcome = outcome or {
+                    state = OUTCOME.COMPLETED,
+                    reason = reason or REASON.SESSION_FINISHED
+                }
+            }
+            payload.refs = deactivation_refs(state)
+            return payload
+        end,
+        dispatch = function(active_agent, phase, payload)
+            return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
+        end
     })
-
-    if not err then
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-    end
-
-    return result, err
+    if not err and transition.deactivation then state.completed_turn_span = nil end
+    return transition.deactivation or { applied = 0, skipped = 0 }, err
 end
 
 local function ensure_agent_activated(ctx: SessionContext, agent: any, refs: table?): (table?, string?)
     ctx.lifecycle_state = ctx.lifecycle_state or {}
     local state = ctx.lifecycle_state
     local agent_ref = agent_ref_from(ctx, agent)
-    local same_agent = state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model
-
-    if same_agent then
-        state.active_agent = agent
-        return { applied = 0, skipped = 0 }, nil
+    local fallback_agent = nil
+    if state.active_agent_id and not state.active_agent then
+        fallback_agent = current_agent(ctx)
+        if not fallback_agent and state.active_agent_id == agent_ref.id and state.active_model == agent_ref.model then
+            fallback_agent = agent
+        end
     end
-
-    if state.active_agent_id then
-        local previous_agent = state.active_agent or current_agent(ctx)
-        if previous_agent then
-            local _, deactivate_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.DEACTIVATE, previous_agent, {
-                reason = REASON.AGENT_SWITCH,
+    local fallback_ref = agent_ref_from(ctx, fallback_agent)
+    local transition, err = lifecycle_controller.activate(state, {
+        id = agent_ref.id,
+        model = agent_ref.model,
+        agent = agent,
+        variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+    }, {
+        fallback = fallback_agent and {
+            id = fallback_ref.id,
+            model = fallback_ref.model,
+            agent = fallback_agent,
+            variant = ctx.agent_ctx and ctx.agent_ctx.active_traits
+        } or nil,
+        payload = function(phase, _descriptor)
+            if phase == lifecycle_runtime.PHASE.DEACTIVATE then
+                local payload = {
+                    reason = REASON.AGENT_SWITCH,
+                    outcome = {
+                        state = OUTCOME.CONTINUES,
+                        reason = REASON.AGENT_SWITCH
+                    }
+                }
+                payload.refs = deactivation_refs(state)
+                return payload
+            end
+            return {
+                reason = "agent_loaded",
+                refs = refs,
                 outcome = {
                     state = OUTCOME.CONTINUES,
-                    reason = REASON.AGENT_SWITCH
+                    reason = "agent_loaded"
                 }
-            })
-            if deactivate_err then
-                return nil, deactivate_err
-            end
+            }
+        end,
+        dispatch = function(active_agent, phase, payload)
+            return apply_lifecycle(ctx :: SessionContext, phase, active_agent, payload)
         end
-
-        state.active_agent_id = nil
-        state.active_model = nil
-        state.active_agent = nil
-    end
-
-    local result, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.ACTIVATE, agent, {
-        reason = "agent_loaded",
-        refs = refs,
-        outcome = {
-            state = OUTCOME.CONTINUES,
-            reason = "agent_loaded"
-        }
     })
     if err then
-        return result, err
+        return (transition.activation :: table?), err
     end
 
-    state.active_agent_id = agent_ref.id
-    state.active_model = agent_ref.model
-    state.active_agent = agent
-    return result, nil
+    if transition.deactivation then state.completed_turn_span = nil end
+
+    return transition.activation or { applied = 0, skipped = 0 }, nil
 end
 
-local function outcome_from_agent_result(result: any): table
+local function step_outcome(result: any): table
+    if result and result.stopped then
+        return { state = OUTCOME.COMPLETED, reason = REASON.STOP_REQUESTED }
+    end
     if result and result.truncated then
         return {
             state = result.truncation_reason == "empty_output" and OUTCOME.FAILED or OUTCOME.CONTINUES,
@@ -395,6 +512,39 @@ local function outcome_from_agent_result(result: any): table
         state = OUTCOME.COMPLETED,
         reason = REASON.NO_TOOLS_REQUIRED
     }
+end
+
+local function outcome_from_agent_result(result: any): table
+    local outcome = step_outcome(result)
+    if result and result.memory_recall_error then
+        outcome.memory_recall_error = result.memory_recall_error
+    end
+    return outcome
+end
+
+-- Runs after_persist for a committed assistant record. A strict binding error is
+-- returned to the caller, which settles it through the fatal path: the record and
+-- any tool intents are already stored.
+local function apply_after_persist(ctx: SessionContext, op: any, agent: any, response_id: string,
+    event_id: string, result: any): string?
+    if not lifecycle_runtime.subscribed(agent.bindings, lifecycle_runtime.PHASE.AFTER_PERSIST) then
+        return nil
+    end
+    local _, err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_PERSIST, agent, {
+        reason = "agent_step",
+        refs = {
+            message_id = op.message_id,
+            response_id = response_id,
+            request_id = op.request_id,
+            event_id = event_id
+        },
+        outcome = outcome_from_agent_result(result)
+    })
+    if err then
+        ctx.upstream:message_error(response_id, consts.ERROR_CODES.AGENT_ERROR, err)
+        return err
+    end
+    return nil
 end
 
 -- LOOP GUARDS. One turn is one user message and the chain of agent steps it triggers
@@ -444,11 +594,16 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     state.last_round = nil
     state.last_round_failed = false
     state.last_round_tools = nil
+    state.route = nil
+    -- Presentation obligations belong only to the turn that created them.
+    -- An interrupted/cancelled turn must never render an old artifact in a
+    -- later user's answer.
+    state.pending_inline_artifacts = nil
     state.active = true
     return state
 end
 
-local CONTROL_TABLE_FIELDS = { "artifacts", "context", "memory", "config" }
+local CONTROL_TABLE_FIELDS = { "artifacts", "forms", "context", "memory", "config" }
 
 local function control_shape_error(control: any): string?
     if control == nil then return nil end
@@ -469,8 +624,9 @@ local function is_turn_stopped(ctx: any): boolean
         or (state and state.failed) or false)
 end
 
-local function settle_cancelled_call(ctx, call, message_id, call_type, validated)
-    local reason = "Session stopped before the call executed"
+local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason)
+    call_type = call_type or call.type
+    reason = reason or "Session stopped before the call executed"
     local _, err = ctx.writer:update_message_meta(message_id, {
         status = consts.FUNC_STATUS.CANCELLED, result = reason,
     })
@@ -485,9 +641,10 @@ local function settle_cancelled_call(ctx, call, message_id, call_type, validated
         private = private or (schema and schema.meta and schema.meta.private)
     end
     if not private and not delegation then
+        -- outcome matches the REST projection in api/session_messages.lua.
         ctx.upstream:send_message_update(call.id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
             message_id = message_id, call_id = call.id, function_name = call.name,
-            error = reason, status = consts.FUNC_STATUS.CANCELLED,
+            error = reason, outcome = consts.FUNC_STATUS.CANCELLED,
         })
     end
     return true
@@ -512,6 +669,110 @@ local function take_over_handoff(ctx: any): boolean
     if not state or not state.handoff or is_turn_stopped(ctx) then return false end
     state.handoff = nil
     return true
+end
+
+-- Lifecycle deactivation is deliberately deferred until the successor takes a
+-- real turn. Keep the completed outgoing turn bounded independently of the
+-- moving checkpoint cursor, so a lifecycle consumer neither loses its source
+-- user request nor absorbs the successor input that caused the switch.
+--
+-- `last(1)` is backed by the chronology index. Do not replace this with an
+-- all-history read: sessions can be arbitrarily long and a range consumer
+-- needs only the immediate predecessor / final row.
+--
+-- A form answer the session has not admitted yet is skipped: admission moves
+-- that row to the end of the history, so it cannot bound a span. The window
+-- grows only past such rows.
+local function latest_message_id(ctx): (string?, boolean, boolean)
+    if not ctx.reader or type(ctx.reader.messages) ~= "function" then return nil, false, false end
+    local window = 1
+    while true do
+        local query = ctx.reader:messages()
+        if not query or type(query.last) ~= "function" or type(query.all) ~= "function" then
+            return nil, false, false
+        end
+        local messages, err = query:last(window):all()
+        if err or type(messages) ~= "table" then return nil, false, false end
+        if #messages == 0 then return nil, true, true end
+        for index = #messages, 1, -1 do
+            local message = messages[index]
+            if not message_repo.is_pending_answer(message) then
+                if type(message.message_id) == "string" and message.message_id ~= "" then
+                    return message.message_id, true, false
+                end
+                return nil, false, false
+            end
+        end
+        if #messages < window then return nil, true, true end
+        window = window * 4
+    end
+end
+
+-- Where a turn's lifecycle span starts: the newest row before it. A caller
+-- that admits rows for the turn reads this first.
+function message_handlers.turn_anchor(ctx): table
+    local id, known, empty = latest_message_id(ctx)
+    return { id = id, known = known, empty = empty }
+end
+
+local function record_completed_turn_span(ctx, state): string?
+    if not state or not state.active then return end
+    local lifecycle = ctx.lifecycle_state
+    if type(lifecycle) ~= "table" or type(lifecycle.active_agent_id) ~= "string"
+        or lifecycle.active_agent_id == "" then return end
+    local prior = lifecycle.completed_turn_span
+    local same_active_agent = type(prior) == "table"
+        and prior.agent_id == lifecycle.active_agent_id
+        and prior.model == lifecycle.active_model
+        and prior.revision == lifecycle.active_revision
+    if state.span_anchor_known ~= true and not same_active_agent then
+        lifecycle.completed_turn_span = nil
+        return
+    end
+    local to_id, known = latest_message_id(ctx)
+    if not known or not to_id then
+        -- Retain the activation's original anchor for a later successful
+        -- completion, but never expose an earlier end as the current end.
+        if same_active_agent then prior.to_id = nil
+        else lifecycle.completed_turn_span = nil end
+        return
+    end
+    -- A lifecycle activation can cover several completed user turns before a
+    -- real successor step finally retires it. Preserve the first exclusive
+    -- anchor across that run, while moving only the inclusive end forward.
+    -- A restart has no active lifecycle state, so it intentionally emits no
+    -- guessed span rather than widening a range from unrelated history.
+    local from_id = state.span_from_id
+    local open_start = state.span_open_start == true
+    if same_active_agent then
+        from_id = prior.from_id
+        open_start = prior.open_start == true
+    end
+    lifecycle.completed_turn_span = {
+        agent_id = lifecycle.active_agent_id,
+        model = lifecycle.active_model,
+        revision = lifecycle.active_revision,
+        from_id = from_id,
+        open_start = open_start,
+        to_id = to_id,
+    }
+    return to_id
+end
+
+deactivation_refs = function(state)
+    local span = type(state) == "table" and state.completed_turn_span or nil
+    if type(span) ~= "table" or span.agent_id ~= state.active_agent_id
+        or span.model ~= state.active_model or span.revision ~= state.active_revision
+        or type(span.to_id) ~= "string" or span.to_id == "" then
+        return nil
+    end
+    local range = { to_id = span.to_id }
+    if type(span.from_id) == "string" and span.from_id ~= "" then
+        range.from_id = span.from_id
+    elseif span.open_start ~= true then
+        return nil
+    end
+    return { deactivation_range = range }
 end
 
 -- Whether the current turn ended by creating a form (control_forms keys its
@@ -566,6 +827,7 @@ function message_handlers.complete_turn(ctx)
     if not ok then
         return nil, err or "Failed to persist turn completion"
     end
+    record_completed_turn_span(ctx, state)
     ctx.turn_state = candidate_state
     ctx.status = target_status
     input_policy.accept_committed(ctx, interaction)
@@ -600,6 +862,9 @@ function message_handlers.finish_turn(ctx, opts)
     if opts and opts.defer_completion and ends_normally and ctx.status == consts.STATUS.RUNNING
         and coordinator and coordinator.state == "running" then
         ctx.completion_deferred = true
+        -- complete_turn does not run when the next turn replaces this one, and
+        -- the answers admitted next must not end up in this turn's span.
+        record_completed_turn_span(ctx, state)
         return { completed = true, next_ops = {} }
     end
     local completed, complete_err = message_handlers.complete_turn(ctx)
@@ -610,9 +875,14 @@ end
 -- Starts a turn at `message_id` (a row that is already stored) the way an
 -- idle typed message does in handle_message: the running status and the
 -- new interaction are persisted first, then the turn state follows. Used for
--- turns that answer form answers or steering left after a form.
-function message_handlers.start_turn(ctx, message_id: any)
-    local next_turn = { active = true, steps = 0, repeated_calls = 0, message_id = message_id }
+-- turns that answer form answers or steering left after a form. `anchor`
+-- (turn_anchor) is the turn's span start when rows were admitted for it first.
+function message_handlers.start_turn(ctx, message_id: any, anchor: any?)
+    local prior = anchor or message_handlers.turn_anchor(ctx)
+    local next_turn = {
+        active = true, steps = 0, repeated_calls = 0, message_id = message_id,
+        span_from_id = prior.id, span_anchor_known = prior.known, span_open_start = prior.empty,
+    }
     local interaction = interaction_for(ctx, next_turn, consts.STATUS.RUNNING, false)
     local ok, err = ctx.writer:update_meta({ status = consts.STATUS.RUNNING, meta = { interaction = interaction } })
     if not ok then return nil, err or "Failed to persist turn start" end
@@ -759,7 +1029,62 @@ local function error_text(err: any): string
     if type(err) == "table" and type(err.message) == "string" then
         return err.message
     end
+    if type(err) == "table" then
+        local encoded = json.encode(err)
+        if encoded then return encoded end
+    end
     return tostring(err)
+end
+
+-- Inline artifacts are created by a tool round, then normally referenced by
+-- the model in its following response. A terminal response carries the
+-- system-issued references as presentation metadata as well. The renderer owns
+-- placement: it preserves an authored component when it rendered one and
+-- mounts a missing reference outside the Markdown body.  Session must not
+-- append markup to model text: Markdown may legally end in an unterminated
+-- fence, quote, or HTML context.
+local function terminal_inline_artifact_presentation(ctx: SessionContext,
+    tool_call_count: number): (any?, {any}?)
+    local state = ctx.turn_state
+    local pending = state and state.pending_inline_artifacts
+    if type(pending) ~= "table" or #pending == 0 or tool_call_count > 0 then return nil, nil end
+
+    local refs = {}
+    local seen = {}
+    for _, artifact in ipairs(pending) do
+        local artifact_id = type(artifact) == "table" and artifact.artifact_id or nil
+        if type(artifact_id) == "string" and artifact_id ~= "" and not seen[artifact_id] then
+            refs[#refs + 1] = { artifact_id = artifact_id }
+            seen[artifact_id] = true
+        end
+    end
+    if #refs == 0 then return nil, nil end
+    return { artifact_refs = refs }, pending
+end
+
+local function commit_inline_artifacts(ctx: SessionContext, pending: {any}?)
+    if pending and ctx.turn_state and ctx.turn_state.pending_inline_artifacts == pending then
+        ctx.turn_state.pending_inline_artifacts = nil
+    end
+end
+
+local function queue_inline_artifacts(ctx: SessionContext, created_artifacts: any)
+    if type(created_artifacts) ~= "table" then return end
+    local pending = nil
+    for _, artifact in ipairs(created_artifacts) do
+        if type(artifact) == "table" and artifact.inline == true
+            and type(artifact.artifact_id) == "string" and artifact.artifact_id ~= "" then
+            pending = pending or {}
+            table.insert(pending, { artifact_id = artifact.artifact_id })
+        end
+    end
+    if pending and #pending > 0 then
+        local state = turn_state(ctx)
+        state.pending_inline_artifacts = state.pending_inline_artifacts or {}
+        for _, artifact in ipairs(pending) do
+            table.insert(state.pending_inline_artifacts, artifact)
+        end
+    end
 end
 
 -- Ends only the current turn after an agent, provider, or configuration failure; the
@@ -780,6 +1105,7 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     input_policy.clear_turn(ctx)
     ctx.upstream:message_error(response_id, code, detail)
 
+    local memory_recall_error = opts and opts.memory_recall_error
     if opts and opts.after_step then
         apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
             reason = REASON.HOST_FAILED,
@@ -790,7 +1116,8 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
             },
             outcome = {
                 state = OUTCOME.FAILED,
-                reason = REASON.HOST_FAILED
+                reason = REASON.HOST_FAILED,
+                memory_recall_error = memory_recall_error
             }
         })
     end
@@ -798,8 +1125,10 @@ local function fail_turn(ctx: SessionContext, op: any, agent: any, response_id: 
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: " .. detail, {
         system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
         error_code = code,
+        error_details = opts and opts.error_details,
         source_id = op.message_id,
-        response_id = response_id
+        response_id = response_id,
+        memory_recall_error = memory_recall_error
     })
 
     return {
@@ -958,6 +1287,16 @@ function message_handlers.handle_message(ctx, op)
         return acknowledge_duplicate(accepted_message.message_id, accepted_message)
     end
 
+    if not validate_file_references(data.file_uuids, ctx.user_id, ctx.session_id) then
+        return reject_file_references(ctx, op)
+    end
+    if not has_text(data.text) and not (type(attachments) == "table" and #attachments > 0)
+        and not (type(data.file_uuids) == "table" and #data.file_uuids > 0) then
+        local code = consts.ERROR_CODES.EMPTY_MESSAGE
+        if op.request_id then ctx.upstream:command_error(op.request_id, code, "Message has no text or attachments") end
+        return { completed = true, rejected = true, error = code }
+    end
+
     local active = ctx.turn_state and ctx.turn_state.active == true or false
     local interaction = input_policy.resolve(ctx, current_agent(ctx))
     if not interaction.can_send then
@@ -965,9 +1304,8 @@ function message_handlers.handle_message(ctx, op)
             "Session is not accepting messages right now") end
         return { completed = true }
     end
-    if not validate_file_references(data.file_uuids, ctx.user_id, ctx.session_id) then
-        return reject_file_references(ctx, op)
-    end
+    local prior_id, prior_known, prior_empty = nil, false, false
+    if not active then prior_id, prior_known, prior_empty = latest_message_id(ctx) end
 
     local answers: {any} = {}
     if not active and not op.exiting and not answer_admission.finishing(ctx) then
@@ -997,7 +1335,11 @@ function message_handlers.handle_message(ctx, op)
         if type(ctx.writer.admit_message) ~= "function" then
             return nil, "Session writer does not support atomic admission"
         end
-        next_turn = { active = true, steps = 0, repeated_calls = 0 }
+        next_turn = {
+            active = true, steps = 0, repeated_calls = 0,
+            span_from_id = prior_id, span_anchor_known = prior_known,
+            span_open_start = prior_empty,
+        }
         local next_interaction = interaction_for(ctx, next_turn, consts.STATUS.RUNNING, false)
         message_id, err, duplicate = ctx.writer:admit_message(consts.MSG_TYPE.USER, text, metadata, {
             status = consts.STATUS.RUNNING,
@@ -1114,6 +1456,8 @@ end
 function message_handlers.agent_step(ctx, op)
     local handed_off = take_over_handoff(ctx)
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
+    local recovered, recovery_err = message_handlers.recover_behavior_controls(ctx)
+    if not recovered then return nil, recovery_err end
     local response_id, id_err = uuid.v7()
     if id_err then
         return nil, "Failed to generate response ID: " .. tostring(id_err)
@@ -1125,15 +1469,6 @@ function message_handlers.agent_step(ctx, op)
         op.from_user and op.message_id or nil)
     if not input_updates then return nil, input_err end
     local prompt_options = { input_overrides = input_updates }
-    local builder, err
-    if type(ctx.prepare_attention_prompt) == "function" then
-        builder, err = ctx.prepare_attention_prompt(prompt_options)
-    else
-        builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
-    end
-    if not builder then
-        return nil, "Failed to build prompt: " .. tostring(err)
-    end
 
     if not ctx.config.agent_id or ctx.config.agent_id == "" then
         return fail_turn(ctx, op, nil, response_id, consts.ERROR_CODES.AGENT_ERROR,
@@ -1177,8 +1512,38 @@ function message_handlers.agent_step(ctx, op)
     end
 
     if handed_off then
+        state.route = nil
         local _, policy_err = input_policy.publish(ctx :: any, agent)
         if policy_err then return nil, policy_err end
+    end
+
+    -- A turn gets one time note, from the first agent that declares time context:
+    -- the one the user message reached, or a successor after a handoff. It is
+    -- rendered here so a bad configuration fails before any side effect, and
+    -- stored only once the turn has passed its gates. A retried turn or a reopened
+    -- session replays the stored note and its minute.
+    local turn_note = nil
+    if op.from_user or handed_off then
+        local note, note_err = turn_context.render(agent.agent_options, time.now())
+        if note_err then
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+                "Failed to render turn context: " .. tostring(note_err))
+        end
+        if note then
+            local stored, stored_err = ctx.reader:get_turn_note(op.message_id)
+            if stored_err then return nil, stored_err end
+            if not stored then turn_note = note end
+        end
+    end
+
+    local builder, err
+    if type(ctx.prepare_attention_prompt) == "function" then
+        builder, err = ctx.prepare_attention_prompt(prompt_options)
+    else
+        builder, err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+    end
+    if not builder then
+        return nil, "Failed to build prompt: " .. tostring(err)
     end
 
     local session_context, ctx_err = ctx.reader:get_full_context()
@@ -1194,7 +1559,17 @@ function message_handlers.agent_step(ctx, op)
     if activate_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_err)
     end
-    append_lifecycle_messages(builder, activate_result)
+    -- Activation fires once, so its notes are stored when they fire: they outlive
+    -- a step whose output is discarded.
+    local activation_notes, activate_notes_err = lifecycle_notes(activate_result, lifecycle_runtime.PHASE.ACTIVATE, agent, op)
+    if not activation_notes then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, activate_notes_err)
+    end
+    if #activation_notes > 0 then
+        local stored, store_err = ctx.writer:add_notes(activation_notes)
+        if not stored then return nil, store_err end
+        append_notes(builder, activation_notes)
+    end
 
     local before_result, before_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.BEFORE_STEP, agent, {
         reason = "agent_step",
@@ -1210,7 +1585,10 @@ function message_handlers.agent_step(ctx, op)
     if before_err then
         return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_err)
     end
-    append_lifecycle_messages(builder, before_result)
+    local step_notes, before_notes_err = lifecycle_notes(before_result, lifecycle_runtime.PHASE.BEFORE_STEP, agent, op)
+    if not step_notes then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, before_notes_err)
+    end
 
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     ctx.input_apply_batch = input_updates
@@ -1228,12 +1606,107 @@ function message_handlers.agent_step(ctx, op)
     end
     if is_turn_blocked(ctx) then return { completed = true, next_ops = {} } end
     answer_admission.publish_applied_inputs(ctx, input_updates)
+    if turn_note then
+        -- Written before the model call, since continuation steps of this turn
+        -- replay it even when this step's output is discarded.
+        local metadata = { preserve_position = true, source_id = op.message_id,
+            system_action = consts.SYSTEM_ACTIONS.TURN_CONTEXT }
+        local _, write_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, turn_note, metadata)
+        if write_err then return nil, write_err end
+        builder:add_system(turn_note, metadata)
+    end
+    append_notes(builder, step_notes)
     ctx.upstream:response_beginning(response_id, op.message_id)
 
     local runtime_options = {
+        context_id = ctx.session_id,
         context = session_context,
-        stop_check = step_stop_check(ctx)
+        stop_check = step_stop_check(ctx),
+        cancel = ctx.coordinator and ctx.coordinator.cancel,
+        drop_stale_thinking = true,
+        -- Generation stays fixed when an inclusive checkpoint updates its anchor.
+        thinking_is_current = function(message, fingerprint)
+            local metadata = message.metadata or {}
+            return metadata.prefix_fingerprint == fingerprint
+                and metadata.generation_checkpoint_id ~= nil
+                and metadata.generation_checkpoint_id == (ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or "")
+        end,
     }
+
+    local checkpoint_op = {
+        agent_options = agent.agent_options,
+        checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+    }
+    local checkpoint_function_id, threshold, checkpoint_options, checkpoint_available =
+        session_handlers.resolve_checkpoint_config(ctx, checkpoint_op)
+    local checkpoint_next_ops = {}
+    if checkpoint_available and checkpoint_options.enabled ~= false then
+        runtime_options.checkpoint = {
+            token_threshold = threshold,
+            compact = function(info)
+                local messages, read_err = ctx.reader:messages():from_checkpoint():all()
+                if not messages then return nil, read_err end
+                local tail = nil
+                for _, message in ipairs(messages) do
+                    local metadata = message.metadata or {}
+                    local input = metadata.input
+                    if (message.type == consts.MSG_TYPE.FUNCTION or message.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+                        or message.type == consts.MSG_TYPE.DELEGATION) and metadata.status == consts.FUNC_STATUS.PENDING then
+                        return nil, "Cannot checkpoint an unsettled tool round"
+                    end
+                    -- Steering never anchors the cut: the exclusive boundary would
+                    -- leave it to the summary, out of the request that applies it.
+                    -- Nor does a pending form answer: admission moves that row
+                    -- to the end of the history.
+                    if type(input) ~= "table" and not message_repo.is_pending_answer(message) then
+                        tail = message
+                    end
+                end
+                local anchor_id = tail and tail.message_id
+                    or ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or op.message_id
+                local checkpoint_result, checkpoint_err = session_handlers.create_checkpoint(ctx, {
+                    checkpoint_function_id = checkpoint_function_id,
+                    checkpoint_bindings = checkpoint_op.checkpoint_bindings,
+                    checkpoint_options = checkpoint_options,
+                    checkpoint_id = anchor_id,
+                    message_id = anchor_id,
+                    exclusive = true,
+                    source_id = op.message_id,
+                    trigger_tokens = info.estimated_prompt_tokens,
+                    agent = { id = agent.id, model = agent.model },
+                    agent_options = agent.agent_options,
+                })
+                if not checkpoint_result then
+                    -- The threshold is a soft limit: a prompt that still fits is sent as
+                    -- it is, and the next step tries the checkpoint again.
+                    local reserved = tonumber(info.requested_output_tokens) or 0
+                    local window = tonumber(info.context_window)
+                    if window and window > 0 and (tonumber(info.estimated_prompt_tokens) or 0) + reserved > window then
+                        return nil, checkpoint_err
+                    end
+                    logger:warn("checkpoint failed; sending the current prompt", {
+                        session_id = ctx.session_id, error = error_text(checkpoint_err),
+                    })
+                    return builder
+                end
+                checkpoint_next_ops = checkpoint_result.next_ops or {}
+                local replacement, build_err
+                if type(ctx.prepare_attention_prompt) == "function" then
+                    replacement, build_err = ctx.prepare_attention_prompt(prompt_options)
+                else
+                    replacement, build_err = (message_handlers._prompt_builder or prompt_builder).from_session(ctx.reader, prompt_options)
+                end
+                if not replacement then return nil, build_err end
+                append_notes(replacement, step_notes)
+                return replacement
+            end,
+        }
+    end
+
+    if state.route ~= nil then
+        runtime_options.route = state.route
+    end
+
     if ctx.stream_target then
         runtime_options.stream_target = ctx.stream_target
     elseif ctx.upstream.conn_pid then
@@ -1243,20 +1716,76 @@ function message_handlers.agent_step(ctx, op)
         }
     end
 
-    local result, exec_err = agent:step(builder, runtime_options)
+    local result, exec_err, exec_details = agent:step(builder, runtime_options)
+    local memory_recall_error = type(result) == "table" and result.memory_recall_error or nil
     if exec_err or type(result) ~= "table" then
-        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR,
+        local error_code = consts.ERROR_CODES.AGENT_ERROR
+        local error_details = nil
+        if type(exec_details) == "table" and exec_details.error_type
+            and exec_details.error_type == consts.ERROR_CODES.CONTEXT_WINDOW then
+            error_code = exec_details.error_type
+            error_details = exec_details
+        end
+        return fail_turn(ctx, op, agent, response_id, error_code,
             exec_err or "Agent step returned no result", {
                 after_step = true,
-                tokens = type(result) == "table" and result.tokens or nil
+                error_details = error_details,
+                tokens = type(result) == "table" and result.tokens or nil,
+                memory_recall_error = memory_recall_error
             })
     end
+    local sent_notes, notes_err = context_notes(result, op)
+    if not sent_notes then
+        return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, notes_err, {
+            after_step = true, tokens = result.tokens, memory_recall_error = memory_recall_error })
+    end
+    for _, note in ipairs(sent_notes) do table.insert(step_notes, note) end
+
     if result.stopped then
-        ctx.upstream:invalidate_message(response_id)
+        local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+            reason = REASON.STOP_REQUESTED,
+            refs = {
+                message_id = op.message_id,
+                response_id = response_id,
+                request_id = op.request_id
+            },
+            outcome = {
+                state = OUTCOME.COMPLETED,
+                reason = REASON.STOP_REQUESTED,
+                memory_recall_error = memory_recall_error
+            }
+        })
+        if after_err then
+            return fail_turn(ctx, op, agent, response_id, consts.ERROR_CODES.AGENT_ERROR, after_err)
+        end
+        if has_text(result.result) then
+            local stored_id, _, store_err, stored_date = ctx.writer:add_response(result.result, {
+                source_id = op.message_id,
+                agent_id = ctx.config.agent_id,
+                model = ctx.config.model,
+                stopped = true,
+                generation_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or "",
+                memory_recall_error = memory_recall_error
+            }, {}, step_notes)
+            if store_err then return nil, store_err end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
+            ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
+                content = result.result,
+                using_tools = false,
+                date = stored_date
+            })
+        else
+            ctx.upstream:invalidate_message(response_id)
+        end
         return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
-    local _, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
+    if result.route_pin ~= nil then
+        state.route = result.route_pin
+    end
+
+    local after_result, after_err = apply_lifecycle(ctx, lifecycle_runtime.PHASE.AFTER_STEP, agent, {
         reason = "agent_step",
         refs = {
             message_id = op.message_id,
@@ -1282,26 +1811,34 @@ function message_handlers.agent_step(ctx, op)
     if result.truncated then
         local _, token_err = persist_token_usage(ctx, result.tokens)
         if token_err then return nil, token_err end
-        if result.result and result.result ~= "" then
-            local _, store_err, _, stored: any = ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, result.result, {
+        -- A truncated response is not terminal. Keep presentation refs for the
+        -- eventual tool-free answer rather than attaching them to partial text.
+        local truncation_notice = { type = consts.MSG_TYPE.DEVELOPER, content = (output :: any).TRUNCATION_MSG, metadata = {} }
+        if has_text(result.result) then
+            local stored_id, _, store_err, stored_date = ctx.writer:add_response(result.result, {
                 source_id = op.message_id,
                 agent_id = ctx.config.agent_id,
                 model = ctx.config.model,
                 tokens = result.tokens,
-                truncated = true
-            })
+                truncated = true,
+                generation_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID) or "",
+                memory_recall_error = memory_recall_error
+            }, {}, step_notes, { truncation_notice })
             if store_err then
                 return nil, store_err
             end
+            local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+            if persist_err then return nil, persist_err end
 
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
                 content = result.result,
                 using_tools = false,
-                date = type(stored) == "table" and stored.date or nil
+                date = stored_date
             })
+        else
+            ctx.writer:add_message(truncation_notice.type, truncation_notice.content, truncation_notice.metadata)
         end
 
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, (output :: any).TRUNCATION_MSG, {})
         if is_turn_blocked(ctx) then
             return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
         end
@@ -1320,6 +1857,19 @@ function message_handlers.agent_step(ctx, op)
                 }
             }
         }
+    end
+
+    local behavior_controls = {}
+    for _, phase_result in ipairs({ before_result or {}, after_result or {} }) do
+        for _, control in ipairs(phase_result.controls or {}) do behavior_controls[#behavior_controls + 1] = control end
+    end
+    local behavior_round = #behavior_controls > 0
+    for _, wrapper in ipairs(agent.tool_wrappers or {}) do
+        if wrapper.source == "behavior" then
+            for _, phase in ipairs(wrapper.phases or {}) do
+                if phase == "after_execute" then behavior_round = true end
+            end
+        end
     end
 
     local unified_tool_calls = {}
@@ -1392,7 +1942,12 @@ function message_handlers.agent_step(ctx, op)
 
     local assistant_message_id: any = nil
 
-    if (result.result and result.result ~= "") or (#unified_tool_calls > 0) or result.memory_recall then
+    local terminal_presentation, pending_inline_artifacts = terminal_inline_artifact_presentation(
+        ctx :: SessionContext, #unified_tool_calls)
+
+    local output_text = has_text(result.result) and result.result or ""
+    if output_text ~= "" or (#unified_tool_calls > 0)
+        or behavior_round or terminal_presentation then
         local current_checkpoint_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
 
         local metadata = {
@@ -1403,15 +1958,26 @@ function message_handlers.agent_step(ctx, op)
             checkpoint_id = current_checkpoint_id
         }
 
-        if result.memory_recall then
-            metadata.memory_ids = result.memory_recall.memory_ids
-            metadata.memory_count = result.memory_recall.count
+        if memory_recall_error then
+            metadata.memory_recall_error = memory_recall_error
         end
 
         if result.metadata then
             for k, v in pairs(result.metadata) do
-                metadata[k] = v
+                if k ~= "presentation" then metadata[k] = v end
             end
+        end
+        -- Thinking blocks in result.metadata are bound to this prefix; later
+        -- steps keep them only while the prefix is unchanged.
+        metadata.prefix_fingerprint = result.prefix_fingerprint
+        metadata.generation_checkpoint_id = current_checkpoint_id or ""
+        -- This is server-owned presentation data, never model output.  It is
+        -- intentionally stored with the terminal assistant message so reloads
+        -- and live delivery use the same contract.
+        if terminal_presentation then metadata.presentation = terminal_presentation end
+        if behavior_round then
+            metadata.behavior_controls = behavior_controls
+            metadata.behavior_control_state = "pending"
         end
 
         -- fail_turn must not be used from add_response on: the stored tool intents are
@@ -1440,14 +2006,19 @@ function message_handlers.agent_step(ctx, op)
             call_message_types[call.id] = call_type
         end
         local stored_id, call_message_ids, store_err, stored_date = ctx.writer:add_response(
-            result.result or "", metadata, intents)
+            output_text, metadata, intents, step_notes)
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
         end
         assistant_message_id = stored_id
+        commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts)
         result.call_message_ids = call_message_ids
+        if behavior_round then ctx.reader:reset() end
         result.call_message_types = call_message_types
+
+        local persist_err = apply_after_persist(ctx, op, agent, response_id, stored_id, result)
+        if persist_err then return nil, persist_err end
 
         if is_turn_blocked(ctx) then
             for index, call in ipairs(unified_tool_calls) do
@@ -1460,12 +2031,14 @@ function message_handlers.agent_step(ctx, op)
             end
         end
 
-        -- Sent after Stop too: a reply to a model call already in flight is
-        -- stored, so clients must see it. It carries the stored row's date.
-        if result.result and result.result ~= "" then
+        -- Sent after Stop too: a model call that finished before Stop cancelled
+        -- it has stored its reply, so clients must see it. It carries the stored
+        -- row's date.
+        if output_text ~= "" or terminal_presentation then
             ctx.upstream:send_message_update(response_id, consts.UPSTREAM_TYPES.CONTENT, {
-                content = result.result,
+                content = output_text,
                 using_tools = (#unified_tool_calls > 0),
+                presentation = terminal_presentation,
                 date = stored_date
             })
         end
@@ -1474,20 +2047,26 @@ function message_handlers.agent_step(ctx, op)
     end
 
     if is_turn_blocked(ctx) then
+        if behavior_round and assistant_message_id then
+            local marked, mark_err = ctx.writer:update_message_meta(assistant_message_id, { behavior_control_state = "cancelled" })
+            if not marked then return nil, mark_err end
+        end
         return { message_id = op.message_id, response_id = response_id, completed = true, next_ops = {} }
     end
 
-    if result.memory_prompt then
-        local memory_metadata = {}
-        if result.memory_prompt.metadata and result.memory_prompt.metadata.memory_ids then
-            memory_metadata.memory_ids = result.memory_prompt.metadata.memory_ids
-        end
-        ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, result.memory_prompt.content, memory_metadata)
+    if #unified_tool_calls == 0 and behavior_round then
+        local applied, control_err = control_handlers.apply_behavior_controls(ctx, behavior_controls)
+        if not applied then return nil, control_err end
+        local marked, mark_err = ctx.writer:update_message_meta(assistant_message_id, { behavior_control_state = "applied" })
+        if not marked then return nil, mark_err end
+        local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+        if not cleared then return nil, clear_err end
+        ctx.reader:reset()
     end
 
     -- Separate user-facing operations from background operations
     local user_facing_ops = {}
-    local background_ops = {}
+    local background_ops = checkpoint_next_ops
 
     if #unified_tool_calls > 0 and not is_turn_blocked(ctx) then
         table.insert(user_facing_ops, {
@@ -1499,6 +2078,11 @@ function message_handlers.agent_step(ctx, op)
             caller = prepared_caller,
             validated_tools = validated_tools,
             validation_error = validate_err,
+            behavior_controls = behavior_controls,
+            behavior_round = behavior_round,
+            checkpoint_anchor_id = assistant_message_id,
+            checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+            tokens = result.tokens,
             agent = {
                 id = agent.id,
                 model = agent.model,
@@ -1507,12 +2091,21 @@ function message_handlers.agent_step(ctx, op)
             message_id = op.message_id,
             response_id = response_id,
             request_id = op.request_id,
-            has_text_response = (result.result and result.result ~= ""),
+            has_text_response = output_text ~= "",
             ui_action_runtime = op.ui_action_runtime,
         })
     end
 
-    if result.tokens then
+    if result.tokens or (#unified_tool_calls == 0 and
+        ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true) then
+        local checkpoint_agent = agent
+        if ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
+            -- Declarative controls have committed by this boundary. Compaction
+            -- must use that target, just as it would after recovery, rather than
+            -- the agent/provider that produced the now-settled response.
+            checkpoint_agent = current_agent(ctx)
+            if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
+        end
         local checkpoint_anchor_id = op.message_id
         if not op.from_user and assistant_message_id then
             checkpoint_anchor_id = assistant_message_id
@@ -1522,11 +2115,11 @@ function message_handlers.agent_step(ctx, op)
             type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
             background = true,
             tokens = result.tokens,
-            agent_options = agent.agent_options or {},
-            checkpoint_bindings = agent.bindings and agent.bindings.checkpoint,
+            agent_options = checkpoint_agent.agent_options or {},
+            checkpoint_bindings = checkpoint_agent.bindings and checkpoint_agent.bindings.checkpoint,
             agent = {
-                id = agent.id,
-                model = agent.model
+                id = checkpoint_agent.id,
+                model = checkpoint_agent.model
             },
             run_context_binding = (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
             message_id = op.message_id,
@@ -1630,6 +2223,17 @@ message_handlers._resolve_tool_runtime_context = function(context: AttentionTool
     }, nil
 end
 
+local function settle_behavior_round(ctx, op, cancelled)
+    if not op.behavior_round then return true end
+    local marked, mark_err = ctx.writer:update_message_meta(op.checkpoint_anchor_id, {
+        behavior_control_state = cancelled and "cancelled" or "applied",
+    })
+    if not marked then return nil, mark_err end
+    local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+    if not cleared then return nil, clear_err end
+    return ctx.reader:reset()
+end
+
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
@@ -1642,6 +2246,8 @@ function message_handlers.process_tools(ctx, op)
                 op.validated_tools and op.validated_tools[call.id])
             if err then return nil, err end
         end
+        local settled, settle_err = settle_behavior_round(ctx, op, true)
+        if not settled then return nil, settle_err end
         return { completed = true, next_ops = {} }
     end
 
@@ -1706,7 +2312,7 @@ function message_handlers.process_tools(ctx, op)
     session_context = with_agent_run_context(ctx, session_context, active_agent)
 
     local executed, results, execute_err = pcall(function()
-        return caller:execute(session_context, validated_tools)
+        return caller:execute(session_context, validated_tools, ctx.coordinator and ctx.coordinator.cancel)
     end)
     if not executed then
         execute_err = tostring(results)
@@ -1738,15 +2344,26 @@ function message_handlers.process_tools(ctx, op)
         end
         return nil, failure
     end
-    local function announce_function_error(call_id, message_id, function_name, error_text)
+    local function announce_function_error(call_id, message_id, function_name, detail)
         ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
             message_id = message_id,
             call_id = call_id,
             function_name = function_name,
-            error = error_text
+            error = detail
         })
     end
 
+    local controls = {}
+    for _, control in ipairs(op.behavior_controls or {}) do controls[#controls + 1] = control end
+    if type(caller.get_wrapper_controls) == "function" then
+        for _, control in ipairs(caller:get_wrapper_controls()) do controls[#controls + 1] = control end
+    end
+    if op.behavior_round then
+        local stored, store_err = ctx.writer:update_message_meta(op.checkpoint_anchor_id, { behavior_controls = controls })
+        if not stored then return fail_remaining(1, store_err) end
+    end
+
+    local calls_cancelled = false
     for index, call in ipairs(op.tool_calls) do
         local call_id = call.id
         local result_data = results[call_id]
@@ -1764,6 +2381,15 @@ function message_handlers.process_tools(ctx, op)
         local is_delegation = ctx.config.delegation_func_id
             and result_data.tool_call.registry_id == ctx.config.delegation_func_id
         local is_private = result_data.tool_call.meta and result_data.tool_call.meta.private
+
+        if result_data.cancelled then
+            calls_cancelled = true
+            local _, cancel_err = settle_cancelled_call(ctx, call, message_id,
+                op.call_message_types and op.call_message_types[call_id],
+                validated_tools and validated_tools[call_id], "Session stopped while the call was running")
+            if cancel_err then return fail_remaining(index, cancel_err) end
+            goto continue_call
+        end
 
         local policy_result = result_data.result
         if not result_data.error and not is_delegation and type(policy_result) == "table" then
@@ -1793,7 +2419,7 @@ function message_handlers.process_tools(ctx, op)
 
         if result_data.error then
             local _, update_err = ctx.writer:update_message_meta(message_id, {
-                result = tostring(result_data.error),
+                result = error_text(result_data.error),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
                 call_id = call_id,
@@ -1802,7 +2428,7 @@ function message_handlers.process_tools(ctx, op)
             if update_err then return fail_remaining(index, update_err) end
 
             if not is_delegation and not is_private then
-                announce_function_error(call_id, message_id, result_data.tool_call.name, tostring(result_data.error))
+                announce_function_error(call_id, message_id, result_data.tool_call.name, error_text(result_data.error))
             end
         else
             local tool_result = result_data.result
@@ -1886,6 +2512,9 @@ function message_handlers.process_tools(ctx, op)
                         end_turn = true
                         if effect[1] == control_handlers.control_forms then form_committed = true end
                     end
+                    if effect[1] == control_handlers.control_artifacts then
+                        queue_inline_artifacts(ctx, applied.created_artifacts)
+                    end
                 end
             end
 
@@ -1910,19 +2539,65 @@ function message_handlers.process_tools(ctx, op)
                 })
             end
         end
+        ::continue_call::
     end
 
     message_handlers.note_tool_round(ctx, results)
 
-    -- A turn that ended by creating a form queues no continuation step; a
-    -- handoff does, so the new agent continues the turn.
-    if #op.tool_calls > 0 and not end_turn and not is_turn_stopped(ctx) then
-        table.insert(next_ops, {
-            type = consts.OP_TYPE.AGENT_CONTINUE,
-            message_id = op.message_id,
-            request_id = op.request_id,
-            ui_action_runtime = op.ui_action_runtime,
-        })
+    -- A successful handoff blocks the old agent's next step, but does not
+    -- cancel proposals from its settled round. Match recovery's call statuses.
+    local policies_cancelled = calls_cancelled or is_turn_stopped(ctx)
+    if not policies_cancelled then
+        if #controls > 0 then
+            local applied, control_err = control_handlers.apply_behavior_controls(ctx, controls)
+            if not applied then return nil, control_err end
+        end
+    end
+    local settled, settle_err = settle_behavior_round(ctx, op, policies_cancelled)
+    if not settled then return nil, settle_err end
+
+    -- A control-driven handoff starts the successor before the old turn can
+    -- reach the queue-empty boundary. Its tool results are now durable, so
+    -- capture the old agent's completed span before the successor activation
+    -- performs the deferred deactivation.
+    if not policies_cancelled and ctx.turn_state and ctx.turn_state.handoff then
+        local outgoing_end = record_completed_turn_span(ctx, ctx.turn_state)
+        -- The successor continues this user turn, but owns a new lifecycle
+        -- span. Its eventual deactivation must not reuse the retired agent's
+        -- first-history anchor. Unknown boundaries remain unknown.
+        ctx.turn_state.span_from_id = outgoing_end
+        ctx.turn_state.span_anchor_known = outgoing_end ~= nil
+        ctx.turn_state.span_open_start = false
+    end
+
+    if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
+        -- Requested compaction waits for the complete tool/result round. The
+        -- existing token-threshold background scheduling remains unchanged.
+        if ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
+            local checkpoint_agent = current_agent(ctx)
+            if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
+            table.insert(next_ops, {
+                type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
+                requested_only = true,
+                message_id = op.checkpoint_anchor_id or op.message_id,
+                checkpoint_anchor_id = op.checkpoint_anchor_id,
+                checkpoint_bindings = checkpoint_agent and checkpoint_agent.bindings
+                    and checkpoint_agent.bindings.checkpoint,
+                agent_options = checkpoint_agent and checkpoint_agent.agent_options,
+                agent = checkpoint_agent and { id = checkpoint_agent.id, model = checkpoint_agent.model },
+                tokens = op.tokens,
+            })
+        end
+        -- A turn that ended by creating a form queues no continuation step; a
+        -- handoff does, so the new agent continues the turn.
+        if not end_turn then
+            table.insert(next_ops, {
+                type = consts.OP_TYPE.AGENT_CONTINUE,
+                message_id = op.message_id,
+                request_id = op.request_id,
+                ui_action_runtime = op.ui_action_runtime,
+            })
+        end
     end
 
     return {
@@ -1939,6 +2614,41 @@ function message_handlers.agent_continue(ctx, op)
         from_user = false,
         ui_action_runtime = op.ui_action_runtime,
     })
+end
+
+-- Persisted proposals are at-least-once. Effects are deliberately limited to
+-- declarative targets and compaction requests, so a crash before the applied
+-- marker can replay them without re-executing tools or starting an LLM step.
+function message_handlers.recover_behavior_controls(ctx)
+    local state = ctx.reader:state() or {}
+    if not (state.meta and state.meta.behavior_controls_pending) then return true end
+    local rounds, read_err = ctx.reader:list_behavior_rounds()
+    if not rounds then return nil, read_err end
+    for _, round in ipairs(rounds) do
+        local cancelled = false
+        for _, message_id in pairs(round.metadata.behavior_call_message_ids or {}) do
+            local call, call_err = ctx.reader:get_behavior_call(message_id)
+            if not call then return nil, call_err end
+            local status = call.metadata and call.metadata.status
+            if status ~= consts.FUNC_STATUS.SUCCESS and status ~= consts.FUNC_STATUS.ERROR
+                and status ~= consts.FUNC_STATUS.CANCELLED then
+                return nil, "Behavior round still has unsettled calls"
+            end
+            if status == consts.FUNC_STATUS.CANCELLED then cancelled = true end
+        end
+        if not cancelled then
+            local applied, apply_err = control_handlers.apply_behavior_controls(ctx, round.metadata.behavior_controls)
+            if not applied then return nil, apply_err end
+        end
+        local marked, mark_err = ctx.writer:update_message_meta(round.message_id, {
+            behavior_control_state = cancelled and "cancelled" or "applied",
+        })
+        if not marked then return nil, mark_err end
+    end
+    local cleared, clear_err = ctx.writer:update_meta({ meta = { behavior_controls_pending = false } })
+    if not cleared then return nil, clear_err end
+    ctx.reader:reset()
+    return true
 end
 
 return message_handlers

@@ -13,19 +13,35 @@ local time = require("time")
 local json = require("json")
 local env = require("env")
 local benchmark_report = require("benchmark_report")
-local agent = require("agent")
-local prompt = require("prompt")
+local framework_capabilities = require("framework_capabilities")
+
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+-- Stop cancellation has a real latency requirement, independent of event waits.
+local STOP_LATENCY_SECONDS = 2
+
 local active_pid = nil
 local active_exit = nil
+local observed = {}
+local test_inbox, test_events
+local expected_session_errors = false
+
+local function receive_channels()
+    if not test_inbox then test_inbox = process.inbox() end
+    if not test_events then test_events = process.events() end
+    return test_inbox, test_events
+end
 
 local function receive_until(predicate, description)
-    local inbox, events, timer = process.inbox(), process.events(), time.timer("5s")
+    local inbox, events = receive_channels()
+    local timer = time.timer(EVENT_DEADLINE)
     local deadline = timer:channel()
     while true do
         local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
         if selected.channel == deadline then
             timer:stop()
-            error("Deadline waiting for " .. description)
+            error("Deadline waiting for " .. description .. "; observed=" .. tostring(json.encode(observed)))
         end
         if selected.channel == events then
             if selected.value.from == active_pid then
@@ -36,7 +52,11 @@ local function receive_until(predicate, description)
         else
             local message = selected.value
             local payload = message:payload():data()
-            if payload.type == consts.UPSTREAM_TYPES.ERROR then
+            observed[#observed + 1] = {topic = message:topic(), type = payload.type,
+                session_id = payload.session_id, request_id = payload.request_id,
+                status = payload.status, code = payload.code}
+            if #observed > 16 then table.remove(observed, 1) end
+            if payload.type == consts.UPSTREAM_TYPES.ERROR and not expected_session_errors then
                 timer:stop()
                 error("Session error: " .. tostring(payload.message or payload.code))
             end
@@ -48,21 +68,34 @@ local function receive_until(predicate, description)
     end
 end
 
-local function open_process(session_id, user_id, create)
+local function open_process(session_id, user_id, create, conn_pid)
     local pid, err = process.spawn_monitored(consts.PROCESS.SESSION_ID, "app:processes", {
         session_id = session_id, user_id = user_id, parent_pid = process.pid(), create = create,
+        conn_pid = conn_pid,
     })
     test.is_nil(err)
     test.not_nil(pid)
     active_pid, active_exit = pid, nil
-    receive_until(function(topic, payload)
-        return topic == "session:" .. session_id and payload.status == "idle" and payload.interaction ~= nil
-    end, "session readiness")
+    -- Agent initialization publishes an idle interaction before model
+    -- configuration has finished. A correlated inbox reply proves ingress
+    -- is accepting commands after all initial configuration has completed.
+    local request_id = "runtime-ready:" .. uuid.v7()
+    local sent, send_err = process.send(pid, consts.TOPICS.COMMAND, {
+        command = "context_transport_capabilities", capabilities_version = 1, request_id = request_id,
+    })
+    test.is_nil(send_err)
+    test.is_true(sent)
+    local ready = receive_until(function(topic, payload)
+        return topic == "session:" .. session_id and payload.type == consts.UPSTREAM_TYPES.COMMAND_RESPONSE
+            and payload.request_id == request_id
+    end, "session ingress readiness")
+    test.is_true(ready.success)
     return pid
 end
 
 local function wait_for_exit(pid, session_id)
-    local events, timer = process.events(), time.timer("5s")
+    local _, events = receive_channels()
+    local timer = time.timer(EVENT_DEADLINE)
     local deadline = timer:channel()
     while true do
         local selected = channel.select({ events:case_receive(), deadline:case_receive() })
@@ -94,7 +127,8 @@ local function stop_active_process()
     local pid = active_pid
     if not active_exit then
         local _, terminate_err = process.terminate(pid)
-        local events, timer = process.events(), time.timer("5s")
+        local _, events = receive_channels()
+        local timer = time.timer(EVENT_DEADLINE)
         local deadline = timer:channel()
         while not active_exit do
             local selected = channel.select({ events:case_receive(), deadline:case_receive() })
@@ -134,8 +168,11 @@ local function run_scenario(options)
         hold_handoff = options.retire_at == "handoff",
         hold_prompt = options.hold_prompt == true or options.retire_at == "prompt", parent = process.pid() })
     local stopped = options.stop or (options.hold_prompt and not options.retire_at) or options.stop_after_retire
+    -- Stop cancels the in-flight handoff instead of waiting for its result.
+    local handoff_cancelled = options.stop and options.cancels_in_flight
     local actor = security.actor()
     local session_id, context_id = uuid.v7(), uuid.v7()
+    observed = {}
     local _, context_err = context_repo.create(context_id, "primary", "{}")
     test.is_nil(context_err)
     local _, create_err = session_repo.create(session_id, actor:id(), context_id, "Runtime handoff", "test", {}, {
@@ -186,7 +223,7 @@ local function run_scenario(options)
                 process.send(pid, consts.TOPICS.STOP, { request_id = "runtime-stop" })
                 receive_until(function(_, payload) return payload.request_id == "runtime-stop" end, "committed Stop")
             end
-            process.send(ready.pid, "fixture:release", true)
+            if not handoff_cancelled then process.send(ready.pid, "fixture:release", true) end
         end
         if options.hold_prompt or options.retire_at == "prompt" then
             local ready = receive_until(function(topic) return topic == "fixture:prompt_ready" end, "prompt barrier")
@@ -218,19 +255,31 @@ local function run_scenario(options)
         local reopened, reopen_err = reader.open(session_id)
         test.is_nil(reopen_err)
         test.not_nil(reopened)
-        test.eq(reopened:state().config.agent_id, "app.runtime:help")
-        test.eq(reopened:state().config.model, "session-runtime-help")
-        test.eq(reopened:get_context("handoff_note"), "Keep the earlier conversation.")
+        if handoff_cancelled then
+            test.eq(reopened:state().config.agent_id, "app.runtime:router")
+            test.eq(reopened:state().config.model, "session-runtime-router")
+            test.is_nil(reopened:get_context("handoff_note"))
+        else
+            test.eq(reopened:state().config.agent_id, "app.runtime:help")
+            test.eq(reopened:state().config.model, "session-runtime-help")
+            test.eq(reopened:get_context("handoff_note"), "Keep the earlier conversation.")
+        end
         local messages, history_err = message_repo.list_all_by_session(session_id)
         test.is_nil(history_err)
         local handoffs, failures, answers, malformed = 0, 0, 0, 0
         for _, message in ipairs(messages) do
             if message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-handoff" then
                 handoffs = handoffs + 1
-                test.eq(message.metadata.status, consts.FUNC_STATUS.SUCCESS)
-                test.eq(message.metadata.control_operations.config.agent, "app.runtime:help")
-                test.eq(message.metadata.result.message, "Handoff accepted.")
-                test.is_nil(message.metadata.result._control)
+                if handoff_cancelled then
+                    test.eq(message.metadata.status, consts.FUNC_STATUS.CANCELLED)
+                    test.eq(message.metadata.result, "Session stopped while the call was running")
+                    test.is_nil(message.metadata.control_operations)
+                else
+                    test.eq(message.metadata.status, consts.FUNC_STATUS.SUCCESS)
+                    test.eq(message.metadata.control_operations.config.agent, "app.runtime:help")
+                    test.eq(message.metadata.result.message, "Handoff accepted.")
+                    test.is_nil(message.metadata.result._control)
+                end
             elseif message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-failure" then
                 failures = failures + 1
                 test.eq(message.metadata.status, consts.FUNC_STATUS.ERROR)
@@ -268,18 +317,652 @@ local function run_scenario(options)
     if not ok then error(failure) end
 end
 
-local function framework_stops_before_generation()
-    local probe = agent.new({ id = "stop-check-probe", name = "Stop check probe",
-        description = "Detects step stop_check support", prompt = "Probe." })
-    local previous = agent._llm
-    local seen = { generated = false }
-    agent._llm = { generate = function()
-        seen.generated = true
-        return { result = "", tokens = {} }
-    end }
-    local ok, result = pcall(probe.step, probe, prompt.new(), { stop_check = function() return true end })
-    agent._llm = previous
-    return ok and type(result) == "table" and result.stopped == true and not seen.generated
+local function run_checkpoint_scenario()
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("checkpoints", 0)
+    storage:set("edits", 0)
+    storage:set("scenario", { checkpoint = true })
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local actor = security.actor()
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, actor:id(), context_id, "Checkpoint task", "test", {}, {
+        agent_id = "app.runtime:checkpoint_agent", model = "session-runtime-help",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 300000,
+    }))
+    local request = "Rebuild the Word handout. Finish every edit before giving the final answer."
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, actor:id(), true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "checkpoint-task", data = { text = request },
+        }))
+        receive_until(function(_, data)
+            return data.type == consts.UPSTREAM_TYPES.RECEIVED and data.request_id == "checkpoint-task"
+        end, "accepted checkpoint task")
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == "idle"
+        end, "checkpointed task completion")
+        local requests = storage:get("requests")
+        local history = assert(message_repo.list_all_by_session(session_id))
+        for _, message in ipairs(history) do
+            test.is_false(message.type == consts.MSG_TYPE.SYSTEM and message.metadata.system_action == consts.SYSTEM_ACTIONS.TURN_FAILED,
+                tostring(message.data))
+        end
+        test.eq(#requests, 5)
+        test.eq(storage:get("checkpoints"), 2, "the real token-threshold checkpoint must run twice mid-turn")
+        for _, index in ipairs({ 3, 5 }) do
+            local users, recalls, latest_result = 0, 0, false
+            for _, message in ipairs(requests[index].messages) do
+                for _, part in ipairs(message.content or {}) do
+                    if message.role == "user" and part.text == request then users = users + 1 end
+                    if message.role == "developer" and message.metadata and message.metadata.memory_ids then
+                        recalls = recalls + 1
+                        test.contains(part.text, "Use the usual handout style.")
+                    end
+                    if message.role == "function_result" and part.text == "Handout edit " .. (index - 1) .. " stored." then
+                        latest_result = true
+                    end
+                end
+            end
+            test.eq(users, 1, "each post-checkpoint provider request must retain the exact user task once: "
+                .. tostring(json.encode(requests[index].messages)))
+            test.eq(recalls, 1, "per-step memory recall is present alongside the active request")
+            test.is_true(latest_result, "the newest tool result must survive each checkpoint")
+        end
+        local edits, answer = 0, false
+        for _, message in ipairs(history) do
+            if message.type == consts.MSG_TYPE.FUNCTION then
+                edits = edits + 1
+                test.eq(message.metadata.status, consts.FUNC_STATUS.SUCCESS)
+            end
+            if message.type == consts.MSG_TYPE.ASSISTANT and message.data == "Finished rebuilding the handout." then
+                answer = true
+            end
+        end
+        test.eq(edits, 4)
+        test.is_true(answer)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
+local function run_checkpoint_stop_scenario(followup)
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("checkpoints", 0)
+    storage:set("edits", 0)
+    storage:set("scenario", { checkpoint = true, hold_checkpoint = true, parent = process.pid() })
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, "Checkpoint Stop", "test", {}, {
+        agent_id = "app.runtime:checkpoint_agent", model = "session-runtime-help",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 300000,
+    }))
+    local original = "Rebuild the Word handout. Finish every edit before giving the final answer."
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "checkpoint-stop-task", data = { text = original },
+        }))
+        local held = receive_until(function(topic) return topic == "fixture:checkpoint_ready" end,
+            "first post-checkpoint generation")
+        test.eq(storage:get("checkpoints"), 1)
+        assert(process.send(pid, consts.TOPICS.STOP, { request_id = "checkpoint-stop" }))
+        receive_until(function(_, data) return data.request_id == "checkpoint-stop" end, "committed Stop")
+        assert(process.send(held.pid, "fixture:checkpoint_release", true))
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == consts.STATUS.IDLE
+        end, "stopped checkpoint turn")
+        test.eq(storage:get("edits"), 2, "Stop prevents the third edit")
+        close_process(pid, session_id)
+        pid = open_process(session_id, owner, false)
+        test.eq(#storage:get("requests"), 3, "reopening never resumes the stopped turn")
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "checkpoint-followup", data = { text = followup },
+        }))
+        receive_until(function(topic, data)
+            return topic == "session:" .. session_id and data.status == consts.STATUS.IDLE
+        end, "new request after Stop and reopen")
+        local requests = storage:get("requests")
+        test.eq(#requests, 5, "the later user request is allowed to complete")
+        for _, index in ipairs({ 4, 5 }) do
+            local current, stale, boundary, current_at, stale_at = 0, 0, nil, nil, nil
+            for position, message in ipairs(requests[index].messages) do
+                for _, part in ipairs(message.content or {}) do
+                    if message.role == "user" and part.text == followup then
+                        current, current_at = current + 1, position
+                    end
+                    if message.role == "user" and part.text == original then
+                        stale, stale_at = stale + 1, position
+                    end
+                    if message.role == "developer" and part.text
+                        and part.text:find("Do not automatically resume", 1, true) then boundary = position end
+                end
+            end
+            test.eq(current, 1, "the new user request survives the next checkpoint exactly once")
+            test.is_true(stale <= 1, "the historical task must not be duplicated")
+            if stale_at then
+                test.is_true(stale_at < current_at, "the historical task must precede the current request")
+            end
+            if index == 4 then
+                test.not_nil(boundary, "the persisted Stop boundary survives reopening")
+                test.is_true(boundary < current_at, "the later request follows the interruption boundary")
+                if stale_at then
+                    test.is_true(stale_at < boundary, "the historical task must remain before Stop")
+                end
+            end
+        end
+        test.eq(storage:get("edits"), 3, "only the newly requested edit runs after reopening")
+        test.eq(storage:get("checkpoints"), 2)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
+-- Stop during a streaming model call ends the turn idle with the streamed text kept.
+local function run_stream_stop()
+    local storage = store.get("app.runtime:state")
+    storage:set("requests", {})
+    storage:set("stream_released", false)
+    storage:set("scenario", { parent = process.pid() })
+    local actor = security.actor()
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local _, context_err = context_repo.create(context_id, "primary", "{}")
+    test.is_nil(context_err)
+    local _, create_err = session_repo.create(session_id, actor:id(), context_id, "Runtime stream Stop", "test", {}, {
+        agent_id = "app.runtime:streamer", model = "session-runtime-stream",
+    })
+    test.is_nil(create_err)
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, actor:id(), true, process.pid())
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "stream-input", data = { text = "Tell me something." },
+        }))
+        local streamed, model_ready = {}, false
+        receive_until(function(topic, payload)
+            if topic == "fixture:stream_ready" then model_ready = true end
+            if payload.type == "chunk" then streamed[#streamed + 1] = payload.content end
+            return model_ready and #streamed == 2
+        end, "streamed chunks of the in-flight model call")
+        test.eq(table.concat(streamed), "Partial answer")
+
+        local started = time.now()
+        assert(process.send(pid, consts.TOPICS.STOP, { request_id = "stream-stop" }))
+        local resolved, idle = false, false
+        receive_until(function(topic, payload)
+            if topic == consts.TOPICS.STOP_RESOLVED then resolved = true end
+            if topic == "session:" .. session_id and payload.status == "idle" then idle = true end
+            return resolved and idle
+        end, "idle session after Stop")
+        test.is_true(time.now():sub(started):seconds() < STOP_LATENCY_SECONDS, "Stop must end the in-flight turn promptly")
+        test.is_false((storage:get("stream_released")), "Stop must not wait for the model call")
+        test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
+
+        local messages, history_err = message_repo.list_all_by_session(session_id)
+        test.is_nil(history_err)
+        local answer = nil :: any
+        for _, message in ipairs(messages) do
+            if message.type == consts.MSG_TYPE.ASSISTANT then answer = message end
+        end
+        test.not_nil(answer, "The streamed text must be stored")
+        test.eq(answer.data, "Partial answer")
+        test.is_true(answer.metadata.stopped)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    session_repo.delete(session_id)
+    context_repo.delete(context_id)
+    storage:release()
+    if not ok then error(failure) end
+    if cleanup_err then error(cleanup_err) end
+end
+
+local function run_artifact_scenario()
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("scenario", { hold_handoff = true, parent = process.pid() })
+    local session_id, context_id, artifact_id = uuid.v7(), uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    observed = {}
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, "Runtime artifact", "test", {}, {
+        agent_id = "app.runtime:router", model = "session-runtime-router",
+    }))
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        assert(process.send(pid, consts.TOPICS.MESSAGE, {
+            request_id = "artifact-input", data = { text = "Please hand off this request." },
+        }))
+        local held = receive_until(function(topic) return topic == "fixture:handoff_ready" end, "running tool call")
+        local persistence = assert(writer.new(session_id))
+        assert(persistence:create_artifact(artifact_id, consts.ARTIFACT_TYPES.VIEW_REF, "Progress", "{}",
+            { page_id = "app.runtime:progress" }))
+        assert(process.send("session." .. session_id, consts.TOPICS.COMMAND, {
+            command = consts.COMMANDS.ARTIFACT, artifact_id = artifact_id,
+        }))
+        local announced = receive_until(function(_, payload)
+            return payload.type == consts.MSG_TYPE.ARTIFACT and payload.artifact_id == artifact_id
+        end, "artifact reference while the tool call runs")
+        local stored, call = nil, nil
+        for _, message in ipairs(assert(message_repo.list_all_by_session(session_id))) do
+            if message.type == consts.MSG_TYPE.ARTIFACT then stored = message end
+            if message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-handoff" then call = message end
+        end
+        test.not_nil(stored, "The artifact reference must be stored before the tool call returns")
+        test.eq(stored.message_id, announced.message_id)
+        test.eq(stored.metadata.artifact_id, artifact_id)
+        test.not_nil(call)
+        test.eq(call.metadata.status, consts.FUNC_STATUS.PENDING)
+        assert(process.send(held.pid, "fixture:release", true))
+        receive_until(function(topic, payload)
+            return topic == "session:" .. session_id and payload.status == consts.STATUS.IDLE
+        end, "completed turn")
+        close_process(pid, session_id)
+        local positions = {}
+        for index, message in ipairs(assert(message_repo.list_all_by_session(session_id))) do
+            if message.type == consts.MSG_TYPE.FUNCTION and message.metadata.call_id == "call-handoff" then
+                positions.call = index
+            elseif message.type == consts.MSG_TYPE.ARTIFACT then
+                positions.artifact = index
+            elseif message.type == consts.MSG_TYPE.ASSISTANT and message.data == "The help agent completed the handoff." then
+                positions.answer = index
+            end
+        end
+        test.not_nil(positions.call)
+        test.not_nil(positions.artifact)
+        test.not_nil(positions.answer)
+        test.is_true(positions.call < positions.artifact and positions.artifact < positions.answer,
+            "The artifact reference must stay between the running call and the final answer")
+    end)
+    local _, cleanup_err = stop_active_process()
+    session_repo.delete(session_id)
+    context_repo.delete(context_id)
+    storage:release()
+    if not ok then error(failure) end
+    if cleanup_err then error(cleanup_err) end
+end
+
+-- The request as a provider prefix sees it: cache markers are not part of it.
+local function provider_view(messages)
+    local view = {}
+    for _, message in ipairs(messages) do
+        if message.role ~= "cache_marker" then
+            local metadata = type(message.metadata) == "table" and message.metadata or {}
+            view[#view + 1] = json.encode({ role = message.role, content = message.content, name = message.name,
+                function_call = message.function_call, positional = metadata.preserve_position == true,
+                thinking = metadata.thinking_blocks })
+        end
+    end
+    return view
+end
+
+local function assert_prefix(earlier, later, description)
+    test.is_true(#later >= #earlier, description .. ": a later request must extend the earlier one")
+    for index, entry in ipairs(earlier) do
+        test.eq(later[index], entry, description .. ": request diverges at message " .. tostring(index))
+    end
+end
+
+local function send_and_settle(pid, session_id, request_id, text)
+    assert(process.send(pid, consts.TOPICS.MESSAGE, { request_id = request_id, data = { text = text } }))
+    receive_until(function(_, payload)
+        return payload.type == consts.UPSTREAM_TYPES.RECEIVED and payload.request_id == request_id
+    end, "accepted " .. request_id)
+    receive_until(function(topic, payload)
+        return topic == "session:" .. session_id and payload.status == consts.STATUS.IDLE
+    end, "completed " .. request_id)
+end
+
+local function with_session(title, config, scenario, body)
+    local storage = assert(store.get("app.runtime:state"))
+    storage:set("requests", {})
+    storage:set("edits", 0)
+    storage:set("lifecycle_activate", 0)
+    storage:set("lifecycle_before_step", 0)
+    storage:set("checkpoints", 0)
+    scenario.parent = process.pid()
+    storage:set("scenario", scenario)
+    local session_id, context_id = uuid.v7(), uuid.v7()
+    local owner = assert(security.actor()):id()
+    observed = {}
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, owner, context_id, title, "test", {}, config))
+    local ok, failure = pcall(function()
+        local pid = open_process(session_id, owner, true)
+        body(pid, session_id, storage)
+        close_process(pid, session_id)
+    end)
+    local _, cleanup_err = stop_active_process()
+    if not cleanup_err then
+        session_repo.delete(session_id)
+        context_repo.delete(context_id)
+    end
+    storage:release()
+    if cleanup_err then error(tostring(failure) .. "; cleanup failed: " .. cleanup_err) end
+    if not ok then error(failure) end
+end
+
+local function rows_of(session_id)
+    local rows, err = message_repo.list_all_by_session(session_id)
+    test.is_nil(err)
+    return rows
+end
+
+local function run_stable_prefix_scenario()
+    with_session("Stable prefix", { agent_id = "app.runtime:prefix_agent", model = "session-runtime-prefix" },
+        { prefix = true }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "prefix-first", "Pack the first document.")
+        send_and_settle(pid, session_id, "prefix-second", "Now summarize it.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3, "a tool round and its answer, then a second turn")
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "tool continuation")
+        assert_prefix(views[2], views[3], "next user turn")
+
+        local rows = rows_of(session_id)
+        local sequence, fingerprints = {}, {}
+        for index, row in ipairs(rows) do
+            local metadata = row.metadata or {}
+            if row.type == consts.MSG_TYPE.SYSTEM and not metadata.preserve_position then
+                sequence[#sequence + 1] = "system:" .. tostring(metadata.system_action)
+            elseif row.type == consts.MSG_TYPE.SYSTEM and metadata.lifecycle_phase then
+                test.is_true(metadata.preserve_position, "the lifecycle system note keeps its position")
+                test.eq(metadata.system_action, "lifecycle_note")
+                sequence[#sequence + 1] = row.data
+            elseif row.type == consts.MSG_TYPE.SYSTEM then
+                test.eq(metadata.system_action, "turn_context")
+                test.eq(metadata.source_id, rows[index - 1].type == consts.MSG_TYPE.USER and rows[index - 1].message_id
+                    or rows[index - 2].message_id, "the turn note follows its user message and any activation note")
+                test.contains(row.data, "The current date and time is ")
+                sequence[#sequence + 1] = "time"
+            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.memory_ids then
+                test.is_true(metadata.preserve_position, "the recall note keeps its position")
+                test.eq(metadata.memory_ids[1], "style")
+                sequence[#sequence + 1] = "recall"
+            elseif row.type == consts.MSG_TYPE.DEVELOPER and metadata.lifecycle_phase then
+                test.is_true(metadata.preserve_position, "lifecycle note keeps its position")
+                sequence[#sequence + 1] = row.data
+            elseif row.type == consts.MSG_TYPE.DEVELOPER then
+                sequence[#sequence + 1] = "host"
+            elseif row.type == consts.MSG_TYPE.ASSISTANT then
+                test.not_nil(metadata.thinking_blocks)
+                test.eq(type(metadata.prefix_fingerprint), "string")
+                fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint
+                sequence[#sequence + 1] = "assistant"
+            else
+                sequence[#sequence + 1] = row.type
+            end
+        end
+        test.eq(table.concat(sequence, "|"), table.concat({
+            "system:agent_change", "host", "system:model_change", "host",
+            "user", "Prefix agent activated.", "time", "Before step 1.", "Before step 1 system note.", "recall", "assistant", "function",
+            "Before step 2.", "Before step 2 system note.", "recall", "assistant",
+            "user", "time", "Before step 3.", "Before step 3 system note.", "recall", "assistant",
+        }, "|"))
+        test.eq(fingerprints[1], fingerprints[2])
+        test.eq(fingerprints[2], fingerprints[3])
+
+        local thinking = 0
+        for _, message in ipairs(requests[3].messages) do
+            if message.role == "assistant" and message.metadata and message.metadata.thinking_blocks then
+                thinking = thinking + 1
+            end
+        end
+        test.eq(thinking, 2, "blocks bound to the unchanged prefix are replayed")
+    end)
+end
+
+local function run_stale_thinking_scenario()
+    with_session("Stale thinking", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 }, { thinking = true }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "thinking-handoff", "Please hand off this request.")
+        send_and_settle(pid, session_id, "thinking-followup", "Anything else?")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(requests[3].model, "help")
+        local function blocks_on(request, text)
+            for _, message in ipairs(request.messages) do
+                if message.role == "assistant" then
+                    for _, part in ipairs(message.content or {}) do
+                        if part.text == text then return message.metadata and message.metadata.thinking_blocks end
+                    end
+                end
+            end
+            error("assistant message missing: " .. text)
+        end
+        test.not_nil(blocks_on(requests[2], "Transferring the request."),
+            "the current tool round keeps its blocks across the agent change")
+        test.is_nil(blocks_on(requests[3], "Transferring the request."),
+            "blocks produced under the router prefix are stripped once the round is over")
+        test.not_nil(blocks_on(requests[3], "The help agent completed the handoff."),
+            "blocks produced under the current prefix are kept")
+
+        local fingerprints = {}
+        for _, row in ipairs(rows_of(session_id)) do
+            local metadata = row.metadata or {}
+            test.is_false(row.type == consts.MSG_TYPE.SYSTEM and metadata.preserve_position == true,
+                "an agent without turn context gets no turn note")
+            test.is_nil(metadata.memory_ids, "an agent without a memory contract gets no recall")
+            if row.type == consts.MSG_TYPE.ASSISTANT then fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint end
+        end
+        test.eq(#fingerprints, 3)
+        test.is_false(fingerprints[1] == fingerprints[2], "the agent change changes the prefix")
+        test.eq(fingerprints[2], fingerprints[3])
+    end)
+end
+
+local function request_has(request, text)
+    local found = 0
+    for _, message in ipairs(request.messages) do
+        for _, part in ipairs(message.content or {}) do
+            if type(part.text) == "string" and part.text:find(text, 1, true) then found = found + 1 end
+        end
+    end
+    return found
+end
+
+local TIME_NOTE = "The current date and time is "
+
+local function run_opening_compaction_scenario()
+    with_session("Opening compaction", { agent_id = "app.runtime:time_agent", model = "session-runtime-prefix",
+        checkpoint_function_id = "app.runtime:checkpoint_summary", token_checkpoint_threshold = 1 },
+        { script = {{ content = "It is noon." }} }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "compaction-first", "What time is it?")
+        local requests = storage:get("requests")
+        test.is_true(storage:get("checkpoints") >= 1, "the opening step compacts before dispatch")
+        test.eq(request_has(requests[1], TIME_NOTE), 1, "the compacted opening request keeps the time note")
+    end)
+end
+
+local function run_time_successor_scenario()
+    with_session("Time successor", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 },
+        { handoff_target = "app.runtime:time_agent", script = {
+            { content = "Handing off.", calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }} },
+            { content = "It is noon." },
+            { content = "Still noon." },
+        } }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "successor-first", "Hand off. What time is it?")
+        send_and_settle(pid, session_id, "successor-second", "And now?")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(request_has(requests[1], TIME_NOTE), 0)
+        test.eq(request_has(requests[2], TIME_NOTE), 1, "the time-aware successor gets this turn's note")
+        test.eq(request_has(requests[3], TIME_NOTE), 2, "the next user turn adds its own note")
+    end)
+end
+
+local function run_failed_activation_scenario()
+    with_session("Failed activation", { agent_id = "app.runtime:prefix_agent", model = "session-runtime-prefix" },
+        { script = {{ error = "provider down" }, { content = "Recovered." }} }, function(pid, session_id, storage)
+        expected_session_errors = true
+        send_and_settle(pid, session_id, "activation-first", "First.")
+        expected_session_errors = false
+        send_and_settle(pid, session_id, "activation-second", "Second.")
+        local requests = storage:get("requests")
+        test.eq(storage:get("lifecycle_activate"), 1)
+        test.eq(request_has(requests[1], "Prefix agent activated."), 1)
+        test.eq(request_has(requests[2], "Prefix agent activated."), 1, "the note outlives the failed step")
+    end)
+end
+
+-- A response whose thinking is interleaved with its two tool calls.
+local function parallel_response(first_id, second_id, second_name)
+    return {
+        content = "AB",
+        calls = { { id = first_id, name = "checkpoint_edit", arguments = "{}" },
+            { id = second_id, name = second_name or "checkpoint_edit", arguments = "{}" } },
+        metadata = {
+            thinking_blocks = { { type = "thinking", thinking = "", signature = "s1", position = 1 },
+                { type = "thinking", thinking = "", signature = "s2", position = 4 } },
+            content_positions = { { type = "text", text = "A", position = 2 }, { type = "tool_use", id = first_id, position = 3 },
+                { type = "text", text = "B", position = 5 }, { type = "tool_use", id = second_id, position = 6 } },
+        },
+    }
+end
+
+local function roles_of(request)
+    local roles = {}
+    for _, message in ipairs(request.messages) do
+        if message.role ~= "cache_marker" and message.role ~= "system" and message.role ~= "developer" then
+            roles[#roles + 1] = message.role
+        end
+    end
+    return table.concat(roles, ",")
+end
+
+local function run_parallel_round_scenario()
+    with_session("Parallel round", { agent_id = "app.runtime:parallel_agent", model = "session-runtime-prefix" },
+        { script = { parallel_response("p1", "p2"), { content = "Second round.", calls = {
+            { id = "p3", name = "checkpoint_edit", arguments = "{}" } } }, { content = "Done." } } },
+        function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "parallel-first", "Run both.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        test.eq(roles_of(requests[2]), "user,assistant,function_call,function_call,function_result,function_result")
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "first round")
+        assert_prefix(views[2], views[3], "second round")
+    end)
+end
+
+local function run_parallel_handoff_scenario()
+    local response = parallel_response("p1", "call-handoff", "handoff")
+    response.calls[1].name = "failing_tool"
+    with_session("Parallel handoff", { agent_id = "app.runtime:router", model = "session-runtime-router",
+        max_turn_iterations = 4, max_repeated_tool_calls = 2 },
+        { script = { response, { content = "Answer." } } }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "parallel-handoff", "Hand off.")
+        local requests = storage:get("requests")
+        test.eq(requests[2].model, "help")
+        local blocks = nil
+        for _, message in ipairs(requests[2].messages) do
+            if message.role == "assistant" then blocks = message.metadata and message.metadata.thinking_blocks end
+        end
+        test.not_nil(blocks, "the successor continues the round with its blocks")
+        test.eq(#blocks, 2)
+    end)
+end
+
+local function define_stable_prefix_tests()
+    test.describe("Session stable request prefix through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("replays a parallel round in one assistant turn across requests", run_parallel_round_scenario)
+        test.it("keeps a parallel round's blocks across a handoff", run_parallel_handoff_scenario)
+        test.it("keeps the time note when the opening step compacts", run_opening_compaction_scenario)
+        test.it("notes the turn for a time-aware successor after a handoff", run_time_successor_scenario)
+        test.it("keeps an activation note when the provider fails", run_failed_activation_scenario)
+        test.it("replays turn, lifecycle and recall notes so each request extends the previous one",
+            run_stable_prefix_scenario)
+        test.it("strips thinking produced under another prefix and keeps the current round", run_stale_thinking_scenario)
+    end)
+end
+
+local function define_checkpoint_tests()
+    test.describe("Session checkpoint continuity through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("retains the user task through repeated mid-turn checkpoints with per-step recall", run_checkpoint_scenario)
+        test.it("honors a new request after checkpoint Stop and reopening", function()
+            run_checkpoint_stop_scenario("Start a different task: prepare the agenda.")
+        end)
+        test.it("allows explicit continuation after checkpoint Stop and reopening", function()
+            run_checkpoint_stop_scenario("Continue the previous handout task and finish the remaining edits.")
+        end)
+        test.it("rejects checkpoint source messages from another session", function()
+            local context_id, first, second, message_id = uuid.v7(), uuid.v7(), uuid.v7(), uuid.v7()
+            local owner = assert(security.actor()):id()
+            assert(context_repo.create(context_id, "primary", "{}"))
+            assert(session_repo.create(first, owner, context_id, "First", "test"))
+            assert(session_repo.create(second, owner, context_id, "Second", "test"))
+            assert(message_repo.create(message_id, second, "user", "Private to the second session.", {}))
+            local message, err = assert(reader.open(first)):get_message(message_id)
+            session_repo.delete(first)
+            session_repo.delete(second)
+            context_repo.delete(context_id)
+            test.is_nil(message)
+            test.eq(err, "Message not found in session")
+        end)
+    end)
+end
+
+local function define_readiness_tests()
+    test.describe("Session ingress readiness without generation", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("applies the configured model before admitting commands without generating", function()
+            local storage = assert(store.get("app.runtime:state"))
+            storage:set("requests", {})
+            storage:set("scenario", {})
+            local samples = tonumber((env.get("WIPPY_BENCH_SAMPLES"))) or 25
+            test.is_true(samples > 0 and samples <= 10000 and samples % 1 == 0)
+            local actor = security.actor()
+            for _ = 1, samples do
+                local session_id, context_id = uuid.v7(), uuid.v7()
+                assert(context_repo.create(context_id, "primary", "{}"))
+                assert(session_repo.create(session_id, actor:id(), context_id, "Readiness", "test", {}, {
+                    -- Initial agent selection restores the router default;
+                    -- the following model operation must apply this override.
+                    agent_id = "app.runtime:router", model = "session-runtime-help",
+                }))
+                local ok, failure = pcall(function()
+                    local pid = open_process(session_id, actor:id(), true)
+                    local state = assert(reader.open(session_id)):state()
+                    test.eq(state.config.model, "session-runtime-help")
+                    close_process(pid, session_id)
+                end)
+                local _, cleanup_err = stop_active_process()
+                if cleanup_err then
+                    storage:release()
+                    error(tostring(failure or "Readiness cleanup failed") .. "; " .. cleanup_err)
+                end
+                session_repo.delete(session_id)
+                context_repo.delete(context_id)
+                if not ok then
+                    storage:release()
+                    error(failure)
+                end
+            end
+            local requests = storage:get("requests")
+            storage:release()
+            test.eq(#requests, 0, "initialization and the readiness barrier must never generate")
+        end)
+    end)
 end
 
 local function define_tests()
@@ -299,11 +982,19 @@ local function define_tests()
         test.it("cancels pending retirement during prompt construction and keeps the same session", function()
             run_scenario({retire_at = "prompt", cancel_retire = true, reopen = true})
         end)
-        test.it("commits a handoff but suppresses its continuation after Stop", function()
-            run_scenario({ stop = true, reopen = true })
-        end)
+        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_capabilities.cancels_in_flight() then
+            test.it("cancels the in-flight handoff and its continuation on Stop", function()
+                run_scenario({ stop = true, cancels_in_flight = true, reopen = true })
+            end)
+            test.it("cancels a streaming model call on Stop and keeps the streamed text", run_stream_stop)
+        else
+            test.it("commits a handoff but suppresses its continuation after Stop", function()
+                run_scenario({ stop = true, reopen = true })
+            end)
+            test.it_skip("Stop cancels in-flight model calls (requires Framework cancellation)", function() end)
+        end
         local stop_boundary = "suppresses provider generation when Stop commits while the next prompt is built"
-        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_stops_before_generation() then
+        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_capabilities.stops_before_generation() then
             test.it("honors Stop during prompt construction even after retirement is pending", function()
                 run_scenario({retire_at = "prompt", stop_after_retire = true, reopen = true})
             end)
@@ -335,6 +1026,10 @@ local function define_tests()
             test.not_nil(observed.exit.from)
             test.is_true(observed.row_present)
         end)
+    end)
+    test.describe("Session artifact references through the runtime", function()
+        test.before_all(function() wait_for_boot.run() end)
+        test.it("renders an artifact announced by another process while a tool call is running", run_artifact_scenario)
     end)
 end
 
@@ -372,4 +1067,6 @@ local function define_benchmark()
     end)
 end
 
-return { run = test.run_cases(define_tests), benchmark = test.run_cases(define_benchmark) }
+return { readiness = test.run_cases(define_readiness_tests), run = test.run_cases(define_tests), checkpoint = test.run_cases(define_checkpoint_tests),
+    stable_prefix = test.run_cases(define_stable_prefix_tests),
+    benchmark = test.run_cases(define_benchmark) }

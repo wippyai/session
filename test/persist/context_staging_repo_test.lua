@@ -17,6 +17,7 @@ local function define_tests()
         local original_now = staging._now
         local function fixture()
             local actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+            boot.ensure_user(actor)
             test.is_nil(select(2, contexts.create(context_id, 'primary', 'staging test')))
             test.is_nil(select(2, sessions.create(session, actor, context_id, 'Staging test', 'test')))
             table.insert(fixtures, { session = session, context_id = context_id })

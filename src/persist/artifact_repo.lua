@@ -1,6 +1,7 @@
 local sql = require("sql")
 local json = require("json")
 local time = require("time")
+local message_order = require("message_order")
 local security = require("security")
 local tx = require("tx")
 
@@ -516,7 +517,7 @@ function artifact_repo.list_by_session(session_id, limit, offset)
     local query = sql.builder.select("artifact_id", "session_id", "user_id", "kind", "title", "meta", "created_at", "updated_at", "content_version")
         :from("artifacts")
         :where("session_id = ?", session_id)
-        :order_by("created_at DESC")
+        :order_by(message_order.date(tx.type_of(db), "created_at") .. " DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then
@@ -565,6 +566,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
     local db, err = get_db()
     if err then return nil, err end
 
+    local date_key = message_order.date(tx.type_of(db), "created_at")
     local cursor_created_at = nil
     if cursor_artifact_id then
         local cursor_filters = {
@@ -574,7 +576,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
         if session_id and session_id ~= "" then
             cursor_filters[#cursor_filters + 1] = sql.builder.expr("session_id = ?", session_id)
         end
-        local cursor_query = sql.builder.select("created_at", "artifact_id")
+        local cursor_query = sql.builder.select(date_key .. " AS created_at", "artifact_id")
             :from("artifacts")
             :where(sql.builder.and_(cursor_filters))
             :limit(1)
@@ -596,7 +598,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
     end
     if cursor_created_at and cursor_artifact_id then
         filters[#filters + 1] = sql.builder.expr(
-            "(created_at < ? OR (created_at = ? AND artifact_id < ?))",
+            "(" .. date_key .. " < ? OR (" .. date_key .. " = ? AND artifact_id < ?))",
             cursor_created_at,
             cursor_created_at,
             cursor_artifact_id
@@ -608,7 +610,7 @@ function artifact_repo.list_by_user(user_id, session_id, limit, cursor_artifact_
         )
         :from("artifacts")
         :where(sql.builder.and_(filters))
-        :order_by("created_at DESC, artifact_id DESC")
+        :order_by(date_key .. " DESC, artifact_id DESC")
         :limit(limit + 1)
 
     local artifacts, query_err = query:run_with(db):query()
@@ -651,7 +653,7 @@ function artifact_repo.list_by_kind(session_id, kind, limit, offset)
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("kind = ?", kind)
         }))
-        :order_by("created_at DESC")
+        :order_by(message_order.date(tx.type_of(db), "created_at") .. " DESC")
 
     -- Add limit and offset if provided
     if limit and limit > 0 then

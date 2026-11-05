@@ -64,11 +64,21 @@ entries:
       - json
       - security
     imports:
+      checkpoint_repo: wippy.session.persist:checkpoint_repo
       session_repo: wippy.session.persist:session_repo
       message_repo: wippy.session.persist:message_repo
       artifact_repo: wippy.session.persist:artifact_repo
       context_repo: wippy.session.persist:context_repo
       session_contexts_repo: wippy.session.persist:session_contexts_repo
+
+  - name: checkpoint_repo
+    kind: library.lua
+    meta:
+      comment: Atomic persistence of a session checkpoint
+    source: file://checkpoint_repo.lua
+    modules: [sql, json, time]
+    imports:
+      consts: wippy.session:consts
 
   # wippy.session.persist:artifact_repo
   - name: artifact_repo
@@ -83,6 +93,7 @@ entries:
       - time
     imports:
       tx: wippy.session.persist:tx
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:context_repo
   - name: context_repo
@@ -146,6 +157,7 @@ entries:
       - time
     imports:
       tx: wippy.session.persist:tx
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:reader
   - name: reader

@@ -5,8 +5,12 @@ type UpstreamPayload = {
     session_id: string?,
 }
 
-local session_upstream = {}
+local session_upstream = { _session_repo = require("session_repo") }
 session_upstream.__index = session_upstream
+
+local function is_not_found(err)
+    return type(err) == "userdata" and err:kind() == "NotFound"
+end
 
 function session_upstream.new(session_id, conn_pid, parent_pid)
     local self = setmetatable({}, session_upstream)
@@ -14,6 +18,48 @@ function session_upstream.new(session_id, conn_pid, parent_pid)
     self.conn_pid = conn_pid
     self.parent_pid = parent_pid
     return self
+end
+
+function session_upstream.notify_external(session_id, changes)
+    if type(session_id) ~= "string" or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if type(changes) ~= "table" then
+        return nil, "Session changes are required"
+    end
+
+    local session_pid, lookup_err = process.registry.lookup("session." .. session_id)
+    if lookup_err and not is_not_found(lookup_err) then return nil, lookup_err end
+    if not session_pid then return true end
+
+    local sent, send_err = process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
+    if sent then return true end
+    -- Persistence already succeeded. A normal owner exit between lookup and
+    -- delivery does not turn an offline rename into an error.
+    local current, current_err = process.registry.lookup("session." .. session_id)
+    if not current and (not current_err or is_not_found(current_err)) then return true end
+    return nil, send_err
+end
+
+-- Called only by the session owner. Notifications invalidate fields; their
+-- values may already be stale by the time this mailbox message is handled.
+function session_upstream:refresh_external(changes)
+    local current, err = session_upstream._session_repo.get(self.session_id)
+    if not current then
+        if err == "Session not found" then
+            self:update_session({ deleted = true })
+            return true, nil, true
+        end
+        return nil, err or "Failed to reload session"
+    end
+    local update = {}
+    for _, key in ipairs({ "title", "status", "kind", "public_meta", "last_message_date" }) do
+        if changes[key] ~= nil then update[key] = current[key] end
+    end
+    -- Never forward private metadata, config or caller-supplied row contents.
+    update.session_id = self.session_id
+    self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, update)
+    return true
 end
 
 -- Topic generation methods --
@@ -32,6 +78,11 @@ end
 
 -- Update session state (status, agent, model, etc.)
 function session_upstream:update_session(changes)
+    -- Title writes can originate in the command-bus coroutine or an API.
+    -- Only the owner's inbox loop publishes their authoritative stored value.
+    if changes.title ~= nil then
+        return session_upstream.notify_external(self.session_id, changes)
+    end
     changes["session_id"] = self.session_id
     self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, changes)
 end

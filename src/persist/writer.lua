@@ -8,6 +8,7 @@ type WriteResult = {
 }
 
 local session_writer = {
+    _checkpoint_repo = require("checkpoint_repo"),
     _session_repo = require("session_repo"),
     _message_repo = require("message_repo"),
     _artifact_repo = require("artifact_repo"),
@@ -94,6 +95,23 @@ function session_writer:update_title(title)
     end
 
     return self:update_meta({ title = title })
+end
+
+function session_writer:commit_checkpoint(op, summary, metadata)
+    local summary_id, id_err = uuid.v7()
+    if not summary_id then return nil, id_err end
+    self._meta_lock:receive()
+    local result, err = session_writer._checkpoint_repo.commit(self.session_id, self.user_id,
+        op, summary, metadata, summary_id)
+    self._meta_lock:send(true)
+    return result, err
+end
+
+function session_writer:update_initial_title(title)
+    self._meta_lock:receive()
+    local updated, err = session_writer._session_repo.update_initial_title(self.session_id, title)
+    self._meta_lock:send(true)
+    return updated, err
 end
 
 function session_writer:update_status(status, error_message)
@@ -207,15 +225,34 @@ function session_writer:apply_inputs(updates, expected_revision)
     return result, err
 end
 
-function session_writer:stop_with_input_rollback(updates, session_updates)
+function session_writer:stop_with_input_rollback(updates, session_updates, boundary)
     self._meta_lock:receive()
     local result, err = session_writer._message_repo.stop_with_input_rollback(
-        self.session_id, updates, session_updates)
+        self.session_id, updates, session_updates, boundary)
     self._meta_lock:send(true)
     return result, err
 end
 
-function session_writer:add_response(content, metadata, calls)
+local function append_note_rows(rows: {any}, notes: {any}?): any
+    for _, note in ipairs(notes or {}) do
+        local note_id, note_err = uuid.v7()
+        if note_err then return note_err end
+        table.insert(rows, { message_id = note_id, type = note.type, data = note.content, metadata = note.metadata })
+    end
+    return nil
+end
+
+-- Commits notes that outlive any one step, in order and all at once.
+function session_writer:add_notes(notes)
+    local rows = {}
+    local note_err = append_note_rows(rows, notes)
+    if note_err then return nil, note_err end
+    return session_writer._message_repo.create_batch(self.session_id, rows)
+end
+
+-- Commits one step atomically: the notes the request sent, in order, then the
+-- assistant row, its pending calls, and any rows that follow the output.
+function session_writer:add_response(content, metadata, calls, notes, trailing)
     calls = calls or {}
     local seen_call_ids = {}
     for _, call in ipairs(calls) do
@@ -229,11 +266,12 @@ function session_writer:add_response(content, metadata, calls)
         seen_call_ids[call.id] = true
     end
 
+    local rows = {}
+    local notes_err = append_note_rows(rows, notes)
+    if notes_err then return nil, nil, notes_err end
     local assistant_id, id_err = uuid.v7()
     if id_err then return nil, nil, id_err end
-    local rows = {{
-        message_id = assistant_id, type = "assistant", data = content, metadata = metadata
-    }}
+    table.insert(rows, { message_id = assistant_id, type = "assistant", data = content, metadata = metadata })
     local call_ids = {}
     for _, call in ipairs(calls) do
         local row_id, row_err = uuid.v7()
@@ -258,6 +296,9 @@ function session_writer:add_response(content, metadata, calls)
             }
         })
     end
+    local trailing_err = append_note_rows(rows, trailing)
+    if trailing_err then return nil, nil, trailing_err end
+    if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
     local _, err, dates: any = session_writer._message_repo.create_batch(self.session_id, rows)
     if err then return nil, nil, err end
     -- The fourth value is the assistant row's stored date: a live update of

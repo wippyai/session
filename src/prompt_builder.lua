@@ -7,7 +7,9 @@ local fs = require("fs")
 local hash = require("hash")
 local time = require("time")
 local input_metadata = require("input_metadata")
+local text_clamp = require("text_clamp")
 local message_order = require("message_order")
+local tool_result = require("tool_result")
 
 type BuildOptions = {
     include_contexts: boolean?,
@@ -323,7 +325,7 @@ end
 prompt_builder._authorize_visual = authorize_visual_via_contract
 prompt_builder._resolve_visual = resolve_visual_via_contract
 
-function prompt_builder.build(messages, contexts, session_meta, options)
+function prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
     if not messages then
         return nil, "Messages are required"
     end
@@ -392,6 +394,32 @@ function prompt_builder.build(messages, contexts, session_meta, options)
         end
     end
 
+    -- A stored row renders as itself on every request. The builder merges adjacent
+    -- messages of one role and drivers hoist unpositioned developer messages into
+    -- the top-level instructions; either would edit what an earlier request sent.
+    local function in_place(metadata: table?): table
+        local copy = {}
+        for key, value in pairs(metadata or {}) do copy[key] = value end
+        copy.preserve_position = true
+        return copy
+    end
+
+    -- A row stored blank renders as nothing; providers reject empty text blocks.
+    local function has_text(value: any): boolean
+        return type(value) == "string" and value:find("%S") ~= nil
+    end
+
+    -- The calls of one response follow its assistant row, and each row holds a call
+    -- and its result. All the calls render first, then all the results: providers end
+    -- the assistant turn at the first result, and its thinking blocks are positioned
+    -- between the calls.
+    local response_calls_open = false
+    local pending_results = {}
+    local function flush_results()
+        for _, add_result in ipairs(pending_results) do add_result() end
+        pending_results = {}
+    end
+
     local function add_message(msg, render_steering)
         local metadata: table = msg.metadata or {}
 
@@ -400,15 +428,32 @@ function prompt_builder.build(messages, contexts, session_meta, options)
             return
         end
 
+        -- nil for a form answer accepted while a turn was running: the session
+        -- admits it after the turn ends (moving it to the end of the history),
+        -- so it stays out until then and does not close an open tool round.
+        local user_text = nil
+        if msg.type == consts.MSG_TYPE.USER then
+            user_text = answer_text.model_text(msg)
+            if user_text == nil then return end
+        end
+
+        if msg.type ~= consts.MSG_TYPE.FUNCTION and msg.type ~= consts.MSG_TYPE.PRIVATE_FUNCTION
+            and msg.type ~= consts.MSG_TYPE.DELEGATION then
+            flush_results()
+            response_calls_open = msg.type == consts.MSG_TYPE.ASSISTANT
+        end
+
         if msg.type == consts.MSG_TYPE.SYSTEM then
-            -- for internal use only, use developer role for ongoing system messages
+            -- Positional system notes (turn context, lifecycle) render where they
+            -- were sent; other system rows are host records for the client.
+            if metadata.preserve_position == true and has_text(msg.data) then
+                builder:add_system(msg.data :: string, metadata)
+            end
         elseif msg.type == consts.MSG_TYPE.USER then
-            -- nil for a form answer accepted while a turn was running: the
-            -- session admits it after the turn ends (moving it to the end of
-            -- the history), so it stays out until then.
-            local text = answer_text.model_text(msg)
-            if text == nil then return end
-            local user_parts = { prompt_builder._prompt.text(text) }
+            local user_parts = {}
+            if has_text(user_text) then
+                table.insert(user_parts, prompt_builder._prompt.text(user_text :: string))
+            end
             if include_context_attachments and metadata.context_attachments then
                 local required, required_count, required_versions = {}, 0, {}
                 for _, attachment in ipairs(metadata.context_attachments) do
@@ -447,7 +492,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                     table.insert(user_parts, part)
                 end
             end
-            builder:add_message(prompt_builder._prompt.ROLE.USER, user_parts)
+            builder:add_message(prompt_builder._prompt.ROLE.USER, user_parts, nil, { preserve_position = true })
 
             if include_files and metadata.file_uuids and #metadata.file_uuids > 0 then
                 local file_info = {}
@@ -473,7 +518,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                             file.filename, file.type, file.size, file.uuid
                         )
                     end
-                    builder:add_developer(files_text)
+                    builder:add_developer(files_text, { preserve_position = true })
                 end
             end
 
@@ -481,10 +526,17 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 builder:add_cache_marker("checkpoint_" .. msg.message_id)
             end
         elseif msg.type == consts.MSG_TYPE.ASSISTANT then
-            -- Always use add_assistant and let prompt library handle thinking blocks internally
-            builder:add_assistant(msg.data :: string, metadata)
+            -- Always use add_assistant and let prompt library handle thinking blocks internally.
+            -- A row with no text stays only for the thinking blocks of its tool round.
+            if has_text(msg.data) then
+                builder:add_assistant(msg.data :: string, in_place(metadata))
+            elseif type(metadata.thinking_blocks) == "table" and #metadata.thinking_blocks > 0 then
+                builder:add_assistant("", in_place(metadata))
+            end
         elseif msg.type == consts.MSG_TYPE.DEVELOPER then
-            builder:add_developer(msg.data :: string, metadata)
+            if has_text(msg.data) then
+                builder:add_developer(msg.data :: string, in_place(metadata))
+            end
         elseif
             msg.type == consts.MSG_TYPE.FUNCTION
             or msg.type == consts.MSG_TYPE.PRIVATE_FUNCTION
@@ -507,58 +559,41 @@ function prompt_builder.build(messages, contexts, session_meta, options)
                 end
                 builder:add_function_call(func_name, args :: string, llm_call_id, opts)
 
-                if metadata.status == consts.FUNC_STATUS.PENDING then
-                    builder:add_function_result(func_name, "incomplete", llm_call_id)
-                elseif metadata.status == consts.FUNC_STATUS.SUCCESS or
-                    metadata.status == consts.FUNC_STATUS.ERROR or
-                    metadata.status == consts.FUNC_STATUS.CANCELLED then
-                    -- A RESULT THAT HAS SINCE STOPPED BEING TRUE.
-                    --
-                    -- The conversation is rebuilt from these rows on every turn, so a tool
-                    -- result keeps being re-sent long after the thing it described has moved
-                    -- on. Usually that is right. It is the opposite when the result carries an
-                    -- IMAGE: the image is re-sent as a vision part every turn, and the model
-                    -- sees a picture of something that has since changed, with nothing
-                    -- attached to say so. It reads as perception rather than as a record with
-                    -- a date on it, and a model will answer from it without calling anything.
-                    --
-                    -- Only the tool that produced a result knows when it expires, and it
-                    -- cannot reach a prompt assembled here. So the producer marks its own row
-                    -- and this honours the mark.
-                    --
-                    -- The row is REPLACED, never dropped: providers reject a function call
-                    -- with no matching result, so the pair has to survive. Replacing the
-                    -- content is also what removes the image, since the image only exists
-                    -- because it is encoded in this content.
-                    local stale = metadata.stale
-                    if stale ~= nil and stale ~= false then
-                        local why = type(stale) == "string" and stale or ""
-                        builder:add_function_result(
-                            func_name,
-                            "STALE INFO: this result was withdrawn by the tool that produced " ..
-                            "it and no longer describes the current state." ..
-                            (why ~= "" and (" " .. why) or "") ..
-                            " Do not answer from it. Call the tool again if you need this.",
-                            llm_call_id)
-                    else
-                        local result_content = metadata.result
-                        if type(result_content) == "table" then
-                            result_content = json.encode(result_content)
-                        elseif result_content == nil then
-                            result_content = "nil"
+                local function add_result()
+                    if metadata.status == consts.FUNC_STATUS.PENDING then
+                        builder:add_function_result(func_name, "incomplete", llm_call_id)
+                    elseif metadata.status == consts.FUNC_STATUS.SUCCESS or
+                        metadata.status == consts.FUNC_STATUS.ERROR or
+                        metadata.status == consts.FUNC_STATUS.CANCELLED then
+                        -- Providers require a result for every call, including withdrawn results.
+                        local notice = tool_result.withdrawal_notice(metadata.stale)
+                        if notice then
+                            builder:add_function_result(func_name, notice, llm_call_id)
                         else
-                            result_content = tostring(result_content)
+                            local result_content = metadata.result
+                            if type(result_content) == "table" then
+                                result_content = json.encode(result_content)
+                            elseif result_content == nil then
+                                result_content = "nil"
+                            else
+                                result_content = tostring(result_content)
+                            end
+                            builder:add_function_result(func_name, tostring(result_content), llm_call_id, {
+                                is_error = metadata.status == consts.FUNC_STATUS.ERROR
+                                    or metadata.status == consts.FUNC_STATUS.CANCELLED
+                            })
                         end
-                        builder:add_function_result(func_name, tostring(result_content), llm_call_id, {
-                            is_error = metadata.status == consts.FUNC_STATUS.ERROR
-                                or metadata.status == consts.FUNC_STATUS.CANCELLED
-                        })
                     end
+                end
+                if response_calls_open then
+                    table.insert(pending_results, add_result)
+                else
+                    add_result()
                 end
             end
         elseif msg.type == consts.MSG_TYPE.ARTIFACT then
-            if msg.data and msg.data ~= "" then
-                builder:add_developer("Artifact: " .. msg.data, metadata)
+            if has_text(msg.data) then
+                builder:add_developer("Artifact: " .. msg.data, in_place(metadata))
             end
         end
     end
@@ -578,6 +613,12 @@ function prompt_builder.build(messages, contexts, session_meta, options)
 
     -- add_message returns an error when required context cannot be rendered;
     -- the whole prompt fails closed rather than dropping that context.
+    -- The restored request predates all retained steering, including applied
+    -- corrections whose original anchor is no longer in the history window.
+    for _, msg in ipairs(checkpoint_prefix or {}) do
+        local _, render_err = add_message(msg)
+        if render_err then return nil, render_err end
+    end
     local anchored_err = add_anchored("")
     if anchored_err then return nil, anchored_err end
     for _, msg in ipairs(messages) do
@@ -590,6 +631,7 @@ function prompt_builder.build(messages, contexts, session_meta, options)
             if anchored_err then return nil, anchored_err end
         end
     end
+    flush_results()
     -- A ROLLING BREAKPOINT ON THE HISTORY TAIL.
     --
     -- The prompt is rebuilt from the message rows on every agent step, and the only
@@ -608,19 +650,67 @@ function prompt_builder.build(messages, contexts, session_meta, options)
     return builder, nil
 end
 
-prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Everything before this point is "
-    .. "summarized in the session context memory above. Continue the current task from the latest messages below."
+prompt_builder.CHECKPOINT_RESUME_NOTE = "The conversation resumed from a checkpoint. Earlier progress and task revisions "
+    .. "are summarized in the session context memory above. Any original user request shown again is historical "
+    .. "context, not a new turn, and may be excerpted. Use that request, the summary, and subsequent messages "
+    .. "to continue the current task. Honor later corrections and do not repeat completed work."
 
-local function anchors_on_agent_message(session: any, messages: any): boolean
+local CHECKPOINT_REQUEST_MAX_BYTES = 6000
+local CHECKPOINT_REQUEST_OMISSION = "\n\n[Middle of the original request omitted; see the checkpoint summary for the full task.]\n\n"
+
+local function checkpoint_request_excerpt(text)
+    if #text <= CHECKPOINT_REQUEST_MAX_BYTES then return text end
+    -- Keep the task at the start and restrictions often placed at the end.
+    -- The budget includes the omission marker, and neither cut splits UTF-8.
+    local edge_bytes = math.floor((CHECKPOINT_REQUEST_MAX_BYTES - #CHECKPOINT_REQUEST_OMISSION) / 2)
+    return text_clamp.head(text, edge_bytes) .. CHECKPOINT_REQUEST_OMISSION .. text_clamp.tail(text, edge_bytes)
+end
+
+local function checkpoint_agent_message(session: any, messages: any): any
     if type(session.get_context) ~= "function" then
-        return false
+        return nil
     end
     local checkpoint_id = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
-    local first = messages[1]
-    if not checkpoint_id or not first or first.message_id ~= checkpoint_id then
-        return false
+    local boundary = session:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_BOUNDARY)
+    if checkpoint_id and type(boundary) == "table" and boundary.checkpoint_id == checkpoint_id and boundary.exclusive == true then
+        return { message_id = checkpoint_id, metadata = { source_id = boundary.source_id } }
     end
-    return first.type ~= consts.MSG_TYPE.USER and first.type ~= consts.MSG_TYPE.DEVELOPER
+    for _, message in ipairs(messages) do
+        if message.message_id == checkpoint_id then
+            if message.type ~= consts.MSG_TYPE.USER and message.type ~= consts.MSG_TYPE.DEVELOPER then
+                return message
+            end
+            return nil
+        end
+        if message.type ~= consts.MSG_TYPE.USER or type((message.metadata or {}).input) ~= "table" then
+            return nil
+        end
+    end
+    return nil
+end
+
+local function checkpoint_request(session, messages, anchor)
+    local source_id = (anchor.metadata or {}).source_id
+    if type(source_id) ~= "string" or source_id == "" then return nil, nil end
+    for _, message in ipairs(messages) do
+        if message.message_id == source_id then return nil, nil end
+        -- A later ordinary user message starts a new turn. Steering and a form
+        -- answer not admitted yet, including pending input, must not hide the
+        -- request that owns this checkpoint.
+        if message.type == consts.MSG_TYPE.USER and (message.metadata or {}).input == nil
+            and answer_text.model_text(message) ~= nil then
+            return nil, nil
+        end
+    end
+    local request, err = session:get_message(source_id)
+    if err then return nil, err end
+    if not request or request.type ~= consts.MSG_TYPE.USER then return nil, nil end
+    -- Keep the actual user text at user authority. Uploaded content and visual
+    -- attachments before the checkpoint are represented by its summary.
+    return {
+        message_id = request.message_id, date = request.date,
+        type = consts.MSG_TYPE.USER, data = checkpoint_request_excerpt(request.data), metadata = {},
+    }, nil
 end
 
 -- The session's form index (form identity and state survive checkpoints
@@ -656,12 +746,30 @@ function prompt_builder.from_session(session, options)
         return nil, "Failed to load messages: " .. err
     end
 
-    if anchors_on_agent_message(session, messages) then
-        table.insert(messages, 1, {
-            message_id = "checkpoint-resume:" .. tostring(messages[1].message_id),
+    local checkpoint_prefix = {}
+    local anchor = checkpoint_agent_message(session, messages)
+    if anchor then
+        local request, request_err = checkpoint_request(session, messages, anchor)
+        if request_err then return nil, "Failed to load checkpoint request: " .. request_err end
+        if request then
+            table.insert(checkpoint_prefix, request)
+            -- The note of the source turn stays with its excerpt, unless the
+            -- retained history already holds it.
+            local note, note_err = session:get_turn_note(request.message_id)
+            if note_err then return nil, "Failed to load turn note: " .. note_err end
+            if note then
+                local retained = false
+                for _, message in ipairs(messages) do
+                    if message.message_id == note.message_id then retained = true end
+                end
+                if not retained then table.insert(checkpoint_prefix, note) end
+            end
+        end
+        table.insert(checkpoint_prefix, {
+            message_id = "checkpoint-resume:" .. tostring(anchor.message_id),
             type = consts.MSG_TYPE.DEVELOPER,
             data = prompt_builder.CHECKPOINT_RESUME_NOTE,
-            metadata = {}
+            metadata = { preserve_position = true }
         })
     end
 
@@ -677,15 +785,17 @@ function prompt_builder.from_session(session, options)
 
     local session_meta = session:state()
 
-    local builder, build_err = prompt_builder.build(messages, contexts, session_meta, options)
+    local builder, build_err = prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
     if not builder then
         return nil, build_err
     end
     -- After the history and its cache marker: the index changes whenever a
     -- form is asked, answered or admitted, and anywhere earlier it would make
     -- the provider re-read the cached history behind it on the next step.
+    -- Positional, because drivers hoist any other developer message into the
+    -- top-level instructions, which sit in front of the whole history.
     if index then
-        builder:add_developer(index)
+        builder:add_developer(index, { preserve_position = true })
     end
     return builder, nil
 end

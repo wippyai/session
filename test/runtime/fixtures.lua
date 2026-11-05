@@ -1,6 +1,10 @@
 local store = require("store")
 local time = require("time")
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+
 local function state()
     local storage, err = store.get("app.runtime:state")
     if err then error(tostring(err)) end
@@ -13,8 +17,68 @@ local function generate(args)
     requests[#requests + 1] = { model = args.model, messages = args.messages }
     storage:set("requests", requests)
     local scenario = storage:get("scenario")
+    if args.model == "stream" then
+        for _, text in ipairs({ "Partial ", "answer" }) do
+            process.send(args.stream.reply_to, args.stream.topic, { type = "chunk", content = text })
+        end
+        local release = process.listen("fixture:stream_release")
+        process.send(scenario.parent, "fixture:stream_ready", { pid = process.pid() })
+        local timer = time.timer(EVENT_DEADLINE)
+        local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
+        timer:stop()
+        process.unlisten(release)
+        if selected.channel ~= release then error("stream release deadline exceeded") end
+        storage:set("stream_released", true)
+        return {
+            success = true,
+            result = { content = "Partial answer completed.", tool_calls = {} },
+            tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+            finish_reason = "stop",
+        }
+    end
+    local scripted = scenario.script and scenario.script[#requests]
+    if scripted then
+        if scripted.error then return nil, errors.new({ message = scripted.error, kind = "Internal", retryable = false }) end
+        local scripted_calls = scripted.calls or {}
+        return {
+            success = true,
+            result = { content = scripted.content or "Done.", tool_calls = scripted_calls },
+            tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+            finish_reason = #scripted_calls > 0 and "tool_call" or "stop",
+            metadata = scripted.metadata,
+        }
+    end
     local calls = {}
     local content = "The help agent completed the handoff."
+    local prompt_tokens = 10
+    if scenario.checkpoint then
+        if #requests <= 4 then
+            content = "Editing the handout."
+            calls = {{ id = "edit-" .. #requests, name = "checkpoint_edit", arguments = "{}" }}
+        else
+            content = "Finished rebuilding the handout."
+        end
+        if #requests == 2 or #requests == 4 then prompt_tokens = 300001 end
+        if scenario.hold_checkpoint and #requests == 3 then
+            local release = process.listen("fixture:checkpoint_release")
+            assert(process.send(scenario.parent, "fixture:checkpoint_ready", { pid = process.pid() }))
+            local timer = time.timer(EVENT_DEADLINE)
+            local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
+            timer:stop()
+            process.unlisten(release)
+            if selected.channel ~= release then error("checkpoint release deadline exceeded") end
+        end
+    end
+    if args.model == "prefix" then
+        if #requests == 1 then
+            content = "Packing the document."
+            calls = {{ id = "prefix-edit", name = "checkpoint_edit", arguments = "{}" }}
+        elseif #requests == 2 then
+            content = "The document is packed."
+        else
+            content = "It is a packed handout."
+        end
+    end
     if args.model == "router" then
         content = "Transferring the request."
         calls = {{ id = "call-handoff", name = "handoff", arguments = "{}" }}
@@ -26,11 +90,17 @@ local function generate(args)
                 { id = "call-malformed", name = "malformed_effects", arguments = "{}" })
         end
     end
+    local metadata = nil
+    if args.model == "prefix" or scenario.thinking then
+        metadata = { thinking_blocks = {{ type = "thinking", thinking = "Reasoning " .. #requests .. ".",
+            signature = "signature-" .. #requests }} }
+    end
     return {
         success = true,
         result = { content = content, tool_calls = calls },
-        tokens = { prompt_tokens = 10, completion_tokens = 5, total_tokens = 15 },
+        tokens = { prompt_tokens = prompt_tokens, completion_tokens = 5, total_tokens = prompt_tokens + 5 },
         finish_reason = #calls > 0 and "tool_call" or "stop",
+        metadata = metadata,
     }
 end
 
@@ -40,7 +110,7 @@ local function handoff()
     if scenario.stop or scenario.hold_handoff then
         local release = process.listen("fixture:release")
         process.send(scenario.parent, "fixture:handoff_ready", { pid = process.pid() })
-        local timer = time.timer("5s")
+        local timer = time.timer(EVENT_DEADLINE)
         local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
         timer:stop()
         process.unlisten(release)
@@ -49,7 +119,7 @@ local function handoff()
     return {
         message = "Handoff accepted.",
         _control = {
-            config = { agent = "app.runtime:help" },
+            config = { agent = scenario.handoff_target or "app.runtime:help" },
             context = { session = { set = { handoff_note = "Keep the earlier conversation." } } },
         },
     }
@@ -60,7 +130,7 @@ local function held_prompt()
     if scenario and scenario.hold_prompt then
         local release = process.listen("fixture:prompt_release")
         process.send(scenario.parent, "fixture:prompt_ready", { pid = process.pid() })
-        local timer = time.timer("5s")
+        local timer = time.timer(EVENT_DEADLINE)
         local selected = channel.select({ release:case_receive(), timer:channel():case_receive() })
         timer:stop()
         process.unlisten(release)
@@ -76,10 +146,42 @@ local function malformed_effects()
     return { message = "Malformed control.", _control = true }
 end
 
+-- Counts each phase so every note names the step it was sent with.
+local function prefix_lifecycle(payload)
+    local storage = state()
+    local key = "lifecycle_" .. tostring(payload.phase)
+    local count = (storage:get(key) or 0) + 1
+    storage:set(key, count)
+    if payload.phase == "activate" then
+        return { messages = {{ content = "Prefix agent activated." }} }
+    elseif payload.phase == "before_step" then
+        return { messages = {
+            { content = "Before step " .. count .. "." },
+            { role = "system", content = "Before step " .. count .. " system note." },
+        } }
+    end
+    return {}
+end
+
 return {
     generate = generate,
+    prefix_lifecycle = prefix_lifecycle,
     handoff = handoff,
     malformed_effects = malformed_effects,
     held_prompt = held_prompt,
+    checkpoint_edit = function()
+        local storage = state()
+        local edits = (storage:get("edits") or 0) + 1
+        storage:set("edits", edits)
+        return "Handout edit " .. edits .. " stored."
+    end,
+    checkpoint_summary = function()
+        local storage = state()
+        storage:set("checkpoints", (storage:get("checkpoints") or 0) + 1)
+        return { summary = "The user requested a rebuilt Word handout. Edits are in progress." }
+    end,
+    checkpoint_recall = function()
+        return { memories = {{ id = "style", content = "Use the usual handout style.", metadata = {} }} }
+    end,
     fail = function() error("Expected mixed-result failure") end,
 }

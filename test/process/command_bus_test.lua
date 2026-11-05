@@ -134,7 +134,15 @@ local function define_tests()
             local steps = 0
             local function context(current_writer)
                 local ctx = { session_id = session_id, writer = current_writer, held = {},
-                    reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
+                    reader = {
+                        list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+                        list_pending_answers = function(_, limit)
+                            return message_repo.list_pending_answers(session_id, limit)
+                        end,
+                        newest_non_input_id = function(_, excluded)
+                            return message_repo.newest_non_input_id(session_id, excluded)
+                        end,
+                    },
                     status = consts.STATUS.IDLE,
                     config = { input_policy = { while_running = "steer" } },
                     upstream = {
@@ -423,6 +431,32 @@ local function define_tests()
             test.is_nil(err)
             test.eq(recorded, 1)
             test.eq(steps, 0)
+        end)
+
+        it("closes the turn cancel channel on Stop and opens a fresh one for the next turn", function()
+            local ctx = {}
+            local bus = command_bus.new(ctx)
+            local cancelled = {}
+            ctx.queue_empty_callback = function()
+                if #cancelled == 1 then
+                    bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "second" })
+                else
+                    bus:stop()
+                end
+                return true
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                if #cancelled == 0 then bus:request_stop() end
+                local selected = channel.select({ bus.cancel:case_receive(), default = true })
+                table.insert(cancelled, selected.default ~= true)
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(#cancelled, 2)
+            test.is_true(cancelled[1], "Stop must cancel the running turn")
+            test.is_false(cancelled[2], "The next turn must start with an open cancel channel")
         end)
 
         it("applies tool outcomes and control before draining STOP", function()

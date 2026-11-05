@@ -10,6 +10,10 @@ local cleanup = require('context_cleanup')
 local consts = require('consts')
 local boot = require('wait_for_boot')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function define_tests()
     describe('Session context cleanup without active user sessions', function()
         local fixtures, worker_pid = {}, nil
@@ -19,6 +23,7 @@ local function define_tests()
             for i = 1, count do
                 if (i - 1) % staging.MAX_SESSION == 0 then
                     actor, context_id, session = uuid.v7(), uuid.v7(), uuid.v7()
+                    boot.ensure_user(actor)
                     assert(contexts.create(context_id, 'primary', 'Cleanup lifecycle'))
                     assert(sessions.create(session, actor, context_id, 'Cleanup lifecycle', 'test'))
                     table.insert(fixtures, { session = session, context_id = context_id })
@@ -54,8 +59,9 @@ local function define_tests()
             assert(pid, tostring(err or 'cleanup spawn failed'))
             worker_pid = pid
         end
-        local function sweep_result()
-            local inbox, events, deadline = process.inbox(), process.events(), time.after('3s')
+        local function sweep_result(deadline)
+            deadline = deadline or time.after(EVENT_DEADLINE)
+            local inbox, events = process.inbox(), process.events()
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:case_receive() })
                 assert(selected.ok and selected.channel ~= deadline, 'cleanup sweep timed out')
@@ -77,7 +83,7 @@ local function define_tests()
         end
         local function stop()
             assert(process.cancel(worker_pid, '1s'))
-            local events, deadline = process.events(), time.after('2s')
+            local events, deadline = process.events(), time.after(EVENT_DEADLINE)
             while true do
                 local selected = channel.select({ events:case_receive(), deadline:case_receive() })
                 assert(selected.ok and selected.channel ~= deadline, 'cleanup cancellation timed out')
@@ -110,14 +116,12 @@ local function define_tests()
             test.eq(removed, 104)
             test.eq(remaining(), 0)
             stages(1); expire()
-            -- The worker sweeps every 20ms, so sweeps that ran before the row
-            -- was staged are queued ahead of the one that removes it.
-            local result = sweep_result()
-            for _ = 1, 100 do
-                if result.count ~= 0 then break end
-                result = sweep_result()
-            end
-            test.is_false(result.unavailable)
+            local deadline = time.after(EVENT_DEADLINE)
+            local result
+            repeat
+                result = sweep_result(deadline)
+                test.is_false(result.unavailable)
+            until result.count > 0
             test.eq(result.count, 1)
             test.eq(remaining(), 0)
             stop()

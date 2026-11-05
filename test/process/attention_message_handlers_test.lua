@@ -78,7 +78,10 @@ local function context(writer_error, duplicate): (any, any)
     local ctx = {
         session_id = "session-1",
         -- An idle session reads its history to admit pending form answers first.
-        reader = { list_all_messages = function() return {} end },
+        reader = {
+            list_pending_inputs = function() return {} end,
+            list_pending_answers = function() return {} end,
+        },
         writer = {
             add_message = function(_, message_type, text, metadata, request_id, request_hash)
                 return write(message_type, text, metadata, request_id, request_hash)

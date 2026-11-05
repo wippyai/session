@@ -9,9 +9,19 @@ local security = require("security")
 local store = require("store")
 local sql = require("sql")
 local boot = require("boot")
+local framework_capabilities = require("framework_capabilities")
+local env = require("env")
 
-local function scenario(reason: string, reconnect: boolean?)
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = "30s"
+-- Stop cancellation has a real latency requirement, independent of event waits.
+local STOP_LATENCY_SECONDS = 2
+
+local function scenario(reason: string, reconnect: boolean?, cancels_in_flight: boolean?)
     local explicit_stop = reason == "stop"
+    -- Stop cancels the in-flight provider call, so no tool intent is produced.
+    local cancelled = explicit_stop and cancels_in_flight == true
     local finish_after_turn = reconnect or reason == "foreign_finish"
     boot.run()
     local id, context_id = uuid.v7(), uuid.v7()
@@ -34,7 +44,7 @@ local function scenario(reason: string, reconnect: boolean?)
     local exit: any = nil
     local terminal = {} :: {any}
     local function receive_until(predicate: any): any
-        local inbox, events, deadline = process.inbox(), process.events(), time.timer("12s")
+        local inbox, events, deadline = process.inbox(), process.events(), time.timer(EVENT_DEADLINE)
         local ok, value = pcall(function()
             while true do
                 local selected = channel.select({ inbox:case_receive(), events:case_receive(), deadline:channel():case_receive() })
@@ -92,9 +102,13 @@ local function scenario(reason: string, reconnect: boolean?)
             request_id = "native-barrier",
         }))
         receive_until(function(_, data) return data.request_id == "native-barrier" end)
-        assert(process.send(generating.pid, "lifecycle:release", {}))
+        if not cancelled then assert(process.send(generating.pid, "lifecycle:release", {})) end
         if explicit_stop or finish_after_turn then
+            local started = time.now()
             receive_until(function(_, data) return data.status == "idle" end)
+            if cancelled then
+                test.is_true(time.now():sub(started):seconds() < STOP_LATENCY_SECONDS, "Stop must cancel the provider call promptly")
+            end
             assert(process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {}))
         end
         local completion = receive_until(function(topic) return topic == "exit" end)
@@ -104,14 +118,25 @@ local function scenario(reason: string, reconnect: boolean?)
         for _, message in ipairs(page.messages) do
             if message.type == consts.MSG_TYPE.FUNCTION then call = message end
         end
-        test.not_nil(call, "provider tool intent must be stored")
         local check_db = assert(sql.get("app:db"))
         local rows = assert(check_db:query("SELECT COUNT(*) AS count FROM session_lifecycle_effects WHERE id = $1", {id}))
         check_db:release()
+        if cancelled then
+            test.is_nil(call, "a cancelled provider call stores no tool intent")
+            test.eq(rows[1].count, 0)
+            test.eq(#terminal, 0)
+            local state = assert(store.get("app.lifecycle:state"))
+            test.eq(state:get("count"), 1, "the cancelled provider call must not be repeated")
+            state:release()
+            return
+        end
+        test.not_nil(call, "provider tool intent must be stored")
         if explicit_stop then
             test.eq(rows[1].count, 0)
             test.eq(call.metadata.status, consts.FUNC_STATUS.CANCELLED)
             test.eq(#terminal, 1, "Stop must settle the cancelled live chip")
+            test.eq(terminal[1].outcome, consts.FUNC_STATUS.CANCELLED, "the live event uses the history field")
+            test.is_nil(terminal[1].status, "the live event carries only outcome")
         else
             test.eq(call.metadata.status, consts.FUNC_STATUS.SUCCESS, tostring(call.metadata.result))
             test.eq(rows[1].count, 1, "disconnect finish must allow the edit to commit")
@@ -135,7 +160,11 @@ local function define_tests()
         it("invalidates a pending finish on reconnect and stays usable", function() scenario("shutdown", true) end)
         it("ignores retirement requested by a foreign process", function() scenario("foreign_finish") end)
         it("ignores cancellation of retirement by a foreign process", function() scenario("foreign_cancel") end)
-        it("cancels explicitly stopped work and settles its live event", function() scenario("stop") end)
+        if env.get("WIPPY_TEST_REQUIRE_CASES") == "1" or framework_capabilities.cancels_in_flight() then
+            it("cancels the in-flight provider call on Stop", function() scenario("stop", false, true) end)
+        else
+            it("cancels explicitly stopped work and settles its live event", function() scenario("stop") end)
+        end
     end)
 end
 

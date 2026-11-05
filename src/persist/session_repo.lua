@@ -2,6 +2,7 @@ local sql = require("sql")
 local json = require("json")
 local time = require("time")
 local tx = require("tx")
+local message_order = require("message_order")
 
 type Session = {
     session_id: string,
@@ -258,7 +259,7 @@ function session_repo.list_by_user(user_id, limit, offset)
         )
         :from("sessions")
         :where("user_id = ?", user_id)
-        :order_by("last_message_date DESC")
+        :order_by(message_order.date(tx.type_of(db), "last_message_date") .. " DESC")
 
     if limit and limit > 0 then
         query = query:limit(limit)
@@ -422,21 +423,21 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     local result, update_err = update:run_with(dbtx):exec()
     if update_err or not result or result.rows_affected ~= 1 then
         dbtx:rollback()
-        if update_err then
+        if update_err or not result then
             db:release()
-            return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE', current_state
+            return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
         end
-        -- Another writer committed between the read above and this update. On
-        -- PostgreSQL the update waits for that writer, and the state read
-        -- before it is out of date, so the caller gets the committed state.
-        local committed_rows = current_query:limit(1):run_with(db):query()
+        -- PostgreSQL can read the previous revision before a competing writer
+        -- commits. After losing the conditional update, return the committed
+        -- state rather than the snapshot read before that race.
+        local latest_rows, latest_err = current_query:limit(1):run_with(db):query()
         db:release()
-        local committed = committed_rows and committed_rows[1]
-        if committed then
-            current_state = attention_context(committed.attention_enabled, tonumber(committed.attention_revision) or 0,
-                committed.attention_updated_at, committed.attention_updated_by)
-        end
-        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+        if latest_err then return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' end
+        if #latest_rows == 0 then return nil, 'SESSION_NOT_FOUND' end
+        local latest = latest_rows[1]
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', attention_context(
+            latest.attention_enabled, tonumber(latest.attention_revision) or 0,
+            latest.attention_updated_at, latest.attention_updated_by)
     end
 
     local commit_ok, commit_err = dbtx:commit()
@@ -448,6 +449,30 @@ function session_repo.update_attention_context(session_id, enabled, expected_rev
     db:release()
 
     return attention_context(enabled, next_revision, now, updated_by)
+end
+
+function session_repo.update_initial_title(session_id, title)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if not title or title == "" then
+        return nil, "Title cannot be empty"
+    end
+
+    local db, err = get_db()
+    if err then return nil, err end
+    local result
+    result, err = sql.builder.update("sessions")
+        :set("title", title)
+        :where("session_id = ?", session_id)
+        :where("(title IS NULL OR title = '')")
+        :run_with(db):exec()
+    db:release()
+    if err then return nil, "Failed to update initial title: " .. err end
+    if not result or type(result.rows_affected) ~= "number" then
+        return nil, "Missing initial title update result"
+    end
+    return result.rows_affected > 0
 end
 
 -- Update session metadata (title, meta, config, public_meta, status, last_message_date)
@@ -515,15 +540,22 @@ function session_repo.update_session_meta(session_id, updates)
         result.public_meta = updates.public_meta
     end
 
-    -- Always update last_message_date if any field is updated
-    local date
+    -- Message persistence owns implicit recency updates. Metadata edits only
+    -- change the date when the caller supplies one explicitly.
     if updates.last_message_date ~= nil then
-        date = time.unix(updates.last_message_date, 0):utc():format(time.RFC3339)
-    else
-        date = time.now():utc():format(time.RFC3339)
+        local date = time.unix(updates.last_message_date, 0):utc():format(time.RFC3339)
+        update_query = update_query:set("last_message_date", date)
+        result.last_message_date = date
+    elseif updates.title == nil and updates.status == nil and updates.kind == nil
+        and updates.meta == nil and updates.config == nil and updates.public_meta == nil then
+        -- Preserve successful no-op updates without generating an empty SET
+        -- clause or manufacturing message activity. Missing sessions still fail.
+        local rows, read_err = db:query("SELECT session_id FROM sessions WHERE session_id = $1", { session_id })
+        db:release()
+        if read_err then return nil, "Failed to update session metadata: " .. read_err end
+        if not rows or #rows == 0 then return nil, "Session not found" end
+        return result
     end
-    update_query = update_query:set("last_message_date", date)
-    result.last_message_date = date
 
     -- Add WHERE clause
     update_query = update_query:where("session_id = ?", session_id)

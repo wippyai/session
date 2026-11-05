@@ -40,6 +40,8 @@ local consts = {
     -- Context Keys
     CONTEXT_KEYS = {
         CURRENT_CHECKPOINT_ID = "current_checkpoint_id",
+        CURRENT_CHECKPOINT_BOUNDARY = "current_checkpoint_boundary",
+        CHECKPOINT_REQUESTED = "checkpoint_requested",
         FULL_CONTEXT = "full_context"
     },
 
@@ -162,6 +164,7 @@ local consts = {
         ERROR = "error",
         SESSION_OPENED = "session.opened",
         SESSION_CLOSED = "session.closed",
+        SESSION_UPDATED = "session.updated",
         FINISH_AND_EXIT = "finish_and_exit",
         STOP_ESCALATION = "session.stop_escalation",
         STOP_RESOLVED = "session.stop_resolved",
@@ -258,7 +261,9 @@ local consts = {
         TITLE_GENERATED = "title_generated",
         CHECKPOINT_CREATED = "checkpoint_created",
         TURN_LIMIT = "turn_limit",
-        TURN_FAILED = "turn_failed"
+        TURN_FAILED = "turn_failed",
+        TURN_CONTEXT = "turn_context",
+        LIFECYCLE_NOTE = "lifecycle_note"
     },
 
     -- Error Codes for Plugin
@@ -270,11 +275,13 @@ local consts = {
         INVALID_SESSION_ID = "invalid_session_id",
         SESSION_NOT_FOUND = "session_not_found",
         INVALID_MESSAGE_TYPE = "invalid_message_type",
+        EMPTY_MESSAGE = "empty_message",
         TOKEN_INVALID = "token_invalid",
         REQUEST_CONFLICT = "request_conflict",
         INVALID_FILE_REFERENCES = "invalid_file_references",
         INVALID_CONTEXT_ATTACHMENTS = "invalid_context_attachments",
         AGENT_ERROR = "agent_error",
+        CONTEXT_WINDOW = "context_window",
         STORAGE_ERROR = "storage_error"
     },
 

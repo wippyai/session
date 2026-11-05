@@ -3,6 +3,7 @@ local test = require("test")
 local uuid = require("uuid")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
+local message_repo = require("message_repo")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
@@ -379,11 +380,101 @@ local function define_tests()
             test.is_true(is_current_instant(stored.start_date), "start_date: " .. tostring(stored.start_date))
             test.is_true(is_current_instant(stored.last_message_date),
                 "last_message_date: " .. tostring(stored.last_message_date))
-            local updated = session_repo.update_session_meta(session_id, { title = "Date stamp 2" })
+            -- Metadata edits keep the date unless the caller names one.
+            local updated = session_repo.update_session_meta(session_id,
+                { title = "Date stamp 2", last_message_date = time.now():unix() })
             test.is_true(is_current_instant(updated.last_message_date),
                 "updated last_message_date: " .. tostring(updated.last_message_date))
             session_repo.delete(session_id)
             test.not_nil(created)
+        end)
+
+        for _, change in ipairs({
+            { name = "title", updates = { title = "Renamed" } },
+            { name = "status", updates = { status = "idle" } },
+            { name = "kind", updates = { kind = "renamed-kind" } },
+            { name = "metadata", updates = { meta = { favorite = true } } },
+            { name = "config", updates = { config = { model = "changed" } } },
+            { name = "public metadata", updates = { public_meta = { label = "changed" } } },
+            { name = "empty updates", updates = {} },
+            { name = "unsupported fields", updates = { unknown = true } },
+        }) do
+            it("preserves message recency for " .. change.name, function()
+                local id = uuid.v7()
+                assert(session_repo.create(id, test_data.user_id, test_data.context_id, "Recency", "test"))
+                assert(session_repo.update_session_meta(id, { last_message_date = 946684800 }))
+                local before = assert(session_repo.get(id))
+
+                local result, update_err = session_repo.update_session_meta(id, change.updates)
+                local after = assert(session_repo.get(id))
+                assert(session_repo.delete(id))
+
+                test.is_nil(update_err)
+                test.not_nil(result)
+                test.is_true(result.updated)
+                test.is_nil(result.last_message_date, "unchanged dates are not published as updates")
+                test.eq(after.last_message_date, before.last_message_date)
+            end)
+        end
+
+        it("preserves message recency when assigning an automatic initial title", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "", "test"))
+            assert(session_repo.update_session_meta(id, { last_message_date = 946684800 }))
+            local before = assert(session_repo.get(id))
+            local updated, err = session_repo.update_initial_title(id, "Automatic title")
+            local after = assert(session_repo.get(id))
+            assert(session_repo.delete(id))
+
+            test.is_nil(err)
+            test.is_true(updated)
+            test.eq(after.title, "Automatic title")
+            test.eq(after.last_message_date, before.last_message_date)
+        end)
+
+        it("rejects no-op metadata updates for missing sessions", function()
+            for _, updates in ipairs({ {}, { unknown = true } }) do
+                local result, err = session_repo.update_session_meta(uuid.v7(), updates)
+                test.is_nil(result)
+                test.eq(err, "Session not found")
+            end
+        end)
+
+        it("keeps message ordering after renaming an older session", function()
+            local user_id, older_id, newer_id = test_data.user_id, uuid.v7(), uuid.v7()
+            assert(session_repo.create(older_id, user_id, test_data.context_id, "Older", "test"))
+            assert(session_repo.create(newer_id, user_id, test_data.context_id, "Newer", "test"))
+            assert(session_repo.update_session_meta(older_id, { last_message_date = 946684800 }))
+            assert(session_repo.update_session_meta(newer_id, { last_message_date = 978307200 }))
+
+            assert(session_repo.update_session_meta(older_id, { title = "Renamed older session" }))
+            local rows = assert(session_repo.list_by_user(user_id))
+            assert(session_repo.delete(older_id))
+            assert(session_repo.delete(newer_id))
+
+            local older_index, newer_index
+            for index, row in ipairs(rows) do
+                if row.session_id == older_id then older_index = index end
+                if row.session_id == newer_id then newer_index = index end
+            end
+            test.not_nil(older_index)
+            test.not_nil(newer_index)
+            test.is_true(newer_index < older_index)
+        end)
+
+        it("still advances message recency when a real message is persisted", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "New message", "test"))
+            assert(session_repo.update_session_meta(id, { last_message_date = 946684800 }))
+            local before = assert(session_repo.get(id))
+
+            local message, message_err = message_repo.create(uuid.v7(), id, consts.MSG_TYPE.USER, "New message")
+            local after = assert(session_repo.get(id))
+            assert(session_repo.delete(id))
+
+            test.is_nil(message_err)
+            test.not_nil(message)
+            test.is_true(after.last_message_date ~= before.last_message_date)
         end)
 
         it("should update last message date", function()
@@ -878,6 +969,55 @@ local function define_tests()
 
             test.is_nil(missing_status)
             test.contains(tostring(status_err), "Status is required")
+        end)
+        it("sets an automatic title only once across independent writers", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "", "test"))
+            local done = channel.new(2)
+            for _, title in ipairs({ "First automatic", "Second automatic" }) do
+                coroutine.spawn(function()
+                    local updated, err = session_repo.update_initial_title(id, title)
+                    done:send({ updated = updated, err = err })
+                end)
+            end
+            local applied = 0
+            for _ = 1, 2 do
+                local result = done:receive()
+                test.is_nil(result.err)
+                if result.updated then applied = applied + 1 end
+            end
+            test.eq(applied, 1)
+            local stored = assert(session_repo.get(id, test_data.user_id))
+            test.is_true(stored.title == "First automatic" or stored.title == "Second automatic")
+            assert(session_repo.update_session_meta(id, { title = "Manual afterwards" }))
+            test.eq(assert(session_repo.get(id, test_data.user_id)).title, "Manual afterwards")
+            session_repo.delete(id)
+        end)
+
+        it("preserves a rename between an initial read and automatic admission", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "", "test", { marker = "kept" }))
+            test.eq(assert(session_repo.get(id, test_data.user_id)).title, "")
+            assert(session_repo.update_session_meta(id, { title = "Manual winner" }))
+            local updated, err = session_repo.update_initial_title(id, "Late automatic")
+            test.is_nil(err)
+            test.is_false(updated)
+            local stored = assert(session_repo.get(id, test_data.user_id))
+            test.eq(stored.title, "Manual winner")
+            test.eq(stored.meta.marker, "kept")
+            session_repo.delete(id)
+        end)
+
+        it("handles missing sessions and invalid initial titles without a write", function()
+            local updated, err = session_repo.update_initial_title(uuid.v7(), "Not persisted")
+            test.is_nil(err)
+            test.is_false(updated)
+            updated, err = session_repo.update_initial_title("", "Not persisted")
+            test.is_nil(updated)
+            test.eq(err, "Session ID is required")
+            updated, err = session_repo.update_initial_title(uuid.v7(), "")
+            test.is_nil(updated)
+            test.eq(err, "Title cannot be empty")
         end)
     end)
 end

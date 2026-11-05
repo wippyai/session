@@ -97,7 +97,15 @@ local function define_tests()
             test.is_nil(writer_err)
             return {
                 session_id = session_id,
-                reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
+                reader = {
+                    list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+                    list_pending_answers = function(_, limit)
+                        return message_repo.list_pending_answers(session_id, limit)
+                    end,
+                    newest_non_input_id = function(_, excluded)
+                        return message_repo.newest_non_input_id(session_id, excluded)
+                    end,
+                },
                 writer = session_writer,
                 upstream = {
                     send_message_update = function() end,

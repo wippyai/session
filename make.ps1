@@ -3,8 +3,9 @@
 #
 # Settings are read from environment variables of the same name as the
 # Makefile variables (TEST_ARTIFACTS, TEST_DIR, TEST_CONFIG, TEST_DB,
-# TEST_BACKUP_DIR, TEST_FILTER, FRAMEWORK_DIR, PGHOST, PGPORT, PGDATABASE,
-# PGUSER, PGPASSWORD, POSTGRES_SUITES, the BENCH_* sizes, UI_DIR, UI_ANSWERS_DIR). Set WIPPY_BIN
+# TEST_BACKUP_DIR, TEST_FILTER, TEST_TIMEZONE, FRAMEWORK_DIR, PGHOST, PGPORT,
+# PGDATABASE, PGUSER, PGPASSWORD, POSTGRES_TEST_FILTER, POSTGRES_TEST_OVERRIDES,
+# the BENCH_* sizes, UI_DIR, UI_ANSWERS_DIR). Set WIPPY_BIN
 # (or WIPPY) to a runtime binary path when wippy is not on PATH.
 #
 # prepare and clean do what scripts/test-workspace.sh and
@@ -23,7 +24,7 @@
 # package.json. verify runs install, test, lint, test-ui, lint-ui and check-ui
 # in that order and stops at the first failure.
 param(
-    [ValidateSet('test', 'test-runtime', 'test-postgres', 'bench', 'lint', 'install', 'prepare', 'clean', 'build-ui', 'ui-dev', 'ui-dev-answers', 'test-ui', 'lint-ui', 'check-ui', 'verify', 'help')]
+    [ValidateSet('test', 'test-runtime', 'test-postgres', 'test-postgres-full', 'test-admission', 'bench', 'lint', 'install', 'prepare', 'clean', 'build-ui', 'ui-dev', 'ui-dev-answers', 'test-ui', 'lint-ui', 'check-ui', 'verify', 'help')]
     [string]$Target = 'test'
 )
 
@@ -48,9 +49,10 @@ $testDb = ConvertTo-FullPath (Get-Setting 'TEST_DB' "$testArtifacts/test.db")
 $testBackupDir = ConvertTo-FullPath (Get-Setting 'TEST_BACKUP_DIR' "$testArtifacts/backups")
 $testFilter = Get-Setting 'TEST_FILTER'
 $frameworkDir = Get-Setting 'FRAMEWORK_DIR'
-# The suites test-postgres runs, as entry id prefixes (see POSTGRES_SUITES in
-# the Makefile for what is left out and why).
-$postgresSuites = (Get-Setting 'POSTGRES_SUITES' 'app: app.api: app.forms: app.funcs: app.lifecycle: app.persist: app.process: app.run_context: app.runtime:handoff_runtime') -split '\s+' | Where-Object { $_ }
+$testTimezone = Get-Setting 'TEST_TIMEZONE' 'UTC'
+# The suites test-postgres runs (see POSTGRES_TEST_FILTER in the Makefile).
+$postgresFilter = Get-Setting 'POSTGRES_TEST_FILTER' 'app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test app.forms:'
+$postgresOverrides = Get-Setting 'POSTGRES_TEST_OVERRIDES'
 $uiDir = Join-Path $repo (Get-Setting 'UI_DIR' 'frontend/wippy-form')
 $uiAnswersDir = Join-Path $repo (Get-Setting 'UI_ANSWERS_DIR' 'frontend/wippy-form-answers')
 
@@ -134,6 +136,7 @@ function Invoke-Prepare {
     $config = [ordered]@{
         version = '1.0'
         logger = [ordered]@{ level = 'error' }
+        override = [ordered]@{ 'wippy.session.process:context_cleanup.service:lifecycle.auto_start' = $false }
         registry = [ordered]@{
             dependency_vendor_dir = "$workspace/modules/vendor"
             dependency_lock_path = "$workspace/wippy.lock"
@@ -180,7 +183,7 @@ function Invoke-Clean {
 
 function Invoke-WippyTest([string]$Filter, [hashtable]$ExtraEnvironment = @{}) {
     New-Item -ItemType Directory -Force -Path "$testArtifacts/benchmarks" | Out-Null
-    $environment = @{ WIPPY_TEST_REPOSITORY = $repo.Replace('\', '/'); WIPPY_TEST_ARTIFACTS = $testArtifacts }
+    $environment = @{ TZ = $testTimezone; WIPPY_TEST_REPOSITORY = $repo.Replace('\', '/'); WIPPY_TEST_ARTIFACTS = $testArtifacts }
     foreach ($name in $ExtraEnvironment.Keys) { $environment[$name] = $ExtraEnvironment[$name] }
     $arguments = @('test')
     if ((Get-Setting 'WIPPY_BENCH_EXACT_ALLOCATIONS') -eq '1') { $arguments += '--profiler' }
@@ -192,17 +195,12 @@ function Invoke-WippyTest([string]$Filter, [hashtable]$ExtraEnvironment = @{}) {
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
 }
 
-function Assert-FrameworkDir {
-    if (-not $frameworkDir) { throw 'Set FRAMEWORK_DIR to use the required runtime test runner' }
-}
-
 function Invoke-Test {
     Invoke-Clean
     Invoke-WippyTest $testFilter
 }
 
 function Invoke-TestRuntime([string]$Filter = 'app.runtime:handoff_runtime') {
-    Assert-FrameworkDir
     Invoke-Install
     Invoke-WithEnvironment @{ WIPPY_TEST_REQUIRE_CASES = '1' } {
         Invoke-Clean
@@ -211,12 +209,11 @@ function Invoke-TestRuntime([string]$Filter = 'app.runtime:handoff_runtime') {
 }
 
 # The caller supplies a fresh disposable database; this target never drops one.
-function Invoke-TestPostgres {
-    Assert-FrameworkDir
+function Invoke-TestPostgres([string]$Filter = $postgresFilter, [string]$Overrides = $postgresOverrides) {
     Invoke-Install
     New-Item -ItemType Directory -Force -Path "$testArtifacts/benchmarks" | Out-Null
     $environment = @{
-        TZ = 'UTC'
+        TZ = $testTimezone
         WIPPY_TEST_REQUIRE_CASES = '1'
         WIPPY_TEST_REPOSITORY = $repo.Replace('\', '/')
         WIPPY_TEST_ARTIFACTS = $testArtifacts
@@ -230,9 +227,27 @@ function Invoke-TestPostgres {
         '-o', "app:db:password=$(Get-Setting 'PGPASSWORD' 'kickside')",
         '-o', 'app:db:options.sslmode=disable',
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
-        '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks",
-        'test', '--') + $postgresSuites
+        '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks")
+    $arguments += @($Overrides -split '\s+' | Where-Object { $_ })
+    $suites = @($Filter -split '\s+' | Where-Object { $_ })
+    if ($suites.Count -gt 0) { $arguments += @('test', '--') + $suites }
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
+}
+
+# Release validation executes every suite rather than only persistence handoff.
+# Benchmarks stay opt-in workloads run by bench.
+function Invoke-TestPostgresFull {
+    Invoke-TestPostgres '' '-o app.runtime:handoff_benchmark:meta.type=benchmark -o app.runtime:metadata_benchmark:meta.type=benchmark'
+}
+
+# Requires the admission capability in either published dependencies or an
+# explicit source composition.
+function Invoke-TestAdmission {
+    Invoke-Install
+    Invoke-WithEnvironment @{ WIPPY_TEST_REQUIRE_ADMISSION = '1' } {
+        Invoke-Clean
+        Invoke-WippyTest 'app.persist:checkpoint_repo_test'
+    }
 }
 
 function Invoke-Bench {
@@ -319,6 +334,8 @@ try {
         'test' { Invoke-Test }
         'test-runtime' { Invoke-TestRuntime }
         'test-postgres' { Invoke-TestPostgres }
+        'test-postgres-full' { Invoke-TestPostgresFull }
+        'test-admission' { Invoke-TestAdmission }
         'bench' { Invoke-Bench }
         'lint' { Invoke-Lint }
         'install' { Invoke-Install }
@@ -338,7 +355,7 @@ try {
             Invoke-LintUi
             Invoke-CheckUi
         }
-        'help' { 'Targets: test, test-runtime, test-postgres, bench, lint, install, prepare, clean, build-ui, ui-dev, ui-dev-answers, test-ui, lint-ui, check-ui, verify. Settings come from environment variables named like the Makefile variables. Set WIPPY_BIN (or WIPPY) to override the runtime path.' }
+        'help' { 'Targets: test, test-runtime, test-postgres, test-postgres-full, test-admission, bench, lint, install, prepare, clean, build-ui, ui-dev, ui-dev-answers, test-ui, lint-ui, check-ui, verify. Settings come from environment variables named like the Makefile variables. Set WIPPY_BIN (or WIPPY) to override the runtime path.' }
     }
 }
 catch {

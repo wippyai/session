@@ -5,6 +5,248 @@ namespace: app
 # workspace.replacements in .wippy.yaml, so these entries only wire up the
 # resources it asks for and register the suites that sit next to src/*.lua.
 entries:
+  - name: native_behavior
+    kind: function.lua
+    meta:
+      test_only: true
+    source: file://native_behavior.lua
+    method: apply
+
+  - name: native_behavior_binding
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:lifecycle
+        methods:
+          apply: app:native_behavior
+
+  - name: native_behavior_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      test_only: true
+    data:
+      behaviors:
+        - id: native_policy
+          kind: policy
+          handles: [after_step]
+          strict: true
+          handlers:
+            lifecycle: app:native_behavior_binding
+
+  - name: persist_probe
+    kind: function.lua
+    meta:
+      test_only: true
+    source: file://persist_probe.lua
+    modules: [contract, json, sql]
+    method: apply
+
+  - name: persist_probe_binding
+    kind: contract.binding
+    contracts:
+      - contract: wippy.agent:lifecycle
+        methods:
+          apply: app:persist_probe
+
+  - name: persist_probe_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      test_only: true
+    data:
+      behaviors:
+        - id: persist_probe
+          kind: memory
+          handles: [after_persist]
+          strict: true
+          handlers:
+            lifecycle: app:persist_probe_binding
+
+  - name: lifecycle_behavior_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      name: Lifecycle Behavior Test Trait
+      test_only: true
+    data:
+      behaviors:
+        - id: durable_context
+          kind: memory
+          handles: [activate, before_step, checkpoint]
+          handlers:
+            lifecycle: app:lifecycle_test_binding
+            checkpoint: app:checkpoint_test_binding
+          checkpoint:
+            token_threshold: 1200
+            max_memory_chars: 2000
+
+  - name: legacy_lifecycle_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      name: Legacy Lifecycle Test Trait
+      test_only: true
+    data:
+      bindings:
+        lifecycle:
+          - id: legacy_lifecycle
+            contract: wippy.agent:lifecycle
+            binding: app:legacy_lifecycle_test_binding
+            phases: [deactivate]
+            priority: 200
+        checkpoint:
+          - id: legacy_checkpoint
+            contract: wippy.agent:checkpoint
+            binding: app:legacy_checkpoint_test_binding
+            priority: 200
+
+  - name: dep.wippy.relay
+    kind: ns.dependency
+    component: wippy/relay
+    version: '*'
+    parameters:
+      - name: application_host
+        value: app:processes
+      - name: user_security_scope
+        value: app:relay_user
+
+  - name: relay_user
+    kind: registry.entry
+
+  - name: lifecycle_tool
+    kind: function.lua
+    meta:
+      type: tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://lifecycle_tool.lua
+    method: run
+
+  - name: lifecycle_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: gpt-4o
+    prompt: Test only.
+    tools: [app:lifecycle_tool]
+
+  - name: lifecycle_disconnect_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      session_service: wippy.session:service
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_lifecycle
+
+  - name: users_fixture_migration
+    kind: function.lua
+    meta:
+      type: migration
+      target_db: app:db
+      timestamp: '2020-01-01T00:00:00Z'
+      depends_on: [ns:wippy.migration]
+    source: file://users_fixture_migration.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
+  - name: interruption_plugin_worker
+    kind: process.lua
+    source: file://interruption_plugin_worker.lua
+    imports:
+      plugin: wippy.session.process:plugin
+      consts: wippy.session:consts
+    method: run
+
+  - name: interruption_generate
+    kind: function.lua
+    source: file://interruption_generate.lua
+    method: run
+    modules: [ctx, time]
+    imports:
+      response_mapper: wippy.llm.openai:mapper
+
+  - name: interruption_driver
+    kind: contract.binding
+    contracts:
+      - contract: wippy.llm:generator
+        methods:
+          generate: app:interruption_generate
+      - contract: wippy.llm:provider
+        methods:
+          status: app:interruption_status
+
+  - name: interruption_status
+    kind: function.lua
+    source: file://interruption_generate.lua
+    method: status
+    modules: [ctx, time]
+    imports:
+      response_mapper: wippy.llm.openai:mapper
+
+  - name: interruption_provider
+    kind: registry.entry
+    meta:
+      type: llm.provider
+      name: interruption-fixture
+    driver:
+      id: app:interruption_driver
+      options: {}
+
+  - name: interruption_session_worker
+    kind: process.lua
+    source: file://interruption_session_worker.lua
+    modules: [time]
+    imports:
+      writer: wippy.session.persist:writer
+      session: wippy.session.process:session
+      llm: wippy.llm:llm
+    method: run
+
+  - name: interruption_prompt_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      session_service: wippy.session:service
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_tests
+
+  - name: interruption_prompt_blocked_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session_runtime
+    source: file://interruption_prompt_test.lua
+    modules: [time, uuid, security, sql, json]
+    imports:
+      session_service: wippy.session:service
+      test: wippy.test:test
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
+      wait_for_boot: app:wait_for_boot
+    method: run_blocked
   - name: dep.wippy.test
     kind: ns.dependency
     component: wippy/test
@@ -45,6 +287,7 @@ entries:
       context_staging_repo: wippy.session.persist:context_staging_repo
       context_cleanup: wippy.session.process:context_cleanup_runtime
       consts: wippy.session:consts
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run
 
@@ -107,6 +350,10 @@ entries:
     source: file://context_transport_runtime_test.lua
     modules: [time, uuid, hash, sql, security]
     imports:
+      reader: wippy.session.persist:reader
+      writer: wippy.session.persist:writer
+      session_handlers: wippy.session.process:session_handlers
+      session_service: wippy.session:service
       test: wippy.test:test
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
@@ -114,6 +361,8 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
+      upstream: wippy.session.process:upstream
+      relay_consts: wippy.relay:consts
       wait_for_boot: app:wait_for_boot
     method: run
 
@@ -122,6 +371,8 @@ entries:
     meta:
       comment: File-backed SQLite, recreated on every run by `make test`. A plain in-memory DB gives each pooled connection its own empty database, so the schema can vanish under parallel test connections.
     file: ./.wippy/test.db
+    pool:
+      max_idle: 2
 
   - name: migration_probe_db
     kind: db.sql.sqlite
@@ -317,6 +568,8 @@ entries:
       claude_mapper: wippy.llm.claude:mapper
       context_attachments: wippy.session:context_attachments
       google_mapper: wippy.llm.google:mapper
+      openai_mapper: wippy.llm.openai:mapper
+      bedrock_mapper: wippy.llm.bedrock:mapper
       consts: wippy.session:consts
       prompt_builder: wippy.session:prompt_builder
       test: wippy.test:test

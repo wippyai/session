@@ -1,4 +1,4 @@
--- SQLite stores RFC3339Nano as text, whose variable-width fractions do not sort
+-- SQLite stores RFC3339Nano timestamps as text, whose variable-width fractions do not sort
 -- chronologically (".11Z" sorts before ".1Z"). Normalize only the comparison key:
 -- original dates, IDs and cursor contracts remain unchanged, including old rows.
 -- Strip fractions before SQLite's date conversion to avoid millisecond rounding,
@@ -91,19 +91,28 @@ end
 
 -- Steering rows can be re-anchored after retrieval. Use the same chronological
 -- order there, parsing with the runtime's time SDK once per row, not per comparison.
+local function sort_key(row: any): string
+    local key = tostring(row.date or "")
+    local parsed = message_order.parse(key)
+    if parsed then key = parsed:utc():format("2006-01-02T15:04:05.000000000Z") end
+    return key
+end
+
 function message_order.sort(rows: {any})
     if #rows < 2 then return end
     local keys = {}
-    for _, row in ipairs(rows) do
-        local key = tostring(row.date or "")
-        local parsed = message_order.parse(key)
-        if parsed then key = parsed:utc():format("2006-01-02T15:04:05.000000000Z") end
-        keys[row] = key
-    end
+    for _, row in ipairs(rows) do keys[row] = sort_key(row) end
     table.sort(rows, function(a, b)
         if keys[a] ~= keys[b] then return keys[a] < keys[b] end
         return tostring(a.message_id) < tostring(b.message_id)
     end)
+end
+
+-- Whether row `a` sorts before row `b` in store order.
+function message_order.precedes(a: any, b: any): boolean
+    local key_a, key_b = sort_key(a), sort_key(b)
+    if key_a ~= key_b then return key_a < key_b end
+    return tostring(a.message_id) < tostring(b.message_id)
 end
 
 return message_order

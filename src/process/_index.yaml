@@ -91,6 +91,7 @@ entries:
       description: Handles communication between session process and upstream systems
     source: file://upstream.lua
     imports:
+      session_repo: wippy.session.persist:session_repo
       consts: wippy.session:consts
       input_policy: wippy.session.process:input_policy
 
@@ -131,6 +132,7 @@ entries:
       form_artifact: wippy.session.forms:form_artifact
       form_meta: wippy.session.forms:form_meta
       input_policy: wippy.session.process:input_policy
+      behavior_controls: wippy.agent:behavior_controls
 
   # wippy.session.process:answer_admission
   - name: answer_admission
@@ -140,7 +142,6 @@ entries:
     source: file://answer_admission.lua
     imports:
       consts: wippy.session:consts
-      input_metadata: wippy.session:input_metadata
       message_repo: wippy.session.persist:message_repo
       message_order: wippy.session.persist:message_order
       artifact_repo: wippy.session.persist:artifact_repo
@@ -167,6 +168,7 @@ entries:
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
       tool_caller: wippy.agent.tools:caller
+      lifecycle_controller: wippy.agent:lifecycle_controller
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
@@ -174,6 +176,8 @@ entries:
       control_handlers: wippy.session.process:control_handlers
       answer_admission: wippy.session.process:answer_admission
       message_repo: wippy.session.persist:message_repo
+      session_handlers: wippy.session.process:session_handlers
+      turn_context: wippy.agent:turn_context
 
   - name: input_policy
     kind: library.lua

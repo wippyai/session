@@ -1,4 +1,4 @@
-version: "0.6.8" # x-release-please-version
+version: "0.6.19" # x-release-please-version
 namespace: wippy.session
 
 entries:
@@ -384,6 +384,7 @@ entries:
       consts: wippy.session:consts
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
+      upstream: wippy.session.process:upstream
 
   # wippy.session:service_binding
   - name: service_binding
@@ -458,7 +459,7 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.7"
+    version: ">=v0.5.13"
 
   - name: migration
     kind: ns.dependency
@@ -471,7 +472,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.5.4"
+    version: ">=v0.5.10"
 
   - name: dep.wippy.views
     kind: ns.dependency
@@ -521,6 +522,14 @@ entries:
               { "type": "object", "properties": { "size": { "type": "integer" }, "mime_type": { "type": "string" }, "user_id": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] }, "metadata": { "type": "object", "properties": { "filename": { "type": "string" }, "session_id": { "type": "string" }, "expires_at": { "type": ["string", "integer"] } } } } }
             format: application/schema+json
 
+  - name: text_clamp
+    kind: library.lua
+    source: file://text_clamp.lua
+
+  - name: tool_result
+    kind: library.lua
+    source: file://tool_result.lua
+
   - name: input_metadata
     kind: library.lua
     source: file://input_metadata.lua
@@ -544,8 +553,10 @@ entries:
       form_index: wippy.session.forms:form_index
       answer_text: wippy.session.forms:answer_text
       context_attachments: wippy.llm:context_attachments
+      text_clamp: wippy.session:text_clamp
       input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order
+      tool_result: wippy.session:tool_result
 
   # wippy.session:context_attachments
   - name: context_attachments

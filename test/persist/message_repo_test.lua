@@ -7,6 +7,8 @@ local message_date = require("message_date")
 local tx = require("tx")
 local message_order = require("message_order")
 local writer = require("writer")
+local reader = require("reader")
+local prompt_builder = require("prompt_builder")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local artifact_repo = require("artifact_repo")
@@ -174,6 +176,88 @@ local function define_tests()
             test.not_nil(created.date)
         end)
 
+        describe("metadata encoding", function()
+            local session_id
+            before_each(function()
+                session_id = uuid.v7()
+                assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Metadata", "test"))
+            end)
+            after_each(function()
+                session_repo.delete(session_id)
+            end)
+
+            local paths = {
+                { name = "create", write = function(id, metadata)
+                    return message_repo.create(id, session_id, "user", "Pending.", metadata)
+                end },
+                { name = "admit", write = function(id, metadata)
+                    return message_repo.admit(id, session_id, "user", "Pending.", metadata, {})
+                end },
+                { name = "create_batch", encodes_strings = true, write = function(id, metadata)
+                    return message_repo.create_batch(session_id, {
+                        { message_id = id, type = "user", data = "Pending.", metadata = metadata },
+                    })
+                end },
+                { name = "update_metadata", write = function(id, metadata)
+                    assert(message_repo.create(id, session_id, "user", "Pending.", {}))
+                    return message_repo.update_metadata(id, metadata, session_id)
+                end },
+                { name = "stop_with_input_rollback", encodes_strings = true, boundary = true,
+                    write = function(id, metadata)
+                        return message_repo.stop_with_input_rollback(session_id, {}, {}, {
+                            message_id = id, data = "Stopped.", metadata = metadata,
+                        })
+                    end },
+            }
+
+            local function stored_metadata(id)
+                local db = assert(sql.get(consts.get_db_resource()))
+                local rows, err = db:query("SELECT metadata FROM messages WHERE message_id = $1", { id })
+                db:release()
+                test.is_nil(err)
+                test.eq(#rows, 1)
+                return rows[1].metadata
+            end
+
+            for _, path in ipairs(paths) do
+                it("normalizes JSON strings in " .. path.name .. " and preserves ordinary metadata bytes", function()
+                    local function check_bytes(metadata, expected)
+                        local id = uuid.v7()
+                        assert(path.write(id, metadata))
+                        local stored = stored_metadata(id)
+                        assert(message_repo.delete(id))
+                        test.eq(stored, expected, "stored metadata bytes")
+                    end
+
+                    local ordinary = { model = "test-model", tokens = { prompt = 10, completion = 5 } }
+                    local ordinary_json = assert(json.encode(ordinary))
+                    check_bytes(ordinary, ordinary_json)
+                    if not path.encodes_strings then check_bytes(ordinary_json, ordinary_json) end
+                    local invalid = '{"broken":'
+                    check_bytes(invalid, path.encodes_strings and assert(json.encode(invalid)) or invalid)
+
+                    local id = uuid.v7()
+                    local raw = [=[{"\u0069nput":{"state":"pending"}}]=]
+                    if path.boundary then raw = [=[{"\u0069nterruption":{"reason":"stop"}}]=] end
+                    assert(path.write(id, raw))
+                    if not path.boundary then
+                        local pending = assert(message_repo.list_pending_inputs(session_id))
+                        test.eq(#pending, 1, "escaped input key reaches list_pending_inputs")
+                        test.eq(pending[1].message_id, id)
+                        test.eq(pending[1].data, "Pending.")
+                        test.eq(pending[1].metadata.input.state, "pending")
+                    end
+                    test.eq(stored_metadata(id), assert(json.encode(assert(json.decode(raw)))), "canonical JSON bytes")
+                    assert(message_repo.delete(id))
+
+                    check_bytes(ordinary_json, ordinary_json)
+                    check_bytes(" false ", "false")
+                    check_bytes(" null ", "null")
+                    check_bytes([=["\u0061"]=], '"a"')
+                end)
+            end
+        end)
+
         it("commits an assistant and all pending calls together and resolves them on recovery", function()
             local assistant_id = uuid.v7()
             local first_id = uuid.v7()
@@ -294,7 +378,7 @@ local function define_tests()
             if not db then error(db_err) end
             local _, insert_err = db:execute(
                 "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
-                { unrelated_id, test_data.session_id, time.now():format(time.RFC3339NANO),
+                { unrelated_id, test_data.session_id, time.now():utc():format(time.RFC3339NANO),
                     consts.MSG_TYPE.USER, "unrelated", "{malformed" })
             db:release()
             test.is_nil(insert_err)
@@ -380,6 +464,103 @@ local function define_tests()
                 test.eq(message_repo.get(id).metadata.status, consts.FUNC_STATUS.SUCCESS)
             end
             for _, row in ipairs(rows) do message_repo.delete(row.message_id) end
+        end)
+
+        it("reads a whole session before its first checkpoint and pages only API reads", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Long session", "test"))
+            local ok, failure = pcall(function()
+                local rows = {{ message_id = uuid.v7(), type = consts.MSG_TYPE.USER, data = "THE ORIGINAL TASK.", metadata = {} }}
+                for index = 2, 507 do
+                    rows[index] = { message_id = uuid.v7(), type = consts.MSG_TYPE.ASSISTANT,
+                        data = "Step " .. index, metadata = {} }
+                end
+                assert(message_repo.create_batch(session_id, rows))
+
+                local session_reader = assert(reader.open(session_id))
+                local all = assert(session_reader:messages():all())
+                test.eq(#all, 507, "all() means all")
+                test.eq(all[1].data, "THE ORIGINAL TASK.")
+                test.eq(all[507].data, "Step 507")
+
+                local from_checkpoint = assert(session_reader:messages():from_checkpoint():all())
+                test.eq(#from_checkpoint, 507)
+                local built = assert(prompt_builder.from_session(session_reader, { include_files = false, cache_markers = false }))
+                test.eq(built:get_messages()[1].content[1].text, "THE ORIGINAL TASK.", "the prompt keeps the task")
+
+                local page = assert(message_repo.list_by_session(session_id))
+                test.eq(#page.messages, 500, "paged reads keep their default")
+                test.is_true(page.has_more)
+                test.eq(#assert(session_reader:messages():last(10):all()), 10)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
+        end)
+
+        it("commits step notes with the response in order, or none of them", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Step notes", "test"))
+            local ok, failure = pcall(function()
+                local session_writer = assert(writer.new(session_id))
+                local notes = {}
+                for index = 1, 40 do
+                    notes[index] = { type = index % 2 == 0 and consts.MSG_TYPE.SYSTEM or consts.MSG_TYPE.DEVELOPER,
+                        content = "Step note " .. index, metadata = { preserve_position = true } }
+                end
+                local assistant_id, call_ids, response_err = session_writer:add_response("answer", {},
+                    {{ id = "noted", name = "lookup", arguments = "{}", type = consts.MSG_TYPE.FUNCTION }}, notes)
+                test.is_nil(response_err)
+
+                local rows = assert(message_repo.list_all_by_session(session_id))
+                test.eq(#rows, 42, "the notes are part of the batch")
+                for index = 1, 40 do
+                    test.eq(rows[index].data, "Step note " .. index)
+                end
+                test.eq(rows[41].message_id, assistant_id)
+                test.eq(rows[42].message_id, (call_ids :: any).noted)
+
+                -- The second row has no type, so the insert fails after the first note went in.
+                local _, failed_ids, batch_err = session_writer:add_response("answer", {}, {}, {
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Orphan candidate", metadata = {} },
+                    { content = "Invalid note", metadata = {} },
+                })
+                test.is_nil(failed_ids)
+                test.not_nil(batch_err, "a row the batch cannot store fails it")
+                test.eq(#assert(message_repo.list_all_by_session(session_id)), 42, "the failed batch leaves no note")
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
+        end)
+
+        it("commits trailing rows after the response and notes on their own in one batch", function()
+            local session_id = uuid.v7()
+            assert(session_repo.create(session_id, test_data.user_id, test_data.context_id, "Trailing", "test"))
+            local ok, failure = pcall(function()
+                local session_writer = assert(writer.new(session_id))
+                local assistant_id = assert(session_writer:add_response("partial", {}, {},
+                    {{ type = consts.MSG_TYPE.DEVELOPER, content = "Before.", metadata = {} }},
+                    {{ type = consts.MSG_TYPE.DEVELOPER, content = "After.", metadata = {} }}))
+                assert(session_writer:add_notes({
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Activated.", metadata = {} },
+                    { type = consts.MSG_TYPE.SYSTEM, content = "Activated system.", metadata = {} },
+                }))
+                local rows = assert(message_repo.list_all_by_session(session_id))
+                test.eq(#rows, 5)
+                test.eq(rows[1].data, "Before.")
+                test.eq(rows[2].message_id, assistant_id)
+                test.eq(rows[3].data, "After.")
+                test.eq(rows[4].data, "Activated.")
+                test.eq(rows[5].data, "Activated system.")
+
+                local _, batch_err = session_writer:add_notes({
+                    { type = consts.MSG_TYPE.DEVELOPER, content = "Orphan candidate", metadata = {} },
+                    { content = "Invalid note", metadata = {} },
+                })
+                test.not_nil(batch_err)
+                test.eq(#assert(message_repo.list_all_by_session(session_id)), 5)
+            end)
+            session_repo.delete(session_id)
+            if not ok then error(failure) end
         end)
 
         it("rolls back the assistant if any call intent cannot be stored", function()
@@ -884,10 +1065,10 @@ local function define_tests()
         -- microseconds and drops an offset, so its dates are UTC and at least a
         -- microsecond apart.
         local function check_historical_order(dates, exact)
-            local prefix = uuid.v7() .. "-"
-            local ids, insert_errors = {}, {}
             local db = sql.get(consts.get_db_resource())
             assert(db)
+            local prefix = uuid.v7() .. "-"
+            local ids, insert_errors = {}, {}
             for index, date in ipairs(dates) do
                 ids[index] = prefix .. string.format("%02d", index)
                 local _, err = db:execute(

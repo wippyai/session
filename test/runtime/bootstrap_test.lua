@@ -10,7 +10,7 @@ end
 
 local function run(command, expected_status)
     local executor = exec.get("app.runtime:executor")
-    local child, create_err = executor:exec("sh -c " .. quote(command))
+    local child, create_err = executor:exec("sh -c " .. quote("export PATH; " .. command .. " 2>&1"))
     test.is_nil(create_err)
     test.not_nil(child)
     local started, start_err = child:start()
@@ -26,8 +26,9 @@ local function run(command, expected_status)
     local status, wait_err = child:wait()
     executor:release()
     test.is_nil(wait_err)
-    test.eq(status, expected_status or 0, command)
-    return table.concat(parts)
+    local output = table.concat(parts)
+    test.eq(status, expected_status or 0, command .. "\n" .. output)
+    return output
 end
 
 local function with_directory(body)
@@ -46,6 +47,9 @@ local function define_tests()
             test.it_skip("requires the Unix Makefile bootstrap environment", function() end)
             return
         end
+        test.it("exports the shell tool search path to child commands", function()
+            test.eq(run("printenv PATH"), run('printf "%s" "$PATH"') .. "\n")
+        end)
         test.it("preserves the previous SQLite contents before resetting the test database", function()
             with_directory(function(directory, repository)
                 local database = directory .. "/test.db"
@@ -89,13 +93,23 @@ local function define_tests()
                 run("bash " .. quote(repository .. "/scripts/test-workspace.sh") .. " " .. quote(source) .. " " .. quote(alias), 1)
             end)
         end)
-        test.it("requires the candidate runner for mandatory runtime checks", function()
+        test.it("requires executed cases with published or candidate dependencies", function()
             with_directory(function(directory, repository)
-                for _, target in ipairs({ "test-runtime", "bench" }) do
-                    run("make -s -C " .. quote(repository) .. " " .. target ..
-                        " FRAMEWORK_DIR= WIPPY=true " .. quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
-                        " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"), 2)
+                for _, framework in ipairs({ "", repository }) do
+                    local output = run("make -s -n -C " .. quote(repository) .. " test-runtime " ..
+                        quote("FRAMEWORK_DIR=" .. framework) ..
+                        " " .. quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
+                        " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"))
+                    test.contains(output, "WIPPY_TEST_REQUIRE_CASES=1")
+                    test.contains(output, 'test -- "app.runtime:handoff_runtime"')
                 end
+            end)
+        end)
+        test.it("rejects a benchmark runner that produces no report", function()
+            with_directory(function(directory, repository)
+                run("make -s -C " .. quote(repository) .. " bench FRAMEWORK_DIR= WIPPY=true " ..
+                    quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
+                    " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"), 2)
             end)
         end)
     end)

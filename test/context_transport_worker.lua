@@ -4,6 +4,10 @@ local handlers = require('message_handlers')
 local staging = require('context_staging_repo')
 local sessions = require('session_repo')
 
+-- Only a hang reaches this: every wait ends on its condition, and normal cases take
+-- seconds that grow under load.
+local EVENT_DEADLINE = '30s'
+
 local function run(args)
     local reply_pid = args.reply_pid :: string
     local sent, send_err = process.send(reply_pid, 'context_worker_started', {})
@@ -33,7 +37,7 @@ local function run(args)
                 -- An idle session admits through admit_message, so both write paths pause.
                 local function pause()
                     assert(process.send(reply_pid, 'context_worker_before_commit', {}))
-                    local deadline = require('time').after('3s')
+                    local deadline = require('time').after(EVENT_DEADLINE)
                     local selected = channel.select({ inbox:case_receive(), deadline:case_receive() })
                     assert(selected.channel ~= deadline and selected.ok, 'commit barrier timed out')
                     assert(selected.value:topic() == 'context_worker_continue', 'commit barrier cancelled')
