@@ -262,7 +262,7 @@ local function define_tests()
             end)
 
             it("accepts a count of zero, which RE2 reads as a repeat", function()
-                for _, pattern in ipairs({ "a{0}", "a{0,0}", "a{0,5}", "a{10}", "a{75}", "a{1,75}" }) do
+                for _, pattern in ipairs({ "a{0}", "a{0,0}", "a{0,5}", "a{10}", "a{100}", "a{1,100}" }) do
                     local ok, code = check(pattern)
                     test.is_true(ok, pattern .. " -> " .. tostring(code))
                 end
@@ -272,11 +272,11 @@ local function define_tests()
             end)
 
             it("matches exactly the lengths its counts name, for every accepted count", function()
-                local counts = { 0, 1, 2, 3, 10, 74, 75 }
+                local counts = { 0, 1, 2, 3, 10, 99, 100 }
                 for _, low in ipairs(counts) do
                     local forms = { { string.format("a{%d}", low), low, low } }
-                    -- An open repeat counts its lower bound plus one, so {75,} is over the size limit.
-                    if low < 75 then table.insert(forms, { string.format("a{%d,}", low), low, nil }) end
+                    -- An open repeat counts its lower bound plus one, so {100,} is over the size limit.
+                    if low < 100 then table.insert(forms, { string.format("a{%d,}", low), low, nil }) end
                     for _, high in ipairs(counts) do
                         if high >= low then
                             table.insert(forms, { string.format("a{%d,%d}", low, high), low, high })
@@ -286,7 +286,7 @@ local function define_tests()
                         local ok, code = check(form[1])
                         test.is_true(ok, form[1] .. " -> " .. tostring(code))
                         local expression = form_pattern.compile(form[1])
-                        for length = 0, 77 do
+                        for length = 0, 102 do
                             local expected = length >= form[2] and (form[3] == nil or length <= form[3])
                             test.eq(((expression :: any):match_string(string.rep("a", length))), expected,
                                 form[1] .. " against " .. length .. " characters")
@@ -296,9 +296,9 @@ local function define_tests()
             end)
 
             it("refuses a count over the bound and a range out of order, whatever the bound is written with", function()
-                local ok, code = check("a{75}")
+                local ok, code = check("a{100}")
                 test.is_true(ok, tostring(code))
-                local _, over = check("a{76}")
+                local _, over = check("a{101}")
                 test.eq(over, "unsupported_pattern")
                 local _, order, order_message = check("a{9,2}")
                 test.eq(order, "invalid_pattern")
@@ -327,7 +327,7 @@ local function define_tests()
             it("refuses a count of any length without reading it as a number", function()
                 local _, code, message = check("a{" .. string.rep("9", 150) .. "}")
                 test.eq(code, "unsupported_pattern")
-                test.contains(message, "at most 75")
+                test.contains(message, "at most 100")
                 local _, ordered = check("a{" .. string.rep("9", 90) .. "," .. string.rep("9", 89) .. "}")
                 test.eq(ordered, "unsupported_pattern")
             end)
@@ -348,57 +348,57 @@ local function define_tests()
         end
 
         it("takes a pattern at the limit and refuses one over it", function()
-            test.eq(form_pattern.MAX_EXPANDED, 75)
-            accepted("a{75}")
-            accepted(string.rep("a", 75))
-            refused("a{76}")
-            refused(string.rep("a", 76))
+            test.eq(form_pattern.MAX_EXPANDED, 100)
+            accepted("a{100}")
+            accepted(string.rep("a", 100))
+            refused(string.rep("a", 101))
+            refused("a{100}b")
         end)
 
         it("multiplies nested repeats", function()
-            accepted("(a{5}){15}")
-            refused("(a{5}){16}")
-            accepted("((a{5}){5}){3}")
-            refused("((a{5}){5}){4}")
-            accepted("(ab){37}")
-            refused("(ab){38}")
+            accepted("(a{5}){20}")
+            refused("(a{5}){21}")
+            accepted("((a{5}){5}){4}")
+            refused("((a{5}){5}){5}")
+            accepted("(ab){50}")
+            refused("(ab){51}")
         end)
 
         it("adds up alternatives and sequences", function()
-            accepted("(a{40}|b{35})")
-            refused("(a{40}|b{36})")
-            accepted("a{40}b{35}")
-            refused("a{40}b{36}")
-            accepted("a{40}|b{35}")
-            refused("a{40}|b{36}")
+            accepted("(a{50}|b{50})")
+            refused("(a{50}|b{51})")
+            accepted("a{50}b{50}")
+            refused("a{50}b{51}")
+            accepted("a{50}|b{50}")
+            refused("a{50}|b{51}")
         end)
 
         it("counts an open repeat as its lower bound plus one", function()
-            accepted("a{74,}")
-            refused("a{75,}")
+            accepted("a{99,}")
+            refused("a{100,}")
         end)
 
         it("counts what * + and ? repeat once, so they hide no cost", function()
-            for _, form in ipairs({ "(a*){0,%d}", "(a+){0,%d}", "(a?){0,%d}" }) do
-                accepted(string.format(form, 75))
-                refused(string.format(form, 76))
+            for _, form in ipairs({ "(a*b){0,%d}", "(a+b){0,%d}", "(a?b){0,%d}" }) do
+                accepted(string.format(form, 50))
+                refused(string.format(form, 51))
             end
         end)
 
         it("counts an empty group", function()
-            accepted("(){0,75}")
-            refused("(){0,76}")
+            accepted("(()()){0,50}")
+            refused("(()()){0,51}")
         end)
 
         it("reports a malformed pattern as malformed, whatever its size", function()
-            local ok, code = form_pattern.check("a{75}a{75}(")
+            local ok, code = form_pattern.check("a{100}a{100}(")
             test.is_nil(ok)
             test.eq(code, "invalid_pattern")
         end)
 
         it("names the limit and no part of the pattern", function()
-            local message = refused("secret{76}")
-            test.contains(message, "75")
+            local message = refused("secret{100}")
+            test.contains(message, "100")
             test.is_nil((string.find(message, "secret", 1, true)))
         end)
 

@@ -26,10 +26,10 @@ local form_text = require("form_text")
 -- and the other letter escapes (RE2 reads these, but the subset stays small
 -- enough for the ask_user tool description to list in full).
 --
--- Bounds: 200 characters, 3 nested groups, repeat counts up to 75 (written
+-- Bounds: 200 characters, 3 nested groups, repeat counts up to 100 (written
 -- without a leading zero, because RE2 reads {01} as the text "{01}"), no
 -- unbounded repeat (* + {n,}) of a group that itself holds an unbounded
--- repeat, such as (a+)+, and a size of 75 with every repeat written out.
+-- repeat, such as (a+)+, and a size of 100 with every repeat written out.
 --
 -- check() answers with a code. "unsupported_pattern" means a well-formed
 -- construct or bound the subset does not allow; "invalid_pattern" means the
@@ -39,12 +39,10 @@ local form_pattern = {}
 
 form_pattern.MAX_LENGTH = 200
 form_pattern.MAX_DEPTH = 3
--- The size of a pattern once its repeats are written out: see parse(). A pattern
--- at this size takes at most 4.9 ms to check on a 2,000 character ASCII answer
--- (runtime 0.3.57a), and the check runs under the acceptance lock.
-form_pattern.MAX_EXPANDED = 75
--- A higher count could not pass the size check.
-form_pattern.MAX_REPEAT = form_pattern.MAX_EXPANDED
+form_pattern.MAX_REPEAT = 100
+-- The size of a pattern once its repeats are written out: see parse(). The check
+-- runs under the acceptance lock, so this bounds the time the lock is held.
+form_pattern.MAX_EXPANDED = 100
 
 local UNSUPPORTED = "unsupported_pattern"
 local INVALID = "invalid_pattern"
