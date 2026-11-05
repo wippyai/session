@@ -221,7 +221,7 @@ local function define_tests()
         end)
         -- Every date is written in UTC, so the wall clock a timestamp column
         -- returns with a "Z" suffix is the UTC one.
-        it('reads a Postgres row date, the server wall clock with a Z suffix, as server-local time', function()
+        it('reads a Postgres row date with a Z suffix as the UTC instant', function()
             local function postgres_date(at) return time.unix(at, 0):utc():format('2006-01-02T15:04:05') .. 'Z' end
             local fresh, old = observation('fresh'), observation('old', 1, '{"name":"Cancel"}')
             fresh.date = postgres_date(now - 1)

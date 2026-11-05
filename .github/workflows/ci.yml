@@ -176,4 +176,5 @@ jobs:
       - name: Verify timestamp persistence outside UTC
         run: |
           make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.persist:utc_timestamp_test
+          make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.process:attention_history_test
           make test-postgres TEST_TIMEZONE=America/New_York POSTGRES_TEST_FILTER=app.persist:utc_timestamp_test

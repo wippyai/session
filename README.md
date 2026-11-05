@@ -135,8 +135,9 @@ the plugin starts it again for form answers that are still pending, and
 steering alone starts nothing.
 
 A turn cut off by a runtime stop is settled when the user's session plugin
-starts again: pending tool calls are repaired and the session is stored idle,
-with `can_send` true, because a new message is how the user continues it.
+starts again: pending tool calls are repaired, the interruption message is
+persisted, and the session is stored idle, with `can_send` true, because a new
+message is how the user continues it.
 Until then, REST responses report such a session the same way.
 
 When a turn does not stop within 10 seconds of a Stop (for example, a model or
@@ -703,16 +704,22 @@ Session 0.7.0 adds Session Forms. Check these points before you upgrade.
 - **Other users' artifacts answer 404, not 403.** `GET /artifact/{id}` and
   `GET /artifact/{id}/content` answer an artifact that belongs to someone else
   exactly like a missing one. A client that reads the 403 must read the 404.
+- **Sessions finish 10 seconds after the last client leaves.** The plugin used
+  to finish them as soon as the last client disconnected. A client that
+  connects again within the 10 seconds cancels the wait, so a page reload does
+  not end a turn.
 - **An enforced Stop leaves the session idle.** When a turn does not stop in
   time and the plugin has to cancel the session process, the session is
-  stored as `idle` (it was `failed`), and Send stays enabled. Form answers
-  accepted during that turn are admitted without starting a new turn.
+  stored as `idle` (it was `failed`), clients get no error, and Send stays
+  enabled. Form answers accepted during that turn are admitted without
+  starting a new turn.
+- **Steering accepted after a turn's first message stays after it.** A steering
+  row accepted after the row that starts the turn is anchored after that row,
+  so the model reads the two in the order they were accepted. Steering left
+  pending by a stopped or recovered turn still goes ahead of the new message.
 - **A stored `running` status reads as `idle`** while no session process is
   registered for the session. This is what the API returns for a turn that a
   crash or a restart cut off. The stored row is not changed.
-- **Dates are stored and returned in UTC.** New session and message dates use
-  UTC with a `Z` suffix. Rows written by older versions keep their stored
-  text, so a client must read each date with its own offset.
 
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases
