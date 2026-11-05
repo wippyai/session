@@ -970,10 +970,10 @@ local function define_tests()
                 local tail_before, tail_after = wire_before[#wire_before], wire_after[#wire_after]
                 test.eq(#tail_before.parts, #tail_after.parts)
                 for index = 1, #tail_before.parts - 1 do
-                    test.eq(json.encode(tail_before.parts[index]), json.encode(tail_after.parts[index]))
+                    test.eq((json.encode(tail_before.parts[index])), (json.encode(tail_after.parts[index])))
                 end
                 for index = 1, #wire_before - 1 do
-                    test.eq(json.encode(wire_before[index]), json.encode(wire_after[index]))
+                    test.eq((json.encode(wire_before[index])), (json.encode(wire_after[index])))
                 end
             end)
 
