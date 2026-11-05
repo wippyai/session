@@ -64,6 +64,11 @@ function readFailure(err: unknown): { status?: number, code?: string, message?: 
   return { known: false, message: err instanceof Error ? err.message : undefined, noResponse: false }
 }
 
+/** The HTTP status of a failed state API call, or `undefined` when the error has none (no response, or not a Host error). */
+export function failureStatusOf(err: unknown): number | undefined {
+  return readFailure(err).status
+}
+
 /** The field and form errors of a 422 rejection, or `null` for any other error. */
 export function validationErrorsOf(err: unknown): { errors: Record<string, FieldError[]>, formErrors: FieldError[] } | null {
   if (!isHostStateError(err) || err.status !== 422)
