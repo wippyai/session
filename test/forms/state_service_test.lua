@@ -1272,6 +1272,89 @@ local function define_tests()
                 test.eq(#user_rows(ctx.session_id), 0)
             end)
 
+            -- Changes the first field of the stored form between the first read
+            -- of a submission and its acceptance transaction, so the answer was
+            -- valid for the form the first read saw.
+            local function change_before_acceptance(artifact_id: string, change: any)
+                local original_new_id = state_service._new_message_id
+                state_service._new_message_id = function()
+                    state_service._new_message_id = original_new_id
+                    local artifact: any = artifact_repo.get(artifact_id)
+                    local content: any = json.decode(tostring(artifact.content))
+                    change(content.props.definition.fields[1])
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                    return original_new_id()
+                end
+            end
+
+            local function answer_field(artifact_id: string, value: any)
+                local request = v2_request({ f = value })
+                request.expected_content_version = nil
+                return post(artifact_id, request)
+            end
+
+            local function as_email(field)
+                field.type, field.min_length, field.max_length = "email", nil, nil
+            end
+
+            for _, case in ipairs({
+                { name = "a text length", field = { type = "text", max_length = 40 }, value = "abcd",
+                    change = function(field) field.max_length = 2 end, code = "too_long" },
+                { name = "a text pattern", field = { type = "text", pattern = "[a-z]+" }, value = "abc",
+                    change = function(field) field.pattern = "[0-9]+" end, code = "pattern_mismatch" },
+                { name = "a textarea length", field = { type = "textarea", max_length = 100 }, value = "abcd",
+                    change = function(field) field.max_length = 2 end, code = "too_long" },
+                { name = "a number bound", field = { type = "number", max = 10 }, value = 5,
+                    change = function(field) field.max = 1 end, code = "above_max" },
+                { name = "an email field", field = { type = "text" }, value = "not an address",
+                    change = as_email, code = "invalid_email" },
+                { name = "a date bound", field = { type = "date" }, value = "2026-05-06",
+                    change = function(field) field.max = "2026-01-01" end, code = "above_max" },
+                { name = "a required checkbox", field = { type = "checkbox" }, value = false,
+                    change = function(field) field.required = true end, code = "required" },
+            }) do
+                it("revalidates " .. case.name .. " against a definition changed before acceptance", function()
+                    local ctx = new_session()
+                    local field = { id = "f", label = "Field" }
+                    for key, value in pairs(case.field) do field[key] = value end
+                    local artifact_id = new_v2_form(ctx, { title = "Form", fields = { field } })
+                    change_before_acceptance(artifact_id, case.change)
+                    local status, body = answer_field(artifact_id, case.value)
+                    test.eq(status, 422, tostring(body and body.code))
+                    test.eq(body.code, "validation_failed")
+                    test.eq(body.errors.f[1].code, case.code)
+                    local artifact = artifact_repo.get(artifact_id)
+                    test.eq(artifact.content_version, 2, "only the competing definition update committed")
+                    test.is_nil(artifact.meta.session_form.submission, "the rejected answer does not settle the form")
+                    test.eq(#user_rows(ctx.session_id), 0, "the rejected answer creates no pending row")
+                    test.eq(#wakes, 0, "the rejected answer does not wake the session")
+                end)
+            end
+
+            it("stores the normalization of a definition changed before acceptance", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx, { title = "Form",
+                    fields = { { id = "f", type = "text", label = "Field" } } })
+                change_before_acceptance(artifact_id, as_email)
+                local status, body = answer_field(artifact_id, "  ann@example.org ")
+                test.eq(status, 200, tostring(body and body.code))
+                local artifact = artifact_repo.get(artifact_id)
+                test.eq(artifact.meta.session_form.submission.answers.f, "ann@example.org")
+            end)
+
+            it("answers 500 when a pattern stops compiling before acceptance, and stores nothing", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx, { title = "Form",
+                    fields = { { id = "f", type = "text", label = "Field", pattern = "[a-z]+" } } })
+                change_before_acceptance(artifact_id, function(field) field.pattern = "(" end)
+                local status, body = answer_field(artifact_id, "abc")
+                test.eq(status, 500)
+                test.eq(body.code, "internal")
+                test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
+                test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
             it("compiles a form's pattern once across writing the form, answering it and replaying the answer", function()
                 local ctx = new_session()
                 local def = { title = "Code", fields = {
