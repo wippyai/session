@@ -7,6 +7,8 @@
  * the server's rules for the check before sending.
  */
 
+import type { ArtifactFormDelivery } from '@wippy-fe/proxy'
+
 /**
  * `form_version` values this component renders. 1 is a choice-only form, 2 is
  * a form with at least one standard (non-choice) field. A higher value keeps
@@ -171,7 +173,7 @@ export interface FormState<D extends FormDefinition = FormDefinition> {
   data: FormAnswers | null
   submitted_at: string | null
   answer_message_id: string | null
-  delivery: null | 'pending' | 'running' | 'complete' | 'interrupted'
+  delivery: ArtifactFormDelivery | null
 }
 
 /** A form state whose definition is choice-only (renders as the question card). */
@@ -199,8 +201,8 @@ export interface SubmitAccepted {
   content_version: number
   status: 'idle'
   late: boolean
-  /** `complete` only on a replay of an answer the session already admitted. */
-  delivery: 'pending' | 'complete'
+  /** `pending` for a new answer. An exact replay reports the current delivery, which can be any of the four values. */
+  delivery: ArtifactFormDelivery
   replayed: boolean
 }
 

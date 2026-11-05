@@ -9,7 +9,10 @@ local consts = require("consts")
 local input_policy = require("input_policy")
 local session_status = require("session_status")
 local form_recovery = require("form_recovery")
+local interruption_boundary = require("interruption_boundary")
 local funcs = require("funcs")
+local ui_action_broker = require("ui_action_broker")
+local prompt_builder = require("prompt_builder")
 local message_repo = require("message_repo")
 local answer_admission = require("answer_admission")
 local reader = require("reader")
@@ -30,6 +33,9 @@ type ActiveSession = {
     last_activity: time.Time?,
     terminating: boolean,
     terminate_reason: string?,
+    -- Told to finish because the grace period after the last client left ran
+    -- out. Stays set when a returning client takes the finish back.
+    finished_for_shutdown: boolean?,
     stop_escalation: number?,
     stop_request_id: string?,
     stop_deadline: any?,
@@ -75,8 +81,17 @@ end
 
 -- The notice that a turn did not complete: after a failed exit, and for a
 -- turn the runtime interrupted (`interrupted`, stored idle).
-local function exit_error_payload(session_id, status, reason, interrupted)
+local function exit_error_payload(session_id, status, reason, interrupted, start_failure)
     if status ~= consts.STATUS.FAILED and not interrupted then return nil end
+    -- A session that exits before confirming start has not run any work.
+    if start_failure then
+        return {
+            type = consts.UPSTREAM_TYPES.ERROR,
+            session_id = session_id,
+            code = consts.ERROR_CODES.SESSION_SPAWN,
+            message = start_failure
+        }
+    end
     return {
         type = consts.UPSTREAM_TYPES.ERROR,
         session_id = session_id,
@@ -144,12 +159,21 @@ end
 
 -- Stores `target_status` with the interaction recovery gives it. Before
 -- that, `opts.recover_calls` repairs the calls an interrupted turn left
--- pending, and `opts.admit_stopped` admits its pending form answers with no
--- turn (admit_stopped_answers, clients told through `opts.hub_pid`).
--- Returns the status, whether it was stored, the storage error, the call
+-- pending, `opts.admit_stopped` admits its pending form answers with no turn
+-- (admit_stopped_answers, clients told through `opts.hub_pid`), and
+-- `opts.recovery_boundary` commits the recovery boundary. A later session
+-- start reads the stored status and writes no boundary for an idle session,
+-- so this one commits first; when it fails, nothing is stored, and the
+-- running status makes the next session start write it. Returns the status, whether it was stored, the storage error, the call
 -- repair error, the interaction and the admitted answer rows.
 local function settle_session(session_id: string, user_id: string, target_status: string, opts: any?)
     opts = opts or {}
+    local stored, read_err = session_repo.get(session_id, user_id)
+    -- Deleted sessions have no status or pending calls to recover. The owner
+    -- still releases its slot on EXIT, without publishing a phantom idle row.
+    if not stored and read_err == "Session not found" then
+        return nil, true, nil, nil, nil, nil
+    end
     local recovery_err = nil
     if opts.recover_calls then
         local _, err = recover_session_calls(session_id)
@@ -163,9 +187,18 @@ local function settle_session(session_id: string, user_id: string, target_status
             logger:warn("form answer admission failed", { session_id = session_id, error = tostring(admit_err) })
         end
     end
-    local stored, read_err = session_repo.get(session_id, user_id)
     if not stored then
         return target_status, false, read_err or "Session was not found", recovery_err, nil, admitted
+    end
+    if opts.recovery_boundary then
+        local boundary, boundary_err = interruption_boundary.new("recovery")
+        local committed = false
+        if boundary then
+            committed, boundary_err = message_repo.stop_with_input_rollback(session_id, {}, {}, boundary)
+        end
+        if not committed then
+            return target_status, false, tostring(boundary_err), recovery_err, nil, admitted
+        end
     end
     local meta = stored.meta or {}
     local interaction = input_policy.recovery_snapshot(stored, target_status)
@@ -181,19 +214,22 @@ end
 -- stored idle with an interaction that takes input, because nothing in the
 -- session failed and a failed status would keep Send disabled. Pending calls
 -- are repaired first. After an enforced Stop the pending form answers are
--- admitted with no turn (`admit_stopped`), and after a runtime stop they stay
--- pending for the next session start. Clients get the recovery notice only
--- when the runtime stopped (settle_stale_running).
+-- admitted with no turn (`admit_stopped`), and the turn already holds the
+-- boundary the Stop committed. After a runtime stop they stay pending for the
+-- next session start, and `recovery_boundary` closes the turn. Clients get the
+-- recovery notice only when the runtime stopped (settle_stale_running).
 local function settle_interrupted(session_id: string, user_id: string, opts: any?)
     opts = opts or {}
-    return settle_session(session_id, user_id, consts.STATUS.IDLE,
-        { recover_calls = true, admit_stopped = opts.admit_stopped, hub_pid = opts.hub_pid })
+    return settle_session(session_id, user_id, consts.STATUS.IDLE, {
+        recover_calls = true, admit_stopped = opts.admit_stopped, hub_pid = opts.hub_pid,
+        recovery_boundary = opts.recovery_boundary,
+    })
 end
 
 -- Whether the plugin cancelled or terminated the session process to enforce
--- the user's Stop: the turn did not stop within the stop deadline (a model
--- call Stop cannot interrupt, for example), so the exit that follows is that
--- Stop, not a failure of the session.
+-- the user's Stop: the turn did not stop within the stop deadline (a model or
+-- tool call that ignores the cancellation, for example), so the exit that
+-- follows is that Stop, not a failure of the session.
 local function stop_enforced(session_info: any): boolean
     return type(session_info) == "table" and (tonumber(session_info.stop_escalation) or 0) >= 2
 end
@@ -227,7 +263,7 @@ local function run(args)
         base_config = base_config,
         active_sessions = {} :: {[string]: ActiveSession},
         session_count = 0,
-        shutting_down = false,
+        shutting_down = false :: boolean,
         -- session id -> { failures, wait }: a session started for its
         -- pending form answers that failed; the scan skips it `wait` times.
         resume_backoff = {} :: {[string]: any},
@@ -235,7 +271,7 @@ local function run(args)
         -- The grace period after the user's last client left, while it runs:
         -- { generation, timer, cancel } (begin_shutdown).
         shutdown_deadline = nil :: any,
-        shutdown_generation = 0,
+        shutdown_generation = 0 :: number,
     }
 
     process.set_options({ trap_links = true })
@@ -250,7 +286,39 @@ local function run(args)
         logger:warn("session plugin registry name unavailable", { user_id = state.user_id, error = tostring(name_err) })
     end
 
+    local broker: any = ui_action_broker.new({
+        ttl_seconds = base_config.ui_action_ttl_seconds,
+        send = function(pid, topic, payload)
+            return process.send(pid, topic, payload)
+        end,
+        monitor = function(pid)
+            return process.monitor(pid)
+        end,
+        unmonitor = function(pid)
+            return process.unmonitor(pid)
+        end,
+        new_id = function()
+            local id, id_err = uuid.v7()
+            if not id then
+                error("Failed to generate UI action ID: " .. tostring(id_err))
+            end
+            return id
+        end,
+        now = function()
+            return time.now():unix_nano() / 1000000000
+        end,
+        format_time = function(unix_seconds)
+            local seconds = math.floor(unix_seconds)
+            local nanoseconds = math.floor((unix_seconds - seconds) * 1000000000)
+            return time.unix(seconds, nanoseconds):utc():format(time.RFC3339NANO)
+        end,
+        validate_prepared_file = function(prepared_file, actor_id, session_id)
+            return prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
+        end,
+    })
+
     local gc_ticker = time.ticker(base_config.gc_interval)
+    local ui_action_ticker = time.ticker(consts.TIMEOUTS.UI_ACTION_SWEEP)
     local inbox = process.inbox()
     local events = process.events()
 
@@ -348,6 +416,8 @@ local function run(args)
 
         session_info.terminating = true
         session_info.terminate_reason = reason
+        if reason == "shutdown" then session_info.finished_for_shutdown = true end
+        broker:cancel_session(session_id, "unavailable", "session is terminating")
 
         logger:info("initiating graceful session termination", {
             user_id = state.user_id,
@@ -355,7 +425,7 @@ local function run(args)
             reason = reason
         })
 
-        process.send(session_info.pid :: string, consts.TOPICS.FINISH_AND_EXIT, {})
+        process.send(session_info.pid :: string, consts.TOPICS.FINISH_AND_EXIT, { reason = reason })
     end
 
     -- The user hub tells this plugin "shutdown" when the user's last client
@@ -379,7 +449,7 @@ local function run(args)
         -- A repeated "shutdown" keeps the grace period it already started.
         if state.shutting_down then return end
         state.shutting_down = true
-        state.shutdown_generation = state.shutdown_generation + 1
+        state.shutdown_generation = (state.shutdown_generation :: number) + 1
         local plugin_pid = process.pid()
         local generation = state.shutdown_generation
         local timer = time.timer(consts.TIMEOUTS.SHUTDOWN_GRACE)
@@ -441,20 +511,18 @@ local function run(args)
 
     local function enforce_session_limit()
         local active_count = 0
-        for _, info in pairs(state.active_sessions) do
-            if not info.terminating then
-                active_count = active_count + 1
-            end
+        for _ in pairs(state.active_sessions) do
+            active_count = active_count + 1
         end
-
-        while active_count >= consts.LIMITS.MAX_SESSIONS_PER_USER do
+        if active_count >= consts.LIMITS.MAX_SESSIONS_PER_USER then
             local oldest_id = get_oldest_session()
-            if not oldest_id then
-                break
+            if oldest_id then
+                graceful_terminate_session(oldest_id, state.active_sessions[oldest_id], "limit_exceeded")
             end
-            graceful_terminate_session(oldest_id, state.active_sessions[oldest_id], "limit_exceeded")
-            active_count = active_count - 1
+            -- Retirement is asynchronous; capacity is released only on EXIT.
+            return false
         end
+        return true
     end
 
     local function unpack_start_token(token)
@@ -469,7 +537,7 @@ local function run(args)
         return token_data, nil
     end
 
-    local function create_session_in_db(session_id, token_data)
+    local function create_session_in_db(session_id, token_data, attention_context_enabled)
         local primary_context_id, ctx_err = uuid.v7()
         if ctx_err then
             return nil, "Failed to generate context ID: " .. ctx_err
@@ -501,6 +569,9 @@ local function run(args)
             init_function_id = token_data.start_func or nil,
             init_function_params = token_data.start_params or nil,
         }
+        if attention_context_enabled ~= nil then
+            session_config.attention_context = { enabled = attention_context_enabled }
+        end
 
         local session_meta = {}
 
@@ -567,14 +638,11 @@ local function run(args)
     local function forward_request(session_info, session_id, topic_type, request_data)
         local conn_pid = request_data.conn_pid
         local request_id = request_data.request_id
-        if session_info.terminating then
-            send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND,
-                "Session is finishing", request_id)
-            return
-        end
         if topic_type == consts.HANDLER_TYPES.MESSAGE then
-            local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.MESSAGE,
-                { conn_pid = conn_pid, data = request_data.data, request_id = request_id })
+            local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.MESSAGE, {
+                conn_pid = conn_pid, data = request_data.data, request_id = request_id,
+                ui_action_runtime = request_data.ui_action_runtime,
+            })
             if send_err then
                 send_error(conn_pid, consts.ERROR_CODES.SESSION_NOT_FOUND, send_err, request_id)
             end
@@ -611,7 +679,17 @@ local function run(args)
             return nil, "Payload data is required"
         end
 
-        enforce_session_limit()
+        logger:info('attention session open opt-in', {
+            supplied = payload_data.attention_context_enabled ~= nil,
+            requested = payload_data.attention_context_enabled == true,
+        })
+
+        if payload_data.attention_context_enabled ~= nil
+            and type(payload_data.attention_context_enabled) ~= "boolean" then
+            send_error(payload_data.conn_pid, consts.ERROR_CODES.INVALID_JSON,
+                "attention_context_enabled must be a boolean", payload_data.request_id)
+            return nil, "attention_context_enabled must be a boolean"
+        end
 
         local session_id = payload_data.session_id
         if not session_id then
@@ -628,6 +706,11 @@ local function run(args)
             logger:debug("session already exists", { user_id = state.user_id, session_id = session_id })
             local session_info = state.active_sessions[session_id]
             if is_open then
+                if session_info.terminating then
+                    session_info.terminating = false
+                    session_info.terminate_reason = nil
+                    process.send(session_info.pid :: string, "cancel_finish", {})
+                end
                 if session_info.open_notified then
                     notify_session_opened(session_id, payload_data.request_id)
                 else
@@ -635,6 +718,12 @@ local function run(args)
                 end
             end
             return session_id, nil
+        end
+
+        if not enforce_session_limit() then
+            local message = "Session limit reached; retry after a retiring session finishes"
+            send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_LIMIT, message, payload_data.request_id)
+            return nil, message
         end
 
         local existing_session, _ = session_repo.get(session_id, state.user_id)
@@ -662,7 +751,7 @@ local function run(args)
                 return nil, err
             end
 
-            local _, session_create_err = create_session_in_db(session_id, token_data)
+            local _, session_create_err = create_session_in_db(session_id, token_data, payload_data.attention_context_enabled)
             if session_create_err then
                 send_error(payload_data.conn_pid, consts.ERROR_CODES.SESSION_SPAWN,
                     "Failed to create session: " .. session_create_err, payload_data.request_id)
@@ -765,7 +854,77 @@ local function run(args)
         end
     end
 
+    local action_intents: any = require('attention_action_intents').new(broker, process.pid())
+
     local function handle_message_or_command(payload_data, topic_type)
+        -- Keep pending Host identity private until the accepted message starts its agent step.
+        local broker = {
+            bind_turn = function(_, intent)
+                return action_intents:stage(intent)
+            end,
+            cancel_session = function() return true end,
+        }
+
+        local function resolve_ui_action_runtime(message_data, resolved_session_id, resolved_session_info)
+            local runtime_context = type(message_data.runtime_context) == "table" and message_data.runtime_context or nil
+            local attention = runtime_context and runtime_context.attention
+            if type(attention) ~= "table" then
+                broker:cancel_session(resolved_session_id, "unavailable", "agent actions unavailable for this turn")
+                return nil
+            end
+            local runtime = broker:bind_turn({
+                user_id = state.user_id,
+                session_id = resolved_session_id,
+                session_pid = resolved_session_info.pid,
+                ingress_pid = state.user_hub_pid,
+                conn_pid = payload_data.conn_pid,
+                host_instance_id = attention.host_instance_id,
+                agent_actions_enabled = attention.agent_actions_enabled,
+                request_id = payload_data.request_id,
+            })
+            if runtime then
+                runtime.broker_pid = process.pid()
+            end
+            return runtime
+        end
+
+        local function prepare_ui_action_turn(cmd_data, resolved_session_id, resolved_session_info)
+            if cmd_data.command ~= "attention_prepare_ui_action_turn" then
+                return false
+            end
+            local message_request_id = cmd_data.message_request_id
+            local host_instance_id = cmd_data.host_instance_id
+            local valid = type(payload_data.conn_pid) == "string" and payload_data.conn_pid ~= ""
+                and type(payload_data.request_id) == "string" and payload_data.request_id ~= ""
+                and type(message_request_id) == "string" and message_request_id ~= "" and #message_request_id <= 128
+                and type(host_instance_id) == "string" and host_instance_id ~= "" and #host_instance_id <= 160
+                and type(cmd_data.agent_actions_enabled) == "boolean"
+            local runtime = valid and broker:bind_turn({
+                user_id = state.user_id,
+                session_id = resolved_session_id,
+                session_pid = resolved_session_info.pid,
+                ingress_pid = state.user_hub_pid,
+                conn_pid = payload_data.conn_pid,
+                host_instance_id = host_instance_id,
+                agent_actions_enabled = cmd_data.agent_actions_enabled,
+                request_id = message_request_id,
+            }) or nil
+            local response = {
+                type = consts.UPSTREAM_TYPES.COMMAND_RESPONSE,
+                session_id = resolved_session_id,
+                request_id = payload_data.request_id,
+                success = runtime ~= nil,
+            }
+            if runtime then
+                response.deferred_action_nonce = runtime.deferred_action_nonce
+            else
+                response.code = "ui_action_unavailable"
+                response.message = "Agent action routing could not be prepared"
+            end
+            process.send(payload_data.conn_pid :: string, consts.TOPIC_PREFIXES.SESSION .. resolved_session_id, response)
+            return true
+        end
+
         if not payload_data then
             return
         end
@@ -773,13 +932,35 @@ local function run(args)
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
         local request_id = payload_data.request_id
+        -- Attention routing runs before a request is queued for a starting
+        -- session, so the queued copy already carries its turn binding.
         local function route(session_info)
             update_session_activity(session_id)
+            local routed = payload_data
+            if topic_type == consts.HANDLER_TYPES.MESSAGE then
+                local message_data = type(payload_data.data) == "table" and payload_data.data or {}
+                local clean_data = {}
+                for key, value in pairs(message_data) do
+                    if key ~= "runtime_context" then
+                        clean_data[key] = value
+                    end
+                end
+                routed = {}
+                for key, value in pairs(payload_data) do
+                    routed[key] = value
+                end
+                routed.data = clean_data
+                routed.ui_action_runtime = resolve_ui_action_runtime(message_data, session_id, session_info)
+            elseif topic_type == consts.HANDLER_TYPES.COMMAND then
+                if prepare_ui_action_turn(payload_data.data or {}, session_id, session_info) then
+                    return
+                end
+            end
             if not session_info.open_notified then
-                queue_start_request(session_info, topic_type, payload_data)
+                queue_start_request(session_info, topic_type, routed)
                 return
             end
-            forward_request(session_info, session_id, topic_type, payload_data)
+            forward_request(session_info, session_id, topic_type, routed)
         end
 
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
@@ -922,9 +1103,10 @@ local function run(args)
 
     -- Tells the user's clients how a session ended: the stored status and
     -- interaction, once they are committed.
-    local function report_final_status(session_id, target_status, stored, reason, interaction, interrupted)
-        if not state.user_hub_pid then return end
-        local error_update = exit_error_payload(session_id, target_status, reason, interrupted)
+    local function report_final_status(session_id, target_status, stored, reason, interaction, interrupted, start_failure)
+        -- A deleted session has no status to report.
+        if not state.user_hub_pid or not target_status then return end
+        local error_update = exit_error_payload(session_id, target_status, reason, interrupted, start_failure)
         if error_update then
             publish_after_commit(state.user_hub_pid, consts.TOPIC_PREFIXES.SESSION .. session_id, error_update)
         end
@@ -943,8 +1125,9 @@ local function run(args)
     -- Host shows Stop and blocks Send until something reopens the session.
     -- Once, at start, each such session of this user that no live process
     -- holds is settled as interrupted (settle_interrupted: pending calls
-    -- repaired, status idle with an interaction that takes input, clients
-    -- told with the recovery notice). Its form answers read as interrupted.
+    -- repaired, the recovery boundary written, status idle with an interaction
+    -- that takes input, clients told with the recovery notice). Its form
+    -- answers read as interrupted.
     -- All of the user's running sessions are read, a page at a time; the
     -- pages follow session ids, so settling a session does not move the rows
     -- of later pages.
@@ -961,7 +1144,7 @@ local function run(args)
                 local session_id = tostring(session.session_id)
                 if not state.active_sessions[session_id] and session_status.is_stale_running(session) then
                     local target_status, stored, status_err, recovery_err, interaction =
-                        settle_interrupted(session_id, state.user_id :: string)
+                        settle_interrupted(session_id, state.user_id :: string, { recovery_boundary = true })
                     if recovery_err or status_err then
                         logger:warn("stale session status could not be settled", { session_id = session_id,
                             error = tostring(status_err or recovery_err) })
@@ -1009,7 +1192,8 @@ local function run(args)
         local result = channel.select({
             inbox:case_receive(),
             events:case_receive(),
-            gc_ticker:channel():case_receive()
+            gc_ticker:channel():case_receive(),
+            ui_action_ticker:channel():case_receive()
         })
 
         if not result.ok then
@@ -1023,7 +1207,17 @@ local function run(args)
 
             logger:debug("received topic", { topic = topic })
 
-            if topic == consts.PLUGIN_TOPICS.OPEN then
+            if topic == 'session_attention_activate' then
+                local request = payload:data()
+                local active = type(request) == 'table' and state.active_sessions[request.session_id]
+                if active and active.pid == msg:from() then
+                    local accepted = require('message_repo').get_by_request_id(request.session_id, request.request_id)
+                    local runtime = action_intents:activate(msg:from(), accepted, request)
+                    process.send(msg:from(), 'session_attention_activated', {
+                        nonce = request.nonce, request_id = request.request_id, runtime = runtime,
+                    })
+                end
+            elseif topic == consts.PLUGIN_TOPICS.OPEN then
                 local payload_data = payload:data()
                 logger:debug("handling session open", { user_id = state.user_id })
                 create_session(payload_data, true)
@@ -1034,6 +1228,17 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.COMMAND then
                 handle_message_or_command(payload:data(), consts.HANDLER_TYPES.COMMAND)
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN then
+                -- The client transport is gone, so UI actions waiting on it end
+                -- now, whatever the grace period does with the sessions.
+                for session_id, _ in pairs(state.active_sessions) do
+                    if type(session_id) == "string" then
+                        broker:cancel_session(session_id, "disconnected", "client transport disconnected")
+                    end
+                end
+                -- An auto-started plugin may never have opened a session.
+                -- Leave through normal ticker/broker cleanup instead of
+                -- waiting out a grace period that has nothing to finish.
+                if state.session_count == 0 then break end
                 begin_shutdown()
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE then
                 finish_sessions_for_shutdown(payload:data())
@@ -1047,6 +1252,47 @@ local function run(args)
                 resume_pending_answer_sessions()
             elseif topic == consts.PLUGIN_TOPICS.RESUME then
                 cancel_shutdown()
+                -- Sessions a lapsed grace period already started to finish
+                -- go back to normal when a client returns.
+                for _, session_info in pairs(state.active_sessions) do
+                    if session_info.terminating and session_info.terminate_reason == "shutdown" then
+                        session_info.terminating = false
+                        session_info.terminate_reason = nil
+                        process.send(session_info.pid :: string, "cancel_finish", {})
+                    end
+                end
+            elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_REQUEST then
+                local accepted, request_err = broker:request(msg:from(), payload:data())
+                if not accepted then
+                    logger:warn("UI action request rejected", {
+                        error = tostring(request_err or "unknown rejection"),
+                    })
+                end
+            elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_CANCEL then
+                broker:cancel(msg:from(), payload:data())
+            elseif topic == consts.PLUGIN_TOPICS.UI_ACTION_RESULT then
+                local payload_data = payload:data() or {}
+                local accepted, result_err = broker:result(
+                    msg:from(),
+                    payload_data.conn_pid,
+                    payload_data.session_id,
+                    payload_data.data
+                )
+                if not accepted then
+                    logger:warn("UI action result rejected", {
+                        error = tostring(result_err or "unknown rejection"),
+                        request_id = payload_data.request_id,
+                        session_id = payload_data.session_id,
+                    })
+                    send_error(payload_data.conn_pid, "ui_action_invalid", "UI action result rejected", payload_data.request_id)
+                else
+                    local result_data = payload_data.data or {}
+                    logger:info("UI action result accepted", {
+                        request_id = result_data.request_id or payload_data.request_id,
+                        session_id = payload_data.session_id,
+                        status = result_data.status,
+                    })
+                end
             elseif topic == consts.TOPICS.STOP_ESCALATION then
                 local stop_data = payload:data()
                 local session_info = state.active_sessions[stop_data.session_id]
@@ -1099,17 +1345,26 @@ local function run(args)
                     end
                 end
             elseif string.sub(topic, 1, string.len(consts.TOPIC_PREFIXES.SESSION)) == consts.TOPIC_PREFIXES.SESSION then
+                local data = payload:data()
+                for session_id, active in pairs(state.active_sessions) do
+                    if active.pid == msg:from() and topic == "session:" .. session_id
+                        and type(data) == "table" and data.status and data.status ~= consts.STATUS.RUNNING then
+                        action_intents:finish(session_id)
+                    end
+                end
                 if state.user_hub_pid then
-                    process.send(state.user_hub_pid :: string, topic, payload:data())
+                    process.send(state.user_hub_pid :: string, topic, data)
                 end
             end
         elseif result.channel == events then
             local event = result.value
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
+                broker:handle_exit(event.from)
                 local exit_result = event.result and event.result.value
                 local exit_error = event.result and event.result.error
                 for session_id, session_info in pairs(state.active_sessions) do
-                    if session_info.pid == event.from then
+                    if type(session_id) == "string" and session_info.pid == event.from then
+                        action_intents:forget(session_id)
                         if type(exit_result) == "table" and exit_result.status == "refused" then
                             fail_start_requests(session_info,
                                 "Failed to create session: " .. tostring(exit_result.error or "Session start refused"))
@@ -1124,18 +1379,21 @@ local function run(args)
                                     tostring(exit_result.error or "Session start refused"))
                                 gc_ticker:stop()
                                 clear_shutdown_deadline()
+                                ui_action_ticker:stop()
                                 return { status = "shutdown", user_id = state.user_id,
                                     reason = "no_active_sessions" }
                             end
                             break
                         end
 
+                        local start_failure = nil
                         if not session_info.open_notified then
                             local reason = "Session exited before confirming start"
                             if exit_error or (type(exit_result) == "table" and exit_result.error) then
                                 reason = exit_error or exit_result.error
                             end
-                            fail_start_requests(session_info, "Failed to create session: " .. tostring(reason))
+                            start_failure = "Failed to create session: " .. tostring(reason)
+                            fail_start_requests(session_info, start_failure)
                         end
 
                         clear_stop_deadline(session_info)
@@ -1153,6 +1411,7 @@ local function run(args)
                         local target_status, success, status_err, recovery_err, interaction, admitted =
                             finalize_exit(session_id, state.user_id :: string, session_info, exit_result, exit_error,
                                 state.user_hub_pid)
+                        if not target_status then err = "deleted" end
                         if recovery_err then
                             logger:warn("failed to recover pending calls", {
                                 session_id = session_id, error = recovery_err
@@ -1171,7 +1430,9 @@ local function run(args)
                         fire_session_end_hook(state.base_config.on_session_end_func_id, {
                             session_id = session_id,
                             user_id = state.user_id,
-                            status = target_status,
+                            -- Keep the hook's existing status contract even
+                            -- when the deleted row has no status to publish.
+                            status = target_status or status_after_exit(session_info, exit_result, exit_error),
                             reason = err,
                         })
 
@@ -1189,7 +1450,7 @@ local function run(args)
                         -- Session status update first, then the closed notification.
                         -- An enforced Stop is what the user asked for, so it
                         -- publishes the idle status without the recovery error.
-                        report_final_status(session_id, target_status, success, err, interaction, false)
+                        report_final_status(session_id, target_status, success, err, interaction, false, start_failure)
                         -- Open views of the forms answered during an enforced
                         -- Stop reload their delivery state once it says idle.
                         answer_admission.publish_admitted(admitted)
@@ -1207,7 +1468,7 @@ local function run(args)
                         -- next periodic scan, or for the plugin to start
                         -- again. Steering alone starts nothing: unused
                         -- steering stays pending, as after any Stop.
-                        if session_info.terminate_reason == "shutdown" and not state.shutting_down then
+                        if session_info.finished_for_shutdown and not state.shutting_down then
                             resume_pending_answer_sessions()
                         end
 
@@ -1216,6 +1477,7 @@ local function run(args)
                                 "Session exited: " .. err)
                             gc_ticker:stop()
                             clear_shutdown_deadline()
+                            ui_action_ticker:stop()
                             logger:info("plugin shutting down - no active sessions", { user_id = state.user_id })
                             return { status = "shutdown", user_id = state.user_id, reason = "no_active_sessions" }
                         end
@@ -1226,13 +1488,21 @@ local function run(args)
                 break
             end
         elseif result.channel == gc_ticker:channel() then
+            local _, context_cleanup_err = require('context_staging_repo').cleanup()
+            if context_cleanup_err then logger:warn('Context staging cleanup unavailable') end
             check_inactive_sessions()
             resume_pending_answer_sessions()
+        elseif result.channel == ui_action_ticker:channel() then
+            broker:expire()
         end
     end
 
+    for session_id, _ in pairs(state.active_sessions) do
+        broker:cancel_session(session_id, "disconnected", "session plugin stopped")
+    end
     gc_ticker:stop()
     clear_shutdown_deadline()
+    ui_action_ticker:stop()
     logger:info("plugin shutting down", { user_id = state.user_id, active_sessions = state.session_count })
     return { status = "shutdown", user_id = state.user_id }
 end

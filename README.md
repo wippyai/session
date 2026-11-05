@@ -15,6 +15,16 @@
 
 </div>
 
+## Timestamp storage
+
+Session activity, messages, artifacts and session contexts store UTC timestamps.
+PostgreSQL's timestamp columns carry UTC wall time without an offset, so writers
+convert both the current time and explicit Unix timestamps to UTC before
+formatting. SQLite retains the same instant in its timestamp text. Runtime time
+zone settings do not change these stored instants.
+SQLite list and cursor comparisons use the existing timestamp comparison key,
+so stored offset timestamps and new UTC timestamps retain chronological order.
+
 ## Session steering
 
 Sessions block new messages during an active turn by default. Add the
@@ -38,10 +48,27 @@ The tool is bound to its calling session. The session validates and persists a
 change before reporting tool success. Temporary overrides clear on completion,
 Stop, failure, recovery, and agent handoff.
 
+A tool that returns `_control.config.agent` while a turn is running hands that
+turn to the new agent. The session commits the switch, and the next agent step
+in the same turn is taken by the new agent with the conversation so far, so a
+router agent whose only action is a handoff still produces the answer. The
+session re-publishes `interaction` for the new agent at that step, and pending
+steering is applied there. Stop still ends the turn at the operation boundary,
+and the committed switch stays in place.
+
 The server generates the canonical message ID. A request ID correlates the
 command response. The session saves a message before acknowledging it. There
 is no automatic retry or client message deduplication. If acknowledgement is
 lost, a manual resend can create a duplicate.
+
+Stop cancels the turn's in-flight model and tool calls. The session hands the
+running turn a cancel channel (`runtime_options.cancel` for the agent step, the
+third argument of `tool_caller:execute`) and closes it on Stop. A cancelled model
+call stores the text streamed so far as the assistant message with
+`metadata.stopped = true`; a cancelled tool call is stored with status
+`cancelled`. The turn then ends idle. A Framework agent without this channel
+keeps the earlier behavior: Stop takes effect at the next operation boundary,
+and the session plugin escalates a turn that does not finish.
 
 Accepted steering is pending until the current response and its tool batch
 finish. The next model request includes it after those results in persisted
@@ -49,6 +76,37 @@ message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
 and is included when the user starts another turn, ahead of the message that
 starts it. Steering sent after that message follows it.
+
+Manual renames and generated titles persist before notifying the live session.
+Title notifications publish through the existing session owner's inbox using the
+stored title. A stopped session can still be renamed without starting a process;
+its next open loads that name. Automatic generation only fills an empty title.
+
+When a checkpoint falls inside a turn, the next agent prompt retains the
+originating user-request text at user authority, followed by the checkpoint
+resume note and subsequent model/tool messages. Restored requests are limited to
+6000 UTF-8 bytes, including an omission marker when needed; excerpts retain both
+ends. The original request and resume note precede retained steering even when
+its original anchor is unavailable. Later corrections take precedence, and
+completed work stays completed. The checkpoint summary covers
+earlier progress and attachments; restoring the request does not reload those
+attachments. A later ordinary user message starts its own turn and prevents
+restoring the previous request. Pending steering cannot replace the active task.
+
+Stop commits a developer message in conversation history together with its
+interaction state and any pending-input rollback. The message tells the model
+that the preceding turn is cancelled and subsequent user messages are new
+requests. Recovery persists an interruption message before accepting input
+when the preceding turn does not finish, including when no assistant response
+exists. Reopening preserves an existing boundary without duplicating it. Positional
+message metadata requires the LLM companion in version 0.5.7 or later.
+
+Shutdown, user close, inactivity and session-limit eviction finish at the active
+turn boundary. They preserve the in-flight model step, tools and continuation;
+only explicit Stop interrupts the turn. Reconnection cancels a pending disconnect
+finish. Cancelled public calls persist their cancelled status before emitting a
+`function_error` update with `outcome = cancelled`; private and delegation calls
+remain private.
 
 REST session responses and WebSocket session updates expose
 `interaction.can_send` and `interaction.revision`. Clients use session status
@@ -65,20 +123,25 @@ seconds after the last client leaves before it finishes the user's sessions,
 and a client that connects again within that time cancels the wait. A running
 turn then ends the way it does without a reload, so it applies the steering
 sent during it and admits the form answers accepted during it. When no client
-returns within 10 seconds, the plugin finishes the sessions, which works like
-a Stop for a running turn. Unused steering then remains pending, and so do the
-form answers accepted during the turn. The next session start admits those
-answers and starts a turn for them. If a client connected again while the
-session was finishing, the plugin starts the session for those answers as soon
-as it exits, and steering alone starts nothing.
+returns within 10 seconds, the plugin retires the sessions (see Session
+retirement below): a running turn finishes, applies the steering sent during
+it and admits the form answers accepted during it, and the session exits when
+its accepted work is done. A Stop that arrives meanwhile still ends the turn;
+unused steering then remains pending, and so do the form answers accepted
+during the turn. The next session start admits those answers and starts a turn
+for them. If a client connects again after the 10 seconds while the session
+is still retiring, it takes the retirement back. If the session already exited,
+the plugin starts it again for form answers that are still pending, and
+steering alone starts nothing.
 
 A turn cut off by a runtime stop is settled when the user's session plugin
-starts again: pending tool calls are repaired and the session is stored idle,
-with `can_send` true, because a new message is how the user continues it.
+starts again: pending tool calls are repaired, the interruption message is
+persisted, and the session is stored idle, with `can_send` true, because a new
+message is how the user continues it.
 Until then, REST responses report such a session the same way.
 
-When a turn does not stop within 10 seconds of a Stop (for example, during a
-model call that Stop cannot interrupt), the session plugin cancels the session
+When a turn does not stop within 10 seconds of a Stop (for example, a model or
+tool call that ignores the cancellation), the session plugin cancels the session
 process, and terminates it if it still runs 10 seconds later. That exit is the
 Stop the user asked for, not a failure. Pending tool calls are repaired, form
 answers sent during the stopped turn are delivered without a new turn, and the
@@ -86,6 +149,315 @@ session is stored idle with `can_send` true. Clients get no error.
 
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
+
+## Runtime tests and benchmarks
+
+`make test-postgres` checks the
+affected persistence paths, the forms suites and real handoffs against
+PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
+`PGDATABASE`, `PGUSER`, and `PGPASSWORD`; the target never drops it.
+`make test-postgres-full` runs every normal suite and leaves opt-in benchmarks
+to `make bench`. CI uses this full gate with PostgreSQL 17. The harness
+supplies the application's user-table contract (a trigger registers the users
+that test rows name; the foreign keys stay enforced) and runs these checks in
+UTC. Dates are written in UTC, and message dates are read back at microsecond
+precision, because the PostgreSQL driver returns a timestamp column cut to
+whole seconds.
+
+On Unix, `make install test` runs the suite against the locked dependencies.
+`make test-runtime` exercises
+registered tools, agent compilation, the Session
+process, and SQLite persistence with deterministic model responses. It covers
+handoff history, persisted control operations, mixed tool results, and Stop.
+Required runtime checks fail if a selected suite executes no cases. Set
+`FRAMEWORK_DIR=/absolute/path/to/framework` to use local Agent, LLM, and test
+sources instead of the locked published dependencies. CI checks both modes.
+
+`make bench` writes local JSON reports
+with median, p95, throughput, samples, allocation counters, and revision
+metadata. Defaults are 100 warmups and 100 measured batches at
+sizes 1, 8, and 32; override `BENCH_WARMUP`, `BENCH_SAMPLES`, and `BENCH_SIZES`
+(comma-separated). Each operation checks the complete persisted handoff.
+Normal garbage collection remains enabled for latency samples. A separate
+256-operation pass measures allocated bytes, exact allocation counts, heap
+growth, and retained heap. Override `BENCH_MEMORY_OPERATIONS` for its size.
+The metadata-write workload checks real persisted patches while retaining
+128-byte and 4096-byte payloads. It uses 32 writes per sample and 2048 writes
+for memory measurement; override `BENCH_METADATA_SIZES` and
+`BENCH_METADATA_MEMORY_OPERATIONS` as needed. Session creation and deletion
+are outside that workload's measured loops.
+Exact counters use the local runtime profiler; `BENCH_EXACT_ALLOCATIONS=0`
+records tracked heap objects instead. Reports include measurement overhead.
+Run one benchmark process at a time with port 6060 free for its profiler.
+CI runs correctness checks; performance comparisons run locally.
+Set `BENCH_REVISION` and `BENCH_FRAMEWORK_REVISION` when comparing external
+source snapshots without Git metadata.
+
+Dependencies, the database, environment file, backups, and benchmark reports
+stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
+backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
+location or `TEST_CONFIG` for an external runtime configuration. These targets
+require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+
+## Session retirement
+
+Disconnect, chat close, inactivity cleanup, and session-capacity retirement let
+accepted turns and queued writes finish before the process exits. Reconnect or
+reopen cancels pending retirement. Explicit Stop still cancels the turn; normal
+provider and turn limits continue to apply. Relay inactivity collection must
+also wait for the session plugin to exit instead of cancelling its parent hub.
+
+Retiring children occupy their live session slots until EXIT. A new session at
+capacity receives `session_limit_reached` and can be retried after a child exits;
+reopening an existing child needs no additional slot.
+
+Cancelled public tools emit a terminal `function_error` event after their
+outcome is stored. The event carries `outcome: cancelled`, the same field that
+history uses, so clients read one field in both places. Session 0.6.8 sent
+`status: cancelled` on this event instead; no released client read it, and the
+event no longer carries it. History keeps `cancelled` in storage and exposes
+`status: error` with `outcome: cancelled`, so old and new clients show a
+settled result after a reload. Stop, a failed turn, an agent handoff and a command-bus failure cancel
+calls this way. Private and delegation calls send no event.
+
+## Tool feedback and loop limits
+
+Settled tool failures are marked as errors in the next model prompt. Public
+function-error events carry the same error text saved in history; private and
+delegation details remain hidden from public tool events. Text-only answers end
+the turn. An explicit empty-output exhaustion is reported rather than sampled
+again; incomplete-tool and older truncation responses retain their retry behavior.
+
+Existing loop settings and defaults remain: `max_iterations` defaults to 1,000
+and `max_repeated_calls` to 50 under `agent_options.loop`. Session overrides use
+`max_turn_iterations` and `max_repeated_tool_calls`. A value of `0` disables that
+limit. There is no separate three-failure default.
+
+The repeat limit covers identical tool rounds and repeated failures of the same
+action across changing batches. Parallel duplicates count once per round.
+Changed arguments identify a different action; successful recovery clears that
+action's failure history, but unrelated successes do not. New user-started turns
+reset the counters. Stop still takes precedence, and unused steering remains
+pending for the next user-started turn.
+
+History and applied steering compare timestamps chronologically, with message
+IDs only breaking ties. Stored timestamps, IDs and pagination cursors are not
+rewritten.
+
+## Checkpoints and prompt caching
+
+The complete checkpoint continuation fix requires Agent 0.5.5 or later. Publish
+Agent 0.5.5 before publishing the Session release that carries this requirement:
+the session keeps the user's task across mid-turn checkpoints, while Agent labels
+per-step memory recall as background context. PostgreSQL installations also need
+Runtime v0.3.50a or later to preserve message timestamp precision when choosing
+checkpoint boundaries.
+
+Agent 0.5.5 requires LLM 0.5.8 or later, so publish LLM before Agent and refresh
+Session's dependency lock from those published packages before release.
+
+When a checkpoint function or binding is configured, the session compares each
+model response's normalized `tokens.context_tokens` with the effective checkpoint
+`token_threshold`. It checks tool continuations too, and schedules
+the checkpoint before the next tool round and model step. The existing strict
+`>` threshold is unchanged; reaching the threshold exactly does not trigger it.
+
+Checkpoint options resolve in this order: session-wide defaults from
+`token_checkpoint_threshold` (default 50000) and `checkpoint_function_id`, then
+the agent's `agent_options.checkpoint` (trait behavior defaults followed by
+explicit agent values), then the persisted `config.checkpoint` map. A nil
+session-wide default sets nothing.
+That map is read from persisted host configuration, not accepted implicitly by
+the start token or `_control.config`. `enabled = false` disables scheduling;
+an effective zero/nonpositive threshold disables automatic scheduling. Maps merge
+recursively and lists replace, including an explicit empty list.
+
+Upgrade note: an app that sets both an app-wide threshold and a per-agent
+threshold now uses the per-agent threshold. Use `config.checkpoint` for an
+explicit session override.
+
+The scheduler captures detached effective options for each queued checkpoint,
+so later config changes cannot alter that operation. A trait checkpoint binding
+is attempted before the configured function fallback; both receive effective
+`options`. A strict binding failure prevents fallback and checkpoint-state
+writes. Without behaviors, the existing function path remains available.
+When a checkpoint succeeds after a non-strict binding failure, the checkpoint
+anchor's metadata retains the runtime diagnostics in `checkpoint_binding_errors`,
+including when a later binding or the configured function supplies the summary.
+Healthy checkpoints omit this field.
+
+This is the current prompt size, not cumulative usage across the turn. Cached
+input still occupies context even when `prompt_tokens` reports only a small
+uncached suffix. The LLM module normalizes provider accounting; the session does
+not add cache counters again.
+
+The default summarizer checks its input against the context window of its resolved model,
+caps `max_tokens` at that model's output limit, and asks for a summary below it. It
+reads the arguments and result of every call row that replays to the model,
+delegation and private calls included, within `max_tool_result_chars` per value.
+These per-row clamps remain in place. With a resolved window, the conversation can
+use all available input after the output reservation, safety margin, and fixed
+prompt sections. An explicit `options.max_conversation_chars` still caps it; the
+500,000-byte default applies only when no window resolves. If fitting the conversation
+requires dropping bytes, the checkpoint fails without generating a summary.
+
+Every tool result already appears in the conversation. The duplicate KEY TOOL RESULTS
+section keeps only the newest `max_tool_results` (100 by default) and clamps them to
+`max_tool_results_chars`. With a resolved window, it uses only the space left after
+the conversation, and is omitted when none remains. Dropping these duplicate results
+does not fail a checkpoint. A summary cut off at `max_tokens` is an error. On any
+checkpoint failure, the previous summary and history anchor stay unchanged.
+
+When a checkpoint fails on a prompt that still fits the agent model's window,
+including its output reservation, the session sends the full prompt as it is and
+tries again on the next step. If the prompt does not fit, the turn fails with a
+visible error. A long session using a small-window summarizer can therefore keep
+failing to compact while its history grows, eventually exhausting the agent's
+window. It preserves that history instead of silently forgetting its beginning.
+Use a summarizer with enough input capacity or checkpoint earlier to avoid this.
+
+The conversation carries rolling cache markers so a provider can reuse the
+stable history prefix on later requests. Caching is provider-dependent, can
+expire or miss, and cached reads still have a cost. Checkpointing shortens the
+active prompt after a successful summary; neither mechanism is a hard spending
+limit or a preflight guarantee against one oversized tool result.
+
+## Stable request prefix
+
+Each request a session sends extends the previous one: everything sent before
+the model's output is stored where it was sent and replayed unchanged, so the
+provider cache and earlier thinking blocks stay valid. This requires Agent
+0.5.10 and LLM 0.5.13 or later; publish them before the Session release and
+refresh the dependency lock from the published packages.
+
+- **Memory recall.** An agent with a memory contract recalls memory on each
+  eligible step and returns the recall note in `context_notes`. The notes are
+  stored, in order, as developer rows with `metadata.preserve_position` and
+  `metadata.memory_ids`, after the step's lifecycle notes and before the step
+  output. Notes and output commit in one batch, so a failed write leaves
+  neither, and the failure is a storage error. Truncated and cancelled text
+  keeps its notes; a step whose output is discarded discards them too. Assistant
+  rows no longer carry `memory_ids` or `memory_count`.
+- **Turn context.** When the agent declares `agent_options.turn_context` (the
+  `time_aware` trait), the session renders the note once for a turn and stores it
+  as a system row with `metadata.preserve_position` and
+  `metadata.system_action = "turn_context"`. A user message that opens a turn
+  renders it; so does a mid-turn handoff to a time-aware successor, when the turn
+  has no note yet. The row follows that message, any rows written while recovered
+  behavior controls settle at the start of the step, and any activation notes. It
+  precedes the step's other notes. Tool continuation steps add none. A note that
+  cannot render (an unknown timezone) fails the turn. The row is written once the
+  turn has passed activation, lifecycle validation and the Stop gate, so a turn
+  that ends at those gates leaves no note. It is written before the model call, so
+  it stays when the provider fails or Stop arrives during the call. A retried turn
+  or a reopened session finds the stored row and replays its minute. When a
+  checkpoint removes the request and the excerpt of the request is restored, the
+  note is restored with it. The prompt builder renders system rows that carry
+  `preserve_position` in place; other system rows (turn and agent-change notices)
+  stay out of the prompt.
+- **Thinking blocks.** Assistant rows store the step's `prefix_fingerprint`
+  and immutable `generation_checkpoint_id` next to their `thinking_blocks`.
+  The generation field records the checkpoint at response persistence, after any
+  in-step compaction; an empty string denotes no checkpoint yet. Checkpoints can
+  update an anchor's `checkpoint_id`, but cannot overwrite its generation field.
+  Every step passes `drop_stale_thinking = true` with a predicate that keeps blocks
+  only when the row's fingerprint and generation checkpoint match the current ones.
+  Rows without the generation field count as stale. An inclusive checkpoint keeps
+  its anchor row in history, but that row's earlier generation remains stale.
+  The current tool round always keeps its blocks.
+- **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
+  positional notes after the history and stored once, where they were first sent:
+  developer messages as developer rows and system messages as system rows, each
+  with `metadata.preserve_position`, `metadata.lifecycle_phase` and
+  `metadata.system_action = "lifecycle_note"`. A binding's own metadata contributes
+  only `memory_ids`. `before_step` notes commit in one batch with the step output
+  and are discarded with a discarded output, so each step adds one set. `activate`
+  fires once, so its notes are stored when they fire and outlive a step whose
+  output is discarded; a later checkpoint folds them into its summary like any other
+  row. A lifecycle message in the user or assistant role fails the step: a host
+  note must not speak as either party.
+- **Stored rows.** A row renders as itself on every request. Developer rows render
+  in place on every driver instead of joining the top-level instructions, and
+  adjacent rows of one role never merge. Model text and lifecycle notes are stored
+  only when they contain a non-space character. A tool round with blank text stores
+  an empty assistant row, and a blank assistant row stays out of the prompt unless
+  it holds the thinking blocks of its round. A user message with no text, files or
+  attachments is rejected with `empty_message`; with attachments, the empty text
+  part is omitted. Rows stored blank by earlier versions render as nothing.
+- **Parallel tool rounds.** The calls of one response render together after its
+  assistant row, then all their results, in the order the model produced them.
+  Calls with no assistant row before them keep a call and its result together. This
+  shape must ship in the first release that stores fingerprints: changing it later
+  edits the prefix of every fingerprinted row.
+
+Positional notes are ordinary rows outside the prompt too. The checkpoint
+summarizer reads them as `[SYSTEM]` and `[DEVELOPER]` lines, and they count toward
+`TITLE_TRIGGER_MESSAGE_COUNT`. Title generation leaves them out, since a title
+describes the conversation and not the time it took place.
+
+These history edits change the prefix by design:
+
+- A tool result marked `stale` is replaced with a withdrawal notice.
+- The attached-files note lists the filename and size the upload has when the
+  prompt is built (`Unknown filename` once the upload is gone).
+- Attention attachments that expire are withdrawn.
+- A developer or system message a client injects is stored when it arrives. If a
+  request is in flight, it lands before that request's output.
+- Stop returns steering applied by the interrupted step to pending, and removes it
+  from the prompt until a later step applies it again. The Stop boundary row commits
+  with the Stop, so it precedes the notes and text the cancelled step stores
+  afterwards.
+- A memory addition changes the session context memory in the top-level system
+  prompt, which also changes the prefix fingerprint. Memory stays there because it
+  must survive checkpoints and can be deleted or cleared, which a positional row
+  could not do.
+- The restored excerpt of a request, with its turn note, leaves the prompt when the
+  next user turn starts.
+- A step whose output is discarded (a provider failure, Stop with no text, a
+  truncated step with no text, which stores only the truncation notice) discards
+  the `before_step` and recall notes it sent, so they do not replay.
+
+The prompt cache restarts at the edited message and the API drops the thinking
+blocks after it.
+
+After upgrading, a stored parallel round renders in the new shape, so its cache
+restarts once from that round. Its rows are not rewritten.
+
+After upgrading, stored conversations restart their cache once: earlier steps
+sent lifecycle notes that were never stored, stored rows that used to merge now
+render separately, and assistant rows carry no `prefix_fingerprint`, so their
+thinking blocks are stripped from the next request (except those of a tool round
+in progress). Recall notes stored by earlier versions stay where they were written.
+
+## Durable behavior controls
+
+Opt-in trait behaviors can propose the shared declarative `_control` subset:
+agent/model/trait/tool targets, session/public metadata, and `memory.compact`.
+The response and its pending proposal marker are saved atomically. Tool and
+delegation outcomes settle before a proposal takes effect. Recovery replays
+persisted proposals without rerunning tools or taking another model step;
+explicitly cancelled tool rounds do not apply their proposals.
+Proposals apply in order. An explicit model, trait or tool target is retained
+when switching agents, even if it matches the preceding agent's settings.
+
+Replay is at-least-once: a crash between a declarative effect and its completion
+marker can repeat it. External providers and lifecycle hooks must use stable
+refs and idempotent writes, not rely on a final `deactivate` callback.
+
+`memory.compact = true` persists a request that bypasses the token threshold,
+not an explicit disable or a missing provider. False is not cancellation.
+When a proposal also changes configuration, requested compaction captures the
+committed agent/provider, not the old response's settings. An agent handoff
+continues the current turn through the canonical replacement-agent
+continuation after the preceding tool results settle. Accepted steering reaches
+the new agent once; compaction uses the committed target's provider and options.
+An explicit Stop suppresses that continuation and keeps unapplied steering for
+the next user-started turn.
+Summary replacement, history anchor, audit metadata and request consumption
+commit in one transaction; failed writes retain the previous usable history.
+This does not install a long-term memory provider or a loop policy. Sessions
+without opted-in behaviors do not scan history for proposals or start new
+automatic model continuations.
 
 ## Artifacts
 
@@ -100,7 +472,7 @@ An artifact carries two independent settings.
 | Setting | Field on `_control.artifacts[]` | Stored as |
 |---|---|---|
 | Render mode | `type` | the `kind` column |
-| Placement | `display_type` | `meta.display_type` |
+| Placement hint | `display_type` | `meta.display_type` |
 
 **Render mode** determines how a client draws the artifact. It is returned as
 `type` by `GET /artifact/{id}`.
@@ -115,29 +487,50 @@ An artifact carries two independent settings.
 Values are stored verbatim and are not validated. A value outside this set
 matches no renderer branch, and the artifact renders as nothing.
 
-**Placement** determines which messages this module writes, and therefore how
-the artifact reaches the thread.
+`display_type` is a stored placement hint. The `instructions` flag determines
+which messages this module writes and whether it queues an inline presentation
+reference.
 
-| `display_type` | Messages written | How it reaches the thread |
+| `instructions` | Messages written | How it reaches the thread |
 |---|---|---|
-| `standalone` | `type="artifact"` with `metadata.artifact_id`, plus `system` `artifact_created` | the client renders the artifact message |
-| `inline` | a `developer` message carrying an embed instruction, plus `system` | the agent pastes `<artifact id="…"/>` into its reply |
+| `false` | `type="artifact"` with `metadata.artifact_id`, plus `system` `artifact_created` | the client renders the artifact message |
+| `true` or omitted | a `developer` message carrying an embed instruction, plus `system` | a terminal assistant message carries `metadata.presentation.artifact_refs` for a compatible renderer |
 
-The reference tools derive placement from `instructions`: `true` → `inline`,
-otherwise `standalone`. The standalone artifact message is written only when
-`instructions` is exactly `false`; `nil` does not qualify.
+The standalone artifact message is written only when `instructions` is exactly
+`false`. Omitted instructions request inline delivery; setting `display_type`
+alone does not switch delivery to a standalone message.
 
-The two settings are independent — any combination is valid. A `standalone`
-placement with an `inline` render mode puts the content in its own message; a
-`standalone` render mode with an `inline` placement gives a chip embedded in the
-agent's reply.
+Render mode is independent of delivery. `instructions=false` with `type=inline`
+puts content in its own artifact message. Inline delivery with `type=standalone`
+provides a reference that a compatible client can present as a chip.
 
-Placement must not be mapped onto `type`. Returning `meta.display_type` as
-`type` for every kind was tried and reverted: it collapses the two settings into
-one, so a `standalone` placement can no longer carry inline content — the
-combination the reference tools produce by default. An author who wants a chip
-asks for the render mode directly (`type = "standalone"`) rather than getting it
-as a side effect of where the artifact is delivered.
+**Unreleased renderer contract:** the metadata fallback described here requires
+a renderer that consumes `presentation.artifact_refs` outside the Markdown body
+and deduplicates it against successfully rendered authored `<artifact>` tags.
+That companion and its live SQLite/PostgreSQL checks remain prerequisites for
+releasing this change. Older clients ignore the field and keep their existing
+behavior; this backend change alone does not make a missing tag visible.
+
+References belong to the creating turn. Session retains them through tool calls
+and truncated responses, then attaches them to the next tool-free terminal
+assistant record and its CONTENT update. Empty terminal text can still carry
+references. Starting a new turn discards pending references from an interrupted
+or cancelled turn. A stored truncated record still runs `after_persist` without
+consuming the references.
+
+The reserved metadata field has this shape:
+
+```json
+{"presentation":{"artifact_refs":[{"artifact_id":"generated-artifact-id"}]}}
+```
+
+Session derives these IDs from successful tool-created artifacts. Agent-supplied
+`metadata.presentation` is ignored; unrelated agent metadata is preserved. No
+markup is appended to model text, including unfinished Markdown fences.
+
+Keep the stored `type` and `display_type` separate when returning artifact
+metadata. To request a chip, set the render mode directly (`type="standalone"`).
+Changing the placement hint does not change how the client draws the content.
 
 ### Content modes
 
@@ -165,7 +558,7 @@ return {
         content      = "# Q3 …",       -- one content mode
         content_type = "text/markdown",
         type         = "standalone",   -- render mode; omitted ⇒ "inline"
-        display_type = "standalone",   -- placement
+        display_type = "standalone",   -- stored placement hint
         instructions = false,
         preview      = "",             -- shown before the artifact loads
         description  = nil,
@@ -304,5 +697,64 @@ answers, and how an answer is admitted into the conversation, and
 for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
 from the browser side.
 
+## Upgrading to 0.7.0
+
+Session 0.7.0 adds Session Forms. Check these points before you upgrade.
+
+- **New requirement `ui_server`.** The module now serves the `wippy-form` and
+  `wippy-form-answers` bundles from an HTTP server. The default is
+  `app:gateway`. If your HTTP server has another name, the static routes
+  (`/wippy-session-forms` and `/wippy-session-form-answers`) do not work until
+  you set the parameter on the dependency:
+
+  ```yaml
+  - name: dep.wippy.session
+    kind: ns.dependency
+    component: wippy/session
+    parameters:
+      - name: ui_server
+        value: app:your_server
+  ```
+
+- **Web Host 1.0.65 or later.** The form card needs the Host's artifact-state
+  API. An older Host shows the questions disabled and cannot send answers.
+- **Other users' artifacts answer 404, not 403.** `GET /artifact/{id}` and
+  `GET /artifact/{id}/content` answer an artifact that belongs to someone else
+  exactly like a missing one. A client that reads the 403 must read the 404.
+- **Sessions finish 10 seconds after the last client leaves.** The plugin used
+  to finish them as soon as the last client disconnected. A client that
+  connects again within the 10 seconds cancels the wait, so a page reload does
+  not end a turn.
+- **An enforced Stop leaves the session idle.** When a turn does not stop in
+  time and the plugin has to cancel the session process, the session is
+  stored as `idle` (it was `failed`), clients get no error, and Send stays
+  enabled. Form answers accepted during that turn are admitted without
+  starting a new turn.
+- **Steering accepted after a turn's first message stays after it.** A steering
+  row accepted after the row that starts the turn is anchored after that row,
+  so the model reads the two in the order they were accepted. Steering left
+  pending by a stopped or recovered turn still goes ahead of the new message.
+- **A stored `running` status reads as `idle`** while no session process is
+  registered for the session. This is what the API returns for a turn that a
+  crash or a restart cut off. The stored row is not changed.
+
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases
+
+### Outgoing prompt checkpoints (pending upstream admission support)
+
+When Agent requests compaction before model dispatch, Session commits an explicit
+exclusive checkpoint boundary: the summary replaces completed history through the
+anchor, while the originating user request is restored at user authority. Stored
+tool results remain intact. The boundary and request reference are committed with
+the summary; a failed write leaves the previous prompt usable. Reopening a session
+honors that boundary, and pending input remains queued for its normal safe boundary.
+Existing checkpoints and explicit `messages():after(id)` queries remain inclusive.
+
+This path requires Agent 0.5.9 and LLM 0.5.11 or later, which provide the checkpoint
+callback and prompt-admission capability released from Framework #203. Session's
+dependency minimums and test lock require those published versions.
+
+Run `make test-admission` to check the published dependencies. For a source composition,
+use `make test-admission FRAMEWORK_DIR=/path/to/framework`. Both forms fail rather than
+skip when the checkpoint callback capability is unavailable.

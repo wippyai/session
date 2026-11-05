@@ -62,6 +62,12 @@ const otherDescribedBy = computed(() => joinIds(otherTooLong.value && otherError
 // form-level error describes the control but does not make it invalid.
 const otherInvalid = computed(() => otherTooLong.value || !!displayError.value)
 
+// Enter on an empty box. Offline, sending and a too-long answer have their own signs.
+function onOtherBlocked() {
+  if (!props.disabled && !otherTooLong.value)
+    props.controller.sendOther(props.question)
+}
+
 function onOtherWrapperClick(event: MouseEvent) {
   if (!(event.target as HTMLElement).closest(partSelector('composer')))
     props.controller.requestFocus('other')
@@ -159,8 +165,9 @@ function onOptionsFocusIn(event: FocusEvent) {
         :invalid="otherInvalid"
         :described-by="otherDescribedBy"
         data-focus="other"
-        @update:model-value="(v) => { answer.other = v }"
+        @update:model-value="(v) => controller.setOther(question, v)"
         @send="controller.sendOther(question)"
+        @blocked="onOtherBlocked"
         @escape="controller.requestFocus('card')"
       />
       <kbd

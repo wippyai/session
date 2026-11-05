@@ -2,6 +2,7 @@ local sql = require("sql")
 local json = require("json")
 local time = require("time")
 local tx = require("tx")
+local message_order = require("message_order")
 
 type Session = {
     session_id: string,
@@ -15,6 +16,7 @@ type Session = {
     public_meta: {[string]: any},
     start_date: string,
     last_message_date: string,
+    attention_context: {[string]: any},
 }
 
 type SessionUpdates = {
@@ -28,6 +30,31 @@ type SessionUpdates = {
 }
 
 local session_repo = {}
+
+local function attention_context(enabled, revision, updated_at, updated_by)
+    return {
+        schema = 'wippy.attention.session.v1',
+        enabled = enabled == true or enabled == 1 or enabled == '1' or enabled == 'true',
+        revision = tonumber(revision) or 0,
+        -- Sessions that predate the column store '' and have no change time.
+        updated_at = updated_at ~= '' and updated_at or nil,
+        updated_by = updated_by or 'system',
+    }
+end
+
+local function attention_context_from_row(session: any): any
+    session.attention_context = attention_context(
+        session.attention_enabled,
+        tonumber(session.attention_revision) or 0,
+        session.attention_updated_at,
+        session.attention_updated_by
+    )
+    session.attention_enabled = nil
+    session.attention_revision = nil
+    session.attention_updated_at = nil
+    session.attention_updated_by = nil
+    return session
+end
 
 -- Get a database connection (refused inside tx.run; see tx.connect)
 local function get_db()
@@ -100,6 +127,18 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
     meta = meta or {}
     config = config or {}
 
+    local initial_attention_enabled = false
+    local initial_attention_revision = 0
+    local initial_attention_updated_by = 'system'
+    if type(config.attention_context) == 'table' and config.attention_context.enabled ~= nil then
+        if type(config.attention_context.enabled) ~= 'boolean' then
+            return nil, 'INVALID_ATTENTION_CONTEXT_ENABLED'
+        end
+        initial_attention_enabled = config.attention_context.enabled
+        initial_attention_revision = 1
+        initial_attention_updated_by = 'application'
+    end
+
     -- Encode JSON fields
     local encoded_meta, err = json.encode(meta)
     if err then
@@ -116,7 +155,7 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
         return nil, err
     end
 
-    local now = time.now():format(time.RFC3339)
+    local now = time.now():utc():format(time.RFC3339)
 
     local query = sql.builder.insert("sessions")
         :set_map({
@@ -128,6 +167,10 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
             meta = encoded_meta,
             config = encoded_config,
             public_meta = '{}',
+            attention_enabled = initial_attention_enabled,
+            attention_revision = initial_attention_revision,
+            attention_updated_at = now,
+            attention_updated_by = initial_attention_updated_by,
             start_date = now,
             last_message_date = now
         })
@@ -150,6 +193,7 @@ function session_repo.create(session_id, user_id, primary_context_id, title, kin
         meta = meta,
         config = config,
         public_meta = {},
+        attention_context = attention_context(initial_attention_enabled, initial_attention_revision, now, initial_attention_updated_by),
         start_date = now,
         last_message_date = now
     }
@@ -169,6 +213,7 @@ function session_repo.get(session_id, user_id)
     local query = sql.builder.select(
             "session_id", "user_id", "status", "primary_context_id",
             "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+            , "attention_enabled", "attention_revision", "attention_updated_at", "attention_updated_by"
         )
         :from("sessions")
         :where("session_id = ?", session_id)
@@ -193,7 +238,7 @@ function session_repo.get(session_id, user_id)
         return nil, "Session not found"
     end
 
-    return decode_json_fields(session)
+    return attention_context_from_row(decode_json_fields(session))
 end
 
 -- List sessions by user ID
@@ -210,10 +255,11 @@ function session_repo.list_by_user(user_id, limit, offset)
     local query = sql.builder.select(
             "session_id", "user_id", "status", "primary_context_id",
             "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+            , "attention_enabled", "attention_revision", "attention_updated_at", "attention_updated_by"
         )
         :from("sessions")
         :where("user_id = ?", user_id)
-        :order_by("last_message_date DESC")
+        :order_by(message_order.date(tx.type_of(db), "last_message_date") .. " DESC")
 
     if limit and limit > 0 then
         query = query:limit(limit)
@@ -234,6 +280,7 @@ function session_repo.list_by_user(user_id, limit, offset)
     -- Parse JSON fields for each session
     for i, session in ipairs(sessions) do
         decode_json_fields(session)
+        attention_context_from_row(session)
     end
 
     return sessions
@@ -306,6 +353,128 @@ function session_repo.list_by_user_status(user_id, status, limit, opts)
     }
 end
 
+-- owner_id, when given, limits the change to that user's session; another
+-- user's session reads as SESSION_NOT_FOUND.
+function session_repo.update_attention_context(session_id, enabled, expected_revision, updated_by, owner_id)
+    if not session_id or session_id == '' then
+        return nil, 'INVALID_SESSION_ID'
+    end
+    if type(enabled) ~= 'boolean' then
+        return nil, 'INVALID_ATTENTION_CONTEXT_ENABLED'
+    end
+    if expected_revision ~= nil and (type(expected_revision) ~= 'number' or expected_revision < 0 or expected_revision % 1 ~= 0) then
+        return nil, 'INVALID_ATTENTION_CONTEXT_REVISION'
+    end
+    if type(updated_by) ~= 'string' or updated_by == '' then
+        return nil, 'INVALID_ATTENTION_CONTEXT_UPDATED_BY'
+    end
+    if owner_id ~= nil and (type(owner_id) ~= 'string' or owner_id == '') then
+        return nil, 'INVALID_ATTENTION_CONTEXT_OWNER'
+    end
+
+    local db, err = get_db()
+    if err then return nil, err end
+    local dbtx, tx_err = db:begin()
+    if tx_err then
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+    end
+
+    local current_query = sql.builder.select(
+        'attention_enabled', 'attention_revision', 'attention_updated_at', 'attention_updated_by'
+    ):from('sessions'):where('session_id = ?', session_id)
+    if owner_id then current_query = current_query:where('user_id = ?', owner_id) end
+    local current_rows, read_err = current_query:limit(1):run_with(dbtx):query()
+    if read_err then
+        dbtx:rollback()
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+    end
+    if #current_rows == 0 then
+        dbtx:rollback()
+        db:release()
+        return nil, 'SESSION_NOT_FOUND'
+    end
+
+    local current = current_rows[1]
+    local current_revision = tonumber(current.attention_revision) or 0
+    local current_state = attention_context(current.attention_enabled, current_revision,
+        current.attention_updated_at, current.attention_updated_by)
+    if expected_revision ~= nil and expected_revision ~= current_revision then
+        dbtx:rollback()
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', current_state
+    end
+    if current_state.enabled == enabled then
+        dbtx:rollback()
+        db:release()
+        return current_state
+    end
+
+    local now = time.now():utc():format(time.RFC3339)
+    local next_revision = current_revision + 1
+    local update = sql.builder.update('sessions'):set_map({
+        attention_enabled = enabled,
+        attention_revision = next_revision,
+        attention_updated_at = now,
+        attention_updated_by = updated_by,
+    }):where('session_id = ?', session_id):where('attention_revision = ?', current_revision)
+    if owner_id then update = update:where('user_id = ?', owner_id) end
+    local result, update_err = update:run_with(dbtx):exec()
+    if update_err or not result or result.rows_affected ~= 1 then
+        dbtx:rollback()
+        if update_err or not result then
+            db:release()
+            return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+        end
+        -- PostgreSQL can read the previous revision before a competing writer
+        -- commits. After losing the conditional update, return the committed
+        -- state rather than the snapshot read before that race.
+        local latest_rows, latest_err = current_query:limit(1):run_with(db):query()
+        db:release()
+        if latest_err then return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE' end
+        if #latest_rows == 0 then return nil, 'SESSION_NOT_FOUND' end
+        local latest = latest_rows[1]
+        return nil, 'ATTENTION_CONTEXT_REVISION_CONFLICT', attention_context(
+            latest.attention_enabled, tonumber(latest.attention_revision) or 0,
+            latest.attention_updated_at, latest.attention_updated_by)
+    end
+
+    local commit_ok, commit_err = dbtx:commit()
+    if commit_err then
+        dbtx:rollback()
+        db:release()
+        return nil, 'ATTENTION_CONTEXT_STORAGE_UNAVAILABLE'
+    end
+    db:release()
+
+    return attention_context(enabled, next_revision, now, updated_by)
+end
+
+function session_repo.update_initial_title(session_id, title)
+    if not session_id or session_id == "" then
+        return nil, "Session ID is required"
+    end
+    if not title or title == "" then
+        return nil, "Title cannot be empty"
+    end
+
+    local db, err = get_db()
+    if err then return nil, err end
+    local result
+    result, err = sql.builder.update("sessions")
+        :set("title", title)
+        :where("session_id = ?", session_id)
+        :where("(title IS NULL OR title = '')")
+        :run_with(db):exec()
+    db:release()
+    if err then return nil, "Failed to update initial title: " .. err end
+    if not result or type(result.rows_affected) ~= "number" then
+        return nil, "Missing initial title update result"
+    end
+    return result.rows_affected > 0
+end
+
 -- Update session metadata (title, meta, config, public_meta, status, last_message_date)
 function session_repo.update_session_meta(session_id, updates)
     if not session_id or session_id == "" then
@@ -319,24 +488,6 @@ function session_repo.update_session_meta(session_id, updates)
     local db, err = get_db()
     if err then
         return nil, err
-    end
-
-    -- Check if session exists
-    local check_query = sql.builder.select("session_id")
-        :from("sessions")
-        :where("session_id = ?", session_id)
-
-    local check_executor = check_query:run_with(db)
-    local sessions, err = check_executor:query()
-
-    if err then
-        db:release()
-        return nil, "Failed to check if session exists: " .. err
-    end
-
-    if #sessions == 0 then
-        db:release()
-        return nil, "Session not found"
     end
 
     -- Build update query
@@ -389,15 +540,22 @@ function session_repo.update_session_meta(session_id, updates)
         result.public_meta = updates.public_meta
     end
 
-    -- Always update last_message_date if any field is updated
-    local date
+    -- Message persistence owns implicit recency updates. Metadata edits only
+    -- change the date when the caller supplies one explicitly.
     if updates.last_message_date ~= nil then
-        date = time.unix(updates.last_message_date, 0):format(time.RFC3339)
-    else
-        date = time.now():format(time.RFC3339)
+        local date = time.unix(updates.last_message_date, 0):utc():format(time.RFC3339)
+        update_query = update_query:set("last_message_date", date)
+        result.last_message_date = date
+    elseif updates.title == nil and updates.status == nil and updates.kind == nil
+        and updates.meta == nil and updates.config == nil and updates.public_meta == nil then
+        -- Preserve successful no-op updates without generating an empty SET
+        -- clause or manufacturing message activity. Missing sessions still fail.
+        local rows, read_err = db:query("SELECT session_id FROM sessions WHERE session_id = $1", { session_id })
+        db:release()
+        if read_err then return nil, "Failed to update session metadata: " .. read_err end
+        if not rows or #rows == 0 then return nil, "Session not found" end
+        return result
     end
-    update_query = update_query:set("last_message_date", date)
-    result.last_message_date = date
 
     -- Add WHERE clause
     update_query = update_query:where("session_id = ?", session_id)
@@ -411,6 +569,9 @@ function session_repo.update_session_meta(session_id, updates)
     if err then
         return nil, "Failed to update session metadata: " .. err
     end
+    if not update_result or update_result.rows_affected == 0 then
+        return nil, "Session not found"
+    end
 
     return result
 end
@@ -422,7 +583,25 @@ function session_repo.delete(session_id)
     end
 
     local result, err = tx.run(function(dbtx)
-        -- Delete artifacts first
+        -- Lock order: the staging guard, then the session row, then the
+        -- rows that belong to the session. Every other path that locks a
+        -- session takes the session row before it touches an artifact (a form
+        -- answer, a form creation) and a receipt takes the guard before the
+        -- session row, so no pair of transactions can wait on each other.
+        -- Deleting the artifacts first made a delete that raced a form answer
+        -- for the same form a deadlock on PostgreSQL.
+
+        -- Serialize deletion against stage creation/cancellation and release private bytes atomically.
+        local _, stage_lock_err = dbtx:execute('UPDATE context_stage_guard SET serial = serial WHERE id = 1')
+        if stage_lock_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
+
+        local _, session_lock_err = sql.builder.update("sessions")
+            :set("last_message_date", sql.builder.expr("last_message_date"))
+            :where("session_id = ?", session_id)
+            :run_with(dbtx):exec()
+        if session_lock_err then return nil, "Failed to lock session: " .. tostring(session_lock_err) end
+
+        -- Delete artifacts
         local artifacts_delete_query = sql.builder.delete("artifacts")
             :where("session_id = ?", session_id)
 
@@ -430,6 +609,10 @@ function session_repo.delete(session_id)
         if artifacts_err then
             return nil, "Failed to delete session artifacts: " .. artifacts_err
         end
+
+        local _, stage_delete_err = sql.builder.delete('context_stages'):where('session_id = ?', session_id)
+            :run_with(dbtx):exec()
+        if stage_delete_err then return nil, 'CONTEXT_STAGING_UNAVAILABLE' end
 
         -- Delete session contexts
         local contexts_delete_query = sql.builder.delete("session_contexts")

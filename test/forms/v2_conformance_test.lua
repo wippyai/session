@@ -42,9 +42,9 @@ local form_text = require("form_text")
 
 local FIXTURE = "/v2_conformance.json"
 
--- The volume is test/forms/fixtures, found from the working directory: run the
--- tests from test/, as make test does.
-local WHERE = " (app.forms:fixtures is ./forms/fixtures from the working directory: run from test/, as make test does)"
+-- The volume is test/forms/fixtures: make test and make.ps1 point it there from
+-- the workspace config.
+local WHERE = " (app.forms:fixtures comes from the override in scripts/test-workspace.sh and make.ps1: run through make)"
 
 local function read_fixture(): string
     local volume, volume_err = fs.get("app.forms:fixtures")

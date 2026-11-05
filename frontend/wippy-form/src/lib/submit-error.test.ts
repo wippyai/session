@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { hostError } from '../test-support/host-error'
-import { classifySubmitError, validationErrorsOf } from './submit-error'
+import { classifySubmitError, failureStatusOf, validationErrorsOf } from './submit-error'
 
 describe('classifySubmitError', () => {
   it('classifies a 401 as auth, not retryable, no reload', () => {
@@ -139,5 +139,17 @@ describe('validationErrorsOf', () => {
 
   it('returns null for a non-Error rejection', () => {
     expect(validationErrorsOf('just a string')).toBeNull()
+  })
+})
+
+describe('failureStatusOf', () => {
+  it('reads the status of a Host error', () => {
+    expect(failureStatusOf(hostError(404))).toBe(404)
+  })
+
+  it('returns undefined for a Host error with no response, an unbranded error and a non-Error rejection', () => {
+    expect(failureStatusOf(hostError(undefined, 'network_error'))).toBeUndefined()
+    expect(failureStatusOf({ response: { status: 404 } })).toBeUndefined()
+    expect(failureStatusOf('just a string')).toBeUndefined()
   })
 })

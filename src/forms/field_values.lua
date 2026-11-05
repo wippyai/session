@@ -106,11 +106,11 @@ end
 -- Decimal numbers
 --
 -- Step checks and the canonical text of a number work on the number's
--- shortest decimal digits, not on float or integer arithmetic: the runtime
--- compares and takes remainders of integers through 64-bit floats, which is
--- not exact above 2^53, and a value of 1e12 with six decimals is 1e18 once
--- scaled. Digit strings of at most 19 digits are added, subtracted, compared
--- and divided here as plain schoolbook arithmetic.
+-- shortest decimal digits, not on float or integer arithmetic: runtime 0.3.43a
+-- compared and took remainders of integers through 64-bit floats, which is not
+-- exact above 2^53 (0.3.57a is exact), and a value of 1e12 with six decimals is
+-- 1e18 once scaled. Digit strings of at most 19 digits are added, subtracted,
+-- compared and divided here as plain schoolbook arithmetic.
 ---------------------------------------------------------------------------
 
 -- A finite number as (negative, digits, power): its magnitude is the integer
@@ -121,8 +121,10 @@ local function decimal_of(value: number): (boolean, string, integer)
     local magnitude = negative and -value or value
     if magnitude == 0 then return false, "0", 0 end
     local digits, power
-    if field_values.is_whole(magnitude) then
-        digits, power = string.format("%d", magnitude), 0
+    -- A whole float past 2^63 has no integer form, so it takes the digits below.
+    local whole = field_values.is_whole(magnitude) and math.tointeger(magnitude) or nil
+    if whole then
+        digits, power = string.format("%d", whole), 0
     else
         -- The shortest of 2 to 17 significant digits that parses back to the
         -- same number (tonumber needs the point in the mantissa).

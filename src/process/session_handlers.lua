@@ -85,19 +85,24 @@ local function has_checkpoint_bindings(bindings: any): boolean
     return #bindings > 0
 end
 
-local function resolve_checkpoint_config(ctx, op): (string?, number?)
-    local checkpoint_options = checkpoint_options_from_agent(op)
-    local function_id = checkpoint_options.function_id or ctx.config.checkpoint_function_id
+local function resolve_checkpoint_options(ctx, op): table
+    local config = ctx.config or {}
+    local options = checkpoint_runtime.resolve_options({
+        token_threshold = config.token_checkpoint_threshold,
+        function_id = config.checkpoint_function_id,
+    }, checkpoint_options_from_agent(op))
+    return checkpoint_runtime.resolve_options(options, config.checkpoint) or {}
+end
+
+function session_handlers.resolve_checkpoint_config(ctx, op): (string?, number?, table, boolean)
+    local checkpoint_options = resolve_checkpoint_options(ctx, op)
+    local function_id = checkpoint_options.function_id
     if type(function_id) ~= "string" or function_id == "" then
         function_id = nil
     end
     local threshold = tonumber(checkpoint_options.token_threshold)
 
-    if not threshold then
-        threshold = tonumber(ctx.config.token_checkpoint_threshold)
-    end
-
-    return function_id, threshold
+    return function_id, threshold, checkpoint_options, function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
 end
 
 function session_handlers.execute_function(ctx, op)
@@ -196,7 +201,8 @@ function session_handlers.check_background_triggers(ctx, op)
     local tokens = op.tokens
     local message_id = op.message_id
 
-    if not tokens or not message_id then
+    local compact_requested = ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true
+    if (not tokens and not compact_requested) or not message_id then
         return { skipped = true }
     end
 
@@ -207,11 +213,14 @@ function session_handlers.check_background_triggers(ctx, op)
 
     local session_data = ctx.reader:state()
 
-    local checkpoint_function_id, token_threshold = resolve_checkpoint_config(ctx, op)
-    local checkpoint_available = checkpoint_function_id ~= nil or has_checkpoint_bindings(op.checkpoint_bindings)
-    if checkpoint_available and tokens.prompt_tokens and token_threshold and token_threshold > 0 then
-
-        if tokens.prompt_tokens > token_threshold then
+    local checkpoint_function_id, token_threshold, checkpoint_options, checkpoint_available = session_handlers.resolve_checkpoint_config(ctx, op)
+    -- context_tokens is the full prompt size (uncached input plus cache reads
+    -- and writes); prompt_tokens alone counts only the uncached input.
+    local context_tokens = tokens and tokens.context_tokens
+    local threshold_exceeded = not op.requested_only and context_tokens and token_threshold
+        and token_threshold > 0 and context_tokens > token_threshold
+    if checkpoint_options.enabled ~= false and checkpoint_available then
+        if compact_requested or threshold_exceeded then
             checkpoint_needed = true
             table.insert(next_ops, {
                 type = consts.OP_TYPE.CREATE_CHECKPOINT,
@@ -219,9 +228,12 @@ function session_handlers.check_background_triggers(ctx, op)
                 checkpoint_bindings = op.checkpoint_bindings,
                 checkpoint_id = anchor_id,
                 message_id = anchor_id,
-                trigger_tokens = tokens.prompt_tokens,
+                trigger_tokens = context_tokens,
+                reason = compact_requested and "compaction_requested" or "token_threshold_exceeded",
+                clear_request = compact_requested,
                 agent = op.agent,
                 agent_options = op.agent_options,
+                checkpoint_options = checkpoint_options,
                 run_context_binding = op.run_context_binding
             })
         end
@@ -231,7 +243,8 @@ function session_handlers.check_background_triggers(ctx, op)
     -- has not reached the session row yet; the steps meanwhile do not start
     -- another one.
     local title_in_flight = (tonumber(ctx.titles_in_flight) or 0) > 0
-    if ctx.config.title_function_id and not checkpoint_needed and not title_in_flight then
+    if ctx.config.title_function_id and not checkpoint_needed and not title_in_flight
+        and not op.requested_only then
         local has_title = session_data.title and session_data.title ~= ""
 
         if not has_title then
@@ -260,6 +273,11 @@ function session_handlers.check_background_triggers(ctx, op)
 end
 
 local function generate_title_now(ctx)
+    local current = ctx.reader:state()
+    if current.title and current.title ~= "" then
+        return { skipped = true }
+    end
+
     local session_context, ctx_err = ctx.reader:get_full_context()
     if ctx_err then
         session_context = {}
@@ -277,12 +295,16 @@ local function generate_title_now(ctx)
         return nil, "No title returned"
     end
 
-    local success, err = ctx.writer:update_title(result.title)
-    if not success then
+    local updated, err = ctx.writer:update_initial_title(result.title)
+    if err then
         return nil, err
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
+    if not updated or ctx.reader:state().title ~= result.title then
+        return { skipped = true }
+    end
 
     ctx.upstream:update_session({ title = result.title })
 
@@ -318,7 +340,11 @@ function session_handlers.generate_title(ctx, op)
 end
 
 function session_handlers.create_checkpoint(ctx, op)
-    local checkpoint_function_id = op.checkpoint_function_id or ctx.config.checkpoint_function_id
+    local checkpoint_options = type(op.checkpoint_options) == "table" and op.checkpoint_options
+        or resolve_checkpoint_options(ctx, op)
+    local checkpoint_function_id = op.checkpoint_function_id or checkpoint_options.function_id
+    if checkpoint_options.enabled == false then return { skipped = true } end
+    local reason = op.reason or "token_threshold_exceeded"
 
     if not op.checkpoint_id then
         return nil, "Checkpoint ID required"
@@ -332,7 +358,7 @@ function session_handlers.create_checkpoint(ctx, op)
     local result = nil
     local checkpoint_source = "function"
     local checkpoint_binding_metadata = nil
-    local checkpoint_options = checkpoint_options_from_agent(op)
+    local checkpoint_binding_errors = nil
 
     if has_checkpoint_bindings(op.checkpoint_bindings) then
         local host = {
@@ -348,10 +374,12 @@ function session_handlers.create_checkpoint(ctx, op)
         }, {
             host = host,
             agent = agent,
-            reason = "token_threshold_exceeded",
-            selector = {
-                mode = "since_checkpoint"
-            },
+            reason = reason,
+            selector = op.exclusive == true and {
+                mode = "range",
+                from_id = ctx.reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID),
+                to_id = op.checkpoint_id,
+            } or { mode = "since_checkpoint" },
             run_context = {
                 contract = RUN_CONTEXT_CONTRACT,
                 binding = op.run_context_binding or (ctx.config and ctx.config.run_context_binding) or DEFAULT_RUN_CONTEXT_BINDING,
@@ -368,6 +396,9 @@ function session_handlers.create_checkpoint(ctx, op)
         if runtime_err then
             return nil, runtime_err
         end
+        if runtime_result and type(runtime_result.errors) == "table" and #runtime_result.errors > 0 then
+            checkpoint_binding_errors = runtime_result.errors
+        end
         if runtime_result and runtime_result.result then
             result = runtime_result.result
             checkpoint_source = "binding"
@@ -383,6 +414,7 @@ function session_handlers.create_checkpoint(ctx, op)
         local func_err
         result, func_err = funcs_module().new():with_context(session_context):call(checkpoint_function_id :: string, {
             session_id = ctx.session_id,
+            checkpoint_id = op.exclusive == true and op.checkpoint_id or nil,
             options = checkpoint_options
         })
 
@@ -395,59 +427,38 @@ function session_handlers.create_checkpoint(ctx, op)
         result.summary = result.memory
     end
 
-    if not result or not result.summary then
-        return nil, "No summary returned"
+    if type(result) ~= "table" or type(result.summary) ~= "string" or not result.summary:find("%S") then
+        return nil, "No non-empty summary returned"
+    end
+
+    -- Providers receive the policy, but the host owns the persistence boundary.
+    -- Reject rather than truncate: an incomplete summary could discard the task
+    -- when the checkpoint moves the visible history anchor.
+    if checkpoint_options.max_memory_chars ~= nil then
+        local limit = tonumber(checkpoint_options.max_memory_chars)
+        if not limit or limit ~= limit or math.abs(limit) == math.huge then
+            return nil, "Invalid checkpoint max_memory_chars"
+        end
+        if limit > 0 and #result.summary > math.floor(limit) then
+            return nil, "Checkpoint summary exceeds max_memory_chars"
+        end
     end
 
     local checkpoint_metadata = {
         checkpoint_summary = result.summary,
-        checkpoint_reason = "token_threshold_exceeded",
+        checkpoint_reason = reason,
         checkpoint_id = op.checkpoint_id,
         trigger_tokens = op.trigger_tokens or 0,
         checkpoint_generated_at = time.now():format(time.RFC3339),
         checkpoint_tokens = result.tokens or {},
         checkpoint_source = checkpoint_source,
-        checkpoint_binding_metadata = checkpoint_binding_metadata
+        checkpoint_binding_metadata = checkpoint_binding_metadata,
+        checkpoint_binding_errors = checkpoint_binding_errors
     }
 
-    local success, err = ctx.writer:update_message_meta(op.message_id, checkpoint_metadata)
-    if not success then
-        return nil, err
-    end
-
-    local session_data = ctx.reader:state()
-    local current_meta = session_data.meta or {}
-
-    if not current_meta.checkpoints or type(current_meta.checkpoints) ~= "table" then
-        current_meta.checkpoints = {}
-    end
-
-    table.insert(current_meta.checkpoints, {
-        checkpoint_id = op.checkpoint_id,
-        message_id = op.message_id,
-        created_at = time.now():format(time.RFC3339),
-        trigger_tokens = op.trigger_tokens or 0,
-        checkpoint_tokens = result.tokens or {}
-    })
-
-    local meta_success, meta_err = ctx.writer:update_meta({ meta = { checkpoints = current_meta.checkpoints } })
-    if not meta_success then
-        return nil, "Failed to update checkpoint meta: " .. (meta_err or "unknown error")
-    end
-
-    local success1, err1 = ctx.writer:set_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID, op.checkpoint_id)
-    if not success1 then
-        return nil, err1
-    end
-
-    ctx.reader:reset()
-
-    ctx.writer:delete_session_contexts_by_type(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY)
-
-    local summary_id, ctx_err = ctx.writer:add_session_context(consts.CONTEXT_TYPES.CONVERSATION_SUMMARY, result.summary)
-    if ctx_err then
-        return nil, ctx_err
-    end
+    local committed, commit_err = ctx.writer:commit_checkpoint(op, result.summary, checkpoint_metadata)
+    if not committed then return nil, commit_err end
+    local refreshed, refresh_err = ctx.reader:reset()
 
     local next_ops = {}
     if ctx.config.title_function_id then
@@ -457,6 +468,7 @@ function session_handlers.create_checkpoint(ctx, op)
             current_checkpoint_id = op.checkpoint_id
         })
     end
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -488,6 +500,10 @@ function session_handlers.agent_change(ctx, op)
     local new_model = ctx.agent_ctx.current_model
     current_config.model = new_model
 
+    if previous_agent ~= op.agent_id and type(ctx.invalidate_attention_control) == "function" then
+        ctx.invalidate_attention_control()
+    end
+
     local next_agent = nil
     if type(ctx.agent_ctx.get_current_agent) == "function" then
         next_agent = ctx.agent_ctx:get_current_agent()
@@ -496,10 +512,7 @@ function session_handlers.agent_change(ctx, op)
     local candidate_state = clone(ctx.turn_state)
     if candidate_state then
         candidate_state.input_policy = nil
-        if candidate_state.active then
-            candidate_state.handoff = true
-            candidate_state.failed = true
-        end
+        if candidate_state.active then candidate_state.handoff = true end
     end
     local candidate = {
         config = current_config,
@@ -528,7 +541,7 @@ function session_handlers.agent_change(ctx, op)
     ctx.config = current_config
     ctx.turn_state = candidate_state
     ctx.current_agent = next_agent
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
     input_policy.accept_committed(ctx, interaction)
 
     local switch_message = string.format("Agent changed to: %s (model: %s)", op.agent_id, new_model)
@@ -547,6 +560,7 @@ function session_handlers.agent_change(ctx, op)
         agent = op.agent_id,
         model = new_model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,
@@ -583,7 +597,7 @@ function session_handlers.model_change(ctx, op)
     end
 
     ctx.config = staged_config
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
 
     local change_message = string.format("Model changed to: %s", op.model)
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, change_message, {
@@ -598,6 +612,7 @@ function session_handlers.model_change(ctx, op)
     ctx.upstream:update_session({
         model = op.model
     })
+    if not refreshed then return nil, refresh_err end
 
     return {
         completed = true,

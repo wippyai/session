@@ -78,7 +78,7 @@ local function define_tests()
                 if artifact_err then return nil, artifact_err end
 
                 local message_result, message_err = message_repo.create(
-                    message_id, test_data.session_id, "user", "shared-tx-commit", {}, { tx = dbtx })
+                    message_id, test_data.session_id, "user", "shared-tx-commit", {}, nil, nil, nil, { tx = dbtx })
                 if message_err then return nil, message_err end
 
                 return { artifact = artifact_result, message = message_result }
@@ -107,7 +107,7 @@ local function define_tests()
                 if artifact_err then return nil, artifact_err end
 
                 local message_result, message_err = message_repo.create(
-                    message_id, test_data.session_id, "user", "shared-tx-rollback", {}, { tx = dbtx })
+                    message_id, test_data.session_id, "user", "shared-tx-rollback", {}, nil, nil, nil, { tx = dbtx })
                 if message_err then return nil, message_err end
 
                 return nil, "forced failure after both writes"
@@ -145,7 +145,7 @@ local function define_tests()
                 -- Same id as the pre-committed row: the insert must fail on the
                 -- primary key, taking the artifact update down with it.
                 local message_result, message_err = message_repo.create(
-                    dup_message_id, test_data.session_id, "user", "duplicate", {}, { tx = dbtx })
+                    dup_message_id, test_data.session_id, "user", "duplicate", {}, nil, nil, nil, { tx = dbtx })
                 if message_err then return nil, message_err end
 
                 return { artifact = artifact_result, message = message_result }
@@ -200,7 +200,7 @@ local function define_tests()
                 table.insert(ids, message_id)
                 local ok, raised = pcall(tx.run, function(dbtx)
                     local _, create_err = message_repo.create(message_id, test_data.session_id, "user",
-                        "written before the raise", {}, { tx = dbtx })
+                        "written before the raise", {}, nil, nil, nil, { tx = dbtx })
                     if create_err then return nil, create_err end
                     error("fn raised on purpose", 0)
                 end)
@@ -215,7 +215,7 @@ local function define_tests()
             end
             -- Nothing is left marked as inside a transaction.
             local after, after_err = tx.run(function(dbtx)
-                return message_repo.create(uuid.v7(), test_data.session_id, "user", "after the raises", {}, { tx = dbtx })
+                return message_repo.create(uuid.v7(), test_data.session_id, "user", "after the raises", {}, nil, nil, nil, { tx = dbtx })
             end)
             test.is_nil(after_err)
             test.not_nil(after)

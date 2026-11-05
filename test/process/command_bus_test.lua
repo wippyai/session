@@ -12,16 +12,10 @@ local uuid = require("uuid")
 local wait_for_boot = require("wait_for_boot")
 local writer = require("writer")
 
--- The session asks the bus to finish (FINISH_AND_EXIT: the client disconnected, the plugin
--- is shutting down, the session went inactive) expecting the in-flight work to wind down and
--- the process to exit. An agent turn is a self-perpetuating chain of operations: every
--- handler result carries the next op. finish() only stops the bus once the queue is empty,
--- so if the chain keeps re-feeding itself through next_ops the queue never empties and the
--- "finishing" session runs forever (observed 2026-09-21: a tool loop survived every
--- graceful-termination signal for 10.5 hours and was only killed by a redeploy).
---
--- A handler that returns next_ops is a continuation of the SAME turn, not new work, so a
--- finishing bus must stop feeding it, exactly the way an intercept (STOP) already does.
+-- finish() closes the bus after settling admitted round effects and suppresses
+-- new agent continuations. The session defers lifecycle retirement until the
+-- bus is quiescent, so healthy turns never enter this cancellation path.
+-- Keep the low-level Stop/finish behavior bounded even for a self-feeding chain.
 
 local SAFETY_VALVE = 5
 
@@ -104,7 +98,34 @@ local function define_tests()
         end)
     end)
     describe("turn boundaries", function()
-        it("persists received input on a fatal turn before exiting and accepts input after reopen", function()
+        it("waits for queued controls and a suspended idle operation before retiring", function()
+            local ctx = {}
+            local bus = command_bus.new(ctx)
+            local release, entered, done = channel.new(1), channel.new(1), channel.new(1)
+            local calls = 0
+            bus:mount_op_handler(consts.OP_TYPE.CONTROL_CONTEXT, function()
+                calls = calls + 1
+                test.is_false(bus:is_quiescent(), "current work must prevent retirement even with an idle turn")
+                if calls == 1 then entered:send(true); release:receive() end
+                return { completed = true }
+            end)
+            ctx.queue_empty_callback = function()
+                test.eq(calls, 2, "accepted control work must drain before retirement")
+                test.is_true(bus:is_quiescent())
+                bus:finish()
+                return true
+            end
+            assert(bus:queue_op({ type = consts.OP_TYPE.CONTROL_CONTEXT }))
+            assert(bus:queue_op({ type = consts.OP_TYPE.CONTROL_CONTEXT }))
+            test.is_false(bus:is_quiescent(), "queued work must prevent retirement")
+            coroutine.spawn(function() local _, err = bus:run(); done:send({ error = err }) end)
+            entered:receive()
+            test.is_false(bus:is_quiescent())
+            release:send(true)
+            test.is_nil(done:receive().error)
+            test.eq(bus.state, "closed")
+        end)
+        it("persists received input on a fatal storage failure before exiting and accepts input after reopen", function()
             local session_id, context_id = create_persisted_fixture()
             local session_writer, writer_err = writer.new(session_id)
             test.is_nil(writer_err)
@@ -113,7 +134,15 @@ local function define_tests()
             local steps = 0
             local function context(current_writer)
                 local ctx = { session_id = session_id, writer = current_writer, held = {},
-                    reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
+                    reader = {
+                        list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+                        list_pending_answers = function(_, limit)
+                            return message_repo.list_pending_answers(session_id, limit)
+                        end,
+                        newest_non_input_id = function(_, excluded)
+                            return message_repo.newest_non_input_id(session_id, excluded)
+                        end,
+                    },
                     status = consts.STATUS.IDLE,
                     config = { input_policy = { while_running = "steer" } },
                     upstream = {
@@ -274,7 +303,7 @@ local function define_tests()
             test.eq(errors[1].code, "SESSION_FINISHING")
         end)
 
-        it("keeps agent work failures fatal without reporting them as command errors", function()
+        it("keeps agent work storage failures fatal without reporting them as command errors", function()
             local errors = {} :: {any}
             local bus = command_bus.new({ upstream = {
                 command_error = function(_self, request_id, code, message)
@@ -294,7 +323,7 @@ local function define_tests()
             test.eq(#errors, 0)
         end)
 
-        it("terminalizes pending tool intents before returning a fatal error", function()
+        it("terminalizes pending tool intents before returning a fatal storage error", function()
             local cancelled = false
             local bus = command_bus.new({})
             bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
@@ -402,6 +431,32 @@ local function define_tests()
             test.is_nil(err)
             test.eq(recorded, 1)
             test.eq(steps, 0)
+        end)
+
+        it("closes the turn cancel channel on Stop and opens a fresh one for the next turn", function()
+            local ctx = {}
+            local bus = command_bus.new(ctx)
+            local cancelled = {}
+            ctx.queue_empty_callback = function()
+                if #cancelled == 1 then
+                    bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "second" })
+                else
+                    bus:stop()
+                end
+                return true
+            end
+            bus:mount_op_handler(consts.OP_TYPE.AGENT_STEP, function()
+                if #cancelled == 0 then bus:request_stop() end
+                local selected = channel.select({ bus.cancel:case_receive(), default = true })
+                table.insert(cancelled, selected.default ~= true)
+                return { completed = true }
+            end)
+            bus:queue_op({ type = consts.OP_TYPE.AGENT_STEP, from_user = true, message_id = "first" })
+            local _, err = bus:run()
+            test.is_nil(err)
+            test.eq(#cancelled, 2)
+            test.is_true(cancelled[1], "Stop must cancel the running turn")
+            test.is_false(cancelled[2], "The next turn must start with an open cancel channel")
         end)
 
         it("applies tool outcomes and control before draining STOP", function()

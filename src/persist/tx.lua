@@ -12,8 +12,9 @@ local tx = {}
 
 local OUTSIDE_ONLY = "inside tx.run without opts.tx: pass the open transaction as opts.tx"
 
--- Coroutines whose fn is running inside tx.run.
-local active = {}
+-- Coroutines whose fn is running inside tx.run, each with the type of the
+-- database ("sqlite" or "postgres") its transaction runs on.
+local active: {[any]: string} = {}
 
 local function current()
     return coroutine.running() or "main"
@@ -21,7 +22,16 @@ end
 
 -- Whether the calling coroutine is inside tx.run.
 function tx.active()
-    return active[current()] == true
+    return active[current()] ~= nil
+end
+
+-- The database type behind `conn`: a pooled connection, or the transaction
+-- that tx.run opened for the calling coroutine (a transaction does not report
+-- its own type).
+function tx.type_of(conn): string
+    local running = active[current()]
+    if running ~= nil then return running end
+    return conn:type() :: string
 end
 
 -- A pooled connection for a repository call that runs outside a transaction.
@@ -55,7 +65,7 @@ function tx.run(fn)
     end
 
     local key = current()
-    active[key] = true
+    active[key] = db:type()
     local ok, result, fn_err = pcall(fn, dbtx)
     active[key] = nil
 

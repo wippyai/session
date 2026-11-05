@@ -8,6 +8,7 @@ type WriteResult = {
 }
 
 local session_writer = {
+    _checkpoint_repo = require("checkpoint_repo"),
     _session_repo = require("session_repo"),
     _message_repo = require("message_repo"),
     _artifact_repo = require("artifact_repo"),
@@ -96,6 +97,23 @@ function session_writer:update_title(title)
     return self:update_meta({ title = title })
 end
 
+function session_writer:commit_checkpoint(op, summary, metadata)
+    local summary_id, id_err = uuid.v7()
+    if not summary_id then return nil, id_err end
+    self._meta_lock:receive()
+    local result, err = session_writer._checkpoint_repo.commit(self.session_id, self.user_id,
+        op, summary, metadata, summary_id)
+    self._meta_lock:send(true)
+    return result, err
+end
+
+function session_writer:update_initial_title(title)
+    self._meta_lock:receive()
+    local updated, err = session_writer._session_repo.update_initial_title(self.session_id, title)
+    self._meta_lock:send(true)
+    return updated, err
+end
+
 function session_writer:update_status(status, error_message)
     local updates = { status = status, last_message_date = os.time() }
 
@@ -108,10 +126,22 @@ end
 
 -- MESSAGE OPERATIONS
 
--- Returns the message id. opts.tx (optional) writes on a caller-supplied
--- transaction; the stored row ({ message_id, date, ... }) is the third return
--- value for callers that need its date.
-function session_writer:add_message(msg_type, content, metadata, opts)
+function session_writer:get_message_by_request_id(request_id)
+    local actor = security.actor()
+    if not actor or actor:id() ~= self.user_id or not security.can('write', 'session:' .. self.session_id) then
+        return nil, 'CONTEXT_SESSION_UNAVAILABLE'
+    end
+    local session, session_err = self._session_repo.get(self.session_id, self.user_id)
+    if not session or session_err then return nil, 'CONTEXT_SESSION_UNAVAILABLE' end
+    local message, err = self._message_repo.get_by_request_id(self.session_id, request_id)
+    if err == 'Message request not found' then return nil end
+    return message, err
+end
+
+-- Returns the message id, nil, whether the request was a duplicate of a stored
+-- one, and the stored row ({ message_id, date, ... }) for callers that need
+-- its date. opts.tx (optional) writes on a caller-supplied transaction.
+function session_writer:add_message(msg_type, content, metadata, request_id, request_hash, context_receipt, opts)
     if not msg_type or msg_type == "" then
         return nil, "Message type is required"
     end
@@ -140,23 +170,48 @@ function session_writer:add_message(msg_type, content, metadata, opts)
         end
     end
 
-    local result, err = session_writer._message_repo.create(message_id, self.session_id, msg_type, content, metadata, opts)
+    local result, err = session_writer._message_repo.create(
+        message_id,
+        self.session_id,
+        msg_type,
+        content,
+        metadata,
+        request_id,
+        request_hash,
+        context_receipt,
+        opts
+    )
     if err or not result then
+        if err == 'CONTEXT_REFERENCE_UNAVAILABLE' or err == 'INVALID_CONTEXT_REFERENCE'
+            or err == 'CONTEXT_SESSION_UNAVAILABLE' then
+            return nil, err
+        end
+        if err == "Request ID conflict" then
+            return nil, err
+        end
         return nil, "Failed to create message: " .. tostring(err or "No result")
     end
 
-    return message_id, nil, result
+    return result.message_id, nil, result.duplicate == true, result
 end
 
-function session_writer:admit_message(msg_type, content, metadata, session_updates)
+function session_writer:admit_message(msg_type, content, metadata, session_updates,
+    request_id, request_hash, context_receipt)
     if not msg_type or msg_type == "" then return nil, "Message type is required" end
     if content == nil then return nil, "Message content is required" end
     local message_id, id_err = uuid.v7()
     if not message_id then return nil, "Failed to generate message ID: " .. tostring(id_err) end
     local result, err = session_writer._message_repo.admit(
-        message_id, self.session_id, msg_type, content, metadata or {}, session_updates)
-    if err or not result then return nil, "Failed to admit message: " .. tostring(err or "No result") end
-    return message_id
+        message_id, self.session_id, msg_type, content, metadata or {}, session_updates,
+        request_id, request_hash, context_receipt)
+    if err or not result then
+        if err == 'CONTEXT_REFERENCE_UNAVAILABLE' or err == 'INVALID_CONTEXT_REFERENCE'
+            or err == 'CONTEXT_SESSION_UNAVAILABLE' or err == "Request ID conflict" then
+            return nil, err
+        end
+        return nil, "Failed to admit message: " .. tostring(err or "No result")
+    end
+    return result.message_id, nil, result.duplicate == true
 end
 
 function session_writer:apply_inputs(updates, expected_revision)
@@ -170,15 +225,34 @@ function session_writer:apply_inputs(updates, expected_revision)
     return result, err
 end
 
-function session_writer:stop_with_input_rollback(updates, session_updates)
+function session_writer:stop_with_input_rollback(updates, session_updates, boundary)
     self._meta_lock:receive()
     local result, err = session_writer._message_repo.stop_with_input_rollback(
-        self.session_id, updates, session_updates)
+        self.session_id, updates, session_updates, boundary)
     self._meta_lock:send(true)
     return result, err
 end
 
-function session_writer:add_response(content, metadata, calls)
+local function append_note_rows(rows: {any}, notes: {any}?): any
+    for _, note in ipairs(notes or {}) do
+        local note_id, note_err = uuid.v7()
+        if note_err then return note_err end
+        table.insert(rows, { message_id = note_id, type = note.type, data = note.content, metadata = note.metadata })
+    end
+    return nil
+end
+
+-- Commits notes that outlive any one step, in order and all at once.
+function session_writer:add_notes(notes)
+    local rows = {}
+    local note_err = append_note_rows(rows, notes)
+    if note_err then return nil, note_err end
+    return session_writer._message_repo.create_batch(self.session_id, rows)
+end
+
+-- Commits one step atomically: the notes the request sent, in order, then the
+-- assistant row, its pending calls, and any rows that follow the output.
+function session_writer:add_response(content, metadata, calls, notes, trailing)
     calls = calls or {}
     local seen_call_ids = {}
     for _, call in ipairs(calls) do
@@ -192,11 +266,12 @@ function session_writer:add_response(content, metadata, calls)
         seen_call_ids[call.id] = true
     end
 
+    local rows = {}
+    local notes_err = append_note_rows(rows, notes)
+    if notes_err then return nil, nil, notes_err end
     local assistant_id, id_err = uuid.v7()
     if id_err then return nil, nil, id_err end
-    local rows = {{
-        message_id = assistant_id, type = "assistant", data = content, metadata = metadata
-    }}
+    table.insert(rows, { message_id = assistant_id, type = "assistant", data = content, metadata = metadata })
     local call_ids = {}
     for _, call in ipairs(calls) do
         local row_id, row_err = uuid.v7()
@@ -221,6 +296,9 @@ function session_writer:add_response(content, metadata, calls)
             }
         })
     end
+    local trailing_err = append_note_rows(rows, trailing)
+    if trailing_err then return nil, nil, trailing_err end
+    if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
     local _, err, dates: any = session_writer._message_repo.create_batch(self.session_id, rows)
     if err then return nil, nil, err end
     -- The fourth value is the assistant row's stored date: a live update of
@@ -237,17 +315,8 @@ function session_writer:update_message_meta(message_id, metadata)
         return nil, "Metadata must be a table"
     end
 
-    local message, get_err = session_writer._message_repo.get(message_id)
-    if get_err then
-        return nil, "Failed to get message: " .. get_err
-    end
-    if not message then
-        return nil, "Message not found"
-    end
-    if message.session_id ~= self.session_id then
-        return nil, "Message belongs to different session"
-    end
-    local result, err = session_writer._message_repo.update_metadata(message_id, metadata)
+    local result, err, stage = session_writer._message_repo.update_metadata(message_id, metadata, self.session_id or "")
+    if stage == "read" or stage == "ownership" then return nil, err end
     if err or not result then
         return nil, "Failed to update message metadata: " .. tostring(err or "No result")
     end
@@ -284,18 +353,7 @@ function session_writer:update_function_result(message_id, result, success, addi
         return nil, "Function result is required"
     end
 
-    local message, err = session_writer._message_repo.get(message_id)
-    if err then
-        return nil, "Failed to get message: " .. err
-    end
-
-    if not message then
-        return nil, "Message not found"
-    end
-
-    local metadata = message.metadata or {}
-    metadata.result = result
-    metadata.status = success and "success" or "error"
+    local metadata = {result = result, status = success and "success" or "error"}
 
     if additional_metadata and type(additional_metadata) == "table" then
         for k, v in pairs(additional_metadata) do

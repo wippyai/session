@@ -7,6 +7,7 @@ import { answerDisplayItems, buildNotedValue } from '../lib/answers'
 import { trimAnswerText } from '../lib/text'
 import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText } from '../lib/definition'
 import { noteKey, optionKey, reviewItemKey } from '../lib/focus-key'
+import { TICK_ANSWER_MESSAGE } from '../lib/messages'
 
 /** One question's answer in progress, before it is submitted. */
 export interface QuestionAnswerState {
@@ -40,6 +41,8 @@ export interface QuestionCardController {
   toggleNote: (q: ChoiceFormField, value: string, openOnly?: boolean) => void
   setNote: (q: ChoiceFormField, value: string, text: string) => void
   sendNote: (q: ChoiceFormField, value: string) => void
+  /** Keeps the Other text as the user types. It also clears the "nothing to send" error that Enter on an empty box raised. */
+  setOther: (q: ChoiceFormField, text: string) => void
   sendOther: (q: ChoiceFormField) => void
   commit: (q: ChoiceFormField) => void
   go: (i: number, focus?: FocusTarget) => void
@@ -302,16 +305,26 @@ export function useQuestionCard(
     commit(q)
   }
 
+  function setOther(q: ChoiceFormField, text: string) {
+    ans(q).other = text
+    error.value = ''
+  }
+
   function sendOther(q: ChoiceFormField) {
     const a = ans(q)
     const text = trimAnswerText(a.other)
+    // Nothing to send: say why, since the box and its send button give no other sign.
     if (q.multiple) {
-      if (!text && a.chosen.length === 0)
+      if (!text && a.chosen.length === 0) {
+        error.value = TICK_ANSWER_MESSAGE
         return
+      }
     }
     else {
-      if (!text)
+      if (!text) {
+        error.value = 'Type your answer, or choose another option.'
         return
+      }
       a.useOther = true
       a.chosen = []
     }
@@ -338,6 +351,7 @@ export function useQuestionCard(
     toggleNote,
     setNote,
     sendNote,
+    setOther,
     sendOther,
     commit,
     go,

@@ -3,6 +3,7 @@ local plugin = require("plugin")
 local session = require("session")
 local message_handlers = require("message_handlers")
 local answer_admission = require("answer_admission")
+local agent_context = require("agent_context")
 local writer = require("writer")
 local uuid = require("uuid")
 local json = require("json")
@@ -13,11 +14,15 @@ local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local wait_for_boot = require("wait_for_boot")
 local start_tokens = require("start_tokens")
+local control_handlers = require("control_handlers")
+local definition = require("definition")
+local state_service = require("state_service")
 
-local function plugin_message(topic, data)
+local function plugin_message(topic, data, sender)
     return {
         topic = function() return topic end,
-        payload = function() return { data = function() return data end } end
+        payload = function() return { data = function() return data end } end,
+        from = function() return sender end
     }
 end
 
@@ -44,13 +49,14 @@ local function run_plugin_lifecycle(actor, session_id, hub_pid, messages, exit_r
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
             spawned_init = init
+            local spawned_pid = options.pid_for and options.pid_for(init) or session_pid
             if options.on_spawn then options.on_spawn(init) end
             if options.confirm_start ~= false then
                 table.insert(inputs, { topic = consts.TOPICS.SESSION_OPENED,
-                    data = { session_id = init.session_id, from_pid = session_pid } })
+                    data = { session_id = init.session_id, from_pid = spawned_pid } })
                 for _, input in ipairs(options.after_open or {}) do table.insert(inputs, input) end
             end
-            return session_pid, nil
+            return spawned_pid, nil
         end }
     end)
     mock("process.send", function(pid, topic, payload)
@@ -144,6 +150,9 @@ local function run_start_through_session(actor, session_id, registry, session_pi
         table.insert(sent, { pid = pid, topic = topic, payload = payload })
         if topic == consts.TOPICS.SESSION_OPENED and pid == spawned_init.parent_pid then
             table.insert(plugin_pending, plugin_message(topic, payload))
+        elseif options.deliver_upstream and in_session and pid == spawned_init.parent_pid
+            and string.sub(topic, 1, #consts.TOPIC_PREFIXES.SESSION) == consts.TOPIC_PREFIXES.SESSION then
+            table.insert(plugin_pending, plugin_message(topic, payload, session_pid))
         end
         return true, nil
     end)
@@ -159,8 +168,13 @@ local function run_start_through_session(actor, session_id, registry, session_pi
     })
     mock("process.inbox", function() return in_session and session_inbox or plugin_inbox end)
     mock("process.events", function() return in_session and session_events or plugin_events end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if capacity == nil then return bus_done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
         return original_channel_new(capacity)
     end)
     mock("coroutine.spawn", function(fn)
@@ -173,7 +187,7 @@ local function run_start_through_session(actor, session_id, registry, session_pi
             if session_behavior == "finish" then
                 if session_step == 1 then
                     return { ok = true, channel = session_inbox,
-                        value = plugin_message(consts.TOPICS.FINISH_AND_EXIT, {}) }
+                        value = plugin_message(consts.TOPICS.FINISH_AND_EXIT, {}, spawned_init.parent_pid) }
                 end
                 return { ok = true, channel = bus_done, value = { error = nil } }
             end
@@ -411,9 +425,9 @@ local function run_graceful_shutdown(actor, session_id, scenario)
         last_sent_topic = topic
         table.insert(sent, { pid = pid, topic = topic, payload = payload })
         if pid == plugin_pid then
-            table.insert(plugin_inbox, plugin_message(topic, payload))
+            table.insert(plugin_inbox, plugin_message(topic, payload, current_pid))
         elseif pid == session_pid then
-            table.insert(session_inbox, plugin_message(topic, payload))
+            table.insert(session_inbox, plugin_message(topic, payload, current_pid))
         end
         return true, nil
     end)
@@ -429,8 +443,13 @@ local function run_graceful_shutdown(actor, session_id, scenario)
             return session_pid, nil
         end }
     end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if current_pid == session_pid and capacity == nil then return bus_done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if current_pid == session_pid and capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
         if current_pid == session_pid and capacity == 1 then
             local fifo = { values = {} }
             function fifo:send(value)
@@ -491,7 +510,7 @@ local function run_graceful_shutdown(actor, session_id, scenario)
             end
         end
         if #scripted > 0 and scripted[1].topic == consts.PLUGIN_TOPICS.SHUTDOWN
-            and scenario ~= "idle" then
+            and scenario ~= "idle" and scenario ~= "active" then
             if scenario == "stop" and not pending_call_id then
                 pending_call_id = add_pending_call(session_id)
             end
@@ -613,8 +632,13 @@ local function run_live_owner_through_plugin(actor, session_id, owner_pid)
             return owner_pid, nil
         end }
     end)
+    local bus_done_issued = false
     mock("channel.new", function(capacity)
-        if capacity == nil then return bus_done end
+        -- session.run creates bus_done once; a running turn creates its cancel channel.
+        if capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
         return original_channel_new(capacity)
     end)
     mock("coroutine.spawn", function() end)
@@ -734,6 +758,85 @@ local function isolated_actor()
     return { id = function() return user_id end }
 end
 
+-- An answered form in `session_id`, admitted, for reading its delivery.
+local function admitted_form(actor, session_id)
+    local session_writer = assert(writer.new(session_id))
+    local ctx = {
+        session_id = session_id,
+        writer = session_writer,
+        reader = {
+            list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+            list_pending_answers = function(_, limit) return message_repo.list_pending_answers(session_id, limit) end,
+            newest_non_input_id = function(_, excluded) return message_repo.newest_non_input_id(session_id, excluded) end,
+        },
+        upstream = {
+            send_message_update = function() end,
+            update_session = function() end,
+            message_received = function() end,
+        },
+    }
+    local artifact_id = uuid.v7()
+    local def = definition.normalize({ title = "Delivery", fields = {
+        { id = "delivery", type = "choice", label = "How?", required = true, options = { "Courier", "Locker" } },
+    } })
+    local _, form_err = control_handlers.control_forms(ctx, {
+        forms = { { artifact_id = artifact_id, definition = def } },
+        turn_id = "turn-" .. uuid.v7(), call_id = "call-1", tool_message_id = "tool-row-1",
+    })
+    test.is_nil(form_err)
+    local status = state_service.submit(actor:id(), artifact_id, json.encode({
+        form_version = 1, request_id = uuid.v7(), answers = { delivery = "Courier" },
+    }))
+    test.eq(status, 200)
+    answer_admission.admit_in_order(ctx, nil)
+    return artifact_id, session_writer
+end
+
+local function delivery_of(actor, artifact_id)
+    local status, body = state_service.get_state(actor:id(), artifact_id)
+    test.eq(status, 200)
+    return json.decode(tostring(body)).delivery
+end
+
+local function recovery_boundaries(session_id)
+    local page: any = message_repo.list_by_session(session_id, 500)
+    local count = 0
+    for _, row in ipairs(page.messages) do
+        if row.type == consts.MSG_TYPE.DEVELOPER and type(row.metadata.interruption) == "table"
+            and row.metadata.interruption.reason == "recovery" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- One stale scan by a plugin that sees only `session_id`.
+local function scan_for_stale_session(actor, session_id)
+    local original_list = session_repo.list_by_user_status
+    session_repo.list_by_user_status = function(user_id, status, limit, opts)
+        local page, err = original_list(user_id, status, limit, opts)
+        if not page then return nil, err end
+        local mine = {}
+        for _, session in ipairs(page.sessions) do
+            if session.session_id == session_id then table.insert(mine, session) end
+        end
+        return { sessions = mine, has_more = page.has_more, next_cursor = page.next_cursor }
+    end
+    local original_pending = message_repo.list_sessions_with_pending_answers
+    message_repo.list_sessions_with_pending_answers = function() return {} end
+    mock("process.registry", {
+        register = function() return true, nil end,
+        lookup = function() return nil end,
+    })
+    local run = run_plugin_lifecycle(actor, session_id, "stale-hub", {
+        { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} },
+    }, nil, { open = false, cancel_plugin = true })
+    restore_mock("process.registry")
+    session_repo.list_by_user_status = original_list
+    message_repo.list_sessions_with_pending_answers = original_pending
+    test.is_nil(run.error)
+end
+
 -- Runs the plugin through a script of inbox messages ({ topic, data }) and
 -- exits ({ exit = session_id }: that session's process fails), then cancels
 -- it. Every spawn gets its own pid.
@@ -819,11 +922,16 @@ local function input_position(run, topic, nth)
     return nil
 end
 
--- Whether a run_graceful_shutdown run told its session to finish.
+-- How many times the plugin told the session of a run_graceful_shutdown run to
+-- finish. The session also sends itself finish checks (they carry a
+-- generation, not a reason), which are not counted.
 local function finish_sent(run)
     local count = 0
     for _, sent in ipairs(run.sent) do
-        if sent.topic == consts.TOPICS.FINISH_AND_EXIT then count = count + 1 end
+        if sent.topic == consts.TOPICS.FINISH_AND_EXIT and type(sent.payload) == "table"
+            and sent.payload.reason ~= nil then
+            count = count + 1
+        end
     end
     return count
 end
@@ -837,6 +945,78 @@ local function message_with_text(session_id, text)
 end
 
 local function define_tests()
+
+    describe("reported disconnect regression", function()
+        it("exits an empty plugin on shutdown instead of retaining its tickers", function()
+            local run = run_plugin_lifecycle(security.actor(), "unused", nil, {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+            }, nil, { open = false })
+            test.is_nil(run.error)
+            test.eq(run.result.status, "shutdown")
+            test.is_nil(run.spawned_init)
+            test.eq(#run.scheduled, 0)
+        end)
+        it("counts retiring children toward capacity and still permits their reopen", function()
+            local actor = security.actor()
+            local first, first_context = create_session_fixture(actor, "Capacity active")
+            local second, second_context = create_session_fixture(actor, "Capacity refused")
+            local old_limit = consts.LIMITS.MAX_SESSIONS_PER_USER
+            consts.LIMITS.MAX_SESSIONS_PER_USER = 1
+            local ok, run = pcall(run_plugin_lifecycle, actor, first, "limit-hub", {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = {
+                    session_id = second, conn_pid = "capacity-client", request_id = "capacity-new",
+                } },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = {
+                    session_id = first, conn_pid = "capacity-client", request_id = "capacity-reopen",
+                } },
+            }, { status = "shutdown", intentional_exit = true })
+            consts.LIMITS.MAX_SESSIONS_PER_USER = old_limit
+            cleanup_session_fixture(first, first_context)
+            cleanup_session_fixture(second, second_context)
+            test.is_true(ok, tostring(run))
+            test.eq(run.spawned_init.session_id, first, "retiring child still occupies its live slot")
+            local rejected, resumed = false, false
+            for _, sent in ipairs(run.sent) do
+                if sent.payload.request_id == "capacity-new" and sent.payload.error == consts.ERROR_CODES.SESSION_LIMIT then
+                    rejected = true
+                end
+                if sent.topic == "cancel_finish" then resumed = true end
+            end
+            test.is_true(rejected)
+            test.is_true(resumed, "reopening an existing child must not need a new slot")
+        end)
+        it("completes accepted agent work when shutdown arrives before the turn drains", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Disconnect audit")
+            local run = run_graceful_shutdown(actor, session_id, "active")
+            cleanup_session_fixture(session_id, context_id)
+            test.is_nil(run.error)
+            test.is_nil(run.session_result.error)
+            test.eq(run.agent_steps, 1, "transport shutdown must complete accepted agent work")
+        end)
+
+        it("forwards Stop after reconnect while lifecycle finish is pending", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Reconnect audit")
+            local run = run_plugin_lifecycle(actor, session_id, "reconnect-hub", {},
+                { status = "shutdown", intentional_exit = true }, { after_open = {
+                    { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                    { topic = consts.PLUGIN_TOPICS.RESUME, data = {} },
+                    { topic = consts.PLUGIN_TOPICS.COMMAND, data = {
+                        session_id = session_id, conn_pid = "reconnect-client", request_id = "explicit-stop",
+                        data = { command = consts.COMMANDS.STOP },
+                    } },
+                } })
+            cleanup_session_fixture(session_id, context_id)
+            local forwarded = false
+            for _, event in ipairs(run.sent) do
+                if event.pid == run.session_pid and event.topic == consts.TOPICS.COMMAND
+                    and event.payload.request_id == "explicit-stop" then forwarded = true end
+            end
+            test.is_true(forwarded, "reconnect must not leave Stop blocked by terminating=true")
+        end)
+    end)
     describe("plugin on_session_end hook", function()
         it("schedules the hook with provenance params when configured", function()
             local spawned = nil
@@ -1063,6 +1243,50 @@ local function define_tests()
                         or "Failed to recover pending calls")
                 cleanup_session_fixture(session_id, context_id)
             end
+        end)
+        it("reports an initial agent load failure to session subscribers once as a start failure", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Initial agent failure")
+            local _, config_err = session_repo.update_session_meta(session_id, { config = {
+                agent_id = "app.process:initial_agent",
+            } })
+            test.is_nil(config_err)
+            local reason = "Agent capability context is invalid: notes.scope expected declared context field, got extra"
+            local original_agent_new = agent_context.new
+            agent_context.new = function(agent_options)
+                local ctx = original_agent_new(agent_options)
+                ctx.load_agent = function() return nil, reason end
+                return ctx
+            end
+            local ok, run = pcall(run_start_through_session, actor, session_id, {}, "failed-initial-agent",
+                "cancel", { deliver_upstream = true })
+            agent_context.new = original_agent_new
+            cleanup_session_fixture(session_id, context_id)
+            test.is_true(ok, tostring(run))
+
+            local expected = "Failed to create session: Failed to load initial agent: " .. reason
+            local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
+            local subscriber_errors = {}
+            local start_error = nil :: any
+            for _, sent in ipairs(run.sent) do
+                test.is_false(sent.topic == consts.TOPICS.SESSION_OPENED)
+                if sent.pid == "start-hub" and sent.topic == session_topic
+                    and sent.payload.type == consts.UPSTREAM_TYPES.ERROR then
+                    table.insert(subscriber_errors, sent.payload)
+                elseif sent.topic == consts.TOPICS.ERROR and sent.payload.request_id == "start-request" then
+                    start_error = sent
+                end
+            end
+            test.eq(#subscriber_errors, 1, "session subscribers must receive exactly one error")
+            test.eq(subscriber_errors[1].session_id, session_id)
+            test.eq(subscriber_errors[1].code, consts.ERROR_CODES.SESSION_SPAWN)
+            local subscriber_message = tostring(subscriber_errors[1].message)
+            test.eq(subscriber_message, expected)
+            test.is_nil((string.find(subscriber_message, "Send a new message to continue", 1, true)))
+            test.not_nil(start_error)
+            test.eq(start_error.pid, "start-caller")
+            test.eq(start_error.payload.error, consts.ERROR_CODES.SESSION_SPAWN)
+            test.eq(start_error.payload.message, expected)
         end)
         it("rejects queued requests when the initial status write fails", function()
             local actor = security.actor()
@@ -1296,7 +1520,7 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
-        it("sends the initial idle update before receipt and running", function()
+        it("announces idle then committed running state before receipt", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Startup order")
             local hub_pid = "startup-order-hub"
@@ -1318,8 +1542,13 @@ local function define_tests()
 
             mock("process.inbox", function() return inbox end)
             mock("process.events", function() return events end)
+            local bus_done_issued = false
             mock("channel.new", function(capacity)
-                if capacity == nil then return bus_done end
+                -- session.run creates bus_done once; a running turn creates its cancel channel.
+                if capacity == nil and not bus_done_issued then
+                    bus_done_issued = true
+                    return bus_done
+                end
                 return original_channel_new(capacity)
             end)
             mock("coroutine.spawn", function(_fn) end)
@@ -1348,6 +1577,7 @@ local function define_tests()
             mock("channel.select", original_channel_select)
             mock("coroutine.spawn", original_spawn)
 
+            cleanup_session_fixture(session_id, context_id)
             test.is_true(ok, tostring(result))
             test.eq(result.status, "shutdown")
             local session_topic = consts.TOPIC_PREFIXES.SESSION .. session_id
@@ -1359,8 +1589,7 @@ local function define_tests()
                     table.insert(order, "received")
                 end
             end
-            test.eq(table.concat(order, ","), "idle,received,running")
-            cleanup_session_fixture(session_id, context_id)
+            test.eq(table.concat(order, ","), "idle,running,received")
         end)
 
         it("forwards the first input after creating a new session", function()
@@ -1601,6 +1830,44 @@ local function define_tests()
             test.is_nil(updates[idle_id])
         end)
 
+        it("closes a turn a stopped runtime cut off with one boundary, which a later start does not repeat", function()
+            local actor = security.actor()
+            local original_lookup, original_plugin = state_service._lookup_session, state_service._lookup_plugin
+            state_service._lookup_session = function() return nil end
+            state_service._lookup_plugin = function() return nil end
+            local session_id, context_id = create_session_fixture(actor, "Cut off", consts.STATUS.RUNNING)
+            local artifact_id, session_writer = admitted_form(actor, session_id)
+            -- Text and no call: only the boundary can show the turn did not finish.
+            session_writer:add_message(consts.MSG_TYPE.ASSISTANT, "Let me check.")
+
+            scan_for_stale_session(actor, session_id)
+            test.eq(session_repo.get(session_id).status, consts.STATUS.IDLE)
+            test.eq(recovery_boundaries(session_id), 1, "the scan closes the turn")
+            test.eq(delivery_of(actor, artifact_id), "interrupted")
+
+            run_start_through_session(actor, session_id, {}, "reopened-after-scan", "finish")
+            test.eq(recovery_boundaries(session_id), 1, "the reopen adds none")
+            test.eq(delivery_of(actor, artifact_id), "interrupted")
+
+            state_service._lookup_session, state_service._lookup_plugin = original_lookup, original_plugin
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("keeps a stale session running when its boundary fails, so the next start writes it", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Boundary failed", consts.STATUS.RUNNING)
+            local original_stop = message_repo.stop_with_input_rollback
+            message_repo.stop_with_input_rollback = function() return nil, "disk full" end
+            scan_for_stale_session(actor, session_id)
+            message_repo.stop_with_input_rollback = original_stop
+            test.eq(session_repo.get(session_id).status, consts.STATUS.RUNNING, "no idle status ahead of the boundary")
+            test.eq(recovery_boundaries(session_id), 0)
+
+            run_start_through_session(actor, session_id, {}, "start-writes-boundary", "finish")
+            test.eq(recovery_boundaries(session_id), 1)
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
         it("ignores a wake for a session this user does not have", function()
             local actor = security.actor()
             local unknown_id = uuid.v7()
@@ -1703,6 +1970,7 @@ local function define_tests()
             test.eq(update.status, consts.STATUS.IDLE)
             test.is_true(update.interaction.can_send)
             test.is_nil(upstream_error(run, "stop-hub"), "a user Stop is not reported as an error")
+            test.eq(recovery_boundaries(session_id), 0, "the boundary of a Stop is the one the Stop committed")
             cleanup_session_fixture(session_id, context_id)
         end)
 
@@ -1926,7 +2194,8 @@ local function define_tests()
             test.not_nil(update)
             test.eq(update.session_id, session_id)
             test.eq(update.code, "recovery_incomplete")
-            test.not_nil(update.message)
+            test.contains(update.message, "tool crashed")
+            test.contains(update.message, "Send a new message to continue")
             test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.FAILED)
             cleanup_session_fixture(session_id, context_id)
         end)
@@ -1964,8 +2233,13 @@ local function define_tests()
 
             cancel_events:send({ kind = process.event.CANCEL })
             mock("process.events", function() return cancel_events end)
+            local bus_done_issued = false
             mock("channel.new", function(capacity)
-                if capacity == nil then return bus_done end
+                -- session.run creates bus_done once; a running turn creates its cancel channel.
+                if capacity == nil and not bus_done_issued then
+                    bus_done_issued = true
+                    return bus_done
+                end
                 return original_channel_new(capacity)
             end)
             mock("coroutine.spawn", function() end)
@@ -1983,7 +2257,7 @@ local function define_tests()
             mock("channel.new", original_channel_new)
             test.eq(result.status, "shutdown")
             test.is_true(result.interrupted)
-            test.eq(message_repo.count_by_session(session_id), before)
+            test.eq(message_repo.count_by_session(session_id), before + 1, "recovery persists one interruption boundary")
             test.eq(message_repo.get(call_id).metadata.status, consts.FUNC_STATUS.ERROR)
             cleanup_session_fixture(session_id, context_id)
         end)
@@ -2090,6 +2364,29 @@ local function define_tests()
             test.eq(forwarded.data.text, "continue")
             cleanup_session_fixture(session_id, context_id)
         end)
+
+        for _, outcome in ipairs({ { status = "shutdown", intentional_exit = true }, { error = "write after deletion" } }) do
+            it("releases a deleted owner's slot without a recovery notice after " .. (outcome.error or "finish"), function()
+                local actor = security.actor()
+                local session_id, context_id = create_session_fixture(actor, "Deleted session", "running")
+                local run = run_plugin_lifecycle(actor, session_id, "test-hub", {{
+                    topic = consts.PLUGIN_TOPICS.SHUTDOWN,
+                    data = function() assert(session_repo.delete(session_id)); return {} end,
+                }}, outcome)
+                test.is_nil(run.error)
+                test.is_nil(upstream_error(run, "test-hub"))
+                local closed
+                for _, sent in ipairs(run.sent) do
+                    if sent.topic == consts.TOPICS.SESSION_CLOSED then closed = sent.payload end
+                    test.is_true(not (sent.topic == consts.TOPIC_PREFIXES.SESSION .. session_id
+                        and sent.payload.status == consts.STATUS.IDLE), "must not announce a deleted session as idle")
+                end
+                test.not_nil(closed)
+                test.eq(closed.reason, "deleted")
+                test.eq(#closed.active_session_ids, 0)
+                cleanup_session_fixture(session_id, context_id)
+            end)
+        end
 
         it("leaves an intentional finish idle without an error", function()
             local actor = security.actor()
@@ -2338,10 +2635,9 @@ local function define_tests()
             test.is_false(run.finished, "the session process keeps running")
         end)
 
-        it("leaves steering pending when no client returns within the grace period", function()
-            -- The turn ended by the plugin finishing the session is stopped
-            -- (README: unused steering remains pending after Stop or
-            -- recovery); the user's next message includes the steering.
+        it("lets the turn drain, steering included, before it finishes the session when no client returns", function()
+            -- Retirement lets accepted work finish: the turn the plugin
+            -- finishes applies the steering sent during it, then the session exits.
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Disconnect steering", consts.STATUS.IDLE)
             local run = run_graceful_shutdown(actor, session_id, "disconnect")
@@ -2353,12 +2649,12 @@ local function define_tests()
             test.eq(finish_sent(run), 1)
             test.is_true(run.finished)
             test.is_true(run.session_result.intentional_exit)
-            test.eq(run.agent_steps, 1)
-            test.eq(steer.metadata.input.state, "pending")
+            test.eq(run.agent_steps, 2, "the turn continues for the steering")
+            test.eq(steer.metadata.input.state, "applied")
             test.eq(stored.status, consts.STATUS.IDLE)
         end)
 
-        it("leaves a form answer pending when no client returns within the grace period", function()
+        it("admits a form answer accepted during the turn before it finishes the session when no client returns", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Disconnect answer", consts.STATUS.IDLE)
             local run = run_graceful_shutdown(actor, session_id, "disconnect_answer")
@@ -2369,11 +2665,41 @@ local function define_tests()
             test.is_nil(run.error)
             test.eq(finish_sent(run), 1)
             test.is_true(run.finished)
-            test.eq(run.agent_steps, 1, "no turn starts for the answer")
-            test.is_true(answer.metadata.session_form.pending, "the next session start admits it")
-            test.eq(#pending_answers, 1)
+            test.eq(run.agent_steps, 2, "a turn answers the answer before the session exits")
+            test.is_nil(answer.metadata.session_form.pending, "the answer is admitted")
+            test.eq(#pending_answers, 0)
         end)
 
+        -- A disconnect that outlasts the grace period finishes the session; a
+        -- client that returns afterwards takes the finish back, and a session
+        -- opened after the resume is not finished.
+        it("finishes sessions on shutdown but not a session opened after resume", function()
+            local actor = security.actor()
+            local first_id, first_context = create_session_fixture(actor, "Before shutdown")
+            local second_id, second_context = create_session_fixture(actor, "After resume")
+            local pids = { [first_id] = "pre-shutdown-session", [second_id] = "post-resume-session" }
+            local run = run_plugin_lifecycle(actor, first_id, nil, {
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN, data = {} },
+                { topic = consts.PLUGIN_TOPICS.SHUTDOWN_DEADLINE, data = { generation = 1 } },
+                { topic = consts.PLUGIN_TOPICS.RESUME, data = {} },
+                { topic = consts.PLUGIN_TOPICS.OPEN, data = { session_id = second_id } },
+            }, nil, {
+                cancel_plugin = true,
+                pid_for = function(init) return pids[init.session_id] end,
+            })
+            test.is_nil(run.error)
+            test.eq((run.spawned_init :: any).session_id, second_id)
+            local finished = {} :: {[string]: number}
+            for _, sent in ipairs(run.sent) do
+                if sent.topic == consts.TOPICS.FINISH_AND_EXIT then
+                    finished[sent.pid] = (finished[sent.pid] or 0) + 1
+                end
+            end
+            test.eq(finished["pre-shutdown-session"], 1)
+            test.is_nil(finished["post-resume-session"])
+            cleanup_session_fixture(first_id, first_context)
+            cleanup_session_fixture(second_id, second_context)
+        end)
     end)
     describe("plugin on_session_end hook", function()
         it("schedules the hook with provenance params when configured", function()

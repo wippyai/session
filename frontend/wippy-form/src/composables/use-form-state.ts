@@ -2,10 +2,17 @@ import type { Ref } from 'vue'
 import type { FormState } from '../lib/definition'
 import { on } from '@wippy-fe/proxy'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { normalizeHostAnswers } from '../lib/answers'
 import { hostExport } from '../lib/host-proxy'
 import { LOAD_FAILED_MESSAGE } from '../lib/messages'
+import { failureStatusOf } from '../lib/submit-error'
 
+/** The first delay before a failed background reload is retried. It doubles after each failure. */
 export const RELOAD_RETRY_MS = 5000
+/** The longest delay between two retries. */
+export const RELOAD_RETRY_MAX_MS = 60000
+/** Statuses where a retry cannot help: signed out, forbidden, gone. */
+const NO_RETRY_STATUSES = [401, 403, 404]
 
 export type LoadStatus = 'idle' | 'loading' | 'loaded' | 'error' | 'unsupported'
 
@@ -34,6 +41,12 @@ export interface UseFormStateResult {
  * background reload sets `reloadError` and keeps the view, so no remount loses
  * focus or a draft. Reloads requested while one is in flight are coalesced into
  * one follow-up load.
+ *
+ * A failed background reload is retried with a doubling delay, from
+ * `RELOAD_RETRY_MS` up to `RELOAD_RETRY_MAX_MS`, until a load succeeds, the id
+ * is rebound or the component unmounts. A success resets the delay. A 401, 403
+ * or 404 is not retried, because it will not fix itself; an event, a visibility
+ * change or a reconnect still loads.
  */
 export function useFormState(artifactId: Ref<string | null>, statePropTrigger: Ref<unknown>): UseFormStateResult {
   const status = ref<LoadStatus>('idle')
@@ -50,18 +63,31 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
   let unsubscribeArtifactEvent: (() => void) | null = null
   let subscribedId: string | null = null
 
-  // One delayed retry after a failed background reload, so a transient failure
-  // does not leave the view stale until the next event.
+  // A failed background reload retries with a doubling delay, capped, until a
+  // load succeeds. Once a turn ends no event arrives, so without this a
+  // transient failure would leave the view stale until a page reload.
   let retryTimer: ReturnType<typeof setTimeout> | null = null
-  let retried = false
-  function scheduleRetry(): void {
-    if (retried || retryTimer)
+  let retryDelay = RELOAD_RETRY_MS
+  function clearRetry(): void {
+    if (retryTimer)
+      clearTimeout(retryTimer)
+    retryTimer = null
+  }
+  function scheduleRetry(err: unknown): void {
+    const status = failureStatusOf(err)
+    // Signed out, forbidden or gone: retrying cannot fix it. Later events,
+    // visibility and reconnect still load.
+    if (status !== undefined && NO_RETRY_STATUSES.includes(status)) {
+      clearRetry()
       return
-    retried = true
+    }
+    if (retryTimer)
+      return
     retryTimer = setTimeout(() => {
       retryTimer = null
       void runLoad()
-    }, RELOAD_RETRY_MS)
+    }, retryDelay)
+    retryDelay = Math.min(retryDelay * 2, RELOAD_RETRY_MAX_MS)
   }
 
   async function performLoad(): Promise<void> {
@@ -89,11 +115,12 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       const next = await artifactState(id).get()
       if (myGeneration !== generation)
         return
-      state.value = next
+      state.value = { ...next, data: normalizeHostAnswers(next.data) }
       status.value = 'loaded'
       errorMessage.value = null
       reloadError.value = null
-      retried = false
+      clearRetry()
+      retryDelay = RELOAD_RETRY_MS
     }
     catch (err) {
       if (myGeneration !== generation)
@@ -105,7 +132,7 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       }
       else {
         reloadError.value = message
-        scheduleRetry()
+        scheduleRetry(err)
       }
     }
   }
@@ -164,6 +191,8 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
       // id, possibly the load a queued follow-up waits behind, from
       // overwriting `state` after the id has moved on.
       generation++
+      clearRetry()
+      retryDelay = RELOAD_RETRY_MS
       state.value = null
       reloadError.value = null
       subscribe(id)
@@ -197,9 +226,7 @@ export function useFormState(artifactId: Ref<string | null>, statePropTrigger: R
 
   onUnmounted(() => {
     generation++
-    if (retryTimer)
-      clearTimeout(retryTimer)
-    retryTimer = null
+    clearRetry()
     unsubscribeArtifactEvent?.()
     unsubscribeSessionMessages?.()
     unsubscribeSessionStatus?.()

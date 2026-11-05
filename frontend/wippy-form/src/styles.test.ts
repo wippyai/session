@@ -80,6 +80,30 @@ describe('styles.css: the card colours', () => {
     expect(contrast(resolveColor(fallbackOf('key-border'), mode), resolveColor(fallbackOf('row'), mode))).toBeGreaterThanOrEqual(1.5)
   })
 
+  // WCAG 1.4.3: text under 18px needs 4.5:1. The plain muted colour is lighter than that on the row backgrounds in the light theme.
+  it.each(['light', 'dark'] as const)('muted text on an answer row reaches 4.5:1 at rest and under the pointer in %s', (mode) => {
+    const text = resolveColor(fallbackOf('muted-row'), mode)
+    expect(contrast(text, resolveColor(fallbackOf('row'), mode))).toBeGreaterThanOrEqual(4.5)
+    expect(contrast(text, resolveColor(fallbackOf('row-hover'), mode))).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it('positive control: the plain muted colour is under 4.5:1 on a hovered row in the light theme, so the check above can fail', () => {
+    const hover = resolveColor(fallbackOf('row-hover'), 'light')
+    expect(contrast(resolveColor(fallbackOf('muted'), 'light'), hover)).toBeLessThan(4.5)
+  })
+
+  it.each([
+    '\\.w-form__option-description',
+    '\\.w-form__option-note',
+    '\\.w-form__option-key',
+    '\\.w-form__review-number',
+    '\\.w-form__review-question',
+    '\\.w-form__answer-note',
+    '\\.w-form__notice',
+  ])('%s reads the muted-on-row colour, because it sits on an answer row', (selector) => {
+    expect(ruleBody(selector)).toMatch(/(?<![-\w])color:\s*var\(--_muted-row\)/)
+  })
+
   it('the card pads all four sides equally', () => {
     expect(fallbackOf('pad')).toBe('10px')
     expect(ruleBody('\\.w-form')).toMatch(/padding:\s*var\(--_pad\)\s*;/)

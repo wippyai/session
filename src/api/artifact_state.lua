@@ -8,7 +8,10 @@ local artifact_state_access = require("artifact_state_access")
 
 local function context()
     local res = http.response()
-    local req = http.request()
+    -- A short read deadline and a body cap that fit the documented answer
+    -- limit. They are set before the owner check: the defaults (5 minutes,
+    -- 120 MB) would let a slow upload hold a pool worker.
+    local req = http.request(artifact_state_access.request_options())
     if not res or not req then
         return nil, nil, "Failed to get HTTP context"
     end

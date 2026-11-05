@@ -5,6 +5,13 @@ local message_repo = require("message_repo")
 local time = require("time")
 local json = require("json")
 
+local api = {
+    _http = http,
+    _security = security,
+    _session_repo = session_repo,
+    _message_repo = message_repo,
+}
+
 type SessionMessagesResponse = {
     success: boolean,
     count: number?,
@@ -19,16 +26,18 @@ type SessionMessagesResponse = {
     error: string?,
 }
 
-local function handler()
-    local res = http.response()
-    local req = http.request()
+function api.handler()
+    local res = api._http.response()
+    local req = api._http.request()
 
     if not res or not req then
         return nil, "Failed to get HTTP context"
     end
 
+    res:set_header("Cache-Control", "no-store")
+
     -- Security check - ensure user is authenticated
-    local actor = security.actor()
+    local actor = api._security.actor()
     if not actor then
         res:set_status(http.STATUS.UNAUTHORIZED)
         res:write_json({
@@ -53,7 +62,7 @@ local function handler()
     local user_id = actor:id()
 
     -- Verify session belongs to the authenticated user
-    local session, err = session_repo.get(session_id, user_id)
+    local session, err = api._session_repo.get(session_id, user_id)
     if err or not session then
         res:set_status(http.STATUS.NOT_FOUND)
         res:write_json({
@@ -85,7 +94,7 @@ local function handler()
     end
 
     -- Get messages for this session with cursor-based pagination
-    local result, err = message_repo.list_by_session(session_id, limit, cursor, direction)
+    local result, err = api._message_repo.list_by_session(session_id, limit, cursor, direction)
     if err then
         res:set_status(http.STATUS.INTERNAL_ERROR)
         res:write_json({
@@ -96,7 +105,7 @@ local function handler()
     end
 
     local messages = result.messages
-    local pending_inputs, pending_err = message_repo.list_pending_inputs(session_id)
+    local pending_inputs, pending_err = api._message_repo.list_pending_inputs(session_id)
     if pending_err then
         res:set_status(http.STATUS.INTERNAL_ERROR)
         res:write_json({ success = false, error = pending_err })
@@ -120,6 +129,17 @@ local function handler()
             end
         elseif not message.metadata then
             message.metadata = {}
+        end
+
+        -- Existing facades only settle success/error. Keep the durable outcome
+        -- cancelled, but expose a terminal status to those clients on reload.
+        if message.metadata.status == "cancelled" then
+            local projected = {}
+            for key, value in pairs(message.metadata) do projected[key] = value end
+            projected.status = "error"
+            projected.outcome = "cancelled"
+            message.metadata = projected
+            if message.metadata_json then message.metadata_json = json.encode(projected) end
         end
 
         -- Extract file_uuids from metadata to top level for easier access
@@ -149,6 +169,4 @@ local function handler()
     })
 end
 
-return {
-    handler = handler
-}
+return api

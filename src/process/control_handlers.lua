@@ -4,10 +4,12 @@ local consts = require("consts")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
 local tx = require("tx")
+local message_date = require("message_date")
 local definition = require("definition")
 local form_artifact = require("form_artifact")
 local form_meta = require("form_meta")
 local input_policy = require("input_policy")
+local behavior_controls = require("behavior_controls")
 
 type ArtifactData = {
     id: string?,
@@ -79,7 +81,8 @@ function control_handlers.context_write(ctx, op)
         return nil, consts.ERR.CONTEXT_UPDATE_FAILED .. ": " .. (err or "unknown error")
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     local context_data, get_err = ctx.reader:get_full_context()
     if get_err then
@@ -112,7 +115,8 @@ function control_handlers.context_delete(ctx, op)
         return nil, consts.ERR.CONTEXT_UPDATE_FAILED .. ": " .. (err or "unknown error")
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     local context_data, get_err = ctx.reader:get_full_context()
     if get_err then
@@ -143,8 +147,8 @@ end
 -- opts.artifact_id - use this id instead of minting one
 -- opts.tx          - write every row on this caller-supplied transaction
 --
--- Returns a record { artifact_id, title, kind, message_id?, message_date?,
--- instruction? }. Nothing is sent upstream here: call announce_artifact with
+-- Returns a record { artifact_id, title, kind, inline, message_id?,
+-- message_date?, instruction? }. Nothing is sent upstream here: call announce_artifact with
 -- the record once the writes are durable (after commit when opts.tx is used).
 function control_handlers.store_artifact(ctx, artifact_data, opts)
     opts = opts or {}
@@ -207,6 +211,7 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
 
     local record = { artifact_id = artifact_id, title = artifact_data.title, kind = kind }
 
+    record.inline = artifact_data.instructions ~= false
     if artifact_data.instructions ~= false then
         if artifact_data.preview and artifact_data.preview ~= "" then
             record.instruction = string.format(instruction_template,
@@ -229,8 +234,8 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
     -- reply (see the instructions block above). Emitting an artifact
     -- message here for the inline case too would render it TWICE.
     if artifact_data.instructions == false then
-        local message_id, message_err, stored_row: any = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT,
-            artifact_data.title, { artifact_id = artifact_id }, write_opts)
+        local message_id, message_err, _, stored_row: any = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT,
+            artifact_data.title, { artifact_id = artifact_id }, nil, nil, nil, write_opts)
         if message_err then
             return nil, "Failed to store standalone artifact message: " .. message_err
         end
@@ -241,7 +246,7 @@ function control_handlers.store_artifact(ctx, artifact_data, opts)
     local _, system_err = ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Artifact created: " .. artifact_data.title, {
         system_action = consts.SYSTEM_ACTIONS.ARTIFACT_CREATED,
         artifact_id = artifact_id
-    }, write_opts)
+    }, nil, nil, nil, write_opts)
     -- Atomic with the other rows on a caller's transaction; best effort otherwise.
     if system_err and opts.tx then
         return nil, "Failed to store artifact created message: " .. tostring(system_err)
@@ -293,7 +298,8 @@ function control_handlers.control_artifacts(ctx, op)
             table.insert(created_artifacts, {
                 artifact_id = record.artifact_id,
                 title = record.title,
-                kind = record.kind
+                kind = record.kind,
+                inline = record.inline
             })
             if record.instruction then
                 table.insert(instructions, record.instruction)
@@ -417,6 +423,12 @@ function control_handlers.control_forms(ctx, op)
     -- form and does not make it stale.
     local held_written = nil
     local record, create_err = tx.run(function(dbtx)
+        -- The session row first, before the artifact insert takes a share lock
+        -- on it through the foreign key. A session delete holds the row's
+        -- update lock and waits for that share lock to clear, so taking the
+        -- row after the insert would make the two wait for each other.
+        local _, lock_err = message_date.lock_session(dbtx, ctx.session_id)
+        if lock_err then return nil, lock_err end
         if ctx.write_held_before_form then
             local written, held_err = ctx.write_held_before_form({ tx = dbtx })
             if not written then return nil, "Failed to store held input: " .. tostring(held_err) end
@@ -540,7 +552,8 @@ function control_handlers.control_context(ctx, op)
         end
     end
 
-    ctx.reader:reset()
+    local refreshed, refresh_err = ctx.reader:reset()
+    if not refreshed then return nil, refresh_err end
 
     return { completed = true }
 end
@@ -548,6 +561,12 @@ end
 function control_handlers.control_memory(ctx, op)
     if not op.memory_operations then
         return nil, "No memory operations provided"
+    end
+
+    if op.memory_operations.compact == true then
+        local stored, err = ctx.writer:set_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED, true)
+        if not stored then return nil, err end
+        ctx.reader:reset()
     end
 
     if op.memory_operations.clear then
@@ -756,12 +775,12 @@ function control_handlers.control_config(ctx, op)
             next_agent = ctx.agent_ctx:get_current_agent() or next_agent
         end
         local candidate_state = clone(ctx.turn_state)
+        if (agent_changed or model_changed) and candidate_state then
+            candidate_state.route = nil
+        end
         if agent_changed and candidate_state then
             candidate_state.input_policy = nil
-            if candidate_state.active then
-                candidate_state.handoff = true
-                candidate_state.failed = true
-            end
+            if candidate_state.active then candidate_state.handoff = true end
         end
         local candidate = {
             config = current_config,
@@ -790,7 +809,7 @@ function control_handlers.control_config(ctx, op)
         ctx.config = current_config
         ctx.turn_state = candidate_state
         ctx.current_agent = next_agent
-        ctx.reader:reset()
+        local refreshed, refresh_err = ctx.reader:reset()
         input_policy.accept_committed(ctx, interaction)
         if agent_changed or model_changed then
             ctx.upstream:update_session({
@@ -819,9 +838,47 @@ function control_handlers.control_config(ctx, op)
             })
             ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, change_message)
         end
+        if not refreshed then return nil, refresh_err end
     end
 
     return { completed = true }
+end
+
+-- Only declarative controls are accepted from behavior handlers.
+-- Tool controls retain their existing broader protocol and dispatch path.
+function control_handlers.apply_behavior_controls(ctx, controls)
+    local prepared, prepare_err = behavior_controls.prepare(controls)
+    if not prepared then return nil, prepare_err end
+    for _, control in ipairs(prepared) do
+        if control.context then
+            local applied, err = control_handlers.control_context(ctx, { context_operations = control.context })
+            if not applied then return nil, err end
+        end
+        if control.config then
+            -- Recovery may replay a partially applied batch. Skip declarative
+            -- targets already committed, including an agent switch: replay must
+            -- not reset that agent's overlays or emit duplicate announcements.
+            local current = ctx.config or (ctx.reader:state() or {}).config or {}
+            local switching_agent = control.config.agent ~= nil and control.config.agent ~= current.agent_id
+            local changes = {}
+            for key, value in pairs(control.config) do
+                local stored_key = key == "agent" and "agent_id" or
+                    (key == "traits" and "active_traits" or (key == "tools" and "active_tools" or key))
+                -- A switch resets the model and overlays. Explicit targets in
+                -- the same proposal must survive even if they match the old agent.
+                if switching_agent or json.encode(current[stored_key]) ~= json.encode(value) then changes[key] = value end
+            end
+            if next(changes) then
+                local applied, err = control_handlers.control_config(ctx, { config_changes = changes })
+                if not applied then return nil, err end
+            end
+        end
+        if control.memory then
+            local applied, err = control_handlers.control_memory(ctx, { memory_operations = control.memory })
+            if not applied then return nil, err end
+        end
+    end
+    return true
 end
 
 return control_handlers

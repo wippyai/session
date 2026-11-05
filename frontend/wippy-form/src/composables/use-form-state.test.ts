@@ -1,10 +1,11 @@
 import type { FormState } from '../lib/definition'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, ref } from 'vue'
 import { formState } from '../test-support/fixtures'
+import { hostError } from '../test-support/host-error'
 import { artifactStateMock, listenerFor, onMock, resetProxyMock } from '../test-support/proxy-control'
-import { RELOAD_RETRY_MS, useFormState } from './use-form-state'
+import { RELOAD_RETRY_MAX_MS, RELOAD_RETRY_MS, useFormState } from './use-form-state'
 
 /** Mounts `useFormState` in a real component, so its listeners are registered on mount and released on unmount. */
 function mountHarness(artifactId: string | null) {
@@ -21,6 +22,20 @@ function mountHarness(artifactId: string | null) {
 }
 
 beforeEach(resetProxyMock)
+
+describe('useFormState: stored answers at the read boundary', () => {
+  it('keeps a noted answer and turns a { value } answer without a note into the plain value', async () => {
+    const stored = formState({ status: 'idle', delivery: 'complete', data: {} })
+    const getFn = vi.fn().mockResolvedValue({ ...stored, data: { f1: { value: 'a', note: 'why' }, f2: { value: 'b' }, f3: { other: 'mine' } } })
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+
+    const wrapper = mountHarness('artifact-1')
+    await flushPromises()
+
+    const loaded = (wrapper.vm as unknown as { state: FormState }).state
+    expect(loaded.data).toEqual({ f1: { value: 'a', note: 'why' }, f2: 'b', f3: { other: 'mine' } })
+  })
+})
 
 describe('useFormState: background reload vs first load', () => {
   it('only sets status to "loading" for the artifact\'s first load, not a later background reload', async () => {
@@ -63,41 +78,149 @@ describe('useFormState: background reload vs first load', () => {
 })
 
 describe('useFormState: retry after a failed background refresh', () => {
-  it('retries once after a delay and clears the notice when that load succeeds', async () => {
-    vi.useFakeTimers()
-    try {
-      const getFn = vi.fn()
-        .mockResolvedValueOnce(formState())
-        .mockRejectedValueOnce(new Error('network down'))
-        .mockRejectedValueOnce(new Error('still down'))
-        .mockResolvedValueOnce(formState({ status: 'idle' }))
-      artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+  interface RetryVm { state: FormState, reloadError: string | null, reload: () => void, id: string | null }
 
-      const wrapper = mountHarness('artifact-1')
-      await vi.advanceTimersByTimeAsync(0)
-      const vm = wrapper.vm as unknown as { state: FormState, reloadError: string | null, reload: () => void }
-
-      vm.reload()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(vm.reloadError).toBe('network down')
-
-      await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS)
-      expect(getFn).toHaveBeenCalledTimes(3)
-      expect(vm.reloadError).toBe('still down')
-
-      // Bounded: no second automatic retry until something else succeeds.
-      await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS * 3)
-      expect(getFn).toHaveBeenCalledTimes(3)
-
-      vm.reload()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(vm.reloadError).toBeNull()
-      expect(vm.state.status).toBe('idle')
-      wrapper.unmount()
+  /** Mounts with a good first load, then fails `failures` reloads with `error` and loads fine after that. */
+  async function mountFailingReloads(failures: number, error: Error = new Error('network down')) {
+    const getFn = vi.fn().mockResolvedValueOnce(formState())
+    // `Infinity` fails every reload.
+    if (failures === Infinity) {
+      getFn.mockRejectedValue(error)
     }
-    finally {
-      vi.useRealTimers()
+    else {
+      for (let i = 0; i < failures; i++)
+        getFn.mockRejectedValueOnce(error)
+      getFn.mockResolvedValue(formState({ status: 'idle' }))
     }
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const wrapper = mountHarness('artifact-1')
+    await vi.advanceTimersByTimeAsync(0)
+    const vm = wrapper.vm as unknown as RetryVm
+    vm.reload()
+    await vi.advanceTimersByTimeAsync(0)
+    return { wrapper, vm, getFn }
+  }
+
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('keeps retrying through several failures and clears the notice when a load succeeds', async () => {
+    const { wrapper, vm, getFn } = await mountFailingReloads(3)
+    expect(getFn).toHaveBeenCalledTimes(2)
+    expect(vm.reloadError).toBe('network down')
+
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS)
+    expect(getFn).toHaveBeenCalledTimes(3)
+    expect(vm.reloadError).toBe('network down')
+
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS * 2)
+    expect(getFn).toHaveBeenCalledTimes(4)
+    expect(vm.reloadError).toBe('network down')
+
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS * 4)
+    expect(getFn).toHaveBeenCalledTimes(5)
+    expect(vm.reloadError).toBeNull()
+    expect(vm.state.status).toBe('idle')
+
+    // A success ends the retries.
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MAX_MS * 2)
+    expect(getFn).toHaveBeenCalledTimes(5)
+    wrapper.unmount()
+  })
+
+  it('doubles the delay up to the cap and keeps retrying at the cap', async () => {
+    const { wrapper, getFn } = await mountFailingReloads(Infinity)
+    let expected = 2
+
+    // 5 s, 10 s, 20 s, 40 s, then 60 s twice. A retry never fires early.
+    for (const delay of [5000, 10000, 20000, 40000, RELOAD_RETRY_MAX_MS, RELOAD_RETRY_MAX_MS]) {
+      await vi.advanceTimersByTimeAsync(delay - 1)
+      expect(getFn).toHaveBeenCalledTimes(expected)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(getFn).toHaveBeenCalledTimes(++expected)
+    }
+    wrapper.unmount()
+  })
+
+  it('starts the backoff again after a success', async () => {
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(formState())
+      .mockRejectedValueOnce(new Error('down'))
+      .mockRejectedValueOnce(new Error('down'))
+      .mockResolvedValueOnce(formState({ status: 'idle' }))
+      .mockRejectedValueOnce(new Error('down'))
+      .mockResolvedValue(formState({ status: 'idle' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const wrapper = mountHarness('artifact-1')
+    await vi.advanceTimersByTimeAsync(0)
+    const vm = wrapper.vm as unknown as RetryVm
+
+    vm.reload()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS)
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS * 2)
+    expect(getFn).toHaveBeenCalledTimes(4)
+    expect(vm.reloadError).toBeNull()
+
+    vm.reload()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getFn).toHaveBeenCalledTimes(5)
+    expect(vm.reloadError).toBe('down')
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS)
+    expect(getFn).toHaveBeenCalledTimes(6)
+    wrapper.unmount()
+  })
+
+  it.each([401, 403, 404])('does not retry after a %i, and a later event still loads', async (status) => {
+    const { wrapper, vm, getFn } = await mountFailingReloads(1, hostError(status, 'denied'))
+    expect(vm.reloadError).not.toBeNull()
+
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MAX_MS * 3)
+    expect(getFn).toHaveBeenCalledTimes(2)
+
+    listenerFor('@reconnect')?.()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getFn).toHaveBeenCalledTimes(3)
+    expect(vm.reloadError).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('retries after a 500', async () => {
+    const { wrapper, getFn } = await mountFailingReloads(1, hostError(500, 'server_error'))
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MS)
+    expect(getFn).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
+  })
+
+  it('stops the timer on unmount', async () => {
+    const { wrapper, getFn } = await mountFailingReloads(Infinity)
+    expect(vi.getTimerCount()).toBe(1)
+
+    wrapper.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MAX_MS * 2)
+    expect(getFn).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops the timer when the id is rebound', async () => {
+    const getFn = vi.fn().mockResolvedValueOnce(formState()).mockRejectedValue(new Error('down'))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const wrapper = mountHarness('artifact-1')
+    await vi.advanceTimersByTimeAsync(0)
+    const vm = wrapper.vm as unknown as RetryVm
+    vm.reload()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getFn).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(1)
+
+    getFn.mockResolvedValueOnce(formState({ artifact_id: 'artifact-2' }))
+    vm.id = 'artifact-2'
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getFn).toHaveBeenCalledTimes(3)
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(RELOAD_RETRY_MAX_MS * 2)
+    expect(getFn).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
   })
 })
 

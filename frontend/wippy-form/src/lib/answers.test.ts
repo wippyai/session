@@ -1,7 +1,7 @@
 import type { AnswerDraft } from './answers'
 import type { FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
-import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, exceedsLength, lengthLimitMessage, NOTE_TEXT_MAX, OTHER_TEXT_MAX, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
+import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, exceedsLength, lengthLimitMessage, normalizeHostAnswers, NOTE_TEXT_MAX, OTHER_TEXT_MAX, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
 
 const definition: FormDefinition = {
   title: 'Form',
@@ -215,6 +215,43 @@ describe('serializeFieldAnswer — noted answers (question-card {value, note} ro
     const field = definition.fields[1]
     const result = serializeFieldAnswer(field, [{ value: 'y', note: 'why' }, 'x'])
     expect(result).toEqual(['x', { value: 'y', note: 'why' }])
+  })
+})
+
+describe('normalizeHostAnswers', () => {
+  it('keeps a { value, note } answer with a non-blank note as a noted answer (positive control)', () => {
+    expect(normalizeHostAnswers({ f1: { value: 'a', note: 'extra context' } })).toEqual({ f1: { value: 'a', note: 'extra context' } })
+  })
+
+  it('turns a { value } object without a note, or with a blank note, into the plain value', () => {
+    expect(normalizeHostAnswers({ f1: { value: 'a' }, f2: { value: 'b', note: '' }, f3: { value: 'c', note: '   ' } }))
+      .toEqual({ f1: 'a', f2: 'b', f3: 'c' })
+  })
+
+  it('passes plain strings and Other answers through', () => {
+    expect(normalizeHostAnswers({ f1: 'a', f2: { other: 'mine' } })).toEqual({ f1: 'a', f2: { other: 'mine' } })
+  })
+
+  it('normalizes each item of a several-answer field and keeps their order', () => {
+    expect(normalizeHostAnswers({ f1: ['a', { value: 'b', note: 'why' }, { value: 'c' }, { other: 'mine' }] }))
+      .toEqual({ f1: ['a', { value: 'b', note: 'why' }, 'c', { other: 'mine' }] })
+  })
+
+  it('returns null for no stored answers and an empty record for an empty one', () => {
+    expect(normalizeHostAnswers(null)).toBeNull()
+    expect(normalizeHostAnswers({})).toEqual({})
+  })
+
+  it('drops a malformed single answer and malformed list items', () => {
+    const malformed = { nope: 1 } as never
+    expect(normalizeHostAnswers({ f1: malformed, f2: ['a', malformed, null as never, { value: 7 } as never] }))
+      .toEqual({ f2: ['a'] })
+  })
+
+  it('does not mutate its input', () => {
+    const input = { f1: { value: 'a' } }
+    normalizeHostAnswers(input)
+    expect(input).toEqual({ f1: { value: 'a' } })
   })
 })
 

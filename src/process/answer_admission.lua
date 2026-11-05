@@ -1,6 +1,6 @@
 local consts = require("consts")
-local input_metadata = require("input_metadata")
 local message_repo = require("message_repo")
+local message_order = require("message_order")
 local artifact_repo = require("artifact_repo")
 local artifact_events = require("artifact_events")
 
@@ -9,10 +9,6 @@ local artifact_events = require("artifact_events")
 -- session_id, reader, writer, upstream, interaction, coordinator and
 -- stopped_answers.
 local answer_admission = {}
-
-local function all_messages(ctx: any)
-    return ctx.reader:list_all_messages()
-end
 
 -- Typed input during a turn follows the input policy: it is refused, or
 -- stored at once as pending steering that the next step applies. A form
@@ -28,40 +24,35 @@ end
 -- changes only its metadata and never its date, so it does not change which
 -- forms are stale (message_repo.has_user_input_after).
 
--- One pass over the session's rows in store order: the pending steering
--- rows (sorted by date, then id), the anchor for applying them (the last row
--- that is neither steering input, a pending answer nor `start_id`), the
--- position and row of the first pending answer, and the position of
--- `start_id` when it is an ordinary row.
+-- The inputs due for admission, read with bounded queries: sessions can be
+-- arbitrarily long, so nothing here reads the whole history. `pending` is the
+-- pending steering in store order, `answer` the first pending form answer,
+-- `anchor_id` the anchor for applying steering (the newest row that is neither
+-- steering input, a pending answer nor `start_id`), and `start` the row
+-- `start_id` when it is an ordinary one.
 local function scan_inputs(ctx: any, start_id)
-    local messages, read_err = all_messages(ctx)
-    if not messages then return nil, read_err or "Failed to read pending inputs" end
-    local scan = { pending = {} :: {any}, anchor_id = nil :: any, first_answer = nil :: number?,
-        answer = nil :: any, start = nil :: number? }
-    for index, message in ipairs(messages) do
-        local metadata = type(message.metadata) == "table" and message.metadata or nil
-        local input = metadata and metadata.input
-        if input ~= nil then
-            if not input_metadata.validate(message) then
-                return nil, "Malformed steering metadata on message " .. tostring(message.message_id)
-            end
-            if input.state == "pending" then table.insert(scan.pending, { row = message, index = index }) end
-        elseif message_repo.is_pending_answer(message) then
-            if not scan.first_answer then
-                scan.first_answer = index
-                scan.answer = message
-            end
-        elseif message.message_id ~= start_id then
-            scan.anchor_id = message.message_id
-        else
-            scan.start = index
-        end
+    local pending, read_err = ctx.reader:list_pending_inputs()
+    if not pending then return nil, read_err or "Failed to read pending inputs" end
+    local answers, answers_err = ctx.reader:list_pending_answers(1)
+    if not answers then return nil, answers_err or "Failed to read pending answers" end
+    message_order.sort(pending)
+    local scan = { pending = pending, answer = answers[1], anchor_id = nil :: any, start = nil :: any }
+    if #pending == 0 then return scan, nil end
+
+    local anchor_err
+    scan.anchor_id, anchor_err = ctx.reader:newest_non_input_id(start_id)
+    if anchor_err then return nil, anchor_err end
+    if start_id then
+        local row = ctx.reader:get_message(start_id)
+        local metadata = type(row) == "table" and type(row.metadata) == "table" and row.metadata or {}
+        if row and metadata.input == nil and not message_repo.is_pending_answer(row) then scan.start = row end
     end
-    table.sort(scan.pending, function(a, b)
-        if a.row.date ~= b.row.date then return tostring(a.row.date or "") < tostring(b.row.date or "") end
-        return tostring(a.row.message_id) < tostring(b.row.message_id)
-    end)
     return scan, nil
+end
+
+-- Steering is due when it was accepted before the first pending form answer.
+local function is_due(scan, row)
+    return not scan.answer or message_order.precedes(row, scan.answer)
 end
 
 -- The applied-state updates for the steering rows due now: those accepted
@@ -83,12 +74,12 @@ end
 -- row.
 local function steering_updates(scan, start_id)
     local updates = {}
-    for _, entry in ipairs(scan.pending) do
-        if not scan.first_answer or entry.index < scan.first_answer then
+    for _, row in ipairs(scan.pending) do
+        if is_due(scan, row) then
             local anchor = scan.anchor_id
-            if scan.start and entry.index > scan.start then anchor = start_id end
+            if scan.start and message_order.precedes(scan.start, row) then anchor = start_id end
             table.insert(updates, {
-                message_id = entry.row.message_id,
+                message_id = row.message_id,
                 metadata = { input = { state = "applied", after_message_id = anchor } },
             })
         end
@@ -277,8 +268,8 @@ function answer_admission.turn_start_after(ctx: any, admitted, steering_turn)
     local scan, err = scan_inputs(ctx, nil)
     if not scan then return nil, err end
     local latest = nil
-    for _, entry in ipairs(scan.pending) do
-        if not scan.first_answer or entry.index < scan.first_answer then latest = entry.row.message_id end
+    for _, row in ipairs(scan.pending) do
+        if is_due(scan, row) then latest = row.message_id end
     end
     return latest or answer_id, nil
 end
@@ -294,7 +285,11 @@ function answer_admission.admit_stopped(session_id: string, writer: any, upstrea
         writer = writer,
         upstream = upstream,
         interaction = interaction,
-        reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
+        reader = {
+            list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+            list_pending_answers = function(_, limit) return message_repo.list_pending_answers(session_id, limit) end,
+            newest_non_input_id = function(_, excluded) return message_repo.newest_non_input_id(session_id, excluded) end,
+        },
     }, nil)
 end
 

@@ -15,7 +15,18 @@ local message_repo = require("message_repo")
 local context_repo = require("context_repo")
 local session_repo = require("session_repo")
 local writer = require("writer")
+local message_date = require("message_date")
+local time = require("time")
 local wait_for_boot = require("wait_for_boot")
+
+-- "sqlite" or "postgres", read when the cases are defined.
+local function database_kind()
+    local db = sql.get(consts.get_db_resource())
+    if not db then return "unknown" end
+    local kind = db:type()
+    db:release()
+    return kind
+end
 
 -- GET/POST form state through wippy.session.forms:state_service on the real
 -- database. The HTTP adapter (src/api/artifact_state.lua) only forwards the
@@ -46,6 +57,7 @@ local function define_tests()
             original.send = state_service._send
             original.plugin = state_service._lookup_plugin
             original.new_id = state_service._new_message_id
+            original.lock_session = message_date.lock_session
         end)
 
         before_each(function()
@@ -61,6 +73,7 @@ local function define_tests()
             state_service._send = original.send
             state_service._lookup_plugin = original.plugin
             state_service._new_message_id = original.new_id
+            message_date.lock_session = original.lock_session
         end)
 
         after_all(function()
@@ -86,7 +99,15 @@ local function define_tests()
             test.is_nil(writer_err)
             return {
                 session_id = session_id,
-                reader = { list_all_messages = function() return message_repo.list_all_by_session(session_id) end },
+                reader = {
+                    list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+                    list_pending_answers = function(_, limit)
+                        return message_repo.list_pending_answers(session_id, limit)
+                    end,
+                    newest_non_input_id = function(_, excluded)
+                        return message_repo.newest_non_input_id(session_id, excluded)
+                    end,
+                },
                 writer = session_writer,
                 upstream = {
                     send_message_update = function() end,
@@ -299,8 +320,12 @@ local function define_tests()
             test.eq(crashed.delivery, "interrupted", "stored running status with no live session process")
 
             ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Locker it is.")
+            local _, replying = get(artifact_id)
+            test.eq(replying.delivery, "running", "the agent replied and its turn still runs")
+
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.IDLE })
             local _, after = get(artifact_id)
-            test.eq(after.delivery, "complete", "the agent replied after the answer")
+            test.eq(after.delivery, "complete", "the agent replied after the answer and the turn is over")
         end)
 
         it("judges staleness by acceptance time, not by where admission moved the answer", function()
@@ -440,6 +465,78 @@ local function define_tests()
             local ok_status, ok_body = post(artifact_id, request)
             test.eq(ok_status, 200)
             test.eq(ok_body.content_version, 2)
+        end)
+
+        it("revalidates against a definition changed before acceptance without writing an answer", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local original_new_id = state_service._new_message_id
+            local changed = false
+            state_service._new_message_id = function()
+                if not changed then
+                    changed = true
+                    -- This runs after the initial artifact read but before
+                    -- the acceptance transaction. The changed definition
+                    -- rejects the request's formerly valid Courier answer.
+                    local artifact = artifact_repo.get(artifact_id)
+                    local content = json.decode(artifact.content)
+                    content.props.definition.fields[1].options = { "Locker" }
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                end
+                return original_new_id()
+            end
+            local request = answer(nil, { delivery = "Courier" })
+            request.expected_content_version = nil
+            local status, body = post(artifact_id, request)
+            state_service._new_message_id = original_new_id
+
+            test.eq(status, 422)
+            test.eq(body.code, "validation_failed")
+            test.eq(body.errors.delivery[1].code, "invalid_option")
+            local artifact = artifact_repo.get(artifact_id)
+            test.eq(artifact.content_version, 2, "only the competing definition update committed")
+            test.is_nil(artifact.meta.session_form.submission, "rejected answer does not settle the form")
+            test.eq(#user_rows(ctx.session_id), 0, "rejected answer creates no pending row")
+            test.eq(#wakes, 0, "rejected answer does not wake the session")
+        end)
+
+        it("persists the current definition's normalization after a concurrent definition change", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local original_new_id = state_service._new_message_id
+            local changed = false
+            state_service._new_message_id = function()
+                if not changed then
+                    changed = true
+                    -- Both values remain valid, but the current definition's
+                    -- option order is the canonical order for a multiple
+                    -- answer. This catches validating current input while
+                    -- accidentally persisting a stale normalization.
+                    local artifact = artifact_repo.get(artifact_id)
+                    local content = json.decode(artifact.content)
+                    content.props.definition.fields[2].options = { "Receipt", "Gift wrap" }
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                end
+                return original_new_id()
+            end
+            local request = answer(nil, { delivery = "Courier", extras = { "Gift wrap", "Receipt" } })
+            request.expected_content_version = nil
+            local status, body = post(artifact_id, request)
+            state_service._new_message_id = original_new_id
+
+            test.eq(status, 200)
+            test.eq(body.content_version, 3, "the definition update and accepted state transition both commit")
+            local artifact = artifact_repo.get(artifact_id)
+            local extras = artifact.meta.session_form.submission.answers.extras
+            test.eq(extras[1], "Receipt")
+            test.eq(extras[2], "Gift wrap")
+            local row: any = message_repo.get(body.answer_message_id)
+            test.contains(row.data,
+                '"answer":[{"value":"Receipt","label":"Receipt"},{"value":"Gift wrap","label":"Gift wrap"}]')
+            test.eq(#user_rows(ctx.session_id), 1)
+            test.eq(#wakes, 1)
         end)
 
         it("returns field errors without changing anything", function()
@@ -620,6 +717,41 @@ local function define_tests()
             test.contains(tostring(why), "process not found")
         end)
 
+        it("never treats a full tool-only history window as a finished reply", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            for i = 1, 55 do
+                ctx.writer:add_response("", {}, {
+                    { id = "review-call-" .. i, name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                        type = consts.MSG_TYPE.FUNCTION },
+                })
+            end
+            local status, body = get(artifact_id)
+            test.eq(status, 200)
+            test.eq(body.delivery, "interrupted", "no assistant or form reply completed after the accepted answer")
+        end)
+
+        it("finds a real reply beyond the first tool-only page", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            for i = 1, 55 do
+                ctx.writer:add_response("", {}, {
+                    { id = "review-long-call-" .. i, name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                        type = consts.MSG_TYPE.FUNCTION },
+                })
+            end
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Confirmed after the tool work.")
+            local status, body = get(artifact_id)
+            test.eq(status, 200)
+            test.eq(body.delivery, "complete")
+        end)
+
         it("counts only a finished reply as delivery", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
@@ -645,6 +777,183 @@ local function define_tests()
             message_repo.delete(accepted.answer_message_id)
             local _, gone = get(artifact_id)
             test.eq(gone.delivery, "interrupted")
+        end)
+
+        it("reports a stopped turn after an answer as interrupted", function()
+            local function admitted_form()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                test.eq(post(artifact_id, answer()), 200)
+                answer_admission.admit_in_order(ctx, nil)
+                state_service._lookup_session = function() return nil end
+                return ctx, artifact_id
+            end
+            local function stop_boundary(ctx)
+                local _, err = ctx.writer:stop_with_input_rollback({}, {}, {
+                    message_id = uuid.v7(), data = "The user cancels the preceding turn.",
+                    metadata = { preserve_position = true, interruption = { reason = "stop" } },
+                })
+                test.is_nil(err)
+            end
+
+            -- Text Stop cut off is not a reply.
+            local ctx, artifact_id = admitted_form()
+            ctx.writer:add_response("Partial ans", { stopped = true }, {})
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- Text ahead of a cancelled call did not finish the turn.
+            ctx, artifact_id = admitted_form()
+            local _, call_ids: any = ctx.writer:add_response("Let me check.", {}, {
+                { id = "cancelled-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted",
+                "no process runs, so nothing will finish the pending call")
+            ctx.writer:update_message_meta(call_ids["cancelled-call"],
+                { status = consts.FUNC_STATUS.CANCELLED, result = "Session stopped while the call was running" })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- Text ahead of the Stop boundary did not finish the turn.
+            ctx, artifact_id = admitted_form()
+            ctx.writer:add_response("Let me check.", {}, {})
+            stop_boundary(ctx)
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- Nor did text ahead of a call recovery settled.
+            ctx, artifact_id = admitted_form()
+            ctx.writer:add_response("Let me check.", {}, {
+                { id = "recovered-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            test.eq(select(2, message_repo.recover_pending(ctx.session_id)), nil)
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- A later turn that replied did deliver the answer.
+            ctx.writer:add_message(consts.MSG_TYPE.USER, "Carry on.")
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Done.")
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+
+            -- A finished turn stays complete when a later turn is stopped.
+            ctx, artifact_id = admitted_form()
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Thanks for the answer.")
+            ctx.writer:add_message(consts.MSG_TYPE.USER, "Next question.")
+            stop_boundary(ctx)
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
+        -- An admitted answer whose turn wrote "Let me check." and a successful
+        -- tool call, with no process running.
+        local function answered_with_preamble()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            local _, call_ids: any = ctx.writer:add_response("Let me check.", {}, {
+                { id = "preamble-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            ctx.writer:update_message_meta(call_ids["preamble-call"], { status = consts.FUNC_STATUS.SUCCESS })
+            test.eq(select(2, get(artifact_id)).delivery, "complete", "nothing cut this turn short yet")
+            return ctx, artifact_id
+        end
+
+        it("reports a turn that failed after a preamble and a tool as interrupted", function()
+            local ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: provider unavailable", {
+                system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+        end)
+
+        it("reports a turn the session limited after a preamble and a tool as interrupted", function()
+            local ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn stopped: too many steps", {
+                system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted", "from the system row alone")
+
+            ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, "The previous turn was stopped by the session.", {
+                system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted", "from the developer row alone")
+        end)
+
+        it("stays running after a reply while the turn runs, so a later Stop reaches the card", function()
+            local ctx, artifact_id = answered_with_preamble()
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            state_service._lookup_session = function() return "live-pid" end
+            test.eq(select(2, get(artifact_id)).delivery, "running", "a reply does not end the turn")
+
+            local _, err = ctx.writer:stop_with_input_rollback({}, {}, {
+                message_id = uuid.v7(), data = "The user cancels the preceding turn.",
+                metadata = { preserve_position = true, interruption = { reason = "stop" } },
+            })
+            test.is_nil(err)
+            test.eq(select(2, get(artifact_id)).delivery, "running", "the turn is still winding down")
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.IDLE })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+        end)
+
+        it("reads complete once the running turn that replied ends", function()
+            local ctx, artifact_id = answered_with_preamble()
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            state_service._lookup_session = function() return "live-pid" end
+            test.eq(select(2, get(artifact_id)).delivery, "running")
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.IDLE })
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
+        it("does not read a call left pending by a crash as a finished turn", function()
+            local ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_response("One more thing.", {}, {
+                { id = "crashed-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted", "stored running, no process, no restart")
+            state_service._lookup_session = function() return "live-pid" end
+            test.eq(select(2, get(artifact_id)).delivery, "running", "the same rows while the call runs")
+        end)
+
+        it("does not take a pending answer for the next turn", function()
+            local ctx = new_session()
+            local first = new_form(ctx)
+            test.eq(post(first, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            local second = new_form(ctx)
+            state_service._lookup_session = function() return nil end
+            ctx.writer:add_response("Let me check.", {}, {})
+            test.eq(post(second, answer()), 200)
+            local _, err = ctx.writer:stop_with_input_rollback({}, {}, {
+                message_id = uuid.v7(), data = "The user cancels the preceding turn.",
+                metadata = { preserve_position = true, interruption = { reason = "stop" } },
+            })
+            test.is_nil(err)
+            test.eq(select(2, get(first)).delivery, "interrupted", "the waiting answer did not end the first turn")
+        end)
+
+        it("counts a final reply that holds only an inline artifact", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            ctx.writer:add_response("", { presentation = { artifact_refs = { { artifact_id = uuid.v7() } } } }, {})
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
+        it("does not count stopped presentation as a reply", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            ctx.writer:add_response("", { stopped = true,
+                presentation = { artifact_refs = { { artifact_id = uuid.v7() } } } }, {})
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
         end)
 
         it("reports a failed session read in the delivery state as an error", function()
@@ -1185,6 +1494,142 @@ local function define_tests()
                 test.gt(#row.data, 64000)
             end)
         end)
+
+        -- A session delete and a form answer for the same form meet on the
+        -- session row and on the form's artifact row. The race below is forced
+        -- into the order that locks them crosswise: the answer holds the
+        -- session row (paused after its lock), the delete removes the
+        -- artifacts and then waits for the session row, and the answer goes on
+        -- to update the artifact. Held in that order by the two sides, the
+        -- locks would form a cycle that PostgreSQL ends by aborting one
+        -- transaction. SQLite serializes writers on one lock, so it has no
+        -- such cycle.
+        local function waiting_for_a_lock()
+            local db = assert(sql.get(consts.get_db_resource()))
+            local rows = db:query("SELECT count(*) AS n FROM pg_stat_activity"
+                .. " WHERE wait_event_type = 'Lock' AND datname = current_database() AND pid <> pg_backend_pid()")
+            db:release()
+            return rows ~= nil and rows[1] ~= nil and tonumber(rows[1].n) > 0
+        end
+
+        local function race_delete_against_answer()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local session_id = ctx.session_id
+            local locked, resume = channel.new(1), channel.new(1)
+            local paused = false
+            message_date.lock_session = function(conn, id)
+                local ok, lock_err = original.lock_session(conn, id)
+                if ok and not paused and id == session_id then
+                    paused = true
+                    locked:send(true)
+                    resume:receive()
+                end
+                return ok, lock_err
+            end
+
+            local answered, deleted = channel.new(1), channel.new(1)
+            coroutine.spawn(function()
+                local status, body = post(artifact_id, answer())
+                answered:send({ status = status, body = body })
+            end)
+            locked:receive()
+            coroutine.spawn(function()
+                local result, delete_err = session_repo.delete(session_id)
+                deleted:send({ result = result, err = delete_err })
+            end)
+            for _ = 1, 100 do
+                if waiting_for_a_lock() then break end
+                time.sleep("50ms")
+            end
+            test.is_true(waiting_for_a_lock(), "the delete waits for the session row")
+            resume:send(true)
+
+            local outcome = {}
+            local deadline = time.after("20s")
+            while not (outcome.answer and outcome.delete) do
+                local selected = channel.select({
+                    answered:case_receive(), deleted:case_receive(), deadline:case_receive(),
+                })
+                test.is_true(selected.channel ~= deadline, "the race settles instead of hanging")
+                if selected.channel == answered then outcome.answer = selected.value
+                else outcome.delete = selected.value end
+            end
+            message_date.lock_session = original.lock_session
+            return ctx, artifact_id, outcome
+        end
+
+        if database_kind() == "postgres" then
+            it("lets a session delete and a form answer both finish when they race for one form", function()
+                local ctx, artifact_id, outcome = race_delete_against_answer()
+                local summary = string.format("answer %s %s, delete %s",
+                    tostring(outcome.answer.status), tostring(outcome.answer.body and outcome.answer.body.code),
+                    tostring(outcome.delete.err or "ok"))
+                -- Whichever side the database aborts is retried: a delete that
+                -- failed is repeated, an answer that failed is asked again.
+                if outcome.delete.err then
+                    local retried = session_repo.delete(ctx.session_id)
+                    test.not_nil(retried, "the delete succeeds when it is retried (" .. summary .. ")")
+                end
+                if outcome.answer.status ~= 200 then
+                    local retry_status = post(artifact_id, answer())
+                    test.eq(retry_status, 404, "an answer retried after the session is gone finds no form (" .. summary .. ")")
+                end
+                test.eq(outcome.answer.status, 200, summary)
+                test.is_nil(outcome.delete.err, summary)
+                local gone = session_repo.get(ctx.session_id)
+                test.is_nil(gone, "the session is deleted")
+                local db = assert(sql.get(consts.get_db_resource()))
+                local left = db:query("SELECT (SELECT count(*) FROM artifacts WHERE session_id = $1) AS artifacts,"
+                    .. " (SELECT count(*) FROM messages WHERE session_id = $1) AS messages", { ctx.session_id })
+                db:release()
+                test.eq(tonumber(left[1].artifacts), 0)
+                test.eq(tonumber(left[1].messages), 0)
+            end)
+
+            it("answers 404 when the session is deleted while the answer waits for the session row", function()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                local session_id = ctx.session_id
+                -- Stands in for a delete that got the session row first.
+                local db = assert(sql.get(consts.get_db_resource()))
+                local holder = assert(db:begin())
+                local _, lock_err = holder:execute(
+                    "UPDATE sessions SET last_message_date = last_message_date WHERE session_id = $1", { session_id })
+                test.is_nil(lock_err)
+
+                local answered = channel.new(1)
+                coroutine.spawn(function()
+                    local status, body = post(artifact_id, answer())
+                    answered:send({ status = status, body = body })
+                end)
+                for _ = 1, 100 do
+                    if waiting_for_a_lock() then break end
+                    time.sleep("50ms")
+                end
+                test.is_true(waiting_for_a_lock(), "the answer waits for the session row")
+                for _, statement in ipairs({
+                    "DELETE FROM artifacts WHERE session_id = $1",
+                    "DELETE FROM messages WHERE session_id = $1",
+                    "DELETE FROM sessions WHERE session_id = $1",
+                }) do
+                    local _, delete_err = holder:execute(statement, { session_id })
+                    test.is_nil(delete_err)
+                end
+                local _, commit_err = holder:commit()
+                db:release()
+                test.is_nil(commit_err)
+
+                local deadline = time.after("20s")
+                local selected = channel.select({ answered:case_receive(), deadline:case_receive() })
+                test.is_true(selected.channel ~= deadline, "the answer settles instead of hanging")
+                test.eq(selected.value.status, 404)
+                test.eq(selected.value.body.code, "not_found")
+            end)
+        else
+            test.it_skip("lets a session delete and a form answer both finish when they race for one form (PostgreSQL only: SQLite serializes writers on one lock)", function() end)
+            test.it_skip("answers 404 when the session is deleted while the answer waits for the session row (PostgreSQL only)", function() end)
+        end
     end)
 end
 

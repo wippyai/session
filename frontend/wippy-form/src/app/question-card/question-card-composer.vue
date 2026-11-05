@@ -31,6 +31,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   'send': []
+  /** Enter was pressed while `enabled` is false, so the parent can say why nothing was sent. */
+  'blocked': []
   'escape': []
 }>()
 
@@ -39,6 +41,8 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     if (props.enabled)
       emit('send')
+    else
+      emit('blocked')
   }
   // An input method uses Escape to cancel its composition, which must not leave the box.
   else if (event.key === 'Escape' && !event.isComposing) {

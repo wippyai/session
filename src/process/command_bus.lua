@@ -91,10 +91,19 @@ function command_bus:is_turn_active()
     return false
 end
 
+-- Retirement must wait for accepted control and background work as well as turns.
+function command_bus:is_quiescent()
+    return self.state == "idle" and self.current_op == nil
+        and self.pending_ops == 0 and #self.ops == 0 and #self.settle_ops == 0
+end
+
 function command_bus:request_stop(stop_request_id)
     if self.state == "closed" or self.state == "draining_finish" then return false end
     if not self:is_turn_active() then return false end
-    if self.state ~= "draining_stop" then self.state = "draining_stop" end
+    if self.state ~= "draining_stop" then
+        self.state = "draining_stop"
+        if self.cancel then self.cancel:close() end
+    end
     self.turn_state.stop_request_id = stop_request_id or self.turn_state.stop_request_id
     self:wake_loop()
     return true
@@ -275,6 +284,7 @@ function command_bus:end_turn()
     end
     self.turn_state.stop_request_id = nil
     self.turn_state.id = nil
+    self.cancel = nil
     if self.context.on_turn_end then self.context.on_turn_end(turn_id, draining, stop_id) end
     return true
 end
@@ -285,7 +295,7 @@ function command_bus:run_initial_ops()
     while true do
         local op = self.ops[1]
         if not op or op.init ~= true then break end
-        table.remove(self.ops, 1)
+        table.remove(self.ops :: {table}, 1)
         self.pending_ops = self.pending_ops - 1
         self.current_op = op
         local result, err = self:process_operation(op)
@@ -300,7 +310,7 @@ end
 
 function command_bus:run()
     while self.state ~= "closed" do
-        local op = table.remove(self.ops, 1)
+        local op = table.remove(self.ops :: {table}, 1)
         if op then
             self.pending_ops = self.pending_ops - 1
             if op.type == consts.OP_TYPE.AGENT_CONTINUE and self.state == "running" then
@@ -311,6 +321,8 @@ function command_bus:run()
                 if op.type == consts.OP_TYPE.AGENT_STEP and op.from_user and self.state == "idle" then
                     self.state = "running"
                     self.turn_state.id = op.message_id
+                    -- Stop closes it; the turn's in-flight model and tool calls select on it.
+                    self.cancel = channel.new()
                 end
                 if self:stop_requested() and op.type == consts.OP_TYPE.PROCESS_TOOLS then
                     op.cancel_only = true

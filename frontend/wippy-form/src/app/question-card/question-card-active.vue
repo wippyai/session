@@ -6,6 +6,7 @@ import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf, optionKey } from '../../lib/focus-key'
+import { TICK_ANSWER_MESSAGE } from '../../lib/messages'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
 import { trimAnswerText } from '../../lib/text'
 import FormMessage from '../form-message.vue'
@@ -216,9 +217,10 @@ watch(() => props.banner, (banner) => {
     void nextTick(restoreFocusAfterFailure)
 })
 
+// Focus stays on the toggle that was pressed: it is not unmounted, and it names
+// the new state ("Show answers" / "Hide answers"), so a screen reader hears it.
 function toggleCollapse() {
   controller.collapsed.value = !controller.collapsed.value
-  controller.requestFocus('card')
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -298,7 +300,7 @@ function onKeydown(event: KeyboardEvent) {
     if (a.chosen.length > 0 || trimAnswerText(a.other))
       controller.commit(q)
     else {
-      controller.error.value = 'Tick at least one answer, or type your own.'
+      controller.error.value = TICK_ANSWER_MESSAGE
       controller.requestFocus(at >= 0 ? optionKey(at) : 'first')
     }
   }

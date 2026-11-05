@@ -410,6 +410,49 @@ describe('QuestionCardActive: several questions', () => {
     expect(collapsedEvents.at(-1)).toEqual([true])
   })
 
+  it('keeps focus on the collapse button when it hides and shows the answers, and does not move it to the card', async () => {
+    const wrapper = mountCard(twoQuestionDef)
+    const toggle = wrapper.find('.w-form__collapse')
+    ;(toggle.element as HTMLElement).focus()
+    expect(document.activeElement).toBe(toggle.element)
+
+    for (const label of ['Hide answers', 'Show answers']) {
+      expect(toggle.attributes('aria-label')).toBe(label)
+      await toggle.trigger('click')
+      await wrapper.vm.$nextTick()
+      await wrapper.vm.$nextTick()
+      expect(document.activeElement).toBe(toggle.element)
+      expect(document.activeElement).not.toBe(wrapper.find('.w-form').element)
+    }
+    expect(toggle.attributes('aria-label')).toBe('Hide answers')
+    wrapper.unmount()
+  })
+
+  it('names each review row by its question, its answer and the action, not by a label that hides them', async () => {
+    const wrapper = mountCard(twoQuestionDef)
+    await wrapper.findAll('[role="radio"]')[1].trigger('click') // Q1: "No"
+    await wrapper.vm.$nextTick()
+    await wrapper.find('.w-form__option').trigger('click') // Q2: tick "proxy"
+    await wrapper.vm.$nextTick()
+    await wrapper.find('[data-focus="send"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    const rows = wrapper.findAll('.w-form__review-edit')
+    expect(rows).toHaveLength(2)
+    for (const row of rows)
+      expect(row.attributes('aria-label')).toBeUndefined()
+    const names = rows.map(row => row.text().replaceAll(/\s+/g, ' ').trim())
+    expect(names[0]).toContain('Question 1')
+    expect(names[0]).toContain('Widen the peer range?')
+    expect(names[0]).toContain('No')
+    expect(names[0]).toContain('Change the answer')
+    expect(names[1]).toContain('Question 2')
+    expect(names[1]).toContain('Which packages?')
+    expect(names[1]).toContain('proxy')
+    expect(names[1]).toContain('Change the answer')
+    wrapper.unmount()
+  })
+
   it('reaching review with a required question still unanswered keeps focus inside the card, on that question\'s row', async () => {
     const wrapper = mountCard(twoQuestionDef)
     // Answer Q1, then jump straight past Q2 (required, multi) into review

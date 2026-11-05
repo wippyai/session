@@ -3,11 +3,22 @@ local test = require("test")
 local uuid = require("uuid")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
+local message_repo = require("message_repo")
 local time = require("time")
 local security = require("security")
 local consts = require("consts")
 local tx = require("tx")
+local json = require("json")
 local wait_for_boot = require("wait_for_boot")
+
+-- A stored date is the current instant: within minutes of now when read with
+-- its own offset. A host-offset string that a timestamp column keeps as wall
+-- clock reads hours off on a host that is not in UTC.
+local function is_current_instant(value)
+    local parsed = type(value) == "string" and time.parse(time.RFC3339NANO, value) or nil
+    if not parsed then return false end
+    return math.abs(parsed:unix() - os.time()) < 300
+end
 
 local function define_tests()
     describe("Session Repository", function()
@@ -106,6 +117,38 @@ local function define_tests()
             test.not_nil(session.last_message_date)
         end)
 
+        it("matches the documented Attention session-state output", function()
+            -- ATTENTION:SESSION-STATE-EXAMPLE:BEGIN
+            local expected = json.decode([[{"schema":"wippy.attention.session.v1","enabled":true,"revision":4,"updated_at":"2026-09-15T12:00:00.000Z","updated_by":"user"}]])
+            -- ATTENTION:SESSION-STATE-EXAMPLE:END
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Documented Attention state", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local db_resource = consts.get_db_resource()
+            local db, db_err = sql.get(db_resource)
+            test.is_nil(db_err)
+            local updated, update_err = db:execute(
+                "UPDATE sessions SET attention_enabled = $1, attention_revision = $2, attention_updated_at = $3, attention_updated_by = $4 WHERE session_id = $5",
+                {1, expected.revision, expected.updated_at, expected.updated_by, session_id})
+            db:release()
+            test.is_nil(update_err)
+            test.not_nil(updated)
+            local current, read_err = session_repo.get(session_id)
+            local removed, remove_err = session_repo.delete(session_id)
+            test.is_nil(remove_err)
+            test.not_nil(removed)
+            test.is_nil(read_err)
+            test.not_nil(current)
+            local fields = 0
+            for key, value in pairs(current.attention_context) do
+                fields = fields + 1
+                test.eq(value, expected[key])
+            end
+            test.eq(fields, 5)
+        end)
+
         it("should get a session by ID", function()
             local session, err = session_repo.get(test_data.session_id)
 
@@ -120,6 +163,165 @@ local function define_tests()
             test.eq(session.meta.model, "test-model")
             test.is_table(session.config)
             test.eq(session.config.max_tokens, 1000)
+        end)
+
+        it("should persist the default disabled Attention state", function()
+            local session, err = session_repo.get(test_data.session_id)
+
+            test.is_nil(err)
+            test.not_nil(session)
+            test.not_nil(session.attention_context)
+            test.is_false(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 0)
+            test.eq(session.attention_context.updated_by, "system")
+            test.not_nil(session.attention_context.updated_at)
+        end)
+
+        it("should report no change time for a session that predates the Attention columns", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Migrated session", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local db = assert(sql.get(consts.get_db_resource()))
+            assert(db:execute("UPDATE sessions SET attention_updated_at = '' WHERE session_id = $1", { session_id }))
+            db:release()
+
+            local session, err = session_repo.get(session_id)
+            test.is_nil(err)
+            test.is_false(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 0)
+            test.is_nil(session.attention_context.updated_at)
+            session_repo.delete(session_id)
+        end)
+
+        it("should not change another user's Attention state", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Owned session", "test")
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local state, err = session_repo.update_attention_context(session_id, true, 0, "user", "someone-else")
+            test.is_nil(state)
+            test.eq(err, "SESSION_NOT_FOUND")
+            local unchanged = session_repo.get(session_id)
+            test.is_false(unchanged.attention_context.enabled)
+            test.eq(unchanged.attention_context.revision, 0)
+
+            state, err = session_repo.update_attention_context(session_id, true, 0, "user", test_data.user_id)
+            test.is_nil(err)
+            test.is_true(state.enabled)
+            session_repo.delete(session_id)
+        end)
+
+        it("should create and read back an enabled Attention state", function()
+            local session_id = uuid.v7()
+            local session, err = session_repo.create(
+                session_id,
+                test_data.user_id,
+                test_data.context_id,
+                "Attention Enabled Session",
+                "test",
+                {},
+                { attention_context = { enabled = true } }
+            )
+
+            test.is_nil(err)
+            test.not_nil(session)
+            test.is_true(session.attention_context.enabled)
+            test.eq(session.attention_context.revision, 1)
+            test.eq(session.attention_context.updated_by, "application")
+
+            local stored, stored_err = session_repo.get(session_id, test_data.user_id)
+            test.is_nil(stored_err)
+            test.not_nil(stored)
+            test.is_true(stored.attention_context.enabled)
+            test.eq(stored.attention_context.revision, 1)
+            test.eq(stored.attention_context.updated_by, "application")
+
+            local deleted, delete_err = session_repo.delete(session_id)
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
+        end)
+
+        it("should update Attention state with revisions and preserve idempotence", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(
+                session_id, test_data.user_id, test_data.context_id, "Attention Revision Session"
+            )
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local enabled, update_err = session_repo.update_attention_context(
+                session_id, true, 0, test_data.user_id
+            )
+
+            test.is_nil(update_err)
+            test.not_nil(enabled)
+            test.is_true(enabled.enabled)
+            test.eq(enabled.revision, 1)
+            test.eq(enabled.updated_by, test_data.user_id)
+
+            local repeated, repeated_err = session_repo.update_attention_context(
+                session_id, true, 1, test_data.user_id
+            )
+
+            test.is_nil(repeated_err)
+            test.not_nil(repeated)
+            test.is_true(repeated.enabled)
+            test.eq(repeated.revision, 1)
+            test.eq(repeated.updated_at, enabled.updated_at)
+            test.eq(repeated.updated_by, enabled.updated_by)
+
+            local disabled, disabled_err = session_repo.update_attention_context(
+                session_id, false, 1, test_data.user_id
+            )
+
+            test.is_nil(disabled_err)
+            test.not_nil(disabled)
+            test.is_false(disabled.enabled)
+            test.eq(disabled.revision, 2)
+
+            local stored, stored_err = session_repo.get(session_id)
+            test.is_nil(stored_err)
+            test.is_false(stored.attention_context.enabled)
+            test.eq(stored.attention_context.revision, 2)
+            test.eq(stored.attention_context.updated_by, test_data.user_id)
+
+            local deleted, delete_err = session_repo.delete(session_id)
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
+        end)
+
+        it("should return the current state for a stale Attention revision", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(
+                session_id, test_data.user_id, test_data.context_id, "Attention Conflict Session"
+            )
+            test.is_nil(create_err)
+            test.not_nil(created)
+
+            local current, current_err = session_repo.update_attention_context(
+                session_id, true, 0, test_data.user_id
+            )
+            test.is_nil(current_err)
+            test.not_nil(current)
+            test.eq(current.revision, 1)
+
+            local rejected, rejected_err, conflict_state = session_repo.update_attention_context(
+                session_id, false, 0, test_data.user_id
+            )
+
+            test.is_nil(rejected)
+            test.eq(rejected_err, "ATTENTION_CONTEXT_REVISION_CONFLICT")
+            test.not_nil(conflict_state)
+            test.is_true(conflict_state.enabled)
+            test.eq(conflict_state.revision, 1)
+
+            local deleted, delete_err = session_repo.delete(session_id)
+            test.is_nil(delete_err)
+            test.is_true(deleted.deleted)
         end)
 
         it("should get a session by ID with user filter", function()
@@ -169,6 +371,112 @@ local function define_tests()
             test.eq(session.title, "Updated Session Title")
         end)
 
+        it("stamps start and last message dates with the current instant", function()
+            local session_id = uuid.v7()
+            local created, create_err = session_repo.create(session_id, test_data.user_id,
+                test_data.context_id, "Date stamp", "test")
+            test.is_nil(create_err)
+            local stored = session_repo.get(session_id)
+            test.is_true(is_current_instant(stored.start_date), "start_date: " .. tostring(stored.start_date))
+            test.is_true(is_current_instant(stored.last_message_date),
+                "last_message_date: " .. tostring(stored.last_message_date))
+            -- Metadata edits keep the date unless the caller names one.
+            local updated = session_repo.update_session_meta(session_id,
+                { title = "Date stamp 2", last_message_date = time.now():unix() })
+            test.is_true(is_current_instant(updated.last_message_date),
+                "updated last_message_date: " .. tostring(updated.last_message_date))
+            session_repo.delete(session_id)
+            test.not_nil(created)
+        end)
+
+        for _, change in ipairs({
+            { name = "title", updates = { title = "Renamed" } },
+            { name = "status", updates = { status = "idle" } },
+            { name = "kind", updates = { kind = "renamed-kind" } },
+            { name = "metadata", updates = { meta = { favorite = true } } },
+            { name = "config", updates = { config = { model = "changed" } } },
+            { name = "public metadata", updates = { public_meta = { label = "changed" } } },
+            { name = "empty updates", updates = {} },
+            { name = "unsupported fields", updates = { unknown = true } },
+        }) do
+            it("preserves message recency for " .. change.name, function()
+                local id = uuid.v7()
+                assert(session_repo.create(id, test_data.user_id, test_data.context_id, "Recency", "test"))
+                assert(session_repo.update_session_meta(id, { last_message_date = 946684800 }))
+                local before = assert(session_repo.get(id))
+
+                local result, update_err = session_repo.update_session_meta(id, change.updates)
+                local after = assert(session_repo.get(id))
+                assert(session_repo.delete(id))
+
+                test.is_nil(update_err)
+                test.not_nil(result)
+                test.is_true(result.updated)
+                test.is_nil(result.last_message_date, "unchanged dates are not published as updates")
+                test.eq(after.last_message_date, before.last_message_date)
+            end)
+        end
+
+        it("preserves message recency when assigning an automatic initial title", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "", "test"))
+            assert(session_repo.update_session_meta(id, { last_message_date = 946684800 }))
+            local before = assert(session_repo.get(id))
+            local updated, err = session_repo.update_initial_title(id, "Automatic title")
+            local after = assert(session_repo.get(id))
+            assert(session_repo.delete(id))
+
+            test.is_nil(err)
+            test.is_true(updated)
+            test.eq(after.title, "Automatic title")
+            test.eq(after.last_message_date, before.last_message_date)
+        end)
+
+        it("rejects no-op metadata updates for missing sessions", function()
+            for _, updates in ipairs({ {}, { unknown = true } }) do
+                local result, err = session_repo.update_session_meta(uuid.v7(), updates)
+                test.is_nil(result)
+                test.eq(err, "Session not found")
+            end
+        end)
+
+        it("keeps message ordering after renaming an older session", function()
+            local user_id, older_id, newer_id = test_data.user_id, uuid.v7(), uuid.v7()
+            assert(session_repo.create(older_id, user_id, test_data.context_id, "Older", "test"))
+            assert(session_repo.create(newer_id, user_id, test_data.context_id, "Newer", "test"))
+            assert(session_repo.update_session_meta(older_id, { last_message_date = 946684800 }))
+            assert(session_repo.update_session_meta(newer_id, { last_message_date = 978307200 }))
+
+            assert(session_repo.update_session_meta(older_id, { title = "Renamed older session" }))
+            local rows = assert(session_repo.list_by_user(user_id))
+            assert(session_repo.delete(older_id))
+            assert(session_repo.delete(newer_id))
+
+            local older_index, newer_index
+            for index, row in ipairs(rows) do
+                if row.session_id == older_id then older_index = index end
+                if row.session_id == newer_id then newer_index = index end
+            end
+            test.not_nil(older_index)
+            test.not_nil(newer_index)
+            test.is_true(newer_index < older_index)
+        end)
+
+        it("still advances message recency when a real message is persisted", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "New message", "test"))
+            assert(session_repo.update_session_meta(id, { last_message_date = 946684800 }))
+            local before = assert(session_repo.get(id))
+
+            local message, message_err = message_repo.create(uuid.v7(), id, consts.MSG_TYPE.USER, "New message")
+            local after = assert(session_repo.get(id))
+            assert(session_repo.delete(id))
+
+            test.is_nil(message_err)
+            test.not_nil(message)
+            test.is_true(after.last_message_date ~= before.last_message_date)
+        end)
+
         it("should update last message date", function()
             local timestamp = os.time() - 3600
             local result, err = session_repo.update_session_meta(
@@ -179,12 +487,12 @@ local function define_tests()
             test.is_nil(err)
             test.not_nil(result)
             test.eq(result.session_id, test_data.session_id)
-            test.eq(result.last_message_date, time.unix(timestamp, 0):format(time.RFC3339))
+            test.eq(result.last_message_date, time.unix(timestamp, 0):utc():format(time.RFC3339))
             test.is_true(result.updated)
 
             -- Verify the update
             local session, err = session_repo.get(test_data.session_id)
-            test.eq(session.last_message_date, time.unix(timestamp, 0):format(time.RFC3339))
+            test.eq(session.last_message_date, time.unix(timestamp, 0):utc():format(time.RFC3339))
         end)
 
         it("should update multiple session fields at once", function()
@@ -265,10 +573,60 @@ local function define_tests()
             test.is_nil(result)
             test.contains(tostring(err), "Session not found")
 
+            local state, attention_err = session_repo.update_attention_context(
+                "", true, 0, test_data.user_id
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_SESSION_ID")
+
+            state, attention_err = session_repo.update_attention_context(
+                test_data.session_id, "true", 0, test_data.user_id
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_ATTENTION_CONTEXT_ENABLED")
+
+            state, attention_err = session_repo.update_attention_context(
+                test_data.session_id, true, 1.5, test_data.user_id
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_ATTENTION_CONTEXT_REVISION")
+
+            state, attention_err = session_repo.update_attention_context(
+                test_data.session_id, true, 0, ""
+            )
+            test.is_nil(state)
+            test.eq(attention_err, "INVALID_ATTENTION_CONTEXT_UPDATED_BY")
+
             -- Count with invalid user ID
             local count, err_count = session_repo.count_by_user("")
             test.is_nil(count)
             test.contains(tostring(err_count), "User ID is required")
+        end)
+
+        it("rejects a metadata update when the session disappears before the write", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "Disappearing session", "test"))
+            local db_resource = consts.get_db_resource()
+            local db = assert(sql.get(db_resource))
+            local trigger = "delete_before_update_" .. id:gsub("-", "")
+            local postgres = db:type() == "postgres"
+            if postgres then
+                assert(db:execute("CREATE FUNCTION " .. trigger .. "() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN " ..
+                    "IF OLD.session_id = '" .. id .. "' THEN DELETE FROM sessions WHERE session_id = OLD.session_id; " ..
+                    "RETURN NULL; END IF; RETURN NEW; END $$"))
+                assert(db:execute("CREATE TRIGGER " .. trigger .. " BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION " .. trigger .. "()"))
+            else
+                assert(db:execute("CREATE TRIGGER " .. trigger .. " BEFORE UPDATE ON sessions WHEN OLD.session_id = '" .. id ..
+                    "' BEGIN DELETE FROM sessions WHERE session_id = OLD.session_id; SELECT RAISE(IGNORE); END"))
+            end
+            local ok, result, err = pcall(session_repo.update_session_meta, id, {title = "Not persisted"})
+            assert(db:execute("DROP TRIGGER " .. trigger .. (postgres and " ON sessions" or "")))
+            if postgres then assert(db:execute("DROP FUNCTION " .. trigger .. "()")) end
+            db:release()
+            session_repo.delete(id)
+            test.is_true(ok)
+            test.is_nil(result)
+            test.eq(err, "Session not found")
         end)
 
         it("should delete a session", function()
@@ -303,24 +661,23 @@ local function define_tests()
 
         -- session_repo.delete removes the session's artifacts, session
         -- contexts and messages, then the session row, in one tx.run. The
-        -- helpers below write those rows directly, so a test can also place
-        -- them under a session id that has no session row (the SQLite test
-        -- database does not enforce the foreign keys).
+        -- helpers below write those rows directly. Every row has a session:
+        -- PostgreSQL enforces the foreign keys, and a date is the RFC3339
+        -- text a timestamp column accepts.
         local function add_dependents(session_id)
             local db, db_err = sql.get(consts.get_db_resource())
             test.is_nil(db_err)
-            local now = os.time()
-            local stamp = time.now():format(time.RFC3339)
+            local stamp = time.now():utc():format(time.RFC3339)
             local _, artifact_err = db:execute(
                 "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at)"
                     .. " VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 { uuid.v7(), session_id, test_data.user_id, "static", "Delete test", "content", nil, stamp, stamp })
             local _, context_err = db:execute(
                 "INSERT INTO session_contexts (id, session_id, type, text, time) VALUES ($1, $2, $3, $4, $5)",
-                { uuid.v7(), session_id, "note", "Delete test", now })
+                { uuid.v7(), session_id, "note", "Delete test", stamp })
             local _, message_err = db:execute(
                 "INSERT INTO messages (message_id, session_id, date, type, data, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
-                { uuid.v7(), session_id, now, "user", "Delete test", "{}" })
+                { uuid.v7(), session_id, stamp, "user", "Delete test", "{}" })
             db:release()
             test.is_nil(artifact_err)
             test.is_nil(context_err)
@@ -368,12 +725,47 @@ local function define_tests()
             test.eq(after.sessions, 0)
         end)
 
-        it("rolls back the dependent deletes when the session row is missing", function()
+        -- Makes the delete of one session row affect no row, the way a delete
+        -- that lost a race for the row does. The foreign keys forbid dependents
+        -- without a session, so a trigger stands in for the vanished row.
+        -- Returns a function that removes the trigger.
+        local function keep_session_row(session_id)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local name = "session_test_keep_" .. string.gsub(session_id, "[^%w]", "_")
+            local statements = {}
+            if db:type() == "postgres" then
+                statements = {
+                    "CREATE OR REPLACE FUNCTION session_test_skip_delete() RETURNS trigger AS $body$ BEGIN RETURN NULL; END; $body$ LANGUAGE plpgsql",
+                    string.format("CREATE TRIGGER %s BEFORE DELETE ON sessions FOR EACH ROW WHEN (OLD.session_id = '%s') EXECUTE FUNCTION session_test_skip_delete()", name, session_id),
+                }
+            else
+                statements = {
+                    string.format("CREATE TRIGGER %s BEFORE DELETE ON sessions WHEN old.session_id = '%s' BEGIN SELECT RAISE(IGNORE); END", name, session_id),
+                }
+            end
+            for _, statement in ipairs(statements) do
+                local _, trigger_err = db:execute(statement)
+                test.is_nil(trigger_err)
+            end
+            db:release()
+            return function()
+                local cleanup_db = assert(sql.get(consts.get_db_resource()))
+                cleanup_db:execute("DROP TRIGGER IF EXISTS " .. name .. " ON sessions")
+                cleanup_db:release()
+            end
+        end
+
+        it("rolls back the dependent deletes when the session row delete affects no row", function()
             local session_id = uuid.v7()
+            test.is_nil(select(2, session_repo.create(session_id, test_data.user_id, test_data.context_id,
+                "Delete without a row", "test")))
             add_dependents(session_id)
+            local drop_trigger = keep_session_row(session_id)
 
             local result, err = session_repo.delete(session_id)
             local after = rows_of(session_id)
+            drop_trigger()
             remove_rows(session_id)
 
             test.is_nil(result)
@@ -381,6 +773,7 @@ local function define_tests()
             test.eq(after.artifacts, 1, "the artifact delete was rolled back")
             test.eq(after.session_contexts, 1, "the session context delete was rolled back")
             test.eq(after.messages, 1, "the message delete was rolled back")
+            test.eq(after.sessions, 1, "the session row is still there")
         end)
 
         it("refuses to run inside another transaction and deletes nothing", function()
@@ -576,6 +969,55 @@ local function define_tests()
 
             test.is_nil(missing_status)
             test.contains(tostring(status_err), "Status is required")
+        end)
+        it("sets an automatic title only once across independent writers", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "", "test"))
+            local done = channel.new(2)
+            for _, title in ipairs({ "First automatic", "Second automatic" }) do
+                coroutine.spawn(function()
+                    local updated, err = session_repo.update_initial_title(id, title)
+                    done:send({ updated = updated, err = err })
+                end)
+            end
+            local applied = 0
+            for _ = 1, 2 do
+                local result = done:receive()
+                test.is_nil(result.err)
+                if result.updated then applied = applied + 1 end
+            end
+            test.eq(applied, 1)
+            local stored = assert(session_repo.get(id, test_data.user_id))
+            test.is_true(stored.title == "First automatic" or stored.title == "Second automatic")
+            assert(session_repo.update_session_meta(id, { title = "Manual afterwards" }))
+            test.eq(assert(session_repo.get(id, test_data.user_id)).title, "Manual afterwards")
+            session_repo.delete(id)
+        end)
+
+        it("preserves a rename between an initial read and automatic admission", function()
+            local id = uuid.v7()
+            assert(session_repo.create(id, test_data.user_id, test_data.context_id, "", "test", { marker = "kept" }))
+            test.eq(assert(session_repo.get(id, test_data.user_id)).title, "")
+            assert(session_repo.update_session_meta(id, { title = "Manual winner" }))
+            local updated, err = session_repo.update_initial_title(id, "Late automatic")
+            test.is_nil(err)
+            test.is_false(updated)
+            local stored = assert(session_repo.get(id, test_data.user_id))
+            test.eq(stored.title, "Manual winner")
+            test.eq(stored.meta.marker, "kept")
+            session_repo.delete(id)
+        end)
+
+        it("handles missing sessions and invalid initial titles without a write", function()
+            local updated, err = session_repo.update_initial_title(uuid.v7(), "Not persisted")
+            test.is_nil(err)
+            test.is_false(updated)
+            updated, err = session_repo.update_initial_title("", "Not persisted")
+            test.is_nil(updated)
+            test.eq(err, "Session ID is required")
+            updated, err = session_repo.update_initial_title(uuid.v7(), "")
+            test.is_nil(updated)
+            test.eq(err, "Title cannot be empty")
         end)
     end)
 end

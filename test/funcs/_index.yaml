@@ -3,6 +3,21 @@ namespace: app.funcs
 
 # Suites for src/funcs/.
 entries:
+  - name: title_test
+    kind: function.lua
+    meta:
+      name: Title conversation input
+      type: test
+      suite: session
+      comment: Positional notes stay out of the conversation a title is generated from
+    source: file://title_test.lua
+    imports:
+      title: wippy.session.funcs:title
+      llm: wippy.llm:llm
+      session: wippy.session.persist:reader
+      test: wippy.test:test
+    method: run_tests
+
   - name: checkpoint_test
     kind: function.lua
     meta:

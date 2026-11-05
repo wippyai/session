@@ -629,3 +629,45 @@ describe('QuestionCardActive: ARIA attributes stay on roles that support them', 
     expect(offenders(wrapper.element)).toEqual([])
   })
 })
+
+describe('QuestionCardActive: Enter in an empty Other box says why nothing was sent', () => {
+  const OTHER_EMPTY_ERROR = 'Type your answer, or choose another option.'
+
+  it('shows the reason as the question\'s alert, keeps focus in the box, and sends nothing', async () => {
+    const wrapper = mountCard(singleDef)
+    const other = wrapper.find('textarea.w-form__other-input')
+    ;(other.element as HTMLTextAreaElement).focus()
+    await other.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(announcersSaying(wrapper.element, OTHER_EMPTY_ERROR)).toHaveLength(1)
+    expect(describedText(wrapper.element, other.element)).toContain(OTHER_EMPTY_ERROR)
+    expect(other.attributes('aria-invalid')).toBe('true')
+    expect(document.activeElement).toBe(other.element)
+  })
+
+  it('treats whitespace as empty, and clears the reason once the reader types', async () => {
+    const wrapper = mountCard(singleDef)
+    const other = wrapper.find('textarea.w-form__other-input')
+    await other.setValue('   ')
+    await other.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(wrapper.text()).toContain(OTHER_EMPTY_ERROR)
+    expect(wrapper.emitted('submit')).toBeUndefined()
+
+    await other.setValue('mine')
+    expect(wrapper.text()).not.toContain(OTHER_EMPTY_ERROR)
+    await other.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('submit')?.[0]).toEqual([{ f1: { other: 'mine' } }])
+  })
+
+  it('asks a several-answer question to tick one or type, with nothing chosen', async () => {
+    const wrapper = mountCard(multiDef)
+    await wrapper.find('textarea.w-form__other-input').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(TICK_ERROR)
+    expect(wrapper.emitted('submit')).toBeUndefined()
+  })
+})

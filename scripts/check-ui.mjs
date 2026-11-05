@@ -3,7 +3,7 @@
 //
 // Modeled on the Host's scripts/check-import-map-drift.mjs. It fails when a
 // hand-maintained copy of some data disagrees with its source of truth. It
-// runs two independent checks:
+// runs three independent checks:
 //
 //   (a) Dist check. The committed src/forms/ui/dist (wippy-form) and
 //       src/forms/ui/answers-dist (wippy-form-answers) bundles must match a
@@ -17,6 +17,11 @@
 //       package.json at load time (see the comment at the top of
 //       _index.yaml). The check fails when the copy disagrees with the
 //       package.json it was copied from.
+//
+//   (c) Publish manifest check. The module manifest (src/wippy.yaml) must
+//       list every fs.directory entry under src/ in `embed:`, so the
+//       published pack ships the bundles, and no second manifest may sit at
+//       the repository root (see checkPublishManifest).
 //
 // The metadata is checked rather than generated because _index.yaml is a
 // hand-authored, commented config file. Its registry entries must carry the
@@ -34,6 +39,9 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const INDEX_YAML_PATH = join(root, 'src/forms/ui/_index.yaml')
+const SRC_DIR = join(root, 'src')
+const MANIFEST_PATH = join(SRC_DIR, 'wippy.yaml')
+const REPO_MANIFEST_PATH = join(root, 'wippy.yaml')
 
 // The temp build output lives under src/forms/ui/, beside the real dist and
 // answers-dist directories and at the same depth under the repo root, and
@@ -186,14 +194,16 @@ function compareDist(pkg) {
 // (b) metadata drift: _index.yaml vs. package.json
 // ---------------------------------------------------------------------
 
-function loadYaml() {
-  let yaml
+function loadJsYaml() {
   try {
-    yaml = createRequire(join(YAML_OWNER.dir, 'package.json'))('js-yaml')
+    return createRequire(join(YAML_OWNER.dir, 'package.json'))('js-yaml')
   }
   catch (err) {
     throw new Error(`check-ui: cannot load js-yaml from ${YAML_OWNER.dirRel} (run \`npm ci\` there): ${err.message}`)
   }
+}
+
+function loadYaml(yaml) {
   return yaml.load(readFileSync(INDEX_YAML_PATH, 'utf8'))
 }
 
@@ -242,6 +252,65 @@ function checkMetadata(pkg, indexYaml) {
 }
 
 // ---------------------------------------------------------------------
+// (c) publish manifest: the bundles must reach the published pack
+// ---------------------------------------------------------------------
+
+// `wippy publish` packs the module from the directory that holds wippy.yaml,
+// and resolves a `base: module` fs.directory against that same directory. A
+// pack keeps the contents of an fs.directory entry only when the manifest's
+// `embed:` list (or --embed) names the entry. Without it the pack still
+// carries the entry but not its files, so a published module serves no
+// component bundle and nothing fails at publish time. A manifest above src/
+// resolves `forms/ui/dist` to a directory that does not exist and fails the
+// pack as soon as the entries are embedded; src/ is also the module root a
+// workspace replacement of this checkout resolves from.
+function checkPublishManifest(yaml) {
+  if (existsSync(REPO_MANIFEST_PATH)) {
+    errors.push('publish (wippy.yaml): the manifest sits above src/, so `wippy publish` resolves base: module directories against the repository root instead of src/. Keep it in src/wippy.yaml and publish with --config <checkout>/src')
+  }
+  if (!existsSync(MANIFEST_PATH)) {
+    errors.push('publish (src/wippy.yaml): the module manifest is missing')
+    return
+  }
+  const manifest = yaml.load(readFileSync(MANIFEST_PATH, 'utf8')) || {}
+  const embedded = Array.isArray(manifest.embed) ? manifest.embed : []
+
+  const directories = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (entry.name !== '_index.yaml')
+        continue
+      const doc = yaml.load(readFileSync(full, 'utf8')) || {}
+      for (const item of Array.isArray(doc.entries) ? doc.entries : []) {
+        if (item && item.kind === 'fs.directory')
+          directories.push({ id: `${doc.namespace}:${item.name}`, item, file: relative(root, full).split(sep).join('/') })
+      }
+    }
+  }
+  walk(SRC_DIR)
+
+  const known = new Set(directories.map(d => d.id))
+  for (const { id, item, file } of directories) {
+    if (!embedded.includes(id))
+      errors.push(`publish (src/wippy.yaml): fs.directory "${id}" (${file}) is not in \`embed:\`, so the published pack would omit its files`)
+    if (item.base === 'module' && !(existsSync(join(SRC_DIR, item.directory)) && readdirSync(join(SRC_DIR, item.directory)).length))
+      errors.push(`publish (${file}): "${id}" directory "${item.directory}" is missing or empty under src/`)
+  }
+  for (const id of embedded) {
+    if (!known.has(id))
+      errors.push(`publish (src/wippy.yaml): \`embed:\` names "${id}", which is not an fs.directory entry under src/`)
+  }
+}
+
+// ---------------------------------------------------------------------
+
+const jsYaml = loadJsYaml()
+checkPublishManifest(jsYaml)
 
 for (const pkg of PACKAGES) {
   try {
@@ -254,7 +323,7 @@ for (const pkg of PACKAGES) {
   }
 }
 
-const indexYaml = loadYaml()
+const indexYaml = loadYaml(jsYaml)
 for (const pkg of PACKAGES)
   checkMetadata(pkg, indexYaml)
 
@@ -266,4 +335,4 @@ if (errors.length) {
   process.exit(1)
 }
 
-console.log('✓ check-ui passed: dist/answers-dist match a fresh build, and _index.yaml metadata matches package.json')
+console.log('✓ check-ui passed: dist/answers-dist match a fresh build, _index.yaml metadata matches package.json, and src/wippy.yaml embeds the bundles')

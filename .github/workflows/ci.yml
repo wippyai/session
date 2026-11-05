@@ -1,27 +1,46 @@
 name: CI
 
 on:
-  push:
-    branches: [master]
   pull_request:
-    branches: [master]
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  WIPPY_TEST_REQUIRE_ADMISSION: "1"
+  FRAMEWORK_REF: bc903313d0854f96114b3ea9d03d2ee34569cb5d
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: session
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wippy
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
         run: |
-          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
-          . /tmp/wippy-install.sh
-          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-lint" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: make install
@@ -30,7 +49,7 @@ jobs:
         run: make lint
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
 
@@ -43,14 +62,28 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: session
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Wippy
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
         run: |
-          curl -fsSL https://hub.wippy.ai/install.sh -o /tmp/wippy-install.sh
-          . /tmp/wippy-install.sh
-          echo "$HOME/.wippy/bin" >> $GITHUB_PATH
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-compatibility" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: make install
@@ -59,9 +92,89 @@ jobs:
         run: make test
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
 
       - name: Test UI packages
         run: make test-ui
+
+  runtime:
+    name: Required runtime handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: session
+    env:
+      FRAMEWORK_DIR: ${{ github.workspace }}/framework
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
+        run: |
+          echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-runtime" >> "$GITHUB_ENV"
+          echo "TEST_BACKUP_DIR=$RUNNER_TEMP/backups/session" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
+      - name: Install candidate dependencies
+        run: make install
+      - name: Lint candidate
+        run: make lint
+      - name: Verify runtime handoff
+        run: make test-runtime
+
+  postgres:
+    name: PostgreSQL persistence and handoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: session
+    env:
+      FRAMEWORK_DIR: ${{ github.workspace }}/framework
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: session_test
+          POSTGRES_USER: kickside
+          POSTGRES_PASSWORD: kickside
+        ports: [5433:5432]
+        options: >-
+          --health-cmd "pg_isready -U kickside -d session_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: session
+          persist-credentials: false
+      - name: Configure external test paths
+        run: echo "TEST_ARTIFACTS=$RUNNER_TEMP/session-postgres" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wippyai/framework
+          ref: ${{ env.FRAMEWORK_REF }}
+          path: framework
+          persist-credentials: false
+      - uses: ./framework/.github/actions/setup-wippy
+        id: runtime
+      - run: dirname "${{ steps.runtime.outputs.path }}" >> "$GITHUB_PATH"
+      - name: Verify PostgreSQL persistence and handoff
+        run: make test-postgres-full
+      - name: Verify timestamp persistence outside UTC
+        run: |
+          make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.persist:utc_timestamp_test
+          make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.process:attention_history_test
+          make test-postgres TEST_TIMEZONE=America/New_York POSTGRES_TEST_FILTER=app.persist:utc_timestamp_test

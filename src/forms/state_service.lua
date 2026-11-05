@@ -128,23 +128,54 @@ local function load_form(user_id, artifact_id)
     return artifact, form
 end
 
--- How many rows after an answer are read to look for the agent's reply.
-local REPLY_SCAN_LIMIT = 50
+-- Page size for the existing message-store cursor API. A full page is not
+-- evidence that the agent replied.
+local REPLY_PAGE_SIZE = 50
 
--- A reply is assistant text, or a turn that ended by asking a new form. Tool
--- calls alone are not: a turn that crashed or was stopped after one did not
--- answer.
+-- A reply is assistant text, an assistant row that carries only an inline
+-- artifact (metadata.presentation), or a turn that ended by asking a new form.
+-- Tool calls alone are not: a turn that crashed or was stopped after one did
+-- not answer. Text cut off by Stop (metadata.stopped) is not a reply either.
 local function is_reply(row)
+    local meta = type(row.metadata) == "table" and row.metadata or {}
     if row.type == consts.MSG_TYPE.ASSISTANT then
-        return type(row.data) == "string" and string.find(row.data, "%S") ~= nil
+        if meta.stopped == true then return false end
+        return type(meta.presentation) == "table"
+            or (type(row.data) == "string" and string.find(row.data, "%S") ~= nil)
     end
     if row.type == consts.MSG_TYPE.FUNCTION then
-        local meta = type(row.metadata) == "table" and row.metadata or {}
         local operations = type(meta.control_operations) == "table" and meta.control_operations or {}
         return meta.status == consts.FUNC_STATUS.SUCCESS
             and type(operations.forms) == "table" and #operations.forms > 0
     end
     return false
+end
+
+-- Whether a row shows that its turn was cut short, so the text before it did
+-- not finish that turn: the note a failed or limited turn writes, the boundary
+-- a Stop or a recovery writes, a call Stop cancelled, a call recovery settled
+-- with an unknown outcome, or a call still pending, which delivery_of reaches
+-- only with no turn running: a crash that nothing has repaired yet.
+local function is_cut_short(row)
+    local meta = type(row.metadata) == "table" and row.metadata or {}
+    if meta.system_action == consts.SYSTEM_ACTIONS.TURN_FAILED
+        or meta.system_action == consts.SYSTEM_ACTIONS.TURN_LIMIT then
+        return true
+    end
+    if row.type == consts.MSG_TYPE.DEVELOPER then return type(meta.interruption) == "table" end
+    if row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+        or row.type == consts.MSG_TYPE.DELEGATION then
+        return meta.status == consts.FUNC_STATUS.CANCELLED or meta.status == consts.FUNC_STATUS.PENDING
+            or (meta.status == consts.FUNC_STATUS.ERROR and meta.result == message_repo.INTERRUPTED_RESULT)
+    end
+    return false
+end
+
+-- A user row that starts another turn. Steering belongs to the running turn,
+-- and a pending answer starts nothing until it is admitted.
+local function starts_turn(row)
+    local meta = type(row.metadata) == "table" and row.metadata or {}
+    return row.type == consts.MSG_TYPE.USER and meta.input == nil and not message_repo.is_pending_answer(row)
 end
 
 -- Whether other user input was accepted after the form was created: the
@@ -161,9 +192,11 @@ end
 
 -- Delivery of an accepted answer, derived from the rows (no stored state):
 --   pending      the answer row waits for admission
---   complete     admitted, and the agent has replied after it
---   running      admitted, no reply yet, and a live session process is
---                running a turn
+--   complete     admitted, and the agent has replied after it in a turn that
+--                is over and was not cut short
+--   running      admitted, and a live session process is running the turn
+--                that answers it, which can still be cut short after a
+--                reply. Clients keep listening for this one.
 --   interrupted  admitted, no reply, and no turn is running: the user
 --                stopped the turn (the answer is delivered; a new message
 --                continues), or it crashed before answering (the stored
@@ -177,13 +210,26 @@ local function delivery_of(submission, session_id)
     if not row then return "interrupted", nil end
     if message_repo.is_pending_answer(row) then return "pending", nil end
 
-    -- The newest rows after the answer (the answer row among them when few
-    -- follow). A full page means the conversation went on long after it.
-    local later, list_err = message_repo.list_after_message(session_id, row.message_id, REPLY_SCAN_LIMIT)
-    if not later then return nil, tostring(list_err) end
-    if #later >= REPLY_SCAN_LIMIT then return "complete", nil end
-    for _, candidate in ipairs(later) do
-        if candidate.message_id ~= row.message_id and is_reply(candidate) then return "complete", nil end
+    -- Read forward from the admitted answer through the store's existing
+    -- cursor API. Only a real reply supplies completion; tool-only pages
+    -- continue through the canonical cursor without a guessed row-count cutoff.
+    -- A reply counts once its turn is known not to be cut short: the rest of
+    -- the turn is read up to the next turn or the end of the history.
+    local cursor = row.message_id
+    local replied = false
+    while true do
+        local page, list_err = message_repo.list_by_session(session_id, REPLY_PAGE_SIZE, cursor, "after")
+        if not page then return nil, tostring(list_err) end
+        for _, candidate in ipairs(page.messages) do
+            if replied and starts_turn(candidate) then return "complete", nil end
+            if is_cut_short(candidate) then
+                replied = false
+            elseif is_reply(candidate) then
+                replied = true
+            end
+        end
+        if not page.has_more then break end
+        cursor = page.prev_cursor
     end
     -- A stored "running" status with no live session process is a stopped
     -- turn, not a running one (session_status).
@@ -191,6 +237,7 @@ local function delivery_of(submission, session_id)
     if not session then return nil, tostring(session_err) end
     local status = session_status.effective(session, state_service._lookup_session)
     if status == consts.STATUS.RUNNING then return "running", nil end
+    if replied then return "complete", nil end
     return "interrupted", nil
 end
 
@@ -368,16 +415,6 @@ function state_service.submit(user_id, artifact_id, raw_body)
     if expected_version ~= nil and (artifact.content_version or 1) ~= expected_version then
         return failure(409, "version_conflict", "The form changed since it was loaded.", conflict_extra(artifact))
     end
-    local normalized, field_errors, form_errors = definition.validate_answers(form.definition, envelope.answers)
-    if not normalized then
-        if form_errors and form_errors[1].code == "internal" then
-            -- The form itself cannot be checked (a stored pattern that no
-            -- longer compiles): nothing the user can fix.
-            return failure(500, "internal", "This form cannot be checked right now.")
-        end
-        return 422, validation_body(field_errors, form_errors)
-    end
-
     local message_id, id_err = state_service._new_message_id()
     if not message_id then return internal_failure("Failed to create the answer id", id_err) end
     local session_id = artifact.session_id
@@ -406,13 +443,26 @@ function state_service.submit(user_id, artifact_id, raw_body)
             return nil, { version_conflict = current }
         end
 
+        -- Normalize under the acceptance lock so the pending answer and
+        -- artifact submission can only be committed for the definition that
+        -- this transaction actually accepts.
+        local current_normalized, current_field_errors, current_form_errors =
+            definition.validate_answers(current_form.definition, envelope.answers)
+        if not current_normalized then
+            return nil, {
+                validation_failed = true,
+                field_errors = current_field_errors,
+                form_errors = current_form_errors,
+            }
+        end
+
         local late, stale_err = moved_on(current, current_form.meta, { tx = dbtx })
         if stale_err then return nil, tostring(stale_err) end
 
         local text = answer_text.build({
             artifact_id = current.artifact_id,
             definition = current_form.definition,
-            answers = normalized,
+            answers = current_normalized,
             late = late,
         })
         -- The row's marker: which form it answers, and that the session has
@@ -422,14 +472,14 @@ function state_service.submit(user_id, artifact_id, raw_body)
                 artifact_id = current.artifact_id,
                 pending = true,
             },
-        }, { tx = dbtx })
+        }, nil, nil, nil, { tx = dbtx })
         if message_err then return nil, tostring(message_err) end
 
         local content, content_err = form_artifact.content_with_state(current_form, consts.ARTIFACT_STATUS.IDLE)
         if not content then return nil, content_err end
         local record = form_meta.with_submission(current_form.meta, {
             request_id = request_id,
-            answers = normalized,
+            answers = current_normalized,
             -- The answer row's own date: its place in the input order.
             submitted_at = stored.date,
             message_id = message_id,
@@ -455,6 +505,15 @@ function state_service.submit(user_id, artifact_id, raw_body)
     if not accepted then
         if type(accept_err) == "table" then
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
+            if accept_err.validation_failed then
+                local form_errors = accept_err.form_errors
+                if form_errors and form_errors[1] and form_errors[1].code == "internal" then
+                    -- The form itself cannot be checked (a stored pattern that
+                    -- no longer compiles): nothing the user can fix.
+                    return failure(500, "internal", "This form cannot be checked right now.")
+                end
+                return 422, validation_body(accept_err.field_errors, form_errors)
+            end
             if accept_err.existing then
                 return against_existing(accept_err.existing, accept_err.form,
                     form_meta.submission(accept_err.form.meta), request_id, envelope.answers)

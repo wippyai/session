@@ -22,6 +22,9 @@ entries:
     modules:
       - time
       - sql
+    imports:
+      tx: wippy.session.persist:tx
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:artifact_projection
   - name: artifact_projection
@@ -43,6 +46,13 @@ entries:
     imports:
       artifact_projection: wippy.session.persist:artifact_projection
 
+  - name: context_staging_repo
+    kind: library.lua
+    source: file://context_staging_repo.lua
+    modules: [sql, json, hash, uuid, time]
+    imports:
+      consts: wippy.session:consts
+
   # wippy.session.persist:writer
   - name: writer
     kind: library.lua
@@ -54,11 +64,21 @@ entries:
       - json
       - security
     imports:
+      checkpoint_repo: wippy.session.persist:checkpoint_repo
       session_repo: wippy.session.persist:session_repo
       message_repo: wippy.session.persist:message_repo
       artifact_repo: wippy.session.persist:artifact_repo
       context_repo: wippy.session.persist:context_repo
       session_contexts_repo: wippy.session.persist:session_contexts_repo
+
+  - name: checkpoint_repo
+    kind: library.lua
+    meta:
+      comment: Atomic persistence of a session checkpoint
+    source: file://checkpoint_repo.lua
+    modules: [sql, json, time]
+    imports:
+      consts: wippy.session:consts
 
   # wippy.session.persist:artifact_repo
   - name: artifact_repo
@@ -73,6 +93,7 @@ entries:
       - time
     imports:
       tx: wippy.session.persist:tx
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:context_repo
   - name: context_repo
@@ -86,6 +107,13 @@ entries:
     imports:
       consts: wippy.session:consts
 
+  - name: message_order
+    kind: library.lua
+    meta:
+      comment: Chronological message comparison keys without changing stored dates
+    source: file://message_order.lua
+    modules: [time]
+
   # wippy.session.persist:message_repo
   - name: message_repo
     kind: library.lua
@@ -96,11 +124,13 @@ entries:
       - sql
       - json
     imports:
+      context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
       tx: wippy.session.persist:tx
       message_date: wippy.session.persist:message_date
       input_metadata: wippy.session:input_metadata
       form_meta: wippy.session.forms:form_meta
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo
@@ -127,6 +157,7 @@ entries:
       - time
     imports:
       tx: wippy.session.persist:tx
+      message_order: wippy.session.persist:message_order
 
   # wippy.session.persist:reader
   - name: reader
@@ -144,3 +175,4 @@ entries:
       artifact_repo: wippy.session.persist:artifact_repo
       session_contexts_repo: wippy.session.persist:session_contexts_repo
       context_repo: wippy.session.persist:context_repo
+      message_order: wippy.session.persist:message_order

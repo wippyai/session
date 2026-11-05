@@ -1,5 +1,198 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* Preserve manual session names during automatic title generation. Running sessions publish both title paths through the existing owner using the stored title; renaming a stopped session persists without starting it.
+* Keep the originating user-request text in prompts after a mid-turn checkpoint, alongside the summary and newest tool results. Preserve user authority, avoid reloading summarized attachments, and keep later user turns distinct from the checkpointed request. Bound restored excerpts to 6000 UTF-8 bytes while retaining both ends, and place the original task before retained steering even when its anchor is unavailable. The resume note preserves later corrections and completed progress.
+* When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
+* PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
+
+## [0.6.19](https://github.com/wippyai/session/compare/v0.6.18...v0.6.19) (2026-11-04)
+
+
+### Bug Fixes
+
+* let an agent's checkpoint options beat the session default ([#111](https://github.com/wippyai/session/issues/111)) ([ee30d96](https://github.com/wippyai/session/commit/ee30d96789c3478b91f061cec4fcd7386235406d))
+
+## [0.6.18](https://github.com/wippyai/session/compare/v0.6.17...v0.6.18) (2026-11-04)
+
+
+### Features
+
+* adopt the stable request prefix ([#107](https://github.com/wippyai/session/issues/107)) ([a35f07f](https://github.com/wippyai/session/commit/a35f07f381a7f10c3446c44eaa5da12036c8b39e))
+
+
+### Bug Fixes
+
+* keep compaction safe and prompt reads bounded ([#108](https://github.com/wippyai/session/issues/108)) ([09e5498](https://github.com/wippyai/session/commit/09e5498957077e2d577d9d9f9111fc1766816503))
+
+## [0.6.17](https://github.com/wippyai/session/compare/v0.6.16...v0.6.17) (2026-10-30)
+
+
+### Bug Fixes
+
+* persist session timestamps in UTC ([#105](https://github.com/wippyai/session/issues/105)) ([a1c7cb0](https://github.com/wippyai/session/commit/a1c7cb0a0bf8427091ce559e00306be577bb9218))
+
+## [0.6.16](https://github.com/wippyai/session/compare/v0.6.15...v0.6.16) (2026-10-28)
+
+### Bug Fixes
+
+* Persist and publish standalone artifact references immediately while a tool call is running, preserving their place in conversation history ([#103](https://github.com/wippyai/session/pull/103)).
+* Carry inline artifact references as server-owned `presentation.artifact_refs` metadata on the next terminal assistant record and live CONTENT update. Preserve references across tool rounds and truncated responses, clear them for a new turn, and reject model-supplied presentation references ([#97](https://github.com/wippyai/session/pull/97)).
+
+### Client compatibility
+
+* Inline fallback display requires a renderer that consumes `presentation.artifact_refs` and deduplicates references against successfully rendered authored artifact tags. This backend release does not add that renderer; existing clients continue using authored tags and standalone artifact messages.
+
+## [0.6.15](https://github.com/wippyai/session/compare/v0.6.14...v0.6.15) (2026-10-27)
+
+
+### Bug Fixes
+
+* **session:** preserve outgoing history across agent handoffs ([6d17020](https://github.com/wippyai/session/commit/6d17020cce699b3a4460a38a6efbf976d8a0af7e))
+
+## [0.6.14](https://github.com/wippyai/session/compare/v0.6.13...v0.6.14) (2026-10-26)
+
+
+### Bug Fixes
+
+* **session:** report non-strict lifecycle failures without blocking the host ([#98](https://github.com/wippyai/session/issues/98)) ([312e8cc](https://github.com/wippyai/session/commit/312e8ccea744e959a22582f928de76e8bf080de6))
+
+## [0.6.13](https://github.com/wippyai/session/compare/v0.6.12...v0.6.13) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** preserve the task across outgoing checkpoints ([#88](https://github.com/wippyai/session/issues/88)) ([5f970bd](https://github.com/wippyai/session/commit/5f970bd5eb3a4e48aeb74a2937d96838eb9ba096))
+
+## [0.6.12](https://github.com/wippyai/session/compare/v0.6.11...v0.6.12) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** preserve message recency on metadata edits ([#92](https://github.com/wippyai/session/issues/92)) ([c4a168b](https://github.com/wippyai/session/commit/c4a168b1724b7d4c019ded9f45a7199a0a498635))
+* **session:** retain checkpoint binding diagnostics ([#93](https://github.com/wippyai/session/issues/93)) ([2e1480b](https://github.com/wippyai/session/commit/2e1480ba3151815020cd192fc38eb468f2b0791f))
+
+## [0.6.11](https://github.com/wippyai/session/compare/v0.6.10...v0.6.11) (2026-10-22)
+
+
+### Bug Fixes
+
+* **session:** report pre-start session exits as start failures ([#90](https://github.com/wippyai/session/issues/90)) ([17fec9d](https://github.com/wippyai/session/commit/17fec9d5610cd00e35f432d5d5dbc9fc994847ea))
+
+## [0.6.10](https://github.com/wippyai/session/compare/v0.6.9...v0.6.10) (2026-10-22)
+
+
+### Features
+
+* **process:** dispatch after_persist and report recall failures ([#89](https://github.com/wippyai/session/issues/89)) ([1a30458](https://github.com/wippyai/session/commit/1a30458d7ea79805ebb1833ed0282c8fa99a6ea2))
+
+
+### Bug Fixes
+
+* pass session context to agent usage tracking ([#83](https://github.com/wippyai/session/issues/83)) ([2a9521c](https://github.com/wippyai/session/commit/2a9521c6fbbd9ffea488b10db19edbc13c219a99))
+* **session:** return committed Attention state and validate full PostgreSQL suite ([#86](https://github.com/wippyai/session/issues/86)) ([409b631](https://github.com/wippyai/session/commit/409b63105641acd6fcef53bfef5bf223e4802517))
+
+## [0.6.9](https://github.com/wippyai/session/compare/v0.6.8...v0.6.9) (2026-10-20)
+
+
+### Features
+
+* keep the route pinned by an llm fallback for the rest of the turn ([fbe2e84](https://github.com/wippyai/session/commit/fbe2e845d9896101f32356532a7910b9a2e8c8cc))
+* **session:** apply agent behavior controls after tool settlement ([#40](https://github.com/wippyai/session/issues/40)) ([e9d3dd2](https://github.com/wippyai/session/commit/e9d3dd29846c064cdb5de7424a676e5fb32e6e37))
+* **session:** send outcome cancelled on cancelled function_error events ([555d61b](https://github.com/wippyai/session/commit/555d61b1f5929342f57df9e2e12bde5d5a79b893))
+
+
+### Bug Fixes
+
+* clear pinned routes after committed model switches ([def8fbb](https://github.com/wippyai/session/commit/def8fbbb0263f2107388df42924759806fbc627b))
+* close stopped steps through the lifecycle hooks ([5182fbb](https://github.com/wippyai/session/commit/5182fbbd10f7d9fe301d9af153a6fa9cf890c760))
+* persist checkpoint state atomically ([4280dad](https://github.com/wippyai/session/commit/4280dadb05b09348a449d81d47b19bf47450c38c))
+* persist checkpoint state atomically ([c1182af](https://github.com/wippyai/session/commit/c1182afe82562c3af8e1b337bf6f70fa7fe47ed5))
+* preserve end-hook status for deleted sessions ([f24631c](https://github.com/wippyai/session/commit/f24631ccd1cffa50e3ffcce4da873ac972cf0185))
+* preserve explicitly named session titles ([42ac5fb](https://github.com/wippyai/session/commit/42ac5fbaa0539d0b9a6e4a6c11b631ff1870080f))
+* publish all titles through the owner and allow offline renames ([b04304d](https://github.com/wippyai/session/commit/b04304dfba29d69151dbec7e0aa2c505cc1c3c41))
+* publish authoritative session state for delayed external events ([2b02223](https://github.com/wippyai/session/commit/2b02223a99403fc178de1e62c0d9683dc572e987))
+* require Agent 0.5.5 for complete checkpoint continuation ([b06a379](https://github.com/wippyai/session/commit/b06a37905f269343ad29d77fd73ee1d20c810652))
+* require Agent memory labeling for checkpoint continuation ([30fbe96](https://github.com/wippyai/session/commit/30fbe96a45b0de88c27bcb8be6bcb5d64bf045ba))
+* retain canonical lifecycle finish and clarify explicit continuation ([d52c9c1](https://github.com/wippyai/session/commit/d52c9c159480010e2498534e3b515b844b2fb104))
+* retire deleted session owners without recovery notices ([1c8fb10](https://github.com/wippyai/session/commit/1c8fb10225d54a74762f1d7de37479860d765304))
+* retire deleted session owners without recovery notices ([52a4a9a](https://github.com/wippyai/session/commit/52a4a9a83866d7335fac7f29208155e2a364333f))
+* **session:** cancel in-flight model and tool calls on Stop ([0798126](https://github.com/wippyai/session/commit/079812607eac76a0ce0161bc72474ef18425c3ec))
+* **session:** cancel in-flight model and tool calls on Stop ([714d733](https://github.com/wippyai/session/commit/714d733d4da120eaed211f5d987c473773f20774))
+* **session:** preserve Stop and recovery intent in subsequent prompts ([321cf12](https://github.com/wippyai/session/commit/321cf1288dddd90837de2b14071748f8df3178da))
+* **session:** preserve task ordering and bound checkpoint excerpts ([599b1b4](https://github.com/wippyai/session/commit/599b1b42629834c26cdb25286874098a93397a0f))
+* **session:** retain the active user request across checkpoints ([a0c322a](https://github.com/wippyai/session/commit/a0c322a40a00baed48b5cbd1157c88fde4aeecf6))
+* **session:** retain the user task across mid-turn checkpoints ([485bc9f](https://github.com/wippyai/session/commit/485bc9f551838d37c854a1a6e6b014c1d0f8093e))
+* **session:** send only outcome on cancelled function_error events ([#82](https://github.com/wippyai/session/issues/82)) ([9a579cf](https://github.com/wippyai/session/commit/9a579cf343df3b2fe7641129aa5c27f4864effff))
+* **session:** unify title updates and preserve offline renames ([807f73c](https://github.com/wippyai/session/commit/807f73cfef343956ff9741e0ca9d40c9c9458eda))
+
+## [0.6.8](https://github.com/wippyai/session/compare/v0.6.7...v0.6.8) (2026-10-14)
+
+
+### Bug Fixes
+
+* Disconnect, chat close, inactivity, and session-capacity retirement let accepted turns finish and persist their model, tool, and handoff results before exit. Reconnecting cancels pending retirement; explicit Stop remains effective. Cancelled public calls settle through a terminal error event and through the history API.
+* With Relay 0.3.17 and Session 0.6.8 installed, affected users can remove the local backend wind-down and cancellation-settlement patches after checking the published versions in their environment.
+
+* harden tool controls and persisted handoffs ([#61](https://github.com/wippyai/session/issues/61)) ([e8cce7c](https://github.com/wippyai/session/commit/e8cce7c0d2507bf897724f955f991b1dbf5caf92))
+* **session:** drain accepted work before lifecycle retirement ([#65](https://github.com/wippyai/session/issues/65)) ([7b7e2b4](https://github.com/wippyai/session/commit/7b7e2b413b0ccf34f1d5e2cd9113d57794b6d0d3))
+
+### Dependencies
+
+* Require Agent 0.5.4 and LLM 0.5.7 so Stop during prompt construction prevents another provider call and positional conversation messages retain their order.
+
+## [0.6.7](https://github.com/wippyai/session/compare/v0.6.6...v0.6.7) (2026-10-09)
+
+
+### Features
+
+* add Attention context and compatible optimistic delivery ([#60](https://github.com/wippyai/session/issues/60)) ([1eb65e7](https://github.com/wippyai/session/commit/1eb65e7e02859e0b042509832e46bddd434dba6f))
+
+## [0.6.7] (2026-10-07)
+
+Attention features require Web Host 1.0.61, Agent 0.5.3 and LLM 0.5.5. Use Relay 0.3.16 to forward the initial Attention setting through WebSocket session opening.
+
+### Features
+
+* Sessions support per-session Attention settings and authorized browser reads and actions. Fresh explicit reads remain available when automatic context attachment is off.
+* Context attachments use a kind/version envelope with strict payload validation. The receiver supports inline delivery and authenticated HTTP staging.
+* Approved PNG and WebP captures can supply image content through `wippy.attention.visual` attachments. Capture approval creates a removable Host draft, and the image is submitted only on a later explicit Send.
+
+### Bug fixes
+
+* Message admission validates and persists user text, file references and required context atomically. Committed permission and status are announced before the one existing correlated `received` response.
+* Attention inspection keeps its existing time limit and now uses fractional server receive times, avoiding deadline loss from whole-second rounding.
+* Prompt construction lists ordinary files instead of automatically inlining every image. Image content is included only through authorized visual context attachments.
+
+### Changed
+
+* Attention traits withdraw expired or superseded observations through existing message-ID metadata updates and `metadata.stale`. Prompt construction preserves matching tool calls and results while replacing stale observations with a bounded notice.
+* Authenticated capability discovery lets the Host select supported Attention features. Ordinary chat keeps its existing commands and receipts, and browser-operation terminal results remain separate from message acceptance.
+* V1 does not collect page URLs, route owners or Vue renderer details. Context kind/version handling preserves extension without adding those fields to V1.
+## [0.6.6](https://github.com/wippyai/session/compare/v0.6.5...v0.6.6) (2026-10-06)
+
+
+### Bug Fixes
+
+* continue the turn with the new agent after a tool-driven handoff ([#59](https://github.com/wippyai/session/issues/59)) ([f0219a6](https://github.com/wippyai/session/commit/f0219a628b148306a9a06f3926fef006d69c76cd))
+* preserve tool feedback chronology and failed-action loop accounting ([#55](https://github.com/wippyai/session/issues/55)) ([06464d1](https://github.com/wippyai/session/commit/06464d1c7a8b807068a10c4b1a36662ba5c4b966))
+
+
+### Performance Improvements
+
+* **process:** reuse session receive cases ([#56](https://github.com/wippyai/session/issues/56)) ([4393c3a](https://github.com/wippyai/session/commit/4393c3a04c40bd83342ad0b5935baff8849684c5))
+
+## [0.6.5](https://github.com/wippyai/session/compare/v0.6.4...v0.6.5) (2026-10-01)
+
+
+### Bug Fixes
+
+* **process:** correlate tool events with persisted message IDs ([#52](https://github.com/wippyai/session/issues/52)) ([34652b8](https://github.com/wippyai/session/commit/34652b814e4566d987cfbb6685e4bf0462350518))
+* **process:** trigger checkpoints on the full context size ([#47](https://github.com/wippyai/session/issues/47)) ([83566b5](https://github.com/wippyai/session/commit/83566b55d66b71dc7be312d67fabccb8abb79367))
+
 ## [0.6.4](https://github.com/wippyai/session/compare/v0.6.3...v0.6.4) (2026-10-01)
 
 

@@ -50,13 +50,13 @@ local function canonical(body: any): string
     return table.concat(parts, ";")
 end
 
-local function insert_artifact(db, artifact_id, session_id, user_id, content)
+local function insert_artifact(db, artifact_id, session_id, user_id, content, meta: any?)
     local now = time.now():format(time.RFC3339)
     local _, err = db:execute(
         "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at) "
             .. "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         { artifact_id, session_id, user_id, "inline", "Notes", content,
-            json.encode({ content_type = "text/plain" }), now, now })
+            json.encode(meta or { content_type = "text/plain" }), now, now })
     if err then error(err) end
 end
 
@@ -73,6 +73,7 @@ local function define_tests()
                 owner_session = uuid.v7(), owner_context = uuid.v7(),
                 other_session = uuid.v7(), other_context = uuid.v7(),
                 owned = uuid.v7(), foreign = uuid.v7(), orphaned = uuid.v7(),
+                numeric_type = uuid.v7(), html_type = uuid.v7(),
                 other_user = "other-user-" .. uuid.v7(),
             }
             context_repo.create(fixture.owner_context, "primary", "{}")
@@ -85,13 +86,18 @@ local function define_tests()
             insert_artifact(db, fixture.foreign, fixture.other_session, fixture.other_user, "their text")
             -- Stored with this user's id, in a session that belongs to someone else.
             insert_artifact(db, fixture.orphaned, fixture.other_session, owner_id, "odd text")
+            -- A content type the owner stored: a number (malformed) and a string.
+            insert_artifact(db, fixture.numeric_type, fixture.owner_session, owner_id, "typed text",
+                { content_type = 42 })
+            insert_artifact(db, fixture.html_type, fixture.owner_session, owner_id, "<p>typed</p>",
+                { content_type = "text/html" })
             db:release()
         end)
 
         after_all(function()
             local db, err = sql.get(consts.get_db_resource())
             if err then error(err) end
-            for _, id in ipairs({ fixture.owned, fixture.foreign, fixture.orphaned }) do
+            for _, id in ipairs({ fixture.owned, fixture.foreign, fixture.orphaned, fixture.numeric_type, fixture.html_type }) do
                 db:execute("DELETE FROM artifacts WHERE artifact_id = $1", { id })
             end
             for _, id in ipairs({ fixture.owner_session, fixture.other_session }) do
@@ -134,6 +140,24 @@ local function define_tests()
             local content_status, content = call(artifact_access.serve_content, tostring(fixture.owned), owner_id)
             test.eq(content_status, 200)
             test.eq(content, "owner text")
+        end)
+
+        -- Ported from upstream: the content type comes from meta.content_type and
+        -- must be a string. Anything else is a server error that sends no content.
+        it("answers 500 without content when meta.content_type is not a string", function()
+            local req, res = fake_exchange(tostring(fixture.numeric_type))
+            artifact_access.serve_content(req, res, owner_id)
+            test.eq(res.status, 500)
+            test.eq(res.content_type, "application/json")
+            test.eq(canonical(res.body), "error=Invalid artifact content type;success=false")
+        end)
+
+        it("serves the content with the content type the artifact stored", function()
+            local req, res = fake_exchange(tostring(fixture.html_type))
+            artifact_access.serve_content(req, res, owner_id)
+            test.eq(res.status, 200)
+            test.eq(res.content_type, "text/html")
+            test.eq(res.body, "<p>typed</p>")
         end)
     end)
 end

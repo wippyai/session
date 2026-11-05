@@ -20,11 +20,30 @@ local function insert_artifact(db, artifact_id, session_id, user_id, kind, title
         end
     end
 
-    local now = time.now():format(time.RFC3339)
-    db:execute(
+    local now = time.now():utc():format(time.RFC3339)
+    local _, insert_err = db:execute(
         "INSERT INTO artifacts (artifact_id, session_id, user_id, kind, title, content, meta, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         { artifact_id, session_id, user_id, kind, title, content or "", meta_json, now, now }
     )
+    test.is_nil(insert_err)
+end
+
+-- A stored date is the current instant: within minutes of now when read with
+-- its own offset. A host-offset string that a timestamp column keeps as wall
+-- clock reads hours off on a host that is not in UTC.
+local function is_current_instant(value)
+    local parsed = type(value) == "string" and time.parse(time.RFC3339NANO, value) or nil
+    if not parsed then return false end
+    return math.abs(parsed:unix() - os.time()) < 300
+end
+
+-- "sqlite" or "postgres", read when the cases are defined.
+local function database_kind()
+    local db = sql.get(consts.get_db_resource())
+    if not db then return "unknown" end
+    local kind = db:type()
+    db:release()
+    return kind
 end
 
 local function define_tests()
@@ -135,6 +154,24 @@ local function define_tests()
                 test.is_nil(artifact)
                 test.contains(tostring(err), "No authenticated user found")
             end
+        end)
+
+        it("stamps created_at and updated_at with the current instant", function()
+            if security.actor() == nil then return end
+            local artifact_id = uuid.v7()
+            local created, create_err = artifact_repo.create(artifact_id, test_data.session_id, "static",
+                "Date stamp", "content")
+            test.is_nil(create_err)
+            test.not_nil(created)
+            local stored = artifact_repo.get(artifact_id)
+            local _, update_err = artifact_repo.update(artifact_id, { title = "Date stamp 2" })
+            local changed = artifact_repo.get(artifact_id)
+            -- The other cases count the session's artifacts, so remove this one first.
+            artifact_repo.delete(artifact_id)
+            test.is_nil(update_err)
+            test.is_true(is_current_instant(stored.created_at), "created_at: " .. tostring(stored.created_at))
+            test.is_true(is_current_instant(stored.updated_at), "updated_at: " .. tostring(stored.updated_at))
+            test.is_true(is_current_instant(changed.updated_at), "changed updated_at: " .. tostring(changed.updated_at))
         end)
 
         it("should get an artifact by ID", function()
@@ -316,6 +353,14 @@ local function define_tests()
             local third_id = uuid.v7()
             local foreign_id = uuid.v7()
 
+            wait_for_boot.ensure_user(owner_id)
+            wait_for_boot.ensure_user(other_owner_id)
+            for _, session_id in ipairs({ session_a, session_b }) do
+                local _, session_err = session_repo.create(session_id, owner_id, test_data.context_id,
+                    "Catalog session", "test")
+                test.is_nil(session_err)
+            end
+
             local db_resource, _ = consts.get_db_resource()
             local db, db_err = sql.get(db_resource)
             if db_err then
@@ -396,9 +441,9 @@ local function define_tests()
             test.is_nil(missing)
             test.contains(tostring(missing_err), "User ID is required")
 
-            db:execute("DELETE FROM artifacts WHERE session_id = $1 OR session_id = $2",
-                { session_a, session_b })
             db:release()
+            test.is_nil(select(2, session_repo.delete(session_a)))
+            test.is_nil(select(2, session_repo.delete(session_b)))
         end)
 
         describe("get_owned", function()
@@ -732,6 +777,112 @@ local function define_tests()
                 test.eq(view_ref_artifact.meta.display_type, "standalone")
             end)
         end)
+
+        -- The runtime opens one SQLite connection per database resource, so
+        -- two writers in one runtime never overlap. The case that matters
+        -- for a patch is a second connection to the same file (another
+        -- runtime, or a second resource): this test stands one in with two
+        -- resources on one probe database file, and points the repository at
+        -- one of them. A patch that read first held only a snapshot there,
+        -- the other connection committed, and the patch failed with
+        -- "database is locked"; a patch that writes first holds the lock.
+        if database_kind() == "sqlite" then
+            describe("update: meta_patch with a second SQLite connection", function()
+                local PATCH_DB = "app:migration_probe_db"
+                local PEER_DB = "app:migration_probe_peer_db"
+                local original_resource = consts.get_db_resource
+
+                local function probe(resource, fn)
+                    local db, db_err = sql.get(resource)
+                    if not db then error(tostring(db_err)) end
+                    local ok, result = pcall(fn, db)
+                    db:release()
+                    if not ok then error(result, 0) end
+                    return result
+                end
+
+                before_all(function()
+                    probe(PATCH_DB, function(db)
+                        assert(db:execute("DROP TABLE IF EXISTS artifacts"))
+                        assert(db:execute("CREATE TABLE artifacts (artifact_id TEXT PRIMARY KEY, kind TEXT, title TEXT,"
+                            .. " content TEXT, meta TEXT, content_version INTEGER NOT NULL DEFAULT 1, updated_at TEXT)"))
+                        assert(db:execute("INSERT INTO artifacts (artifact_id, kind, title, content, meta) VALUES ($1, $2, $3, $4, $5)",
+                            { "locked-patch", "static", "Original", "v1", '{"display_type":"inline"}' }))
+                    end)
+                    consts.get_db_resource = function() return PATCH_DB end
+                end)
+
+                after_all(function()
+                    consts.get_db_resource = original_resource
+                    probe(PATCH_DB, function(db) assert(db:execute("DROP TABLE IF EXISTS artifacts")) end)
+                end)
+
+                it("takes the write lock with its first statement, so another connection cannot commit between its read and its write", function()
+                    local id = "locked-patch"
+                    local reached, resume, patched, other = channel.new(1), channel.new(1), channel.new(1), channel.new(1)
+                    local original = artifact_repo._on_meta_read
+                    local paused = false
+                    -- Runs inside the patch's transaction after the meta read.
+                    artifact_repo._on_meta_read = function(_conn, artifact_id)
+                        if artifact_id ~= id or paused then return end
+                        paused = true
+                        reached:send(true)
+                        resume:receive()
+                    end
+                    coroutine.spawn(function()
+                        local result, err = artifact_repo.update(id, { meta_patch = { status = "active" } })
+                        patched:send({ result = result, err = err and tostring(err) or nil })
+                    end)
+                    reached:receive()
+
+                    coroutine.spawn(function()
+                        local err = nil
+                        local ok, thrown = pcall(function()
+                            probe(PEER_DB, function(db)
+                                local _, exec_err = db:execute("UPDATE artifacts SET title = $1 WHERE artifact_id = $2", { "Other writer", id })
+                                if exec_err then err = tostring(exec_err) end
+                            end)
+                        end)
+                        if not ok then err = tostring(thrown) end
+                        other:send({ err = err })
+                    end)
+                    time.sleep("500ms")
+                    -- Whether the other write has already finished while the
+                    -- patch is paused.
+                    local early = channel.select({ other:case_receive(), default = true })
+                    resume:send(true)
+                    local deadline = time.after("20s")
+                    local patched_selected = channel.select({ patched:case_receive(), deadline:case_receive() })
+                    artifact_repo._on_meta_read = original
+                    test.is_true(patched_selected.channel ~= deadline, "the patch settles instead of hanging")
+                    local other_outcome = early.value
+                    if early.default then
+                        local other_selected = channel.select({ other:case_receive(), deadline:case_receive() })
+                        test.is_true(other_selected.channel ~= deadline, "the other write settles once the patch has committed")
+                        other_outcome = other_selected.value
+                    end
+
+                    test.is_true(paused)
+                    test.is_nil(patched_selected.value.err, "the patch is not failed by the other connection")
+                    test.not_nil(patched_selected.value.result)
+                    test.is_true(early.default == true or early.value.err ~= nil,
+                        "the other connection did not commit while the patch held the lock")
+                    local stored = probe(PATCH_DB, function(db)
+                        return db:query("SELECT title, meta FROM artifacts WHERE artifact_id = $1", { id })
+                    end)
+                    local meta = json.decode(stored[1].meta)
+                    test.eq(meta.status, "active")
+                    test.eq(meta.display_type, "inline")
+                    -- The other write either waited for the patch and then
+                    -- committed, or gave up while the lock was held.
+                    if other_outcome.err == nil then
+                        test.eq(stored[1].title, "Other writer")
+                    end
+                end)
+            end)
+        else
+            test.it_skip("update: meta_patch with a second SQLite connection (SQLite only)", function() end)
+        end
     end)
 end
 

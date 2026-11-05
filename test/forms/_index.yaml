@@ -21,12 +21,10 @@ entries:
       test: wippy.test:test
     method: run
 
-  # The fixtures are found from the process working directory, which is test/
-  # (the app root, where wippy.lock is): make test and make.ps1 run every
-  # target from there. A host-authored entry has no module root to resolve
-  # from, so `base: module` changes nothing for it (checked on runtime
-  # 0.3.43a, where the same path resolved either way); `base: project` says
-  # which anchor is meant.
+  # The tests run from a workspace outside the repository, so `directory` is
+  # only the fallback for a run from test/: make test and make.ps1 point this
+  # entry at the checkout's test/forms/fixtures through the workspace config
+  # (`override` in scripts/test-workspace.sh and make.ps1).
   - name: fixtures
     kind: fs.directory
     meta:
@@ -139,6 +137,7 @@ entries:
     modules:
       - json
       - sql
+      - time
       - uuid
       - security
       - funcs
@@ -151,6 +150,7 @@ entries:
       answer_admission: wippy.session.process:answer_admission
       artifact_repo: wippy.session.persist:artifact_repo
       message_repo: wippy.session.persist:message_repo
+      message_date: wippy.session.persist:message_date
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
       writer: wippy.session.persist:writer
