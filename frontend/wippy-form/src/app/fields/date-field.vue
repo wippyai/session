@@ -3,7 +3,6 @@ import type { ComponentPublicInstance } from 'vue'
 import type { DateFormField, FieldAnswer, FieldError } from '../../lib/definition'
 import DatePicker from 'primevue/datepicker'
 import { computed, nextTick, ref, watch } from 'vue'
-import { useThemeModeClass } from '../../composables/use-theme-mode-class'
 import { partAttrs } from '../../lib/part-attrs'
 import { isValidIsoDate } from '../../lib/scalar-answers'
 import FieldShell from './field-shell.vue'
@@ -45,9 +44,8 @@ import FieldShell from './field-shell.vue'
  * layer is promoted out of every clipping ancestor, so the calendar is never
  * cut off by the message bubble around a short form (`appendTo="self"` was
  * tried and left a one-question form with a quarter of its calendar visible).
- * That layer is a sibling of the themed container, so the calendar would not
- * follow a forced Light or Dark theme; it carries the container's theme class
- * itself (`useThemeModeClass`).
+ * The layer follows the theme class of the calendar's trigger, so the calendar
+ * takes a forced Light or Dark theme from the plugin.
  *
  * The theme opens the calendar at least as wide as the date control, so the
  * control is not left as wide as the whole form: the picker carries the `date`
@@ -220,9 +218,6 @@ function onCalendarHide() {
 }
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
-// The theme class of the container, for the calendar (see above).
-// Only while a calendar can open: not for a read-only or disabled field.
-const themeClass = useThemeModeClass(() => shell.value?.$el as Element | undefined, () => !props.readonly && !props.disabled)
 
 // A DatePicker puts `$attrs` on its wrapper span; the description and error
 // links go to its real `<input>` through its inner InputText's pass-through,
@@ -239,7 +234,7 @@ function pickerPt(describedBy: string | undefined) {
     },
     panel: {
       part: calendarPart.value.part,
-      class: [calendarPart.value.class, themeClass.value],
+      class: calendarPart.value.class,
     },
   }
 }

@@ -326,41 +326,46 @@ describe('date field: calendar overlay', () => {
     return panel as HTMLElement
   }
 
-  it('carries the forced Dark theme class of the container, so the Dark theme reaches it', async () => {
+  /** The layer around the calendar, where the theme plugin puts the theme class. */
+  function overlayLayer(panel: HTMLElement): HTMLElement {
+    return panel.closest('[data-wippy-overlay-layer]') as HTMLElement
+  }
+
+  it('opens in a layer with the forced Dark theme class of the container, so the Dark theme reaches it', async () => {
     const { host, shadow, app } = mountInShadow('w-theme-dark')
-    const panel = await openCalendar(shadow)
-    expect(panel.classList.contains('w-theme-dark')).toBe(true)
-    expect(panel.classList.contains('w-theme-light')).toBe(false)
+    const layer = overlayLayer(await openCalendar(shadow))
+    expect(layer.classList.contains('w-theme-dark')).toBe(true)
+    expect(layer.classList.contains('w-theme-light')).toBe(false)
     app.unmount()
     host.remove()
   })
 
-  it('carries the forced Light theme class of the container', async () => {
+  it('opens in a layer with the forced Light theme class of the container', async () => {
     const { host, shadow, app } = mountInShadow('w-theme-light')
-    const panel = await openCalendar(shadow)
-    expect(panel.classList.contains('w-theme-light')).toBe(true)
-    expect(panel.classList.contains('w-theme-dark')).toBe(false)
+    const layer = overlayLayer(await openCalendar(shadow))
+    expect(layer.classList.contains('w-theme-light')).toBe(true)
+    expect(layer.classList.contains('w-theme-dark')).toBe(false)
     app.unmount()
     host.remove()
   })
 
-  it('carries no theme class when the theme follows the OS, so the OS scheme applies', async () => {
+  it('opens in a layer with no theme class when the theme follows the OS, so the OS scheme applies', async () => {
     const { host, shadow, app } = mountInShadow('')
-    const panel = await openCalendar(shadow)
-    expect(panel.classList.contains('w-theme-dark')).toBe(false)
-    expect(panel.classList.contains('w-theme-light')).toBe(false)
+    const layer = overlayLayer(await openCalendar(shadow))
+    expect(layer.classList.contains('w-theme-dark')).toBe(false)
+    expect(layer.classList.contains('w-theme-light')).toBe(false)
     app.unmount()
     host.remove()
   })
 
   it('follows the theme while the calendar is open', async () => {
     const { host, shadow, container, app } = mountInShadow('w-theme-light')
-    const panel = await openCalendar(shadow)
+    const layer = overlayLayer(await openCalendar(shadow))
     container.classList.replace('w-theme-light', 'w-theme-dark')
     await Promise.resolve()
     await nextTick()
-    expect(panel.classList.contains('w-theme-dark')).toBe(true)
-    expect(panel.classList.contains('w-theme-light')).toBe(false)
+    expect(layer.classList.contains('w-theme-dark')).toBe(true)
+    expect(layer.classList.contains('w-theme-light')).toBe(false)
     app.unmount()
     host.remove()
   })
@@ -579,53 +584,6 @@ describe('date field: keyboard and input methods', () => {
     expect(rewrites).toEqual([])
     expect(input.value).toBe('2026-06-15')
     expect(draft()).toBe('2026-06-15')
-  })
-})
-
-describe('date field: the theme observer', () => {
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  /** Mounts the field inside a themed container and says how often that container is observed and released. */
-  function mountThemed(props: Partial<{ disabled: boolean, readonly: boolean }> = {}) {
-    const container = document.createElement('div')
-    container.setAttribute('data-wippy-theme-root', '')
-    container.className = 'w-theme-dark'
-    document.body.appendChild(container)
-    const observe = vi.spyOn(MutationObserver.prototype, 'observe')
-    const disconnect = vi.spyOn(MutationObserver.prototype, 'disconnect')
-    const wrapper = mount(DateField, {
-      props: { field, modelValue: undefined, errors: [], disabled: false, readonly: false, ...props },
-      global: { plugins: [PrimeVuePlugin] },
-      attachTo: container,
-    })
-    return {
-      wrapper,
-      observed: () => observe.mock.calls.filter(([target]) => target === container).length,
-      released: () => disconnect.mock.calls.length,
-    }
-  }
-
-  it('watches the themed container of an editable field', () => {
-    expect(mountThemed().observed()).toBe(1)
-  })
-
-  it('does not watch it for a read-only field, which has no calendar', () => {
-    expect(mountThemed({ readonly: true, disabled: true }).observed()).toBe(0)
-  })
-
-  it('does not watch it for a disabled field, which cannot open a calendar', () => {
-    expect(mountThemed({ disabled: true }).observed()).toBe(0)
-  })
-
-  it('stops watching while the field is disabled (a submit in flight) and starts again afterwards', async () => {
-    const { wrapper, observed, released } = mountThemed()
-    expect(observed()).toBe(1)
-    await wrapper.setProps({ disabled: true })
-    expect(released()).toBe(1)
-    await wrapper.setProps({ disabled: false })
-    expect(observed()).toBe(2)
   })
 })
 
