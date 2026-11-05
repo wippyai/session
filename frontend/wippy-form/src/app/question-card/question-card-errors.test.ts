@@ -671,3 +671,39 @@ describe('QuestionCardActive: Enter in an empty Other box says why nothing was s
     expect(wrapper.emitted('submit')).toBeUndefined()
   })
 })
+
+describe('QuestionCardActive: the empty Other box message follows the required flag', () => {
+  const OTHER_EMPTY_ERROR = 'Type your answer, or choose another option.'
+  const optional = (def: FormDefinition): FormDefinition => ({ ...def, fields: def.fields.map(f => ({ ...f, required: false })) })
+
+  it.each([
+    ['single', singleDef, OTHER_EMPTY_ERROR],
+    ['several-answer', multiDef, TICK_ERROR],
+  ])('shows the reason on a required %s question', async (_name, definition, message) => {
+    const wrapper = mountCard(definition)
+    await wrapper.find('textarea.w-form__other-input').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(message)
+    expect(wrapper.emitted('submit')).toBeUndefined()
+  })
+
+  it.each([
+    ['single', optional(singleDef)],
+    ['several-answer', optional(multiDef)],
+  ])('shows no error on an Optional %s question, empty or whitespace, and sends nothing', async (_name, definition) => {
+    const wrapper = mountCard(definition)
+    const other = wrapper.find('textarea.w-form__other-input')
+    await other.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    await other.setValue('   ')
+    await other.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain(OTHER_EMPTY_ERROR)
+    expect(wrapper.text()).not.toContain(TICK_ERROR)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(other.attributes('aria-invalid')).not.toBe('true')
+    expect(wrapper.emitted('submit')).toBeUndefined()
+  })
+})

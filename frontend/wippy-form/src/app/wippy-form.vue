@@ -43,20 +43,32 @@ const { isOnline } = useOnlineStatus(() => reload())
 const banner = ref<SubmitBanner | null>(null)
 // Survives the swap to the summary, which is where a lost race ends up.
 const answeredElsewhere = ref(false)
-watch(artifactId, () => { answeredElsewhere.value = false })
+// A send that got no response may have saved the answer, so a later idle state may be our own.
+let sendOutcomeUncertain = false
+// A failed send's banner and its Retry belong to the form it was made for.
+watch(artifactId, () => {
+  answeredElsewhere.value = false
+  banner.value = null
+  sendOutcomeUncertain = false
+})
 const cardRef = ref<InstanceType<typeof QuestionCardActive> | null>(null)
 const summaryRef = ref<InstanceType<typeof QuestionCardSummary> | null>(null)
 
 // Set before our own accepted submit flips `state` to idle, so the watcher below
-// does not report that change as an answer from elsewhere.
+// does not report that change as an answer from elsewhere. It is not set when
+// `state` is already idle, because no change follows and the flag would linger.
 let suppressAnsweredElsewhereWatch = false
 
 // A background reload can flip `state` to idle because another tab or client
 // answered first. A card holding unsent input says its draft was dropped. A card
 // nothing was entered into has nothing to explain. The input is read before the
-// card unmounts, which is why this watcher runs before the render.
+// card unmounts, which is why this watcher runs before the render. The reader's
+// own send is never reported: not while it is in flight (the server publishes the
+// artifact before it returns the POST) and not after one whose outcome is unknown.
 watch(() => state.value?.status, (status, previousStatus) => {
   if (status !== 'idle' || previousStatus !== 'active')
+    return
+  if (submitting.value || sendOutcomeUncertain)
     return
   if (suppressAnsweredElsewhereWatch) {
     suppressAnsweredElsewhereWatch = false
@@ -113,7 +125,7 @@ async function handleSubmit(answers: FormAnswers) {
 
   if (outcome.ok && outcome.accepted) {
     const accepted = outcome.accepted
-    suppressAnsweredElsewhereWatch = true
+    suppressAnsweredElsewhereWatch = state.value.status !== 'idle'
     state.value = {
       ...state.value,
       status: 'idle',
@@ -136,8 +148,13 @@ async function handleSubmit(answers: FormAnswers) {
     return
   }
 
+  if (outcome.code === 'network_error')
+    sendOutcomeUncertain = true
+
   if (outcome.code === 'already_submitted') {
-    answeredElsewhere.value = true
+    // After a send that got no response, the answer that won may be our own.
+    if (!sendOutcomeUncertain)
+      answeredElsewhere.value = true
     // The summary exists only once the reload has replaced the active state.
     await refresh()
     void nextTick(() => summaryRef.value?.focusStatus())
