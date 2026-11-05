@@ -131,13 +131,16 @@ end
 -- evidence that the agent replied.
 local REPLY_PAGE_SIZE = 50
 
--- A reply is assistant text, or a turn that ended by asking a new form. Tool
--- calls alone are not: a turn that crashed or was stopped after one did not
--- answer. Text cut off by Stop (metadata.stopped) is not a reply either.
+-- A reply is assistant text, an assistant row that carries only an inline
+-- artifact (metadata.presentation), or a turn that ended by asking a new form.
+-- Tool calls alone are not: a turn that crashed or was stopped after one did
+-- not answer. Text cut off by Stop (metadata.stopped) is not a reply either.
 local function is_reply(row)
     local meta = type(row.metadata) == "table" and row.metadata or {}
     if row.type == consts.MSG_TYPE.ASSISTANT then
-        return meta.stopped ~= true and type(row.data) == "string" and string.find(row.data, "%S") ~= nil
+        if meta.stopped == true then return false end
+        return type(meta.presentation) == "table"
+            or (type(row.data) == "string" and string.find(row.data, "%S") ~= nil)
     end
     if row.type == consts.MSG_TYPE.FUNCTION then
         local operations = type(meta.control_operations) == "table" and meta.control_operations or {}
@@ -148,23 +151,30 @@ local function is_reply(row)
 end
 
 -- Whether a row shows that its turn was cut short, so the text before it did
--- not finish that turn: the boundary a Stop or a recovery writes, a call Stop
--- cancelled, or a call recovery settled with an unknown outcome.
+-- not finish that turn: the note a failed or limited turn writes, the boundary
+-- a Stop or a recovery writes, a call Stop cancelled, a call recovery settled
+-- with an unknown outcome, or a call still pending, which delivery_of reaches
+-- only with no turn running: a crash that nothing has repaired yet.
 local function is_cut_short(row)
     local meta = type(row.metadata) == "table" and row.metadata or {}
+    if meta.system_action == consts.SYSTEM_ACTIONS.TURN_FAILED
+        or meta.system_action == consts.SYSTEM_ACTIONS.TURN_LIMIT then
+        return true
+    end
     if row.type == consts.MSG_TYPE.DEVELOPER then return type(meta.interruption) == "table" end
     if row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
         or row.type == consts.MSG_TYPE.DELEGATION then
-        return meta.status == consts.FUNC_STATUS.CANCELLED
+        return meta.status == consts.FUNC_STATUS.CANCELLED or meta.status == consts.FUNC_STATUS.PENDING
             or (meta.status == consts.FUNC_STATUS.ERROR and meta.result == message_repo.INTERRUPTED_RESULT)
     end
     return false
 end
 
--- A user row that starts another turn. Steering belongs to the running turn.
+-- A user row that starts another turn. Steering belongs to the running turn,
+-- and a pending answer starts nothing until it is admitted.
 local function starts_turn(row)
     local meta = type(row.metadata) == "table" and row.metadata or {}
-    return row.type == consts.MSG_TYPE.USER and meta.input == nil
+    return row.type == consts.MSG_TYPE.USER and meta.input == nil and not message_repo.is_pending_answer(row)
 end
 
 -- Whether other user input was accepted after the form was created: the
@@ -182,9 +192,10 @@ end
 -- Delivery of an accepted answer, derived from the rows (no stored state):
 --   pending      the answer row waits for admission
 --   complete     admitted, and the agent has replied after it in a turn that
---                was not cut short
---   running      admitted, no reply yet, and a live session process is
---                running a turn
+--                is over and was not cut short
+--   running      admitted, and a live session process is running the turn
+--                that answers it, which can still be cut short after a
+--                reply. Clients keep listening for this one.
 --   interrupted  admitted, no reply, and no turn is running: the user
 --                stopped the turn (the answer is delivered; a new message
 --                continues), or it crashed before answering (the stored
@@ -219,13 +230,13 @@ local function delivery_of(submission, session_id)
         if not page.has_more then break end
         cursor = page.prev_cursor
     end
-    if replied then return "complete", nil end
     -- A stored "running" status with no live session process is a stopped
     -- turn, not a running one (session_status).
     local session, session_err = session_repo.get(session_id)
     if not session then return nil, tostring(session_err) end
     local status = session_status.effective(session, state_service._lookup_session)
     if status == consts.STATUS.RUNNING then return "running", nil end
+    if replied then return "complete", nil end
     return "interrupted", nil
 end
 

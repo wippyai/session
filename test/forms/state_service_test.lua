@@ -318,8 +318,12 @@ local function define_tests()
             test.eq(crashed.delivery, "interrupted", "stored running status with no live session process")
 
             ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Locker it is.")
+            local _, replying = get(artifact_id)
+            test.eq(replying.delivery, "running", "the agent replied and its turn still runs")
+
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.IDLE })
             local _, after = get(artifact_id)
-            test.eq(after.delivery, "complete", "the agent replied after the answer")
+            test.eq(after.delivery, "complete", "the agent replied after the answer and the turn is over")
         end)
 
         it("judges staleness by acceptance time, not by where admission moved the answer", function()
@@ -780,7 +784,8 @@ local function define_tests()
                 { id = "cancelled-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
                     type = consts.MSG_TYPE.FUNCTION },
             })
-            test.eq(select(2, get(artifact_id)).delivery, "complete", "the turn may still finish")
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted",
+                "no process runs, so nothing will finish the pending call")
             ctx.writer:update_message_meta(call_ids["cancelled-call"],
                 { status = consts.FUNC_STATUS.CANCELLED, result = "Session stopped while the call was running" })
             test.eq(select(2, get(artifact_id)).delivery, "interrupted")
@@ -812,6 +817,120 @@ local function define_tests()
             ctx.writer:add_message(consts.MSG_TYPE.USER, "Next question.")
             stop_boundary(ctx)
             test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
+        -- An admitted answer whose turn wrote "Let me check." and a successful
+        -- tool call, with no process running.
+        local function answered_with_preamble()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            local _, call_ids: any = ctx.writer:add_response("Let me check.", {}, {
+                { id = "preamble-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            ctx.writer:update_message_meta(call_ids["preamble-call"], { status = consts.FUNC_STATUS.SUCCESS })
+            test.eq(select(2, get(artifact_id)).delivery, "complete", "nothing cut this turn short yet")
+            return ctx, artifact_id
+        end
+
+        it("reports a turn that failed after a preamble and a tool as interrupted", function()
+            local ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn failed: provider unavailable", {
+                system_action = consts.SYSTEM_ACTIONS.TURN_FAILED,
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+        end)
+
+        it("reports a turn the session limited after a preamble and a tool as interrupted", function()
+            local ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, "Turn stopped: too many steps", {
+                system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted", "from the system row alone")
+
+            ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_message(consts.MSG_TYPE.DEVELOPER, "The previous turn was stopped by the session.", {
+                system_action = consts.SYSTEM_ACTIONS.TURN_LIMIT,
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted", "from the developer row alone")
+        end)
+
+        it("stays running after a reply while the turn runs, so a later Stop reaches the card", function()
+            local ctx, artifact_id = answered_with_preamble()
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            state_service._lookup_session = function() return "live-pid" end
+            test.eq(select(2, get(artifact_id)).delivery, "running", "a reply does not end the turn")
+
+            local _, err = ctx.writer:stop_with_input_rollback({}, {}, {
+                message_id = uuid.v7(), data = "The user cancels the preceding turn.",
+                metadata = { preserve_position = true, interruption = { reason = "stop" } },
+            })
+            test.is_nil(err)
+            test.eq(select(2, get(artifact_id)).delivery, "running", "the turn is still winding down")
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.IDLE })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+        end)
+
+        it("reads complete once the running turn that replied ends", function()
+            local ctx, artifact_id = answered_with_preamble()
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            state_service._lookup_session = function() return "live-pid" end
+            test.eq(select(2, get(artifact_id)).delivery, "running")
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.IDLE })
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
+        it("does not read a call left pending by a crash as a finished turn", function()
+            local ctx, artifact_id = answered_with_preamble()
+            ctx.writer:add_response("One more thing.", {}, {
+                { id = "crashed-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            session_repo.update_session_meta(ctx.session_id, { status = consts.STATUS.RUNNING })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted", "stored running, no process, no restart")
+            state_service._lookup_session = function() return "live-pid" end
+            test.eq(select(2, get(artifact_id)).delivery, "running", "the same rows while the call runs")
+        end)
+
+        it("does not take a pending answer for the next turn", function()
+            local ctx = new_session()
+            local first = new_form(ctx)
+            test.eq(post(first, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            local second = new_form(ctx)
+            state_service._lookup_session = function() return nil end
+            ctx.writer:add_response("Let me check.", {}, {})
+            test.eq(post(second, answer()), 200)
+            local _, err = ctx.writer:stop_with_input_rollback({}, {}, {
+                message_id = uuid.v7(), data = "The user cancels the preceding turn.",
+                metadata = { preserve_position = true, interruption = { reason = "stop" } },
+            })
+            test.is_nil(err)
+            test.eq(select(2, get(first)).delivery, "interrupted", "the waiting answer did not end the first turn")
+        end)
+
+        it("counts a final reply that holds only an inline artifact", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            ctx.writer:add_response("", { presentation = { artifact_refs = { { artifact_id = uuid.v7() } } } }, {})
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
+        it("does not count stopped presentation as a reply", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            test.eq(post(artifact_id, answer()), 200)
+            answer_admission.admit_in_order(ctx, nil)
+            state_service._lookup_session = function() return nil end
+            ctx.writer:add_response("", { stopped = true,
+                presentation = { artifact_refs = { { artifact_id = uuid.v7() } } } }, {})
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
         end)
 
         it("reports a failed session read in the delivery state as an error", function()
