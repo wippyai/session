@@ -1,9 +1,9 @@
 import type { ComputedRef, Ref } from 'vue'
-import type { AnswerDisplayItem } from '../lib/answers'
-import type { ChoiceAnswer, ChoiceFormDefinition, ChoiceFormField, FormAnswers, SingleFieldAnswer } from '../lib/definition'
+import type { AnswerDisplayItem, AnswerDraft } from '../lib/answers'
+import type { ChoiceAnswer, ChoiceFormDefinition, ChoiceFormField, FieldAnswer, FormAnswers, NotedAnswer } from '../lib/definition'
 import type { FocusTarget } from '../lib/focus-key'
 import { computed, reactive, ref } from 'vue'
-import { answerDisplayItems, buildNotedValue } from '../lib/answers'
+import { answerDisplayItems, draftFromAnswers, serializeAnswers, serializeFieldAnswer } from '../lib/answers'
 import { trimAnswerText } from '../lib/text'
 import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText } from '../lib/definition'
 import { noteKey, optionKey, reviewItemKey } from '../lib/focus-key'
@@ -66,6 +66,11 @@ export const MAX_KEYED_ROWS = 9
  *
  * `definition` and `initialData` are read once, when the card is created, so
  * an answer in progress survives a background reload of `state`.
+ *
+ * `lib/answers.ts` owns the draft and the wire answer. `QuestionAnswerState`
+ * only adds what the card's interaction needs (open notes, notes on unticked
+ * options, which questions are done): it starts from `draftFromAnswers`, and
+ * `draftOf` gives it back as a draft for `serializeAnswers`.
  */
 export function useQuestionCard(
   definition: ChoiceFormDefinition,
@@ -85,10 +90,11 @@ export function useQuestionCard(
   const focusTarget = ref<FocusTarget | null>(null)
   const focusSeq = ref(0)
 
+  const initialDraft = draftFromAnswers(definition, initialData)
   const answers = reactive<Record<string, QuestionAnswerState>>(
     Object.fromEntries(definition.fields.map((field) => {
       // A choice field's stored answer is always a choice answer.
-      const existing = initialData?.[field.id] as ChoiceAnswer | undefined
+      const existing = initialDraft[field.id] as ChoiceAnswer | undefined
       const chosen = field.options.filter(o => answerHasOption(existing, o.value)).map(o => o.value)
       const notes: Record<string, string> = {}
       for (const value of chosen) {
@@ -159,40 +165,30 @@ export function useQuestionCard(
       : `${range} answers, ${noteRange} adds a note first.${move}`
   }
 
-  function fieldAnswer(q: ChoiceFormField): ChoiceAnswer | undefined {
+  /** The question's answer in progress as a draft. */
+  function draftOf(q: ChoiceFormField): FieldAnswer | undefined {
     const a = ans(q)
-    if (q.multiple) {
-      const list: SingleFieldAnswer[] = q.options
-        .filter(o => a.chosen.includes(o.value))
-        .map(o => buildNotedValue(o.value, a.notes[o.value] ?? ''))
-      const otherText = trimAnswerText(a.other)
-      if (otherText)
-        list.push({ other: otherText })
-      return list.length > 0 ? list : undefined
-    }
+    const noted = (value: string): NotedAnswer => ({ value, note: a.notes[value] ?? '' })
+    if (q.multiple)
+      return [...a.chosen.map(noted), { other: a.other }]
     if (a.useOther)
-      return { other: trimAnswerText(a.other) }
-    if (a.chosen[0])
-      return buildNotedValue(a.chosen[0], a.notes[a.chosen[0]] ?? '')
-    return undefined
+      return { other: a.other }
+    return a.chosen[0] ? noted(a.chosen[0]) : undefined
   }
 
   function answerItemsFor(q: ChoiceFormField): AnswerDisplayItem[] | null {
     if (!answered(q))
       return null
-    return answerDisplayItems(q, fieldAnswer(q))
+    return answerDisplayItems(q, serializeFieldAnswer(q, draftOf(q)))
   }
 
   function buildAnswers(): FormAnswers {
-    const out: FormAnswers = {}
+    const draft: AnswerDraft = {}
     for (const q of definition.fields) {
-      if (!answered(q))
-        continue
-      const value = fieldAnswer(q)
-      if (value !== undefined)
-        out[q.id] = value
+      if (answered(q))
+        draft[q.id] = draftOf(q)
     }
-    return out
+    return serializeAnswers(definition, draft)
   }
 
   function go(i: number, focus: FocusTarget = 'first') {
