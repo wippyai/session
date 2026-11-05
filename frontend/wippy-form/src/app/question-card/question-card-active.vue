@@ -7,6 +7,7 @@ import { useQuestionCard } from '../../composables/use-question-card'
 import { trimAnswerText } from '../../lib/answers'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf, optionKey } from '../../lib/focus-key'
+import { TICK_ANSWER_MESSAGE } from '../../lib/messages'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
 import FormMessage from '../form-message.vue'
 import QuestionCardHeader from './question-card-header.vue'
@@ -299,7 +300,7 @@ function onKeydown(event: KeyboardEvent) {
     if (a.chosen.length > 0 || trimAnswerText(a.other))
       controller.commit(q)
     else {
-      controller.error.value = 'Tick at least one answer, or type your own.'
+      controller.error.value = TICK_ANSWER_MESSAGE
       controller.requestFocus(at >= 0 ? optionKey(at) : 'first')
     }
   }
