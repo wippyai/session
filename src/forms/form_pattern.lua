@@ -26,10 +26,10 @@ local form_text = require("form_text")
 -- and the other letter escapes (RE2 reads these, but the subset stays small
 -- enough for the ask_user tool description to list in full).
 --
--- Bounds: 200 characters, 3 nested groups, repeat counts up to 100 (written
--- without a leading zero, because RE2 reads {01} as the text "{01}"), and no
+-- Bounds: 200 characters, 3 nested groups, repeat counts up to 75 (written
+-- without a leading zero, because RE2 reads {01} as the text "{01}"), no
 -- unbounded repeat (* + {n,}) of a group that itself holds an unbounded
--- repeat, such as (a+)+.
+-- repeat, such as (a+)+, and a size of 75 with every repeat written out.
 --
 -- check() answers with a code. "unsupported_pattern" means a well-formed
 -- construct or bound the subset does not allow; "invalid_pattern" means the
@@ -39,7 +39,12 @@ local form_pattern = {}
 
 form_pattern.MAX_LENGTH = 200
 form_pattern.MAX_DEPTH = 3
-form_pattern.MAX_REPEAT = 100
+-- The size of a pattern once its repeats are written out: see parse(). A pattern
+-- at this size takes at most 4.9 ms to check on a 2,000 character ASCII answer
+-- (runtime 0.3.57a), and the check runs under the acceptance lock.
+form_pattern.MAX_EXPANDED = 75
+-- A higher count could not pass the size check.
+form_pattern.MAX_REPEAT = form_pattern.MAX_EXPANDED
 
 local UNSUPPORTED = "unsupported_pattern"
 local INVALID = "invalid_pattern"
@@ -162,8 +167,8 @@ local function parse(chars: {string}, points: {integer})
     end
 
     -- The braces after an atom: {n}, {n,} or {n,m}. Returns whether the
-    -- repeat is unbounded.
-    local function parse_braces(): boolean
+    -- repeat is unbounded, and how many copies of the atom it stands for.
+    local function parse_braces(): (boolean, number)
         position = position + 1 -- the {
         -- The digits of one count, or nil when there are none. A count is
         -- never longer than one digit when it starts with a zero: RE2 does not
@@ -208,11 +213,14 @@ local function parse(chars: {string}, points: {integer})
         if high ~= nil and compare(high, low :: string) < 0 then
             reject(INVALID, "A repeat range is out of order.")
         end
-        return unbounded
+        -- Both counts passed the bound above, so they are small numbers.
+        if unbounded then return true, (tonumber(low) :: number) + 1 end
+        return false, tonumber(high) :: number
     end
 
-    local function parse_sequence(depth: integer): boolean
+    local function parse_sequence(depth: integer): (boolean, number)
         local unbounded = false
+        local expanded = 0
         while position <= size do
             local character = chars[position]
             if character == "|" then break end
@@ -222,6 +230,7 @@ local function parse(chars: {string}, points: {integer})
             end
             local quantifiable = true
             local group_unbounded = false
+            local atom_size = 1
             if character == "(" then
                 position = position + 1
                 if chars[position] == "?" then
@@ -234,7 +243,10 @@ local function parse(chars: {string}, points: {integer})
                 if depth + 1 > form_pattern.MAX_DEPTH then
                     reject(UNSUPPORTED, string.format("Groups can be nested %d deep at most.", form_pattern.MAX_DEPTH))
                 end
-                group_unbounded = parse_alternation(depth + 1)
+                local group_size
+                group_unbounded, group_size = parse_alternation(depth + 1)
+                -- An empty group still compiles to something a repeat copies.
+                atom_size = math.max(group_size, 1)
                 if chars[position] ~= ")" then reject(INVALID, "A group is not closed with ).") end
                 position = position + 1
             elseif character == "[" then
@@ -261,7 +273,9 @@ local function parse(chars: {string}, points: {integer})
                 if not quantifiable then reject(INVALID, "A " .. quantifier .. " has nothing to repeat.") end
                 local repeats_forever
                 if quantifier == "{" then
-                    repeats_forever = parse_braces()
+                    local copies
+                    repeats_forever, copies = parse_braces()
+                    atom_size = atom_size * copies
                 else
                     position = position + 1
                     repeats_forever = quantifier ~= "?"
@@ -278,24 +292,38 @@ local function parse(chars: {string}, points: {integer})
                 unbounded = unbounded or repeats_forever
             end
             unbounded = unbounded or group_unbounded
+            expanded = expanded + atom_size
         end
-        return unbounded
+        return unbounded, expanded
     end
 
-    parse_alternation = function(depth: integer): boolean
+    parse_alternation = function(depth: integer): (boolean, number)
         local unbounded = false
+        local expanded = 0
         while true do
-            if parse_sequence(depth) then unbounded = true end
+            local branch_unbounded, branch_size = parse_sequence(depth)
+            if branch_unbounded then unbounded = true end
+            expanded = expanded + branch_size
             if chars[position] == "|" then
                 position = position + 1
             else
                 break
             end
         end
-        return unbounded
+        return unbounded, expanded
     end
 
-    parse_alternation(0)
+    -- Matching takes time in proportion to the compiled program, which the
+    -- other bounds leave open: a{0,100} written 25 times is 200 characters and
+    -- 2,500 steps per character of the answer. A literal, a class, a dot or an
+    -- anchor counts 1, a group is the sum of its branches, and {n}, {m,n} and
+    -- {m,} multiply what they repeat by n, n and m + 1. * + ? count it once.
+    -- This is checked last, so a malformed pattern is reported as malformed.
+    local _, expanded = parse_alternation(0)
+    if expanded > form_pattern.MAX_EXPANDED then
+        reject(UNSUPPORTED, string.format("A pattern counts at most %d with every repeat written out: "
+            .. "a{5} counts 5, and (ab){5} counts 10.", form_pattern.MAX_EXPANDED))
+    end
 end
 
 -- Checks a pattern against the subset. Returns true, or nil, a code
