@@ -228,6 +228,14 @@ describe('normalizeHostAnswers', () => {
       .toEqual({ f1: 'a', f2: 'b', f3: 'c' })
   })
 
+  it('keeps number and boolean answers exactly', () => {
+    const stored = { parcels: 0, agreed: false, news: true, count: 3 }
+    const normalized = normalizeHostAnswers(stored)
+    expect(normalized).toEqual(stored)
+    expect(normalized?.parcels).toBe(0)
+    expect(normalized?.agreed).toBe(false)
+  })
+
   it('passes plain strings and Other answers through', () => {
     expect(normalizeHostAnswers({ f1: 'a', f2: { other: 'mine' } })).toEqual({ f1: 'a', f2: { other: 'mine' } })
   })

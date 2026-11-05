@@ -3506,6 +3506,10 @@ function Cu(e) {
     return null;
   const t = {};
   for (const [n, r] of Object.entries(e)) {
+    if (typeof r == "number" || typeof r == "boolean") {
+      t[n] = r;
+      continue;
+    }
     if (Array.isArray(r)) {
       const o = [];
       for (const a of r) {

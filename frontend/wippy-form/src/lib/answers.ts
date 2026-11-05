@@ -231,7 +231,7 @@ export type HostFormAnswers = Record<string, ArtifactFormAnswerValue | number | 
  * usable note is the plain option value. An item that has none of the three
  * shapes cannot come from the server and is dropped.
  */
-function normalizeHostChoice(item: ArtifactFormChoiceAnswer | number | boolean): SingleFieldAnswer | null {
+function normalizeHostChoice(item: ArtifactFormChoiceAnswer): SingleFieldAnswer | null {
   if (typeof item === 'string')
     return item
   if (isOtherAnswer(item))
@@ -244,14 +244,20 @@ function normalizeHostChoice(item: ArtifactFormChoiceAnswer | number | boolean):
 /**
  * The read boundary for stored answers: maps the proxy's looser
  * `HostFormAnswers` to the internal `FormAnswers`, where a noted answer
- * always has a non-blank `note`. Malformed items are dropped, and a single
- * answer that is malformed is left out like an unanswered question.
+ * always has a non-blank `note`. A number or a boolean is a standard field's
+ * answer and stays as it is, `0` and `false` included. Malformed items are
+ * dropped, and a single answer that is malformed is left out like an unanswered
+ * question.
  */
 export function normalizeHostAnswers(data: HostFormAnswers | null): FormAnswers | null {
   if (data === null)
     return null
   const answers: FormAnswers = {}
   for (const [fieldId, value] of Object.entries(data)) {
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      answers[fieldId] = value
+      continue
+    }
     if (Array.isArray(value)) {
       const items: SingleFieldAnswer[] = []
       for (const entry of value) {
