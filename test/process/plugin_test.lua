@@ -1970,6 +1970,7 @@ local function define_tests()
             test.eq(update.status, consts.STATUS.IDLE)
             test.is_true(update.interaction.can_send)
             test.is_nil(upstream_error(run, "stop-hub"), "a user Stop is not reported as an error")
+            test.eq(recovery_boundaries(session_id), 0, "the boundary of a Stop is the one the Stop committed")
             cleanup_session_fixture(session_id, context_id)
         end)
 
