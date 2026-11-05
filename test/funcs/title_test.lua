@@ -75,7 +75,7 @@ local function define_tests()
             local text = table.concat(sent, "\n")
             test.contains(text, "Plan the release.")
             test.contains(text, "Admitted answer.")
-            test.is_nil(string.find(text, "Waiting answer.", 1, true))
+            test.is_nil((string.find(text, "Waiting answer.", 1, true)))
         end)
 
         it("clamps a long title on a character boundary", function()
