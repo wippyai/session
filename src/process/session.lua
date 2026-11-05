@@ -13,6 +13,7 @@ local agent_context = require("agent_context")
 local tools = require("tools")
 local message_repo = require("message_repo")
 local form_recovery = require("form_recovery")
+local interruption_boundary = require("interruption_boundary")
 local uuid = require("uuid")
 local input_policy = require("input_policy")
 
@@ -59,19 +60,6 @@ local function clone(value)
     return result
 end
 
-local function interruption_boundary(reason)
-    local id, err = uuid.v7()
-    if not id then return nil, err end
-    local detail = reason == "stop" and "The user cancels the preceding turn."
-        or "The preceding turn is interrupted before completion; its outcome may be unknown."
-    return {
-        message_id = id,
-        data = detail .. " Do not automatically resume that turn or carry out its remaining instructions. "
-            .. "Follow subsequent user messages as new requests, including an explicit request to continue.",
-        metadata = { preserve_position = true, interruption = { reason = reason } },
-    }
-end
-
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -105,7 +93,7 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
         context.stop_commit_channel = stop_gate
     end
     local boundary, boundary_err
-    if running then boundary, boundary_err = interruption_boundary("stop") end
+    if running then boundary, boundary_err = interruption_boundary.new("stop") end
     if not running or boundary then
         stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch or {}, {
             status = context.status,
@@ -537,7 +525,7 @@ local function run(args: SessionArgs)
     local interrupted = session_data.status == consts.STATUS.RUNNING
         or session_data.status == consts.STATUS.FAILED or session_data.status == consts.STATUS.ERROR
     if not args.create and (interrupted or recovered_calls > 0) then
-        local boundary, boundary_err = interruption_boundary("recovery")
+        local boundary, boundary_err = interruption_boundary.new("recovery")
         if not boundary then error("Failed to create recovery boundary: " .. tostring(boundary_err)) end
         local committed, commit_err = session_writer:stop_with_input_rollback({}, {}, boundary)
         if not committed then error("Failed to persist recovery boundary: " .. tostring(commit_err)) end

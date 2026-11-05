@@ -14,6 +14,9 @@ local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local wait_for_boot = require("wait_for_boot")
 local start_tokens = require("start_tokens")
+local control_handlers = require("control_handlers")
+local definition = require("definition")
+local state_service = require("state_service")
 
 local function plugin_message(topic, data, sender)
     return {
@@ -753,6 +756,85 @@ end
 local function isolated_actor()
     local user_id = "plugin-test-" .. uuid.v7()
     return { id = function() return user_id end }
+end
+
+-- An answered form in `session_id`, admitted, for reading its delivery.
+local function admitted_form(actor, session_id)
+    local session_writer = assert(writer.new(session_id))
+    local ctx = {
+        session_id = session_id,
+        writer = session_writer,
+        reader = {
+            list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
+            list_pending_answers = function(_, limit) return message_repo.list_pending_answers(session_id, limit) end,
+            newest_non_input_id = function(_, excluded) return message_repo.newest_non_input_id(session_id, excluded) end,
+        },
+        upstream = {
+            send_message_update = function() end,
+            update_session = function() end,
+            message_received = function() end,
+        },
+    }
+    local artifact_id = uuid.v7()
+    local def = definition.normalize({ title = "Delivery", fields = {
+        { id = "delivery", type = "choice", label = "How?", required = true, options = { "Courier", "Locker" } },
+    } })
+    local _, form_err = control_handlers.control_forms(ctx, {
+        forms = { { artifact_id = artifact_id, definition = def } },
+        turn_id = "turn-" .. uuid.v7(), call_id = "call-1", tool_message_id = "tool-row-1",
+    })
+    test.is_nil(form_err)
+    local status = state_service.submit(actor:id(), artifact_id, json.encode({
+        form_version = 1, request_id = uuid.v7(), answers = { delivery = "Courier" },
+    }))
+    test.eq(status, 200)
+    answer_admission.admit_in_order(ctx, nil)
+    return artifact_id, session_writer
+end
+
+local function delivery_of(actor, artifact_id)
+    local status, body = state_service.get_state(actor:id(), artifact_id)
+    test.eq(status, 200)
+    return json.decode(tostring(body)).delivery
+end
+
+local function recovery_boundaries(session_id)
+    local page: any = message_repo.list_by_session(session_id, 500)
+    local count = 0
+    for _, row in ipairs(page.messages) do
+        if row.type == consts.MSG_TYPE.DEVELOPER and type(row.metadata.interruption) == "table"
+            and row.metadata.interruption.reason == "recovery" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- One stale scan by a plugin that sees only `session_id`.
+local function scan_for_stale_session(actor, session_id)
+    local original_list = session_repo.list_by_user_status
+    session_repo.list_by_user_status = function(user_id, status, limit, opts)
+        local page, err = original_list(user_id, status, limit, opts)
+        if not page then return nil, err end
+        local mine = {}
+        for _, session in ipairs(page.sessions) do
+            if session.session_id == session_id then table.insert(mine, session) end
+        end
+        return { sessions = mine, has_more = page.has_more, next_cursor = page.next_cursor }
+    end
+    local original_pending = message_repo.list_sessions_with_pending_answers
+    message_repo.list_sessions_with_pending_answers = function() return {} end
+    mock("process.registry", {
+        register = function() return true, nil end,
+        lookup = function() return nil end,
+    })
+    local run = run_plugin_lifecycle(actor, session_id, "stale-hub", {
+        { topic = consts.PLUGIN_TOPICS.SCAN_ANSWERS, data = {} },
+    }, nil, { open = false, cancel_plugin = true })
+    restore_mock("process.registry")
+    session_repo.list_by_user_status = original_list
+    message_repo.list_sessions_with_pending_answers = original_pending
+    test.is_nil(run.error)
 end
 
 -- Runs the plugin through a script of inbox messages ({ topic, data }) and
@@ -1746,6 +1828,44 @@ local function define_tests()
             end
             test.is_nil(updates[live_id])
             test.is_nil(updates[idle_id])
+        end)
+
+        it("closes a turn a stopped runtime cut off with one boundary, which a later start does not repeat", function()
+            local actor = security.actor()
+            local original_lookup, original_plugin = state_service._lookup_session, state_service._lookup_plugin
+            state_service._lookup_session = function() return nil end
+            state_service._lookup_plugin = function() return nil end
+            local session_id, context_id = create_session_fixture(actor, "Cut off", consts.STATUS.RUNNING)
+            local artifact_id, session_writer = admitted_form(actor, session_id)
+            -- Text and no call: only the boundary can show the turn did not finish.
+            session_writer:add_message(consts.MSG_TYPE.ASSISTANT, "Let me check.")
+
+            scan_for_stale_session(actor, session_id)
+            test.eq(session_repo.get(session_id).status, consts.STATUS.IDLE)
+            test.eq(recovery_boundaries(session_id), 1, "the scan closes the turn")
+            test.eq(delivery_of(actor, artifact_id), "interrupted")
+
+            run_start_through_session(actor, session_id, {}, "reopened-after-scan", "finish")
+            test.eq(recovery_boundaries(session_id), 1, "the reopen adds none")
+            test.eq(delivery_of(actor, artifact_id), "interrupted")
+
+            state_service._lookup_session, state_service._lookup_plugin = original_lookup, original_plugin
+            cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("keeps a stale session running when its boundary fails, so the next start writes it", function()
+            local actor = security.actor()
+            local session_id, context_id = create_session_fixture(actor, "Boundary failed", consts.STATUS.RUNNING)
+            local original_stop = message_repo.stop_with_input_rollback
+            message_repo.stop_with_input_rollback = function() return nil, "disk full" end
+            scan_for_stale_session(actor, session_id)
+            message_repo.stop_with_input_rollback = original_stop
+            test.eq(session_repo.get(session_id).status, consts.STATUS.RUNNING, "no idle status ahead of the boundary")
+            test.eq(recovery_boundaries(session_id), 0)
+
+            run_start_through_session(actor, session_id, {}, "start-writes-boundary", "finish")
+            test.eq(recovery_boundaries(session_id), 1)
+            cleanup_session_fixture(session_id, context_id)
         end)
 
         it("ignores a wake for a session this user does not have", function()

@@ -9,6 +9,7 @@ local consts = require("consts")
 local input_policy = require("input_policy")
 local session_status = require("session_status")
 local form_recovery = require("form_recovery")
+local interruption_boundary = require("interruption_boundary")
 local funcs = require("funcs")
 local ui_action_broker = require("ui_action_broker")
 local prompt_builder = require("prompt_builder")
@@ -158,9 +159,12 @@ end
 
 -- Stores `target_status` with the interaction recovery gives it. Before
 -- that, `opts.recover_calls` repairs the calls an interrupted turn left
--- pending, and `opts.admit_stopped` admits its pending form answers with no
--- turn (admit_stopped_answers, clients told through `opts.hub_pid`).
--- Returns the status, whether it was stored, the storage error, the call
+-- pending, `opts.admit_stopped` admits its pending form answers with no turn
+-- (admit_stopped_answers, clients told through `opts.hub_pid`), and
+-- `opts.recovery_boundary` commits the recovery boundary. A later session
+-- start reads the stored status and writes no boundary for an idle session,
+-- so this one commits first; when it fails, nothing is stored, and the
+-- running status makes the next session start write it. Returns the status, whether it was stored, the storage error, the call
 -- repair error, the interaction and the admitted answer rows.
 local function settle_session(session_id: string, user_id: string, target_status: string, opts: any?)
     opts = opts or {}
@@ -186,6 +190,16 @@ local function settle_session(session_id: string, user_id: string, target_status
     if not stored then
         return target_status, false, read_err or "Session was not found", recovery_err, nil, admitted
     end
+    if opts.recovery_boundary then
+        local boundary, boundary_err = interruption_boundary.new("recovery")
+        local committed = false
+        if boundary then
+            committed, boundary_err = message_repo.stop_with_input_rollback(session_id, {}, {}, boundary)
+        end
+        if not committed then
+            return target_status, false, tostring(boundary_err), recovery_err, nil, admitted
+        end
+    end
     local meta = stored.meta or {}
     local interaction = input_policy.recovery_snapshot(stored, target_status)
     meta.interaction = interaction
@@ -200,13 +214,16 @@ end
 -- stored idle with an interaction that takes input, because nothing in the
 -- session failed and a failed status would keep Send disabled. Pending calls
 -- are repaired first. After an enforced Stop the pending form answers are
--- admitted with no turn (`admit_stopped`), and after a runtime stop they stay
--- pending for the next session start. Clients get the recovery notice only
--- when the runtime stopped (settle_stale_running).
+-- admitted with no turn (`admit_stopped`), and the turn already holds the
+-- boundary the Stop committed. After a runtime stop they stay pending for the
+-- next session start, and `recovery_boundary` closes the turn. Clients get the
+-- recovery notice only when the runtime stopped (settle_stale_running).
 local function settle_interrupted(session_id: string, user_id: string, opts: any?)
     opts = opts or {}
-    return settle_session(session_id, user_id, consts.STATUS.IDLE,
-        { recover_calls = true, admit_stopped = opts.admit_stopped, hub_pid = opts.hub_pid })
+    return settle_session(session_id, user_id, consts.STATUS.IDLE, {
+        recover_calls = true, admit_stopped = opts.admit_stopped, hub_pid = opts.hub_pid,
+        recovery_boundary = opts.recovery_boundary,
+    })
 end
 
 -- Whether the plugin cancelled or terminated the session process to enforce
@@ -1108,8 +1125,9 @@ local function run(args)
     -- Host shows Stop and blocks Send until something reopens the session.
     -- Once, at start, each such session of this user that no live process
     -- holds is settled as interrupted (settle_interrupted: pending calls
-    -- repaired, status idle with an interaction that takes input, clients
-    -- told with the recovery notice). Its form answers read as interrupted.
+    -- repaired, the recovery boundary written, status idle with an interaction
+    -- that takes input, clients told with the recovery notice). Its form
+    -- answers read as interrupted.
     -- All of the user's running sessions are read, a page at a time; the
     -- pages follow session ids, so settling a session does not move the rows
     -- of later pages.
@@ -1126,7 +1144,7 @@ local function run(args)
                 local session_id = tostring(session.session_id)
                 if not state.active_sessions[session_id] and session_status.is_stale_running(session) then
                     local target_status, stored, status_err, recovery_err, interaction =
-                        settle_interrupted(session_id, state.user_id :: string)
+                        settle_interrupted(session_id, state.user_id :: string, { recovery_boundary = true })
                     if recovery_err or status_err then
                         logger:warn("stale session status could not be settled", { session_id = session_id,
                             error = tostring(status_err or recovery_err) })

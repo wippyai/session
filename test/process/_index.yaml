@@ -205,6 +205,9 @@ entries:
       message_repo: wippy.session.persist:message_repo
       message_handlers: wippy.session.process:message_handlers
       answer_admission: wippy.session.process:answer_admission
+      control_handlers: wippy.session.process:control_handlers
+      definition: wippy.session.forms:definition
+      state_service: wippy.session.forms:state_service
       plugin: wippy.session.process:plugin
       session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo

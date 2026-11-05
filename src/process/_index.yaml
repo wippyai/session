@@ -186,6 +186,15 @@ entries:
     source: file://input_policy.lua
     modules: [json]
 
+  # wippy.session.process:interruption_boundary
+  - name: interruption_boundary
+    kind: library.lua
+    meta:
+      comment: The developer row that closes a turn cut short by a Stop or a recovery
+    source: file://interruption_boundary.lua
+    modules:
+      - uuid
+
   # wippy.session.process:session_status
   - name: session_status
     kind: library.lua
@@ -241,6 +250,7 @@ entries:
       input_policy: wippy.session.process:input_policy
       message_repo: wippy.session.persist:message_repo
       form_recovery: wippy.session.forms:form_recovery
+      interruption_boundary: wippy.session.process:interruption_boundary
     method: run
 
   # wippy.session.process:plugin
@@ -273,6 +283,7 @@ entries:
       input_policy: wippy.session.process:input_policy
       session_status: wippy.session.process:session_status
       form_recovery: wippy.session.forms:form_recovery
+      interruption_boundary: wippy.session.process:interruption_boundary
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
       upstream: wippy.session.process:upstream
