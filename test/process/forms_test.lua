@@ -23,6 +23,9 @@ local reader = require("reader")
 local writer = require("writer")
 local message_date = require("message_date")
 local wait_for_boot = require("wait_for_boot")
+local prompt = require("prompt")
+local openai_mapper = require("openai_mapper")
+local google_mapper = require("google_mapper")
 
 -- Session forms inside the session process, on the real database: creation
 -- through the ask_user tool and the `_control.forms` effect in
@@ -116,14 +119,15 @@ local function define_tests()
         end
 
         -- One ask_user call through the real tool and process_tools.
-        local function ask(ctx: any, args)
+        local function ask(ctx: any, args, opts: any?)
             local call_id = "call-" .. uuid.v7()
-            local _, ids: any, store_err = ctx.writer:add_response("", {}, {
+            local _, ids: any, store_err = ctx.writer:add_response("", opts and opts.metadata or {}, {
                 { id = call_id, name = "ask_user", arguments = args, registry_id = TOOL_ID,
                     type = consts.MSG_TYPE.FUNCTION },
             })
             test.is_nil(store_err)
             local tool_result, tool_err = funcs.new():call(TOOL_ID, args)
+            if opts and opts.tool_result then tool_result, tool_err = opts.tool_result, nil end
             local caller = {
                 set_strategy = function() end,
                 execute = function(_self, _context, tools)
@@ -746,6 +750,341 @@ local function define_tests()
                 test.is_nil(err)
                 test.is_true(ok)
                 test.eq(continued, 0)
+            end)
+        end)
+
+        describe("on the current Session", function()
+            -- A scripted agent for real agent_step calls on the database.
+            local function with_agent(ctx: any, options: any?)
+                local agent: any = {
+                    id = "agent:forms", model = "model:forms", tool_wrappers = {},
+                    agent_options = options or {},
+                    step = function() return { result = "Noted.", tool_calls = {} } end,
+                }
+                ctx.config.agent_id = agent.id
+                ctx.config.model = agent.model
+                ctx.agent_ctx = {
+                    load_agent = function() return agent, nil end,
+                    get_current_agent = function() return agent end,
+                }
+                ctx.upstream.response_beginning = function() end
+                ctx.upstream.invalidate_message = function() end
+                return agent
+            end
+
+            local function find_next_op(result: any, op_type)
+                for _, op in ipairs((result and result.next_ops) or {}) do
+                    if op.type == op_type then return op end
+                end
+                return nil
+            end
+
+            it("keeps a requested compaction when a created form ends the turn", function()
+                local ctx = new_ctx()
+                with_agent(ctx)
+                test.is_nil(select(2, ctx.writer:set_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED, true)))
+                ctx.reader:reset()
+
+                local result, err = ask(ctx, DEFINITION)
+
+                test.is_nil(err)
+                test.is_false(has_continue(result), "D11: a created form takes no further step")
+                local compaction: any = find_next_op(result, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
+                test.not_nil(compaction, "the requested compaction still waits for the settled round")
+                test.is_true(compaction.requested_only)
+                test.is_false(result.completed)
+            end)
+
+            it("refuses a malformed forms control as a tool error", function()
+                local ctx = new_ctx()
+                local result, err, call_id, ids = ask(ctx, DEFINITION, {
+                    tool_result = { message = "created", _control = { forms = "not a list" } },
+                })
+
+                test.is_nil(err)
+                test.not_nil(result)
+                local row: any = message_repo.get((ids :: any)[call_id])
+                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(row.metadata.result), "Invalid tool control: forms must be a table")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 0)
+            end)
+
+            it("recovers a crash between the form commit and the call settlement as a created form", function()
+                local ctx = new_ctx()
+                local real_writer = ctx.writer
+                ctx.writer = setmetatable({
+                    update_message_meta = function(_self, id, meta)
+                        if type(meta) == "table" and meta.status == consts.FUNC_STATUS.SUCCESS then
+                            error("process killed")
+                        end
+                        return real_writer:update_message_meta(id, meta)
+                    end,
+                }, { __index = real_writer })
+                local crashed = pcall(ask, ctx, DEFINITION)
+                ctx.writer = real_writer
+                test.is_false(crashed, "the process dies before the call is settled")
+
+                local form_id = form_id_of(ctx)
+                local calls = rows_of(ctx, consts.MSG_TYPE.FUNCTION)
+                test.eq(#calls, 1)
+                test.eq(calls[1].metadata.status, consts.FUNC_STATUS.PENDING,
+                    "the form is durable and the call is not settled yet")
+
+                local recovered, err = message_repo.recover_pending(ctx.session_id, nil, form_recovery.settle_call)
+                test.is_nil(err)
+                test.eq(recovered, 1)
+                local settled: any = message_repo.get(calls[1].message_id)
+                test.eq(settled.metadata.status, consts.FUNC_STATUS.SUCCESS)
+                test.contains(tostring(settled.metadata.result.message), form_id)
+            end)
+
+            it("settles a committed form call before it replays the behavior round at session start", function()
+                local ctx = new_ctx()
+                local _, ask_err, call_id, ids = ask(ctx, DEFINITION, {
+                    metadata = { behavior_controls = {}, behavior_control_state = "pending" },
+                })
+                test.is_nil(ask_err)
+                local message_id = (ids :: any)[call_id]
+                -- The process stopped after the form committed and before the
+                -- call was settled.
+                ctx.writer:update_message_meta(message_id, { status = consts.FUNC_STATUS.PENDING })
+                ctx.reader:reset()
+                local replayed, replay_err = message_handlers.recover_behavior_controls(ctx)
+                test.is_nil(replayed)
+                test.contains(tostring(replay_err), "unsettled calls")
+
+                local pid, spawn_err = process.spawn_monitored(consts.PROCESS.SESSION_ID, "app:processes", {
+                    session_id = ctx.session_id, user_id = user_id, parent_pid = process.pid(),
+                })
+                test.is_nil(spawn_err)
+                local exit: any = nil
+                local deadline = time.after("20s")
+                local events = process.events()
+                local function settled_round()
+                    local stored: any = session_repo.get(ctx.session_id, user_id)
+                    return stored.meta.behavior_controls_pending == false
+                end
+                local poll = time.after("10ms")
+                while not exit and not settled_round() do
+                    local selected = channel.select({ events:case_receive(), poll:case_receive(), deadline:case_receive() })
+                    if selected.channel == deadline then error("the session did not finish its start") end
+                    if selected.channel == events then
+                        if selected.value.from == pid then exit = selected.value end
+                    else
+                        poll = time.after("10ms")
+                    end
+                end
+                if not exit then
+                    process.send(pid, consts.TOPICS.FINISH_AND_EXIT, {})
+                    while not exit do
+                        local selected = channel.select({ events:case_receive(), deadline:case_receive() })
+                        if selected.channel == deadline then
+                            process.terminate(pid)
+                            error("the session did not exit")
+                        end
+                        if selected.value.from == pid then exit = selected.value end
+                    end
+                end
+
+                local outcome: any = exit.result
+                test.is_nil(type(outcome) == "table" and outcome.error or nil, tostring(exit.error))
+                test.is_nil(exit.error)
+                local call: any = message_repo.get(message_id)
+                test.eq(call.metadata.status, consts.FUNC_STATUS.SUCCESS, "the form call counts as created")
+                local assistants = rows_of(ctx, consts.MSG_TYPE.ASSISTANT)
+                test.eq(assistants[1].metadata.behavior_control_state, "applied")
+                test.is_false(session_repo.get(ctx.session_id, user_id).meta.behavior_controls_pending)
+            end)
+
+            it("gives a turn started by a form answer its turn note", function()
+                local note_options = { turn_context = { time = { timezone = "UTC" } } }
+                local function assert_note(ctx: any, op: any)
+                    with_agent(ctx, note_options)
+                    test.not_nil(op, "a turn starts at the answer")
+                    local _, step_err = message_handlers.agent_step(ctx, op)
+                    test.is_nil(step_err)
+                    local notes = {}
+                    for _, row in ipairs(rows_of(ctx, consts.MSG_TYPE.SYSTEM)) do
+                        if row.metadata.system_action == consts.SYSTEM_ACTIONS.TURN_CONTEXT then
+                            table.insert(notes, row)
+                        end
+                    end
+                    test.eq(#notes, 1)
+                    test.eq(notes[1].metadata.source_id, op.message_id)
+                end
+
+                -- The answer arrives while the session is idle.
+                local idle = new_ctx()
+                ask(idle, DEFINITION)
+                submit(form_id_of(idle))
+                local admitted: any = message_handlers.admit_answer(idle)
+                assert_note(idle, admitted.next_ops[1])
+
+                -- The answer arrives during a turn and starts the next one.
+                local busy = new_ctx()
+                ask(busy, DEFINITION)
+                local accepted = submit(form_id_of(busy))
+                local bus: any = running_turn(busy)
+                session.route_input(busy, bus, consts.TOPICS.FORM_ANSWER,
+                    { message_id = accepted.answer_message_id }, { finishing = false })
+                reach_boundary(busy, bus)
+                assert_note(busy, bus.ops[1])
+            end)
+
+            it("keeps the form index out of the instructions and after every earlier message", function()
+                local ctx = new_ctx()
+                ctx.writer:add_message(consts.MSG_TYPE.USER, "Send the parcel.")
+                ask(ctx, DEFINITION)
+                local function request()
+                    ctx.reader:reset()
+                    local builder: any, err = prompt_builder.from_session(ctx.reader)
+                    test.is_nil(err)
+                    return builder:get_messages()
+                end
+                local asked = request()
+                -- The form changes state and the history the model sees does not.
+                submit(form_id_of(ctx))
+                local answered = request()
+
+                local before, after = asked[#asked], answered[#answered]
+                test.is_true(prompt.is_positional_note(before), "drivers keep the index at its position")
+                test.is_true(prompt.is_positional_note(after))
+                test.contains(tostring(before.content[1].text), "- unanswered:")
+                test.contains(tostring(after.content[1].text), "- answer pending")
+                test.eq(#asked, #answered)
+                local history_tail = false
+                for index = 1, #asked - 1 do
+                    test.eq(json.encode(asked[index]), json.encode(answered[index]),
+                        "message " .. index .. " must not change when a form does")
+                    if asked[index].marker_id == "history_tail" then history_tail = true end
+                end
+                test.is_true(history_tail, "the index sits behind the cache boundary of the history")
+
+                -- As sent to a provider that hoists other developer messages.
+                local instructions_before = openai_mapper.extract_instructions(asked)
+                local instructions_after = openai_mapper.extract_instructions(answered)
+                test.eq(instructions_before, instructions_after, "the instructions never carry the index")
+                local wire_before = google_mapper.map_messages(asked)
+                local wire_after = google_mapper.map_messages(answered)
+                test.eq(#wire_before, #wire_after)
+                local tail_before, tail_after = wire_before[#wire_before], wire_after[#wire_after]
+                test.eq(#tail_before.parts, #tail_after.parts)
+                for index = 1, #tail_before.parts - 1 do
+                    test.eq(json.encode(tail_before.parts[index]), json.encode(tail_after.parts[index]))
+                end
+                for index = 1, #wire_before - 1 do
+                    test.eq(json.encode(wire_before[index]), json.encode(wire_after[index]))
+                end
+            end)
+
+            it("writes no second interruption boundary past a pending answer", function()
+                local ctx = new_ctx()
+                ctx.writer:add_message(consts.MSG_TYPE.USER, "Send the parcel.")
+                ask(ctx, DEFINITION)
+                local form_id = form_id_of(ctx)
+                local function boundary(id)
+                    return { message_id = id, data = "Interrupted.",
+                        metadata = { preserve_position = true, interruption = { reason = "stop" } } }
+                end
+                test.is_true(ctx.writer:stop_with_input_rollback({}, {}, boundary(uuid.v7())))
+                submit(form_id)
+                test.is_true(ctx.writer:stop_with_input_rollback({}, {}, boundary(uuid.v7())))
+
+                local count = 0
+                for _, row in ipairs(rows_of(ctx, consts.MSG_TYPE.DEVELOPER)) do
+                    if type(row.metadata.interruption) == "table" then count = count + 1 end
+                end
+                test.eq(count, 1)
+            end)
+
+            it("never anchors a compaction on a pending answer", function()
+                local ctx = new_ctx()
+                local agent = with_agent(ctx)
+                ctx.config.checkpoint_function_id = "app:checkpoint"
+                ctx.config.token_checkpoint_threshold = 1000
+                local user_row = ctx.writer:add_message(consts.MSG_TYPE.USER, "Send the parcel.")
+                ask(ctx, DEFINITION)
+                local accepted = submit(form_id_of(ctx))
+                local anchored = nil
+                local original = session_handlers.create_checkpoint
+                session_handlers.create_checkpoint = function(_ctx, op)
+                    anchored = op.checkpoint_id
+                    return { next_ops = {} }
+                end
+                agent.step = function(_self, _builder, options)
+                    options.checkpoint.compact({ estimated_prompt_tokens = 2000 })
+                    return { result = "Noted.", tool_calls = {} }
+                end
+                local _, step_err = message_handlers.agent_step(ctx, { message_id = user_row, from_user = true })
+                session_handlers.create_checkpoint = original
+
+                test.is_nil(step_err)
+                test.not_nil(anchored)
+                test.is_true(anchored ~= accepted.answer_message_id, "admission moves that row to the end")
+            end)
+
+            -- Commits a checkpoint that leaves `source_id`'s turn out of the
+            -- window; only the excerpt of its request stays.
+            local function checkpoint_after(ctx: any, source_id: string)
+                local anchor, _, store_err = ctx.writer:add_response("Working on it.", { source_id = source_id }, {})
+                test.is_nil(store_err)
+                local committed, commit_err = ctx.writer:commit_checkpoint({
+                    message_id = anchor, checkpoint_id = anchor, exclusive = true, source_id = source_id,
+                }, "Summary of the turn.", {})
+                test.is_nil(commit_err)
+                test.is_true(committed)
+                ctx.reader:reset()
+            end
+
+            it("keeps the turn's request across a checkpoint while a form answer is pending", function()
+                local ctx = new_ctx()
+                local user_row = ctx.writer:add_message(consts.MSG_TYPE.USER, "Send the parcel.")
+                ask(ctx, DEFINITION)
+                checkpoint_after(ctx, user_row)
+                submit(form_id_of(ctx))
+
+                local text = prompt_user_texts(ctx)
+                test.not_nil(index_containing(text, "Send the parcel."),
+                    "an answer the session has not admitted does not start a turn")
+                test.is_nil(index_containing(text, "<wippy-form-answers"))
+            end)
+
+            it("keeps the record of a form answer that started the turn in a restored request", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                submit(form_id_of(ctx))
+                local admitted: any = message_handlers.admit_answer(ctx)
+                checkpoint_after(ctx, admitted.next_ops[1].message_id)
+
+                local text = prompt_user_texts(ctx)
+                test.not_nil(index_containing(text, "<wippy-form-answers record="))
+                test.is_nil(index_containing(text, "&lt;wippy-form-answers"))
+            end)
+
+            it("bounds the turn spans around an answer that starts the next turn", function()
+                local ctx = new_ctx()
+                local bus: any = running_turn(ctx)
+                ctx.lifecycle_state = { active_agent_id = "agent:forms", active_model = "model:forms" }
+                ctx.turn_state.span_anchor_known = true
+                ctx.turn_state.span_open_start = true
+                ask(ctx, DEFINITION)
+                local rows: any = message_repo.list_by_session(ctx.session_id, 500).messages
+                local turn_end = rows[#rows].message_id
+                local accepted = submit(form_id_of(ctx))
+                session.route_input(ctx, bus, consts.TOPICS.FORM_ANSWER,
+                    { message_id = accepted.answer_message_id }, { finishing = false })
+
+                ctx.coordinator = bus
+                local finished: any, err = message_handlers.finish_turn(ctx, { defer_completion = true })
+                test.is_nil(err)
+                test.is_true(finished.completed)
+                test.is_nil(select(2, bus:end_turn()))
+
+                test.eq(ctx.turn_state.message_id, accepted.answer_message_id)
+                test.eq(ctx.lifecycle_state.completed_turn_span.to_id, turn_end,
+                    "the answer belongs to the next turn")
+                test.eq(ctx.turn_state.span_from_id, turn_end, "the next turn's span starts before its answer")
+                test.is_true(ctx.turn_state.span_anchor_known)
             end)
         end)
 

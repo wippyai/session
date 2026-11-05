@@ -551,6 +551,7 @@ entries:
       consts: wippy.session:consts
       prompt: wippy.llm:prompt
       form_index: wippy.session.forms:form_index
+      form_meta: wippy.session.forms:form_meta
       answer_text: wippy.session.forms:answer_text
       context_attachments: wippy.llm:context_attachments
       text_clamp: wippy.session:text_clamp

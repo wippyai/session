@@ -2,6 +2,7 @@ local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
 local form_index = require("form_index")
+local form_meta = require("form_meta")
 local answer_text = require("answer_text")
 local fs = require("fs")
 local hash = require("hash")
@@ -706,10 +707,13 @@ local function checkpoint_request(session, messages, anchor)
     if err then return nil, err end
     if not request or request.type ~= consts.MSG_TYPE.USER then return nil, nil end
     -- Keep the actual user text at user authority. Uploaded content and visual
-    -- attachments before the checkpoint are represented by its summary.
+    -- attachments before the checkpoint are represented by its summary. A form
+    -- answer that started the turn stays marked, so its record stays readable.
+    local answer = type(request.metadata) == "table" and request.metadata[form_meta.ANSWER_KEY] or nil
     return {
         message_id = request.message_id, date = request.date,
-        type = consts.MSG_TYPE.USER, data = checkpoint_request_excerpt(request.data), metadata = {},
+        type = consts.MSG_TYPE.USER, data = checkpoint_request_excerpt(request.data),
+        metadata = { [form_meta.ANSWER_KEY] = answer },
     }, nil
 end
 

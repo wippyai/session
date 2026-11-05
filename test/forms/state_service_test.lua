@@ -752,6 +752,68 @@ local function define_tests()
             test.eq(gone.delivery, "interrupted")
         end)
 
+        it("reports a stopped turn after an answer as interrupted", function()
+            local function admitted_form()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                test.eq(post(artifact_id, answer()), 200)
+                answer_admission.admit_in_order(ctx, nil)
+                state_service._lookup_session = function() return nil end
+                return ctx, artifact_id
+            end
+            local function stop_boundary(ctx)
+                local _, err = ctx.writer:stop_with_input_rollback({}, {}, {
+                    message_id = uuid.v7(), data = "The user cancels the preceding turn.",
+                    metadata = { preserve_position = true, interruption = { reason = "stop" } },
+                })
+                test.is_nil(err)
+            end
+
+            -- Text Stop cut off is not a reply.
+            local ctx, artifact_id = admitted_form()
+            ctx.writer:add_response("Partial ans", { stopped = true }, {})
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- Text ahead of a cancelled call did not finish the turn.
+            ctx, artifact_id = admitted_form()
+            local _, call_ids: any = ctx.writer:add_response("Let me check.", {}, {
+                { id = "cancelled-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            test.eq(select(2, get(artifact_id)).delivery, "complete", "the turn may still finish")
+            ctx.writer:update_message_meta(call_ids["cancelled-call"],
+                { status = consts.FUNC_STATUS.CANCELLED, result = "Session stopped while the call was running" })
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- Text ahead of the Stop boundary did not finish the turn.
+            ctx, artifact_id = admitted_form()
+            ctx.writer:add_response("Let me check.", {}, {})
+            stop_boundary(ctx)
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- Nor did text ahead of a call recovery settled.
+            ctx, artifact_id = admitted_form()
+            ctx.writer:add_response("Let me check.", {}, {
+                { id = "recovered-call", name = "lookup", arguments = "{}", registry_id = "app:lookup",
+                    type = consts.MSG_TYPE.FUNCTION },
+            })
+            test.eq(select(2, message_repo.recover_pending(ctx.session_id)), nil)
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+
+            -- A later turn that replied did deliver the answer.
+            ctx.writer:add_message(consts.MSG_TYPE.USER, "Carry on.")
+            test.eq(select(2, get(artifact_id)).delivery, "interrupted")
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Done.")
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+
+            -- A finished turn stays complete when a later turn is stopped.
+            ctx, artifact_id = admitted_form()
+            ctx.writer:add_message(consts.MSG_TYPE.ASSISTANT, "Thanks for the answer.")
+            ctx.writer:add_message(consts.MSG_TYPE.USER, "Next question.")
+            stop_boundary(ctx)
+            test.eq(select(2, get(artifact_id)).delivery, "complete")
+        end)
+
         it("reports a failed session read in the delivery state as an error", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)

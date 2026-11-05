@@ -176,6 +176,9 @@ entries:
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
       message_date: wippy.session.persist:message_date
+      prompt: wippy.llm:prompt
+      openai_mapper: wippy.llm.openai:mapper
+      google_mapper: wippy.llm.google:mapper
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
     method: run_tests
