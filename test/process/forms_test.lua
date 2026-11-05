@@ -128,6 +128,7 @@ local function define_tests()
             test.is_nil(store_err)
             local tool_result, tool_err = funcs.new():call(TOOL_ID, args)
             if opts and opts.tool_result then tool_result, tool_err = opts.tool_result, nil end
+            if opts and opts.artifacts then tool_result._control.artifacts = opts.artifacts end
             local caller = {
                 set_strategy = function() end,
                 execute = function(_self, _context, tools)
@@ -432,6 +433,71 @@ local function define_tests()
                 session_writer.update_message_meta = original_meta
                 test.is_nil(err)
                 test.eq(table.concat(order, ", "), "form stored, call settled")
+            end)
+
+            it("settles a call with no form before its control effect runs", function()
+                local ctx = new_ctx()
+                local session_writer: any = ctx.writer
+                local original_store = session_writer.create_artifact
+                local original_meta = session_writer.update_message_meta
+                local order = {}
+                session_writer.create_artifact = function(...)
+                    table.insert(order, "artifact stored")
+                    return original_store(...)
+                end
+                session_writer.update_message_meta = function(self, id, meta)
+                    if type(meta) == "table" and meta.status == consts.FUNC_STATUS.SUCCESS then
+                        table.insert(order, "call settled")
+                    end
+                    return original_meta(self, id, meta)
+                end
+                local _, err = ask(ctx, DEFINITION, { tool_result = { message = "done", _control = {
+                    artifacts = { { title = "Notes", content = "Some notes." } },
+                } } })
+                session_writer.create_artifact = original_store
+                session_writer.update_message_meta = original_meta
+                test.is_nil(err)
+                test.eq(table.concat(order, ", "), "call settled, artifact stored")
+            end)
+
+            it("turns a refused edit of a form into an error on a call with no form", function()
+                local ctx = new_ctx()
+                ask(ctx, DEFINITION)
+                local form_id = form_id_of(ctx)
+                ctx.turn_state.id = "turn-" .. uuid.v7()
+                local _, err, call_id, ids = ask(ctx, DEFINITION, { tool_result = { message = "done", _control = {
+                    artifacts = { { id = form_id, content = "replaced" } },
+                } } })
+                test.is_nil(err)
+                local row: any = message_repo.get((ids :: any)[call_id])
+                test.eq(row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(row.metadata.result), "session_form")
+            end)
+
+            it("references an inline artifact created in the round that asks a form", function()
+                local ctx, events = new_ctx()
+                local _, err = ask(ctx, DEFINITION, { artifacts = { { title = "Notes", content = "Some notes." } } })
+                test.is_nil(err)
+                local inline_id = nil
+                for _, artifact in ipairs(artifact_repo.list_by_session(ctx.session_id)) do
+                    if artifact.title == "Notes" then inline_id = artifact.artifact_id end
+                end
+                test.not_nil(inline_id)
+
+                local rows = 0
+                for _, row in ipairs(rows_of(ctx, consts.MSG_TYPE.ARTIFACT)) do
+                    if row.metadata.artifact_id == inline_id then
+                        rows = rows + 1
+                        test.eq(row.data, "", "a reference shows nothing to the model")
+                    end
+                end
+                test.eq(rows, 1)
+                local announced = 0
+                for _, payload in ipairs(events.artifacts) do
+                    if payload.artifact_id == inline_id then announced = announced + 1 end
+                end
+                test.eq(announced, 1)
+                test.is_nil(ctx.turn_state.pending_inline_artifacts, "nothing is left for a later reply")
             end)
 
             it("refuses to edit a form through the generic artifact update", function()

@@ -1087,6 +1087,24 @@ local function queue_inline_artifacts(ctx: SessionContext, created_artifacts: an
     end
 end
 
+-- A round that ends the turn has no later assistant row to present its inline
+-- artifacts (terminal_inline_artifact_presentation), so each one gets the
+-- artifact row and the announcement a client's reference gets.
+local function reference_inline_artifacts(ctx: SessionContext): (boolean?, string?)
+    local state = ctx.turn_state
+    local pending = state and state.pending_inline_artifacts or {}
+    for _, artifact in ipairs(pending) do
+        local message_id, err = ctx.writer:add_message(consts.MSG_TYPE.ARTIFACT, "",
+            { artifact_id = artifact.artifact_id })
+        if err then return nil, err end
+        ctx.upstream:send_message_update(message_id, "artifact", {
+            message_id = message_id, artifact_id = artifact.artifact_id,
+        })
+    end
+    if state then state.pending_inline_artifacts = nil end
+    return true
+end
+
 -- Ends only the current turn after an agent, provider, or configuration failure; the
 -- session stays open and accepts the next message. Use it only before add_response:
 -- after that the turn has stored tool intents, and failures must stay fatal so the
@@ -2450,11 +2468,12 @@ function message_handlers.process_tools(ctx, op)
                 call_id = call_id,
                 registry_id = result_data.tool_call.registry_id
             }
-            -- A call with control effects is settled only after its
-            -- effects commit, so a crash in between leaves the call
-            -- pending for recovery instead of claiming work that never
-            -- happened (e.g. "form created" with no form stored).
-            if not control then
+            -- A call that creates a form is settled only after the form
+            -- commits, so a crash in between leaves the call pending for
+            -- recovery instead of claiming a form that was never stored.
+            -- Every other call is settled before its effects run.
+            local settle_late = control and type(control.forms) == "table" and #control.forms > 0
+            if not settle_late then
                 local _, update_err = ctx.writer:update_message_meta(message_id, settled)
                 if update_err then return fail_remaining(index, update_err) end
             end
@@ -2522,7 +2541,7 @@ function message_handlers.process_tools(ctx, op)
                 settled.result = rejected
                 settled.status = consts.FUNC_STATUS.ERROR
             end
-            if control then
+            if settle_late or rejected then
                 local _, settle_err = ctx.writer:update_message_meta(message_id, settled)
                 if settle_err then return fail_from(settle_err) end
             end
@@ -2555,6 +2574,11 @@ function message_handlers.process_tools(ctx, op)
     end
     local settled, settle_err = settle_behavior_round(ctx, op, policies_cancelled)
     if not settled then return nil, settle_err end
+
+    if end_turn then
+        local referenced, reference_err = reference_inline_artifacts(ctx :: SessionContext)
+        if not referenced then return nil, reference_err end
+    end
 
     -- A control-driven handoff starts the successor before the old turn can
     -- reach the queue-empty boundary. Its tool results are now durable, so
