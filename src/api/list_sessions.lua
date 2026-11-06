@@ -1,6 +1,7 @@
 local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
+local session_status = require("session_status")
 
 type ListSessionsResponse = {
     success: boolean,
@@ -59,7 +60,8 @@ local function handler()
     end
 
     for i, session in ipairs(sessions) do
-        session.interaction = session.meta and session.meta.interaction
+        -- A turn the runtime stopped reads as idle (session_status).
+        session.status, session.interaction = session_status.effective(session)
         session.current_agent = ""
         session.current_model = ""
 

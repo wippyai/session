@@ -1,6 +1,9 @@
 local json = require("json")
 local consts = require("consts")
 local contract = require("contract")
+local form_index = require("form_index")
+local form_meta = require("form_meta")
+local answer_text = require("answer_text")
 local fs = require("fs")
 local hash = require("hash")
 local time = require("time")
@@ -426,6 +429,15 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
             return
         end
 
+        -- nil for a form answer accepted while a turn was running: the session
+        -- admits it after the turn ends (moving it to the end of the history),
+        -- so it stays out until then and does not close an open tool round.
+        local user_text = nil
+        if msg.type == consts.MSG_TYPE.USER then
+            user_text = answer_text.model_text(msg)
+            if user_text == nil then return end
+        end
+
         if msg.type ~= consts.MSG_TYPE.FUNCTION and msg.type ~= consts.MSG_TYPE.PRIVATE_FUNCTION
             and msg.type ~= consts.MSG_TYPE.DELEGATION then
             flush_results()
@@ -440,8 +452,8 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
             end
         elseif msg.type == consts.MSG_TYPE.USER then
             local user_parts = {}
-            if has_text(msg.data) then
-                table.insert(user_parts, prompt_builder._prompt.text(msg.data :: string))
+            if has_text(user_text) then
+                table.insert(user_parts, prompt_builder._prompt.text(user_text :: string))
             end
             if include_context_attachments and metadata.context_attachments then
                 local required, required_count, required_versions = {}, 0, {}
@@ -683,9 +695,11 @@ local function checkpoint_request(session, messages, anchor)
     if type(source_id) ~= "string" or source_id == "" then return nil, nil end
     for _, message in ipairs(messages) do
         if message.message_id == source_id then return nil, nil end
-        -- A later ordinary user message starts a new turn. Steering, including
-        -- pending input, must not hide the request that owns this checkpoint.
-        if message.type == consts.MSG_TYPE.USER and (message.metadata or {}).input == nil then
+        -- A later ordinary user message starts a new turn. Steering and a form
+        -- answer not admitted yet, including pending input, must not hide the
+        -- request that owns this checkpoint.
+        if message.type == consts.MSG_TYPE.USER and (message.metadata or {}).input == nil
+            and answer_text.model_text(message) ~= nil then
             return nil, nil
         end
     end
@@ -693,11 +707,41 @@ local function checkpoint_request(session, messages, anchor)
     if err then return nil, err end
     if not request or request.type ~= consts.MSG_TYPE.USER then return nil, nil end
     -- Keep the actual user text at user authority. Uploaded content and visual
-    -- attachments before the checkpoint are represented by its summary.
+    -- attachments before the checkpoint are represented by its summary. A form
+    -- answer that started the turn stays marked and whole: an excerpt would cut
+    -- its JSON record. The form size limits bound it, and admission fails a
+    -- prompt that does not fit the model's window.
+    local answer = type(request.metadata) == "table" and request.metadata[form_meta.ANSWER_KEY] or nil
+    local data = request.data
+    if type(answer) ~= "table" then data = checkpoint_request_excerpt(data) end
     return {
         message_id = request.message_id, date = request.date,
-        type = consts.MSG_TYPE.USER, data = checkpoint_request_excerpt(request.data), metadata = {},
+        type = consts.MSG_TYPE.USER, data = data,
+        metadata = { [form_meta.ANSWER_KEY] = answer },
     }, nil
+end
+
+-- The session's form index (form identity and state survive checkpoints
+-- through it, not through the free-text summary). Answers accepted during the
+-- running turn are listed as pending, without their values. Returns
+-- (text or nil, error).
+local function forms_index_of(session: any): (string?, string?)
+    if type(session.artifacts) ~= "function" then
+        return nil, nil
+    end
+    local artifacts, err = session:artifacts():all()
+    if err then
+        return nil, "Failed to load forms: " .. tostring(err)
+    end
+    local pending = {}
+    if type(session.session_id) == "string" then
+        local pending_err
+        pending, pending_err = form_index.pending_answers(session.session_id, artifacts)
+        if not pending then
+            return nil, "Failed to load pending form answers: " .. tostring(pending_err)
+        end
+    end
+    return form_index.build(artifacts, { pending_answers = pending }), nil
 end
 
 function prompt_builder.from_session(session, options)
@@ -717,7 +761,7 @@ function prompt_builder.from_session(session, options)
         if request_err then return nil, "Failed to load checkpoint request: " .. request_err end
         if request then
             table.insert(checkpoint_prefix, request)
-            -- The note of the source turn stays with its excerpt, unless the
+            -- The note of the source turn stays with its request, unless the
             -- retained history already holds it.
             local note, note_err = session:get_turn_note(request.message_id)
             if note_err then return nil, "Failed to load turn note: " .. note_err end
@@ -742,9 +786,26 @@ function prompt_builder.from_session(session, options)
         return nil, "Failed to load contexts: " .. err
     end
 
+    local index, index_err = forms_index_of(session)
+    if index_err then
+        return nil, index_err
+    end
+
     local session_meta = session:state()
 
-    return prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
+    local builder, build_err = prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
+    if not builder then
+        return nil, build_err
+    end
+    -- After the history and its cache marker: the index changes whenever a
+    -- form is asked, answered or admitted, and anywhere earlier it would make
+    -- the provider re-read the cached history behind it on the next step.
+    -- Positional, because drivers hoist any other developer message into the
+    -- top-level instructions, which sit in front of the whole history.
+    if index then
+        builder:add_developer(index, { preserve_position = true })
+    end
+    return builder, nil
 end
 
 return prompt_builder

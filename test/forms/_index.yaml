@@ -1,0 +1,65 @@
+version: "1.0"
+namespace: app.forms
+
+# Suites for src/forms/.
+entries:
+  - name: definition_test
+    kind: function.lua
+    meta:
+      name: Form definition, answers and answer text
+      type: test
+      suite: session
+      comment: Definition limits and stable error codes, per-field answer validation and canonical order, server answer text with late wording and safe fencing
+    source: file://definition_test.lua
+    modules:
+      - json
+      - time
+    imports:
+      definition: wippy.session.forms:definition
+      answer_text: wippy.session.forms:answer_text
+      test: wippy.test:test
+    method: run
+
+  - name: form_index_test
+    kind: function.lua
+    meta:
+      name: Form index for the prompt
+      type: test
+      suite: session
+      comment: Bounded, deterministic index of unanswered and answered forms
+    source: file://form_index_test.lua
+    imports:
+      form_index: wippy.session.forms:form_index
+      message_repo: wippy.session.persist:message_repo
+      test: wippy.test:test
+    method: run
+
+  - name: state_service_test
+    kind: function.lua
+    meta:
+      name: Form state API
+      type: test
+      suite: session
+      comment: GET state shapes and POST acceptance, replay, conflicts, validation, ownership, size cap and atomic rollback on the real database
+    source: file://state_service_test.lua
+    modules:
+      - json
+      - sql
+      - time
+      - uuid
+      - security
+    imports:
+      consts: wippy.session:consts
+      definition: wippy.session.forms:definition
+      state_service: wippy.session.forms:state_service
+      control_handlers: wippy.session.process:control_handlers
+      answer_admission: wippy.session.process:answer_admission
+      artifact_repo: wippy.session.persist:artifact_repo
+      message_repo: wippy.session.persist:message_repo
+      message_date: wippy.session.persist:message_date
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      writer: wippy.session.persist:writer
+      test: wippy.test:test
+      wait_for_boot: app:wait_for_boot
+    method: run

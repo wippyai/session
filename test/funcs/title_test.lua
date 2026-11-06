@@ -46,6 +46,38 @@ local function define_tests()
             return table.concat(sent, "\n")
         end
 
+        it("leaves out a form answer the session has not admitted", function()
+            local query = {}
+            function query:all()
+                return {
+                    { type = "user", data = "Plan the release.", metadata = {} },
+                    { type = "user", data = "Waiting answer.",
+                        metadata = { session_form = { artifact_id = "form-1", pending = true } } },
+                    { type = "user", data = "Admitted answer.",
+                        metadata = { session_form = { artifact_id = "form-2" } } },
+                }, nil
+            end
+            local contexts = {}
+            function contexts:type(_kind) return self end
+            function contexts:all() return {}, nil end
+            session.open = function()
+                return { messages = function() return query end, contexts = function() return contexts end }
+            end
+            local sent = {}
+            llm.generate = function(prompt_builder)
+                for _, message in ipairs(prompt_builder:get_messages()) do
+                    for _, part in ipairs(message.content or {}) do sent[#sent + 1] = part.text end
+                end
+                return { result = "Release planning" }, nil
+            end
+
+            test.not_nil(title.handle({ session_id = "session-title" }))
+            local text = table.concat(sent, "\n")
+            test.contains(text, "Plan the release.")
+            test.contains(text, "Admitted answer.")
+            test.is_nil((string.find(text, "Waiting answer.", 1, true)))
+        end)
+
         it("clamps a long title on a character boundary", function()
             local query = {}
             function query:all() return {{ type = "user", data = "Doors.", metadata = {} }}, nil end

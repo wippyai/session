@@ -12,6 +12,10 @@ local function fixture(): (any, any, {any}, {any}, {any}, {any})
     local successes = {} :: {any}
     local ctx: any = {
         session_id = "session-1", held = {}, status = consts.STATUS.IDLE,
+        reader = {
+            list_pending_inputs = function() return {}, nil end,
+            list_pending_answers = function() return {}, nil end,
+        },
         config = { input_policy = { while_running = "steer" } },
         writer = {
             add_message = function(_self, msg_type, content, metadata)
@@ -502,6 +506,7 @@ local function define_tests()
             ctx.prepare_attention_prompt = function() return { get_messages = function() return {} end } end
             ctx.reader = {
                 list_pending_inputs = function() return {} end,
+                list_pending_answers = function() return {} end,
                 get_full_context = function() return {} end,
                 get_context = function() return nil end,
                 state = function() return { meta = {} } end,
