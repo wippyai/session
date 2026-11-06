@@ -77,9 +77,9 @@ function form_artifact.parse(artifact: any): (any, string?)
     if not def then
         return nil, "Stored form definition is invalid: " .. definition.format_errors(def_errors)
     end
-    -- A record labeled with a lower version than its fields need would be
+    -- The definition decides the version. A record labeled lower would be
     -- read by an older component as a form it can render.
-    if version < definition.version_of(def) then
+    if version ~= definition.version_of(def) then
         return nil, "Unsupported form version"
     end
     return {

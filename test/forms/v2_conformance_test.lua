@@ -19,6 +19,9 @@ local form_text = require("form_text")
 --   value         the answer for the first field; absent or null = no answer
 --   value_concat  instead of value: a list of strings and { repeat, times }
 --                 objects joined into one string (long values)
+--   value_as      with value_concat on a choice: "other" makes the string an
+--                 Other answer, and "note" makes it the note of option "a"; a
+--                 question with several answers gets a list of that one item
 --   expect        one of
 --       { ok = v }                the answer is accepted and stored as v
 --       { same = true }           accepted and stored exactly as sent
@@ -61,6 +64,12 @@ local function load_cases(): any
     return cases
 end
 
+local function wrap(case: any, joined: string): any
+    if case.value_as == nil then return joined end
+    local item = case.value_as == "other" and { other = joined } or { value = "a", note = joined }
+    return case.field.multiple and { item } or item
+end
+
 local function expand(case: any): any
     if case.value_concat == nil then return case.value end
     local parts = {}
@@ -71,7 +80,7 @@ local function expand(case: any): any
             table.insert(parts, string.rep(part["repeat"], part.times))
         end
     end
-    return table.concat(parts)
+    return wrap(case, table.concat(parts))
 end
 
 local function build_fields(case: any): {any}
@@ -187,6 +196,10 @@ local function check_answer(case: any)
         return
     end
     local expected = expect.same and value or expect.ok
+    if type(expected) == "table" then
+        test.eq(definition.encode_answers(def, { f = normalized.f }), definition.encode_answers(def, { f = expected }))
+        return
+    end
     test.eq(normalized.f, expected)
     check_number_type(normalized.f)
 end

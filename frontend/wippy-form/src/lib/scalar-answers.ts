@@ -15,7 +15,7 @@ import { codePointLength, hasControlCharacters, isBlank, normalizeNewlines, trim
 
 /**
  * Client-side rules and serialization for the six V2 standard fields,
- * mirroring the server contract (decisions D32). This is a convenience mirror
+ * mirroring the server contract. This is a convenience mirror
  * for the UI: it catches an obvious mistake before a round trip and shapes
  * the value exactly as the server will accept it. The Session state API
  * stays the authority and its 422 errors are what the form ultimately shows.

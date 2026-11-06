@@ -154,13 +154,18 @@ local function trim(text: string): string
     return string.sub(text, first, last)
 end
 
+-- The raw_factor of an answer that is trimmed: a valid one is at most 4 bytes
+-- per character, plus whatever surrounding whitespace a real client sends. This
+-- bounds every per-byte scan of the raw value to a small multiple of the limit,
+-- independent of the 64 KiB body cap.
+local TRIMMED_RAW_FACTOR = 8
+
 -- The sequence every free-text answer takes: the Other text and the note of a
 -- choice, and the text, textarea and email fields. One function, so the six
 -- cannot drift apart. It stops at the first problem, in this order:
 --   1. the size guard: more than opts.max * opts.raw_factor bytes is
 --      "too_long", before anything scans the value. The factor is the bytes a
---      character can take (4), with room for surrounding whitespace where the
---      answer is trimmed;
+--      character can take (4), or TRIMMED_RAW_FACTOR where the answer is trimmed;
 --   2. trim, when opts.trim, with the JavaScript set;
 --   3. UTF-8 ("not_utf8"), which counts the characters;
 --   4. control characters ("control_characters"); a tab and a line break are
@@ -183,6 +188,15 @@ local function read_answer(value: string,
     return kept, length, nil
 end
 
+-- Compares two non-negative integers written as digit strings without leading
+-- zeros: -1, 0 or 1. The longer one is larger, and equal lengths compare as
+-- text, so a value of any length is compared without turning it into a number.
+local function compare_digits(a: string, b: string): integer
+    if #a ~= #b then return #a < #b and -1 or 1 end
+    if a == b then return 0 end
+    return a < b and -1 or 1
+end
+
 form_text.decode_at = decode_at
 form_text.char_length = char_length
 form_text.is_blank = is_blank
@@ -190,5 +204,7 @@ form_text.is_whitespace_only = is_whitespace_only
 form_text.has_control_characters = has_control_characters
 form_text.trim = trim
 form_text.read_answer = read_answer
+form_text.compare_digits = compare_digits
+form_text.TRIMMED_RAW_FACTOR = TRIMMED_RAW_FACTOR
 
 return form_text

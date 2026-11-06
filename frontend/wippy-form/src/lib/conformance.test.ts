@@ -1,4 +1,4 @@
-import type { FieldAnswer, FormField, ScalarFormField } from './definition'
+import type { FieldAnswer, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
 import { evaluateField } from './answers'
 import { numberToPlainText } from './decimal'
@@ -15,6 +15,8 @@ import { effectiveMaxLength } from './scalar-answers'
  *   value            the wire answer; absent or null = no answer
  *   value_concat     instead of `value`: strings and `{ repeat, times }`
  *                    objects joined into one long string
+ *   value_as         with `value_concat` on a choice: `other` makes the string
+ *                    an Other answer, `note` the note of option `a`
  *   expect           { ok: v } accepted and stored as v
  *                    { same: true } accepted and stored exactly as sent
  *                    { unanswered: true } accepted, nothing stored
@@ -22,8 +24,8 @@ import { effectiveMaxLength } from './scalar-answers'
  *                    { definition_ok } / { definition_error, path } /
  *                    { normalized } about the definition itself
  *
- * What the client checks: every answer case for the six standard fields
- * (expect `ok`, `same`, `unanswered`, `error`), and, for definition cases
+ * What the client checks: every answer case for a choice and the six standard
+ * fields (expect `ok`, `same`, `unanswered`, `error`), and, for definition cases
  * that state a normalized `max_length`, that the client derives the same
  * effective limit from the raw field.
  *
@@ -40,7 +42,7 @@ import { effectiveMaxLength } from './scalar-answers'
  * other shape fails loudly.
  */
 
-const SCALAR_TYPES = new Set(['text', 'textarea', 'number', 'email', 'date', 'checkbox'])
+const FIELD_TYPES = new Set(['choice', 'text', 'textarea', 'number', 'email', 'date', 'checkbox'])
 
 export interface RawCase {
   name?: string
@@ -48,10 +50,11 @@ export interface RawCase {
   fields?: unknown[]
   value?: unknown
   value_concat?: Array<string | { repeat: string, times: number }>
+  value_as?: 'other' | 'note'
   expect?: Record<string, unknown>
 }
 
-export type SkipReason = 'definition' | 'not-standard-field' | 'pattern' | 'wrong-type' | 'checkbox-absent' | 'textarea-cr'
+export type SkipReason = 'definition' | 'pattern' | 'wrong-type' | 'checkbox-absent' | 'textarea-cr'
 export type Verdict = 'checked' | `skipped:${SkipReason}`
 
 function skip(reason: SkipReason): Verdict {
@@ -61,14 +64,30 @@ function skip(reason: SkipReason): Verdict {
 function expandValue(raw: RawCase): unknown {
   if (raw.value_concat === undefined)
     return raw.value
-  return raw.value_concat.map(part => typeof part === 'string' ? part : part.repeat.repeat(part.times)).join('')
+  const joined = raw.value_concat.map(part => typeof part === 'string' ? part : part.repeat.repeat(part.times)).join('')
+  if (raw.value_as === undefined)
+    return joined
+  const item = raw.value_as === 'other' ? { other: joined } : { value: 'a', note: joined }
+  return raw.field?.multiple ? [item] : item
+}
+
+/** A raw field of the fixture as the server hands it to the component. */
+function normalizedField(rawField: Record<string, unknown>): FormField {
+  const common = { id: 'f', label: 'Question', required: false, ...rawField }
+  if (rawField.type !== 'choice')
+    return common as unknown as FormField
+  const options = (rawField.options as Array<string | { value: string, label: string }>)
+    .map(option => typeof option === 'string' ? { value: option, label: option } : option)
+  return { multiple: false, allow_other: false, ...common, options } as unknown as FormField
 }
 
 /** The draft a control would hold for this wire value, or `null` when no control can hold such a value. */
-function draftFor(field: ScalarFormField, value: unknown): FieldAnswer | undefined | null {
+function draftFor(field: FormField, value: unknown): FieldAnswer | undefined | null {
   if (value === null || value === undefined)
     return undefined
   switch (field.type) {
+    case 'choice':
+      return value as FieldAnswer
     case 'number':
       return typeof value === 'number' ? numberToPlainText(value) : null
     case 'checkbox':
@@ -93,11 +112,15 @@ export function runCase(raw: unknown, index: number): Verdict {
   const rawField = entry.field
   if (!rawField || typeof rawField.type !== 'string')
     throw new Error(`conformance case ${index} (${name}): no field`)
-  if (!SCALAR_TYPES.has(rawField.type))
-    return skip('not-standard-field')
-  const field = { id: 'f', label: 'Question', required: false, ...rawField } as unknown as ScalarFormField
 
   const isDefinitionCase = 'definition_ok' in expected || 'definition_error' in expected || 'normalized' in expected
+  if (!FIELD_TYPES.has(rawField.type)) {
+    if (isDefinitionCase)
+      return skip('definition')
+    throw new Error(`conformance case ${index} (${name}): unknown field type ${rawField.type}`)
+  }
+  const field = normalizedField(rawField)
+
   if (isDefinitionCase) {
     const normalized = expected.normalized as Record<string, unknown> | undefined
     if (normalized && 'max_length' in normalized && (field.type === 'text' || field.type === 'textarea')) {
@@ -129,7 +152,7 @@ export function runCase(raw: unknown, index: number): Verdict {
   if (field.type === 'checkbox' && draft === undefined && !field.required)
     return skip('checkbox-absent')
 
-  const outcome = evaluateField(field as FormField, draft)
+  const outcome = evaluateField(field, draft)
   if (typeof expected.error === 'string') {
     expect(outcome.errors.map(e => e.code), name).toContain(expected.error)
     expect(outcome.errors[0].code, name).toBe(expected.error)
@@ -170,6 +193,14 @@ describe('conformance runner (inline cases)', () => {
     expect(() => runCase({ name: 'wrong', field: text, value: 'abc', expect: { ok: 'abd' } }, 2)).toThrow()
   })
 
+  it('checks choice answers, and wraps value_concat as an Other answer or a note', () => {
+    const choice = { type: 'choice', options: ['a', 'b'], allow_other: true }
+    expect(runCase({ name: 'same', field: choice, value: 'a', expect: { same: true } }, 0)).toBe('checked')
+    expect(runCase({ name: 'other', field: choice, value_concat: ['x'], value_as: 'other', expect: { same: true } }, 1)).toBe('checked')
+    expect(runCase({ name: 'note', field: { ...choice, multiple: true }, value_concat: ['x'], value_as: 'note', expect: { ok: [{ value: 'a', note: 'x' }] } }, 2)).toBe('checked')
+    expect(() => runCase({ name: 'wrong', field: choice, value: 'a', expect: { error: 'required' } }, 3)).toThrow()
+  })
+
   it('compares the effective max_length of a normalized definition', () => {
     expect(runCase({ name: 'defaults', field: { type: 'text' }, expect: { normalized: { max_length: 500 } } }, 0)).toBe('checked')
     expect(runCase({ name: 'cap', field: { type: 'textarea' }, expect: { normalized: { max_length: 8000 } } }, 1)).toBe('checked')
@@ -180,7 +211,6 @@ describe('conformance runner (inline cases)', () => {
     expect(runCase({ name: 'type', field: { type: 'number' }, value: '3', expect: { error: 'invalid_type' } }, 0)).toBe('skipped:wrong-type')
     expect(runCase({ name: 'wrong json type', field: { type: 'number' }, value: true, expect: { error: 'whatever' } }, 1)).toBe('skipped:wrong-type')
     expect(runCase({ name: 'definition', field: { type: 'number', min: 5, max: 1 }, expect: { definition_error: 'invalid_range', path: 'fields[0].max' } }, 2)).toBe('skipped:definition')
-    expect(runCase({ name: 'choice', field: { type: 'choice', options: ['a'] }, value: 'a', expect: { same: true } }, 3)).toBe('skipped:not-standard-field')
     expect(runCase({ name: 'several', fields: [{ type: 'text' }], expect: { definition_ok: true } }, 4)).toBe('skipped:definition')
     expect(runCase({ name: 'checkbox', field: { type: 'checkbox' }, expect: { unanswered: true } }, 5)).toBe('skipped:checkbox-absent')
     expect(runCase({ name: 'cr', field: { type: 'textarea' }, value: 'a\r\nb', expect: { error: 'invalid_text' } }, 6)).toBe('skipped:textarea-cr')

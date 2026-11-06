@@ -1045,7 +1045,7 @@ local function define_tests()
             test.eq(errors[1].code, "unsupported_type")
             test.eq(errors[1].message, "Supported types: choice.")
             local _, unlimited = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
-            test.eq(unlimited[1].message, "Supported types: " .. field_values.TYPE_NAMES .. ".")
+            test.eq(unlimited[1].message, "Supported types: " .. definition.TYPE_NAMES .. ".")
         end)
 
         it("accepts a choice form when only choices are accepted, and every type without a limit", function()

@@ -674,7 +674,7 @@ describe('QuestionCardActive: Enter in an empty Other box says why nothing was s
 
 describe('QuestionCardActive: the empty Other box message follows the required flag', () => {
   const OTHER_EMPTY_ERROR = 'Type your answer, or choose another option.'
-  const optional = (def: FormDefinition): FormDefinition => ({ ...def, fields: def.fields.map(f => ({ ...f, required: false })) })
+  const optional = (def: ChoiceFormDefinition): ChoiceFormDefinition => ({ ...def, fields: def.fields.map(f => ({ ...f, required: false })) })
 
   it.each([
     ['single', singleDef, OTHER_EMPTY_ERROR],

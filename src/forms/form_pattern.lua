@@ -195,15 +195,9 @@ local function parse(chars: {string}, points: {integer})
             reject(INVALID, "A repeat such as {2,5} is not closed with }.")
         end
         position = position + 1
-        -- The counts are digit strings without a leading zero, so one is
-        -- larger than another when it is longer, or equally long and later in
-        -- the alphabet of digits. Nothing here depends on how many digits the
-        -- bound has, or turns a count into a number.
-        local function compare(a: string, b: string): integer
-            if #a ~= #b then return #a < #b and -1 or 1 end
-            if a == b then return 0 end
-            return a < b and -1 or 1
-        end
+        -- The counts stay digit strings until they pass the bound, so a count
+        -- of any length is refused without being read as a number.
+        local compare = form_text.compare_digits
         local bound = string.format("%d", form_pattern.MAX_REPEAT)
         if compare(low :: string, bound) > 0 or (high ~= nil and compare(high, bound) > 0) then
             reject(UNSUPPORTED, string.format("A repeat count is at most %d.", form_pattern.MAX_REPEAT))
@@ -366,8 +360,8 @@ end
 -- The compiled expressions by pattern text. A form's pattern is compiled
 -- when the form is written (the check, then the check of its default), and
 -- again on every answer and every replay of an answer, so the expression is
--- kept, as the email expression is. The cache is emptied when it is full: a
--- process works with few patterns at a time, and a bound is what matters.
+-- kept. The cache is emptied when it is full: a process works with few patterns
+-- at a time, and a bound is what matters.
 form_pattern.CACHE_LIMIT = 64
 local cache: {[string]: any} = {}
 local cached = 0
@@ -377,8 +371,10 @@ function form_pattern.cached_count(): integer
 end
 
 -- The compiled full-match expression for a pattern, or nil and the error.
--- This is the one place that wraps a pattern as ^(?:pattern)$, so an
--- alternation is matched as a whole and the author needs no anchors.
+-- This is the one place that compiles a regular expression for a form, the
+-- email syntax of field_values included, and the one place that wraps a pattern
+-- as ^(?:pattern)$, so an alternation is matched as a whole and the author
+-- needs no anchors.
 function form_pattern.compile(pattern: string): (any, any)
     local known = cache[pattern]
     if known ~= nil then return known, nil end

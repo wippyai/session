@@ -58,7 +58,6 @@ entries:
     source: file://field_values.lua
     modules:
       - json
-      - text
       - time
     imports:
       form_text: wippy.session.forms:form_text

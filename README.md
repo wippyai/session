@@ -196,8 +196,10 @@ source snapshots without Git metadata.
 Dependencies, the database, environment file, backups, and benchmark reports
 stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
 backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
-location or `TEST_CONFIG` for an external runtime configuration. These targets
-require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+location or `TEST_CONFIG` for an external runtime configuration. An external
+configuration must also carry the `app.forms:fixtures:directory` override that
+`make prepare` writes, or the form fixture suites cannot find their files. These
+targets require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
 
 ## Session retirement
 

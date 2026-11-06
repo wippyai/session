@@ -114,6 +114,13 @@ function otherDraftOf(field: ChoiceFormField, value: FieldAnswer | undefined): O
   return isOtherAnswer(value) ? value : undefined
 }
 
+/** The chosen options of an answer that carry a note. */
+function notedItems(answer: ChoiceAnswer | undefined): NotedAnswer[] {
+  if (answer === undefined)
+    return []
+  return (Array.isArray(answer) ? answer : [answer]).filter(isNotedAnswer)
+}
+
 /**
  * A choice's `answer` is always the plain serialization (an over-long Other
  * is never truncated, a blank one is dropped); `errors` say whether it may
@@ -129,6 +136,8 @@ function evaluateChoice(field: ChoiceFormField, draft: FieldAnswer | undefined):
     return { answer, errors: [{ code: 'blank', message: BLANK_OTHER_MESSAGE }] }
   if (other && exceedsLength(other.other, OTHER_TEXT_MAX))
     return { answer, errors: [{ code: 'too_long', message: lengthLimitMessage(OTHER_TEXT_MAX) }] }
+  if (notedItems(answer).some(item => exceedsLength(item.note, NOTE_TEXT_MAX)))
+    return { answer, errors: [{ code: 'too_long', message: lengthLimitMessage(NOTE_TEXT_MAX) }] }
   if (answer === undefined && field.required)
     return { answer, errors: [{ code: 'required', message: REQUIRED_MESSAGE }] }
   return { answer, errors: [] }

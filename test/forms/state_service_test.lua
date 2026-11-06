@@ -1301,6 +1301,17 @@ local function define_tests()
                 test.eq(get(artifact_id), 200)
             end)
 
+            it("reads a stored version only when it is the version the definition has", function()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 2 end)
+                local status, body = get(artifact_id)
+                test.eq(status, 400, "a choice-only form is version 1, whatever its record says")
+                test.eq(body.code, "not_a_form")
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 1 end)
+                test.eq(get(artifact_id), 200)
+            end)
+
             it("answers 500, not 422, when a stored pattern no longer compiles, and still reads the form", function()
                 local ctx = new_session()
                 local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
@@ -1609,7 +1620,7 @@ local function define_tests()
                 end)
             end)
 
-            -- P6: the largest answers a valid form can take, with the
+            -- The largest answers a valid form can take, with the
             -- characters the record escapes six-fold, through acceptance and
             -- the answer message.
             it("accepts the largest text a form can hold, and keeps it exact in the record", function()

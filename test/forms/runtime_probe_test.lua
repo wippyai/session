@@ -7,8 +7,7 @@ local text = require("text")
 -- form_pattern.lua) are built on, checked against the Wippy runtime these
 -- tests run on. Each case asserts what the runtime does today: when a runtime
 -- upgrade changes one, the failure points at the rule that has to be looked
--- at again. The observed values are written up in
--- .local/work/session-forms/probes/2026-10-01-v2-runtime-probes.md.
+-- at again.
 --
 -- Lua source in these tests writes raw bytes as decimal escapes ("\240"):
 -- this runtime has no "\xHH" or "\u{...}" escape and silently drops the
@@ -29,7 +28,7 @@ local function matches(pattern: string, subject: string): boolean
 end
 
 local function define_tests()
-    describe("P0 Lua source escapes", function()
+    describe("Lua source escapes", function()
         it("has decimal byte escapes only", function()
             test.eq(#"\240", 1)
             test.eq(string.byte("\240", 1), 240)
@@ -38,7 +37,7 @@ local function define_tests()
         end)
     end)
 
-    describe("P1 numbers", function()
+    describe("numbers", function()
         it("decodes integers exactly and everything else as a float", function()
             local cases = {
                 { "3", 3, "integer" },
@@ -117,7 +116,7 @@ local function define_tests()
         end)
     end)
 
-    describe("P2 null in decoded answers", function()
+    describe("null in decoded answers", function()
         it("drops a null object member and leaves a hole in an array", function()
             local object, err = json.decode('{"a":null,"b":1}')
             test.is_nil(err)
@@ -142,7 +141,7 @@ local function define_tests()
         end)
     end)
 
-    describe("P3 time.parse(time.DATE_ONLY)", function()
+    describe("time.parse(time.DATE_ONLY)", function()
         it("accepts exactly the real calendar days written as YYYY-MM-DD", function()
             test.eq(time.DATE_ONLY, "2006-01-02")
             local accepted = {
@@ -178,7 +177,7 @@ local function define_tests()
         end)
     end)
 
-    describe("P4 text.regexp", function()
+    describe("text.regexp", function()
         it("refuses what the form rules also refuse, with an INVALID error", function()
             local refused = {
                 "(?=a)", "(?!a)", "(a)\\1", "a{1001}", "a{0,2000}", "a{3,2}", "a**", "a{2}{3}", "(", "[", "*a",

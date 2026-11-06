@@ -546,8 +546,8 @@ local function define_tests()
 
             it("are every type for ask_user_fields, in the server's order", function()
                 local enum = type_enum(FIELDS_TOOL)
-                test.eq(#enum, #field_values.TYPES)
-                for index, name in ipairs(field_values.TYPES) do
+                test.eq(#enum, #definition.TYPES)
+                for index, name in ipairs(definition.TYPES) do
                     test.eq(enum[index], name)
                 end
             end)

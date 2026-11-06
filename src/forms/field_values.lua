@@ -1,5 +1,4 @@
 local json = require("json")
-local text = require("text")
 local time = require("time")
 local form_text = require("form_text")
 local form_checks = require("form_checks")
@@ -51,9 +50,6 @@ field_values.LIMITS = {
 
 -- A valid answer is at most this many UTF-8 characters, four bytes each.
 local BYTES_PER_CHARACTER = 4
--- An email is trimmed, so it may carry surrounding whitespace that a valid
--- address does not; this bounds the scan of such a value.
-local RAW_EMAIL_MULTIPLIER = 8
 local RAW_DATE_BYTES = 512
 
 local COMMON_KEYS = { id = true, type = true, label = true, description = true, required = true }
@@ -75,10 +71,6 @@ field_values.KEYS = {
     checkbox = keys_of({ "default" }),
 }
 
--- Every field type, in the order messages list them.
-field_values.TYPES = { "choice", "text", "textarea", "number", "email", "date", "checkbox" }
-field_values.TYPE_NAMES = table.concat(field_values.TYPES, ", ")
-
 function field_values.is_standard(type_name: any): boolean
     return type(type_name) == "string" and field_values.KEYS[type_name] ~= nil
 end
@@ -89,6 +81,11 @@ end
 function field_values.is_whole(value: any): boolean
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
         and value == math.floor(value)
+end
+
+-- A whole number as an integer, whatever it was written as.
+local function as_integer(value: number): number
+    return math.tointeger(value) or value
 end
 
 local function refuse(code: string, message: string): (any, any)
@@ -122,8 +119,8 @@ local function decimal_of(value: number): (boolean, string, integer)
     if magnitude == 0 then return false, "0", 0 end
     local digits, power
     -- A whole float past 2^63 has no integer form, so it takes the digits below.
-    local whole = field_values.is_whole(magnitude) and math.tointeger(magnitude) or nil
-    if whole then
+    local whole = as_integer(magnitude)
+    if math.type(whole) == "integer" then
         digits, power = string.format("%d", whole), 0
     else
         -- The shortest of 2 to 17 significant digits that parses back to the
@@ -173,11 +170,7 @@ function field_values.number_text(value: number): string
 end
 
 -- Non-negative integers as digit strings without leading zeros.
-local function compare_digits(a: string, b: string): integer
-    if #a ~= #b then return #a < #b and -1 or 1 end
-    if a == b then return 0 end
-    return a < b and -1 or 1
-end
+local compare_digits = form_text.compare_digits
 
 local function add_digits(a: string, b: string): string
     local out = {}
@@ -287,13 +280,11 @@ end
 -- Answers
 ---------------------------------------------------------------------------
 
--- Compiled once: a pragmatic address syntax (WHATWG-style dot-atom local
--- part, DNS-label domain with at least one dot), ASCII only. No claim that
--- the address exists.
-local EMAIL_PATTERN = "^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+-- A pragmatic address syntax (WHATWG-style dot-atom local part, DNS-label
+-- domain with at least one dot), ASCII only. No claim that the address exists.
+local EMAIL_PATTERN = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
     .. "@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-    .. "(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
-local email_expression = nil
+    .. "(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
 
 local function check_free_text(field: any, value: any): (any, any)
     if type(value) ~= "string" then
@@ -343,17 +334,15 @@ local function check_email(field: any, value: any): (any, any)
     -- characters, too many characters) is one refusal; the address syntax and
     -- the local part's length follow.
     local address, _, problem = form_text.read_answer(value, {
-        max = field_values.LIMITS.EMAIL_MAX, raw_factor = RAW_EMAIL_MULTIPLIER, trim = true, multiline = false })
+        max = field_values.LIMITS.EMAIL_MAX, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = false })
     if problem == "blank" then return unanswered(field) end
     if problem then return refuse("invalid_email", "Enter a valid email address.") end
     local at = string.find(address :: string, "@", 1, true)
     if at ~= nil and at - 1 > field_values.LIMITS.EMAIL_LOCAL_MAX then
         return refuse("invalid_email", "Enter a valid email address.")
     end
-    if email_expression == nil then
-        email_expression = text.regexp.compile(EMAIL_PATTERN)
-    end
-    local matched = (email_expression :: any):match_string(address)
+    local expression = form_pattern.compile(EMAIL_PATTERN)
+    local matched = (expression :: any):match_string(address)
     if not matched then
         return refuse("invalid_email", "Enter a valid email address.")
     end
@@ -374,7 +363,7 @@ local function check_number(field: any, value: any): (any, any)
         return refuse("not_integer", "Enter a whole number.")
     end
     -- A whole number is stored as an integer, however it was written.
-    local stored = whole and math.tointeger(value) or value
+    local stored = as_integer(value)
     if field.min ~= nil and stored < field.min then
         return refuse("below_min", "Is below the minimum.")
     end
@@ -421,9 +410,7 @@ local function check_checkbox(field: any, value: any): (any, any)
         return refuse("invalid_type", "Must be true or false.")
     end
     -- An unchecked optional box is an answer; a required one must be checked.
-    if field.required and not value then
-        return refuse("required", "This question requires an answer.")
-    end
+    if field.required and not value then return unanswered(field) end
     return value, nil
 end
 
@@ -495,11 +482,6 @@ end
 ---------------------------------------------------------------------------
 -- Definition
 ---------------------------------------------------------------------------
-
--- A whole number as an integer, whatever it was written as.
-local function as_integer(value: number): number
-    return math.tointeger(value) or value
-end
 
 -- Reads an optional whole-number key. `low`/`high` are the inclusive bounds
 -- checked for new definitions (opts.strict). Returns the value, or nil when

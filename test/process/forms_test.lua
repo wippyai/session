@@ -953,7 +953,7 @@ local function define_tests()
                 local result, err = ask(ctx, DEFINITION)
 
                 test.is_nil(err)
-                test.is_false(has_continue(result), "D11: a created form takes no further step")
+                test.is_false(has_continue(result), "a created form takes no further step")
                 local compaction: any = find_next_op(result, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
                 test.not_nil(compaction, "the requested compaction still waits for the settled round")
                 test.is_true(compaction.requested_only)

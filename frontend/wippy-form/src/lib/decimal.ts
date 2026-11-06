@@ -5,7 +5,7 @@
  * Everything here works on plain decimal text and BigInt.
  */
 
-/** A number answer's absolute value may not exceed this (D32). */
+/** A number answer's absolute value may not exceed this. */
 export const NUMBER_ABS_MAX = 1e12
 
 export type ParsedNumber

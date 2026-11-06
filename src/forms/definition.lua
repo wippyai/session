@@ -26,6 +26,10 @@ local definition = {}
 -- a notice for a version 2 form instead of rendering it wrongly.
 definition.VERSIONS = { CHOICES = 1, FIELDS = 2 }
 
+-- Every field type, in the order messages list them.
+definition.TYPES = { "choice", "text", "textarea", "number", "email", "date", "checkbox" }
+definition.TYPE_NAMES = table.concat(definition.TYPES, ", ")
+
 -- The field types of the ask_user tool (trait wippy.session.forms:ask_user).
 -- The ask_user_fields tool passes no limit and accepts every type.
 definition.CHOICE_TYPES = { choice = true }
@@ -53,12 +57,6 @@ definition.LIMITS = {
 
 local FIELD_ID_PATTERN = "^[a-z][a-z0-9_]*$"
 local FIELD_ID_MAX = 40
-
--- A valid Other/note answer is at most LIMIT UTF-8 characters (4 bytes
--- each) plus whatever surrounding whitespace a real client sends. This
--- bounds every per-byte scan on the raw value to a small multiple of the
--- limit, independent of the 64 KiB body cap, before any of them run.
-local RAW_TEXT_MULTIPLIER = 8
 
 local ROOT_KEYS = {
     title = true, description = true, submit_label = true, answered_message = true, fields = true,
@@ -130,9 +128,9 @@ end
 -- The supported-types message for a tool that accepts only `types`, or
 -- for every type when `types` is nil.
 local function supported_types(types: {[string]: boolean}?): string
-    if not types then return "Supported types: " .. field_values.TYPE_NAMES .. "." end
+    if not types then return "Supported types: " .. definition.TYPE_NAMES .. "." end
     local names = {}
-    for _, name in ipairs(field_values.TYPES) do
+    for _, name in ipairs(definition.TYPES) do
         if types[name] then table.insert(names, name) end
     end
     return "Supported types: " .. table.concat(names, ", ") .. "."
@@ -386,7 +384,7 @@ local function check_other(field: any, value: table): (any, any)
         return nil, { code = "invalid_type", message = "The other answer must be text." }
     end
     local text, _, problem = form_text.read_answer(value.other, {
-        max = definition.LIMITS.OTHER_TEXT, raw_factor = RAW_TEXT_MULTIPLIER, trim = true, multiline = true })
+        max = definition.LIMITS.OTHER_TEXT, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = true })
     if problem then return nil, refusal(OTHER_WORDING, problem) end
     return { other = text }, nil
 end
@@ -410,7 +408,7 @@ local function check_noted(value: table, positions: {[string]: number}): (any, a
         return nil, { code = "invalid_type", message = "A note must be text." }
     end
     local kept, _, problem = form_text.read_answer(note, {
-        max = definition.LIMITS.NOTE_TEXT, raw_factor = RAW_TEXT_MULTIPLIER, trim = true, multiline = true })
+        max = definition.LIMITS.NOTE_TEXT, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = true })
     if problem == "blank" then return chosen, nil end
     if problem then return nil, refusal(NOTE_WORDING, problem) end
     return { value = chosen, note = kept }, nil
