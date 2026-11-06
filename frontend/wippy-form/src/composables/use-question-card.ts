@@ -309,16 +309,20 @@ export function useQuestionCard(
   function sendOther(q: ChoiceFormField) {
     const a = ans(q)
     const text = trimAnswerText(a.other)
-    // Nothing to send: say why, since the box and its send button give no other sign.
+    // Nothing to send: a required question says why, since the box and its send
+    // button give no other sign. An Optional question says nothing, because it
+    // is allowed to stay empty.
     if (q.multiple) {
       if (!text && a.chosen.length === 0) {
-        error.value = TICK_ANSWER_MESSAGE
+        if (q.required)
+          error.value = TICK_ANSWER_MESSAGE
         return
       }
     }
     else {
       if (!text) {
-        error.value = 'Type your answer, or choose another option.'
+        if (q.required)
+          error.value = 'Type your answer, or choose another option.'
         return
       }
       a.useOther = true

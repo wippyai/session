@@ -299,7 +299,8 @@ function onKeydown(event: KeyboardEvent) {
     event.preventDefault()
     if (a.chosen.length > 0 || trimAnswerText(a.other))
       controller.commit(q)
-    else {
+    // On a one-question form a commit sends, so an Optional question stays put.
+    else if (q.required) {
       controller.error.value = TICK_ANSWER_MESSAGE
       controller.requestFocus(at >= 0 ? optionKey(at) : 'first')
     }

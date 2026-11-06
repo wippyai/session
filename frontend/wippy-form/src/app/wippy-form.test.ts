@@ -723,3 +723,147 @@ describe('WippyForm: form version 2', () => {
     expect(element.getAttribute('card-state')).toBe('answered')
   })
 })
+
+describe('WippyForm: the notice never reports the reader\'s own send as another answer', () => {
+  const answeredByMe = formState({ status: 'idle', data: { f1: 'a' }, submitted_at: ANSWERED_AT, delivery: 'pending' })
+  const noticeText = 'already answered elsewhere'
+
+  it('shows no notice when the reload that sees the answer finishes before the POST response', async () => {
+    let resolveSubmit: ((r: ReturnType<typeof acceptedResponse>) => void) | undefined
+    const submitFn = vi.fn().mockReturnValue(new Promise<ReturnType<typeof acceptedResponse>>((resolve) => { resolveSubmit = resolve }))
+    const getFn = vi.fn().mockResolvedValueOnce(formState()).mockResolvedValue(answeredByMe)
+    artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+
+    const wrapper = mountWippyForm({ formVersion: 1, definition: choiceDefinition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('.w-form__option').trigger('click')
+    await flushPromises()
+    // The server published the artifact event before it returned the POST.
+    emitArtifactEvent('artifact-1')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(submitFn).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).not.toContain(noticeText)
+
+    resolveSubmit?.(acceptedResponse())
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain(noticeText)
+    expect(wrapper.find('.w-form__card--answered').exists()).toBe(true)
+  })
+
+  it('shows no notice when the POST committed but its response and the replay both failed, and a reload then finds the form answered', async () => {
+    vi.useFakeTimers()
+    try {
+      const submitFn = vi.fn().mockRejectedValue(hostError(undefined, 'network_error'))
+      const getFn = vi.fn().mockResolvedValueOnce(formState()).mockResolvedValue(answeredByMe)
+      artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+
+      const wrapper = mountWippyForm({ formVersion: 1, definition: choiceDefinition, state: 'active' }, artifactElement('artifact-1'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      await wrapper.find('.w-form__option').trigger('click')
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.text()).toContain('Your answer may not have been saved')
+
+      emitArtifactEvent('artifact-1')
+      await vi.advanceTimersByTimeAsync(0)
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.find('.w-form__card--answered').exists()).toBe(true)
+      expect(wrapper.text()).not.toContain(noticeText)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows no notice when a retry after an uncertain send is told the form was already answered', async () => {
+    vi.useFakeTimers()
+    try {
+      const submitFn = vi.fn()
+        .mockRejectedValueOnce(hostError(undefined, 'network_error'))
+        .mockRejectedValueOnce(hostError(undefined, 'network_error'))
+        .mockRejectedValue(hostError(409, 'already_submitted'))
+      const getFn = vi.fn().mockResolvedValueOnce(formState()).mockResolvedValue(answeredByMe)
+      artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+
+      const wrapper = mountWippyForm({ formVersion: 1, definition: choiceDefinition, state: 'active' }, artifactElement('artifact-1'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      await wrapper.find('.w-form__option').trigger('click')
+      await vi.advanceTimersByTimeAsync(RETRY_DELAY_MS)
+      await vi.advanceTimersByTimeAsync(0)
+
+      const retryButton = wrapper.findAll('button').find(b => b.text() === 'Retry')
+      if (!retryButton)
+        throw new Error('expected a Retry button to be rendered')
+      await retryButton.trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(0)
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.find('.w-form__card--answered').exists()).toBe(true)
+      expect(wrapper.text()).not.toContain(noticeText)
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still shows the notice when another tab answers after a send that was rejected for certain', async () => {
+    const submitFn = vi.fn().mockRejectedValue(hostError(500))
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(formState())
+      .mockResolvedValue(formState({ status: 'idle', data: { f1: 'b' }, submitted_at: ANSWERED_AT, delivery: 'complete' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+
+    const wrapper = mountWippyForm({ formVersion: 1, definition: choiceDefinition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('.w-form__option').trigger('click')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('The server could not save this.')
+
+    emitArtifactEvent('artifact-1')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[role="status"]').text()).toContain(noticeText)
+  })
+})
+
+describe('WippyForm: a failed send\'s banner does not follow a rebind', () => {
+  it('shows no error and no Retry on the form the element is rebound to', async () => {
+    const submitFn = vi.fn().mockRejectedValue(hostError(500))
+    const getFn = vi.fn()
+      .mockResolvedValueOnce(formState({ artifact_id: 'artifact-1' }))
+      .mockResolvedValue(formState({ artifact_id: 'artifact-2' }))
+    artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+
+    const element = artifactElement('artifact-1')
+    const wrapper = mountWippyForm({ formVersion: 1, definition: choiceDefinition, state: 'active' }, element)
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('.w-form__option').trigger('click')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('The server could not save this.')
+    expect(wrapper.findAll('button').some(b => b.text() === 'Retry')).toBe(true)
+
+    element.setAttribute('data-wippy-artifact-id', 'artifact-2')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.w-form').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('The server could not save this.')
+    expect(wrapper.findAll('button').some(b => b.text() === 'Retry')).toBe(false)
+    expect(submitFn).toHaveBeenCalledTimes(1)
+  })
+})
