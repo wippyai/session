@@ -7587,7 +7587,7 @@ const co = /* @__PURE__ */ fe({
         g.preventDefault(), i.activate(O, Q);
         return;
       }
-      g.key === "Enter" && O.multiple && !_?.matches?.("button") && (g.preventDefault(), V.chosen.length > 0 || ce(V.other) ? i.commit(O) : (i.error.value = Kr, i.requestFocus(Q >= 0 ? Xe(Q) : "first")));
+      g.key === "Enter" && O.multiple && !_?.matches?.("button") && (g.preventDefault(), V.chosen.length > 0 || ce(V.other) ? i.commit(O) : O.required && (i.error.value = Kr, i.requestFocus(Q >= 0 ? Xe(Q) : "first")));
     }
     return (g, _) => (h(), v("section", y({
       ref_key: "cardRoot",
