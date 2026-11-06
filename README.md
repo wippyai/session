@@ -86,8 +86,10 @@ When a checkpoint falls inside a turn, the next agent prompt retains the
 originating user-request text at user authority, followed by the checkpoint
 resume note and subsequent model/tool messages. Restored requests are limited to
 6000 UTF-8 bytes, including an omission marker when needed; excerpts retain both
-ends. The original request and resume note precede retained steering even when
-its original anchor is unavailable. Later corrections take precedence, and
+ends. A form answer is restored whole, because an excerpt would cut its JSON
+record. The form size limits bound it, and a prompt that does not fit the
+model's window fails. The original request and resume note precede retained
+steering even when its original anchor is unavailable. Later corrections take precedence, and
 completed work stays completed. The checkpoint summary covers
 earlier progress and attachments; restoring the request does not reload those
 attachments. A later ordinary user message starts its own turn and prevents
@@ -353,7 +355,7 @@ refresh the dependency lock from the published packages.
   that ends at those gates leaves no note. It is written before the model call, so
   it stays when the provider fails or Stop arrives during the call. A retried turn
   or a reopened session finds the stored row and replays its minute. When a
-  checkpoint removes the request and the excerpt of the request is restored, the
+  checkpoint removes the request and the request is restored, the
   note is restored with it. The prompt builder renders system rows that carry
   `preserve_position` in place; other system rows (turn and agent-change notices)
   stay out of the prompt.
@@ -413,7 +415,7 @@ These history edits change the prefix by design:
   prompt, which also changes the prefix fingerprint. Memory stays there because it
   must survive checkpoints and can be deleted or cleared, which a positional row
   could not do.
-- The restored excerpt of a request, with its turn note, leaves the prompt when the
+- The restored request, with its turn note, leaves the prompt when the
   next user turn starts.
 - A step whose output is discarded (a provider failure, Stop with no text, a
   truncated step with no text, which stores only the truncation notice) discards

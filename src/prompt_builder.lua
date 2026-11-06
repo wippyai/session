@@ -708,11 +708,15 @@ local function checkpoint_request(session, messages, anchor)
     if not request or request.type ~= consts.MSG_TYPE.USER then return nil, nil end
     -- Keep the actual user text at user authority. Uploaded content and visual
     -- attachments before the checkpoint are represented by its summary. A form
-    -- answer that started the turn stays marked, so its record stays readable.
+    -- answer that started the turn stays marked and whole: an excerpt would cut
+    -- its JSON record. The form size limits bound it, and admission fails a
+    -- prompt that does not fit the model's window.
     local answer = type(request.metadata) == "table" and request.metadata[form_meta.ANSWER_KEY] or nil
+    local data = request.data
+    if type(answer) ~= "table" then data = checkpoint_request_excerpt(data) end
     return {
         message_id = request.message_id, date = request.date,
-        type = consts.MSG_TYPE.USER, data = checkpoint_request_excerpt(request.data),
+        type = consts.MSG_TYPE.USER, data = data,
         metadata = { [form_meta.ANSWER_KEY] = answer },
     }, nil
 end
@@ -757,7 +761,7 @@ function prompt_builder.from_session(session, options)
         if request_err then return nil, "Failed to load checkpoint request: " .. request_err end
         if request then
             table.insert(checkpoint_prefix, request)
-            -- The note of the source turn stays with its excerpt, unless the
+            -- The note of the source turn stays with its request, unless the
             -- retained history already holds it.
             local note, note_err = session:get_turn_note(request.message_id)
             if note_err then return nil, "Failed to load turn note: " .. note_err end

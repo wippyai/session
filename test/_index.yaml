@@ -565,8 +565,10 @@ entries:
       - json
       - hash
     imports:
+      answer_text: wippy.session.forms:answer_text
       claude_mapper: wippy.llm.claude:mapper
       context_attachments: wippy.session:context_attachments
+      form_meta: wippy.session.forms:form_meta
       google_mapper: wippy.llm.google:mapper
       openai_mapper: wippy.llm.openai:mapper
       bedrock_mapper: wippy.llm.bedrock:mapper
