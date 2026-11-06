@@ -26,6 +26,7 @@ local wait_for_boot = require("wait_for_boot")
 local prompt = require("prompt")
 local openai_mapper = require("openai_mapper")
 local google_mapper = require("google_mapper")
+local compiler = require("compiler")
 
 -- Session forms inside the session process, on the real database: creation
 -- through the ask_user tool and the `_control.forms` effect in
@@ -640,6 +641,43 @@ local function define_tests()
                 local _, later_err = ask(ctx, DEFINITION)
                 test.is_nil(later_err)
                 test.eq(#artifact_repo.list_by_session(ctx.session_id), 2)
+            end)
+
+            it("gives an agent with both traits both tools and both prompts", function()
+                local compiled: any, err = compiler.compile({
+                    id = "app:forms_both_traits_agent",
+                    traits = { "wippy.session.forms:ask_user", "wippy.session.forms:ask_user_fields" },
+                })
+                test.is_nil(err)
+                test.eq(compiled.tools.ask_user.registry_id, TOOL_ID)
+                test.eq(compiled.tools.ask_user_fields.registry_id, FIELDS_TOOL_ID)
+                test.eq(compiled.tools.read_form.registry_id, "wippy.session.forms:read_form_tool")
+                test.contains(compiled.prompt, "with the ask_user tool")
+                test.contains(compiled.prompt, "with the ask_user_fields tool")
+            end)
+
+            it("shares the one form limit of a turn between ask_user and ask_user_fields", function()
+                local ctx = new_ctx()
+                local _, first_err = ask(ctx, DEFINITION)
+                test.is_nil(first_err)
+                local result, err, call_id, ids = ask(ctx, DETAILS_DEFINITION, { tool_id = FIELDS_TOOL_ID })
+                test.is_nil(err, "a refused form does not fail the turn")
+                test.is_true(has_continue(result), "the agent sees the tool error and the turn goes on")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 1)
+                local call_row = message_repo.get((ids :: any)[call_id])
+                test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(call_row.metadata.result), "one_form_per_turn")
+
+                -- The same holds in the other order, in a later turn.
+                ctx.turn_state.id = "turn-" .. uuid.v7()
+                local _, fields_err = ask(ctx, DETAILS_DEFINITION, { tool_id = FIELDS_TOOL_ID })
+                test.is_nil(fields_err)
+                local _, second_err, second_call, second_ids = ask(ctx, DEFINITION)
+                test.is_nil(second_err)
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 2)
+                local second_row = message_repo.get((second_ids :: any)[second_call])
+                test.eq(second_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(second_row.metadata.result), "one_form_per_turn")
             end)
 
             it("creates one form from two calls in one batch, refuses the second and ends the turn", function()

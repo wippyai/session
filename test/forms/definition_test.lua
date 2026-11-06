@@ -991,6 +991,33 @@ local function define_tests()
         end)
     end)
 
+    describe("a refused default", function()
+        it("never repeats the value in its message", function()
+            local secret = "s3cr3t"
+            local cases = {
+                { type = "text", default = secret, max_length = 2 },
+                { type = "text", default = secret, min_length = 20 },
+                { type = "text", default = secret, pattern = "[0-9]+" },
+                { type = "text", default = secret .. "\n" },
+                { type = "textarea", default = secret, max_length = 2 },
+                { type = "email", default = secret },
+                { type = "date", default = secret },
+                { type = "number", default = secret },
+                { type = "checkbox", default = secret },
+            }
+            for _, case in ipairs(cases) do
+                local field = { id = "f", label = "F" }
+                for key, value in pairs(case) do field[key] = value end
+                local _, errors = definition.normalize(form({ field }))
+                test.eq(codes(errors)["fields[0].default"], "invalid_default", case.type)
+                test.is_nil((string.find(definition.format_errors(errors), secret, 1, true)), case.type)
+            end
+            local _, number_errors = definition.normalize(form({ { id = "f", type = "number", label = "F", max = 1, default = 73310 } }))
+            test.eq(codes(number_errors)["fields[0].default"], "invalid_default")
+            test.is_nil((string.find(definition.format_errors(number_errors), "73310", 1, true)))
+        end)
+    end)
+
     describe("the field types a tool accepts", function()
         local text_field = { id = "name", type = "text", label = "Name", max_length = 40, placeholder = "Ada" }
         local choice_field = { id = "pick", type = "choice", label = "Pick", options = { "a", "b" } }

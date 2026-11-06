@@ -135,6 +135,7 @@ entries:
       comment: GET state shapes and POST acceptance, replay, conflicts, validation, ownership, size cap and atomic rollback on the real database
     source: file://state_service_test.lua
     modules:
+      - fs
       - json
       - sql
       - time

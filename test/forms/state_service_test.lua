@@ -1,6 +1,7 @@
 local test = require("test")
 local json = require("json")
 local sql = require("sql")
+local fs = require("fs")
 local uuid = require("uuid")
 local security = require("security")
 local funcs = require("funcs")
@@ -175,6 +176,48 @@ local function define_tests()
             test.contains(raw, '"submitted_at":null')
             test.contains(raw, '"answer_message_id":null')
             test.contains(raw, '"delivery":null')
+        end)
+
+        -- The bytes come from the V1 release, not from the code under test, so
+        -- a change to how a choice form is read, shown or answered fails here.
+        it("reads, shows and answers a form stored by the V1 release byte for byte as V1 did", function()
+            local volume, volume_err = fs.get("app.forms:fixtures")
+            test.is_nil(volume_err, "app.forms:fixtures comes from the make test override")
+            local raw, read_err = (volume :: any):readfile("v1_stored_form.json")
+            test.is_nil(read_err)
+            local frozen: any = json.decode(tostring(raw))
+
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
+                { frozen.content, artifact_id })
+            db:release()
+            test.is_nil(update_err)
+
+            local function with_ids(text: string, values: any?): string
+                local filled = string.gsub(string.gsub(text, "@ARTIFACT@", artifact_id), "@SESSION@", ctx.session_id)
+                for name, value in pairs(values or {}) do filled = string.gsub(filled, name, value) end
+                return filled
+            end
+
+            local read_status, _, state_before = get(artifact_id)
+            test.eq(read_status, 200)
+            test.eq(state_before, with_ids(frozen.state_before))
+
+            local status, body, response = post(artifact_id, frozen.request)
+            test.eq(status, 200, tostring(body and body.code))
+            local answered = { ["@MESSAGE@"] = body.answer_message_id }
+            test.eq(response, with_ids(frozen.response, answered))
+
+            local artifact: any = artifact_repo.get(artifact_id)
+            test.eq(artifact.content, frozen.content_after)
+            local row: any = message_repo.get(body.answer_message_id)
+            test.eq(row.data, with_ids(frozen.message, answered))
+            answered["@SUBMITTED_AT@"] = artifact.meta.session_form.submission.submitted_at
+            local _, _, state_after = get(artifact_id)
+            test.eq(state_after, with_ids(frozen.state_after, answered))
         end)
 
         it("marks an active form stale only after another user message", function()
