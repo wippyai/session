@@ -243,7 +243,7 @@ defineExpose({
             <label
               :id="otherTextLabelId"
               :for="otherTextId"
-              class="w-form__sr"
+              class="sr-only"
             >Other answer</label>
             <InputText
               :id="otherTextId"
@@ -320,7 +320,7 @@ defineExpose({
             <label
               :id="otherTextLabelId"
               :for="otherTextId"
-              class="w-form__sr"
+              class="sr-only"
             >Other answer</label>
             <InputText
               :id="otherTextId"

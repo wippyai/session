@@ -42,8 +42,9 @@ export interface ChoiceFormField extends FormFieldBase {
 
 export interface TextFormField extends FormFieldBase {
   type: 'text'
-  min_length?: number
-  max_length?: number
+  /** The server always sets both when it normalizes a definition. */
+  min_length: number
+  max_length: number
   /** Full-match pattern the server checks (RE2, linear time). The browser never evaluates it. */
   pattern?: string
   placeholder?: string
@@ -52,8 +53,8 @@ export interface TextFormField extends FormFieldBase {
 
 export interface TextareaFormField extends FormFieldBase {
   type: 'textarea'
-  min_length?: number
-  max_length?: number
+  min_length: number
+  max_length: number
   placeholder?: string
   default?: string
 }

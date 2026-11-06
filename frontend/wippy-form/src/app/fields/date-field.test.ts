@@ -246,7 +246,7 @@ describe('date field: width of the control', () => {
   })
 
   it('leaves the input fields of other types without the date state', () => {
-    const wrapper = mount(FormFieldControl, { props: { field: { id: 'a', type: 'text', label: 'A', required: false }, modelValue: undefined, errors: [], disabled: false, readonly: false }, global: { plugins: [PrimeVuePlugin] } })
+    const wrapper = mount(FormFieldControl, { props: { field: { id: 'a', type: 'text', min_length: 0, max_length: 500, label: 'A', required: false }, modelValue: undefined, errors: [], disabled: false, readonly: false }, global: { plugins: [PrimeVuePlugin] } })
     expect(wrapper.find('input').attributes('part')).toBe('field-input')
   })
 })
@@ -656,8 +656,8 @@ describe('date field: focus when the calendar closes', () => {
 
   type View = ReturnType<typeof mountView>
 
-  function press(target: Element | null, code: string) {
-    target?.dispatchEvent(new KeyboardEvent('keydown', { code, bubbles: true, cancelable: true }))
+  function press(target: Element | null, code: string, shiftKey = false) {
+    target?.dispatchEvent(new KeyboardEvent('keydown', { code, shiftKey, bubbles: true, cancelable: true }))
   }
 
   /** ArrowDown in the box opens the calendar. */
@@ -696,6 +696,26 @@ describe('date field: focus when the calendar closes', () => {
   function expectClosed(view: View) {
     expect(view.shadow.querySelector('.p-datepicker-panel'), 'the calendar has closed').toBeNull()
   }
+
+  it('walks Tab and Shift+Tab through the calendar in a shadow root, where document.activeElement is the host', async () => {
+    const view = mountView()
+    await openIntoDays(view)
+    const day = view.focused()
+    expect(day?.tagName).toBe('SPAN')
+
+    // Round the panel from the day: its last stop, so Tab goes to the first.
+    press(view.focused(), 'Tab')
+    const first = view.focused()
+    expect(first?.tagName).toBe('BUTTON')
+    press(view.focused(), 'Tab')
+    const second = view.focused()
+    expect(second?.tagName).toBe('BUTTON')
+    expect(second).not.toBe(first)
+    press(view.focused(), 'Tab', true)
+    expect(view.focused()).toBe(first)
+    press(view.focused(), 'Tab', true)
+    expect(view.focused()).toBe(day)
+  })
 
   it('puts focus on the box after a day is picked from the keyboard', async () => {
     const view = mountView()

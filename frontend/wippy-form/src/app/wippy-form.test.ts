@@ -536,7 +536,7 @@ describe('WippyForm: unmount during a pending load', () => {
 const v2Definition = {
   title: 'Delivery details',
   fields: [
-    { id: 'name', type: 'text' as const, label: 'Full name', required: true },
+    { id: 'name', type: 'text' as const, min_length: 0, max_length: 500, label: 'Full name', required: true },
     { id: 'mail', type: 'email' as const, label: 'Email', required: false },
     { id: 'qty', type: 'number' as const, label: 'Parcels', required: false, integer: true },
     { id: 'consent', type: 'checkbox' as const, label: 'I agree', required: true },
@@ -633,7 +633,7 @@ describe('WippyForm: form version 2', () => {
   it('leaves a field\'s pattern to the server: a value that does not match is sent, and the 422 shows on that field', async () => {
     const patterned = {
       title: 'Parcel',
-      fields: [{ id: 'code', type: 'text' as const, label: 'Parcel code', required: true, pattern: '[A-Z]{2}\\d{3}' }],
+      fields: [{ id: 'code', type: 'text' as const, min_length: 0, max_length: 500, label: 'Parcel code', required: true, pattern: '[A-Z]{2}\\d{3}' }],
     }
     // The body the Session sends is { code: 'validation_failed', errors: { code: [{ code, message }] } },
     // and the Host client rejects with those on the ArtifactStateError.
@@ -706,6 +706,75 @@ describe('WippyForm: form version 2', () => {
     expect((qty.element as HTMLInputElement).value).toBe('4')
     // Two questions have an error, and the form-level message is spoken as its own text.
     expect(wrapper.find('[role="status"]').text()).toBe('2 questions need attention. This form changed since you loaded it.')
+  })
+
+  it('does not report the reader\'s own send on the fields form as an answer from elsewhere', async () => {
+    let resolveSubmit: ((r: ReturnType<typeof acceptedResponse>) => void) | undefined
+    const submitFn = vi.fn().mockReturnValue(new Promise<ReturnType<typeof acceptedResponse>>((resolve) => { resolveSubmit = resolve }))
+    const answered = v2State({ status: 'idle', data: { name: 'Ada', consent: true }, submitted_at: ANSWERED_AT, delivery: 'pending' })
+    const getFn = vi.fn().mockResolvedValueOnce(v2State()).mockResolvedValue(answered)
+    artifactStateMock().mockReturnValue({ get: getFn, submit: submitFn })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('input').setValue('Ada')
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    // The server published the artifact event before it returned the POST.
+    emitArtifactEvent('artifact-1')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(submitFn).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).not.toContain('already answered elsewhere')
+
+    resolveSubmit?.(acceptedResponse())
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('already answered elsewhere')
+    expect(wrapper.find('input').exists()).toBe(false)
+  })
+
+  it('reports a typed draft on the fields form when another client answers first', async () => {
+    const answered = v2State({ status: 'idle', data: { name: 'Bob', consent: true }, submitted_at: ANSWERED_AT, delivery: 'pending' })
+    const getFn = vi.fn().mockResolvedValueOnce(v2State()).mockResolvedValue(answered)
+    artifactStateMock().mockReturnValue({ get: getFn, submit: vi.fn() })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('input').setValue('Ada')
+    emitArtifactEvent('artifact-1')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('already answered elsewhere')
+  })
+
+  it('Retry after a failed send refuses a field edited into something invalid and keeps the form open', async () => {
+    const submitFn = vi.fn().mockRejectedValue(hostError(500, 'internal'))
+    artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State()), submit: submitFn })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('input').setValue('Ada')
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    const retry = wrapper.findAll('button').find(b => b.text() === 'Retry')
+    expect(retry, 'the failed send offers Retry').toBeDefined()
+    expect(submitFn).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('input[type="email"]').setValue('not an address')
+    await retry?.trigger('click')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(submitFn, 'an invalid value is not sent').toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('Enter a valid email address.')
+    expect(wrapper.find('form').exists()).toBe(true)
   })
 
   it('shows a stored version 2 answer read-only once answered', async () => {

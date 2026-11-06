@@ -18,7 +18,7 @@ const state: FormState = {
   definition: {
     title: 'Delivery details',
     description: 'Where should it go?',
-    fields: [{ id: 'name', type: 'text', label: 'Full name', required: false }],
+    fields: [{ id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: false }],
   },
   data: null,
   submitted_at: null,

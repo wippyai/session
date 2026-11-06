@@ -33,6 +33,14 @@ function mountField(props: Partial<InstanceType<typeof ChoiceField>['$props']> =
   })
 }
 
+describe('ChoiceField: the Other box label', () => {
+  it.each([false, true])('is for screen readers only (several answers: %s)', (multiple) => {
+    const wrapper = mountField({ field: { ...trickyField, multiple } })
+    const label = wrapper.findAll('label').find(l => l.text() === 'Other answer')
+    expect(label?.classes()).toContain('sr-only')
+  })
+})
+
 describe('ChoiceField — DOM id uniqueness', () => {
   it('builds option ids from index, never from option values, and keeps the Other control id distinct', () => {
     const wrapper = mountField()

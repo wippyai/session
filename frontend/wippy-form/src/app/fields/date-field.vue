@@ -60,6 +60,11 @@ import FieldShell from './field-shell.vue'
  * check reads `document.activeElement`, which is the shadow host), and when the
  * calendar then closes the browser drops focus to the page. Focus that has
  * already moved on (a click elsewhere, Tab) is left where it is.
+ *
+ * Tab inside the calendar: the picker keeps Tab in the panel, but it finds the
+ * focused control through `document.activeElement`, which inside a shadow root
+ * is the shadow host, so every Tab lands on the same day. In a shadow root the
+ * panel moves focus itself, before the picker sees the key (`onCalendarTab`).
  */
 const props = defineProps<{
   field: DateFormField
@@ -217,12 +222,30 @@ function onCalendarHide() {
     box.focus({ preventScroll: true })
 }
 
+// What the picker walks with Tab: the header buttons and the one day in the tab order.
+const CALENDAR_STOPS = 'button:not([disabled]):not([tabindex="-1"]), [tabindex="0"]'
+
+function onCalendarTab(event: KeyboardEvent) {
+  const panel = event.currentTarget as HTMLElement
+  const root = panel.getRootNode()
+  if (event.code !== 'Tab' || !(root instanceof ShadowRoot))
+    return
+  const stops = Array.from(panel.querySelectorAll<HTMLElement>(CALENDAR_STOPS))
+  const at = stops.indexOf(root.activeElement as HTMLElement)
+  const next = stops[(at + (event.shiftKey ? -1 : 1) + stops.length) % stops.length]
+  if (!next)
+    return
+  event.preventDefault()
+  event.stopPropagation()
+  next.focus()
+}
+
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 
 // A DatePicker puts `$attrs` on its wrapper span; the description and error
 // links go to its real `<input>` through its inner InputText's pass-through,
 // where `value` is the text the box shows (see above). The calendar panel
-// carries the styling-API part and class.
+// carries the styling-API part and class, and the Tab handler.
 function pickerPt(describedBy: string | undefined) {
   return {
     pcInputText: {
@@ -235,6 +258,7 @@ function pickerPt(describedBy: string | undefined) {
     panel: {
       part: calendarPart.value.part,
       class: calendarPart.value.class,
+      onKeydownCapture: onCalendarTab,
     },
   }
 }

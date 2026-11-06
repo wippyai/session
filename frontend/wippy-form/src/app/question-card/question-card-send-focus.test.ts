@@ -5,6 +5,7 @@ import buttonCss from '@wippy-fe/theme/primevue/button.css?raw'
 import commonCss from '@wippy-fe/theme/primevue/common.css?raw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuestionCard } from '../../composables/use-question-card'
+import { applyFocusFixup } from '../../test-support/dom'
 import { choiceField, definitionOf, formState } from '../../test-support/fixtures'
 import { hostError } from '../../test-support/host-error'
 import { artifactElement, mountWippyForm } from '../../test-support/mount-form'
@@ -64,23 +65,6 @@ async function settle() {
  * test below proves the emulation really takes focus away. Returns a stop
  * function.
  */
-function applyFocusFixup(root: Element): () => void {
-  const observer = new MutationObserver((records) => {
-    for (const record of records) {
-      const el = record.target as HTMLElement
-      if (el !== document.activeElement || !el.matches(':disabled'))
-        continue
-      // jsdom's blur() does nothing for a disabled element, so the attribute
-      // is lifted for the call and put back (a browser needs no such step).
-      el.removeAttribute('disabled')
-      el.blur()
-      el.setAttribute('disabled', '')
-    }
-  })
-  observer.observe(root, { attributes: true, attributeFilter: ['disabled'], subtree: true })
-  return () => observer.disconnect()
-}
-
 const cleanups: Array<() => void> = []
 
 function mountForm(definition: ChoiceFormDefinition, submit: ReturnType<typeof vi.fn>) {

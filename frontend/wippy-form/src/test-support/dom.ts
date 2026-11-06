@@ -5,3 +5,24 @@ export function textElement(root: Element, message: string): HTMLElement {
     throw new Error(`no element holds exactly "${message}"`)
   return found
 }
+
+/**
+ * What a browser does when the focused control becomes disabled, which jsdom
+ * does not: focus falls to <body>. Returns the function that stops it.
+ */
+export function applyFocusFixup(root: Element): () => void {
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      const el = record.target as HTMLElement
+      if (el !== document.activeElement || !el.matches(':disabled'))
+        continue
+      // jsdom's blur() does nothing for a disabled element, so the attribute
+      // is lifted for the call and put back (a browser needs no such step).
+      el.removeAttribute('disabled')
+      el.blur()
+      el.setAttribute('disabled', '')
+    }
+  })
+  observer.observe(root, { attributes: true, attributeFilter: ['disabled'], subtree: true })
+  return () => observer.disconnect()
+}

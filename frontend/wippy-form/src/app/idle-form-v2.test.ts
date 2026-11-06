@@ -15,13 +15,13 @@ const answered: FormState = {
   definition: {
     title: 'Delivery details',
     fields: [
-      { id: 'name', type: 'text', label: 'Full name', required: true },
-      { id: 'notes', type: 'textarea', label: 'Notes', required: false },
+      { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true },
+      { id: 'notes', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false },
       { id: 'mail', type: 'email', label: 'Email', required: true },
       { id: 'qty', type: 'number', label: 'Parcels', required: false },
       { id: 'day', type: 'date', label: 'Delivery date', required: false },
       { id: 'consent', type: 'checkbox', label: 'I agree', required: true },
-      { id: 'later', type: 'text', label: 'Anything else', required: false },
+      { id: 'later', type: 'text', min_length: 0, max_length: 500, label: 'Anything else', required: false },
       { id: 'news', type: 'checkbox', label: 'Newsletter', required: false },
     ],
   },
@@ -85,7 +85,7 @@ describe('IdleForm — choice answers in a fields form', () => {
       fields: [
         { id: 'speed', type: 'choice', label: 'Speed', required: false, options: [{ value: 'fast', label: 'Fast' }, { value: 'slow', label: 'Slow' }], multiple: false, allow_other: true },
         { id: 'extras', type: 'choice', label: 'Extras', required: false, options: [{ value: 'gift', label: 'Gift wrap' }], multiple: true, allow_other: true },
-        { id: 'name', type: 'text', label: 'Name', required: false },
+        { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Name', required: false },
       ],
     },
   }

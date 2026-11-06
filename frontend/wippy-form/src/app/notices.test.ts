@@ -12,8 +12,8 @@ const definition: FormDefinition = {
   title: 'Delivery details',
   description: 'Where should it go?',
   fields: [
-    { id: 'name', type: 'text', label: 'Full name', required: true },
-    { id: 'notes', type: 'textarea', label: 'Notes', required: false },
+    { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true },
+    { id: 'notes', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false },
     { id: 'mail', type: 'email', label: 'Email', required: true },
     { id: 'qty', type: 'number', label: 'Parcels', required: false },
     { id: 'day', type: 'date', label: 'Delivery date', required: false },
@@ -29,6 +29,19 @@ function mountNotice(severity: MessageSeverity) {
 function plain(wrapper: ReturnType<typeof mountNotice>) {
   return wrapper.findAll('input, textarea').filter(el => (el.element as HTMLInputElement).type !== 'radio')
 }
+
+describe('FormNotice: a question of several answers', () => {
+  it('is a named group: a fieldset with a legend', () => {
+    const several: FormDefinition = { title: 'Extras', fields: [
+      { id: 'extras', type: 'choice', label: 'Extras', required: false, multiple: true, allow_other: false, options: [{ value: 'a', label: 'A' }] },
+    ] }
+    const wrapper = mount(FormNotice, { props: { definition: several, severity: 'warn', message: 'Not here.' }, global: { plugins: [PrimeVuePlugin] } })
+    const fieldset = wrapper.find('fieldset')
+    expect(fieldset.exists()).toBe(true)
+    expect(fieldset.find('legend').text()).toBe('Extras')
+    expect(fieldset.find('input[type="checkbox"]').exists()).toBe(true)
+  })
+})
 
 describe.each(['warn', 'secondary'] as const)('FormNotice (%s): standard fields', (severity) => {
   it('renders every field as a real, disabled control of its own kind, never an empty radio group', () => {

@@ -84,7 +84,7 @@ describe('WippyForm notices', () => {
 describe('ActiveForm (fields form): error text follows its severity', () => {
   const fieldsState = formState({
     form_version: 2,
-    definition: definitionOf({ id: 'name', type: 'text', label: 'Full name', required: true }),
+    definition: definitionOf({ id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true }),
   })
 
   function mountFields(banner: { message: string, retryable?: boolean } | null = null) {

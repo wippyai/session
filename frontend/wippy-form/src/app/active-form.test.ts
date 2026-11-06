@@ -110,7 +110,7 @@ describe('ActiveForm — server-side validation errors', () => {
 })
 
 describe('ActiveForm — offline', () => {
-  it('disables Submit and shows a polite offline notice', () => {
+  it('blocks Submit and shows a polite offline notice', () => {
     const wrapper = mount(ActiveForm, {
       props: { state, submitting: false, banner: null, offline: true },
       global: { plugins: [PrimeVuePlugin] },
@@ -118,7 +118,8 @@ describe('ActiveForm — offline', () => {
 
     expect(wrapper.text()).toContain('You are offline. Your choices are kept.')
     const submitButton = wrapper.find('button[type="submit"]')
-    expect(submitButton.attributes('disabled')).toBeDefined()
+    // Blocked and still focusable, as during a send: a disabled button would drop focus.
+    expect(submitButton.attributes('aria-disabled')).toBe('true')
   })
 })
 

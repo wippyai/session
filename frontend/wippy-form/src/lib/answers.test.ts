@@ -1,7 +1,8 @@
 import type { AnswerDraft } from './answers'
 import type { FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
-import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, exceedsLength, lengthLimitMessage, normalizeHostAnswers, NOTE_TEXT_MAX, OTHER_TEXT_MAX, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
+import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, exceedsLength, normalizeHostAnswers, NOTE_TEXT_MAX, OTHER_TEXT_MAX, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
+import { lengthLimitMessage } from './text'
 
 const definition: FormDefinition = {
   title: 'Form',
@@ -300,8 +301,8 @@ describe('answerDisplayItems', () => {
 const v2Definition: FormDefinition = {
   title: 'Delivery',
   fields: [
-    { id: 'name', type: 'text', label: 'Name', required: true },
-    { id: 'notes', type: 'textarea', label: 'Notes', required: false },
+    { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Name', required: true },
+    { id: 'notes', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false },
     { id: 'mail', type: 'email', label: 'Email', required: true },
     { id: 'count', type: 'number', label: 'Parcels', required: false, integer: true, min: 1, max: 9 },
     { id: 'day', type: 'date', label: 'Day', required: false },
@@ -359,7 +360,7 @@ describe('serializeAnswers — V2 fields', () => {
 
   it('omits blank optional fields but still sends an unchecked optional checkbox as false', () => {
     const optionalConsent: FormDefinition = { title: 'T', fields: [
-      { id: 'a', type: 'text', label: 'A', required: false },
+      { id: 'a', type: 'text', min_length: 0, max_length: 500, label: 'A', required: false },
       { id: 'b', type: 'checkbox', label: 'B', required: false },
     ] }
     expect(serializeAnswers(optionalConsent, { a: '   ' })).toEqual({ b: false })
@@ -408,10 +409,10 @@ describe('validateAnswers — required V2 fields', () => {
 
 describe('draftFromAnswers — defaults and stored answers', () => {
   const withDefaults: FormDefinition = { title: 'T', fields: [
-    { id: 'city', type: 'text', label: 'City', required: false, default: 'Berlin' },
+    { id: 'city', type: 'text', min_length: 0, max_length: 500, label: 'City', required: false, default: 'Berlin' },
     { id: 'qty', type: 'number', label: 'Qty', required: false, default: 3 },
     { id: 'ok', type: 'checkbox', label: 'OK', required: false, default: false },
-    { id: 'plain', type: 'text', label: 'Plain', required: false },
+    { id: 'plain', type: 'text', min_length: 0, max_length: 500, label: 'Plain', required: false },
     { id: 'pick', type: 'choice', label: 'Pick', required: false, options: [{ value: 'a', label: 'A' }], multiple: true, allow_other: false },
   ] }
 

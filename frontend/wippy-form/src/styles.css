@@ -552,6 +552,7 @@ span.w-form__option-mark {
 .w-form__field-value {
   margin: 0;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .w-form__field-value--empty {
   color: var(--_muted);

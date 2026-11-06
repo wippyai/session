@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { lengthLimitMessage } from '../../lib/answers'
+import { lengthLimitMessage } from '../../lib/text'
 import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partAttrs } from '../../lib/part-attrs'
 

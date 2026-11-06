@@ -2,6 +2,8 @@ import type { FormState } from '../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
+import { nextTick } from 'vue'
+import { applyFocusFixup } from '../test-support/dom'
 import ActiveForm from './active-form.vue'
 
 const v2State: FormState = {
@@ -16,11 +18,11 @@ const v2State: FormState = {
     title: 'Delivery details',
     description: 'Where should it go?',
     fields: [
-      { id: 'name', type: 'text', label: 'Full name', required: true },
+      { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true },
       { id: 'mail', type: 'email', label: 'Email', required: true },
       { id: 'qty', type: 'number', label: 'Parcels', required: false, integer: true, min: 1, max: 9 },
       { id: 'day', type: 'date', label: 'Delivery date', required: false },
-      { id: 'notes', type: 'textarea', label: 'Notes', required: false },
+      { id: 'notes', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false },
       { id: 'consent', type: 'checkbox', label: 'I agree', required: true },
     ],
   },
@@ -213,7 +215,7 @@ describe('ActiveForm — defaults', () => {
     definition: {
       title: 'Defaults',
       fields: [
-        { id: 'city', type: 'text', label: 'City', required: false, default: 'Berlin' },
+        { id: 'city', type: 'text', min_length: 0, max_length: 500, label: 'City', required: false, default: 'Berlin' },
         { id: 'qty', type: 'number', label: 'Quantity', required: false, default: 3 },
         { id: 'agree', type: 'checkbox', label: 'Agree', required: false, default: false },
       ],
@@ -437,5 +439,123 @@ describe('ActiveForm — a submit-failure banner is announced once', () => {
     const wrapper = mountForm()
     await wrapper.setProps({ banner: { message: 'This form was already answered.' } })
     expect(liveRegions(wrapper).filter(el => el.text().includes('This form was already answered.'))).toHaveLength(1)
+  })
+
+  it('announces a repeated failure with the same text: the region is emptied when the send starts', async () => {
+    const wrapper = mountForm()
+    const status = wrapper.find('[role="status"]')
+    await wrapper.setProps({ banner: BANNER })
+    expect(status.text()).toBe(BANNER.message)
+    await wrapper.setProps({ banner: null, submitting: true })
+    expect(status.text()).toBe('')
+    await wrapper.setProps({ banner: BANNER, submitting: false })
+    expect(status.text()).toBe(BANNER.message)
+  })
+})
+
+describe('ActiveForm — screen reader text', () => {
+  it('hides the status region from sight, so it shows no text and takes no space', async () => {
+    const wrapper = mountForm()
+    expect(wrapper.find('[role="status"]').classes()).toContain('sr-only')
+  })
+})
+
+describe('ActiveForm — Retry', () => {
+  const BANNER = { message: 'Could not send.', retryable: true }
+
+  it('checks the answers first, so a value edited into something invalid is shown and not dropped', async () => {
+    const wrapper = mountForm()
+    await fillValid(wrapper)
+    await wrapper.setProps({ banner: BANNER })
+    await inputOf(wrapper, 'Email').setValue('not an address')
+
+    ;(wrapper.vm as unknown as { retry: () => void }).retry()
+    await nextTick()
+
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(wrapper.text()).toContain('Enter a valid email address.')
+    expect(inputOf(wrapper, 'Email').attributes('aria-invalid')).toBe('true')
+  })
+
+  it('sends valid answers', async () => {
+    const wrapper = mountForm()
+    await fillValid(wrapper)
+    await wrapper.setProps({ banner: BANNER })
+    ;(wrapper.vm as unknown as { retry: () => void }).retry()
+    expect(wrapper.emitted('submit')).toHaveLength(1)
+  })
+})
+
+describe('ActiveForm — focus around a send', () => {
+  const BANNER = { message: 'Could not send.', retryable: true }
+
+  function mountWatched() {
+    const wrapper = mountForm()
+    const stop = applyFocusFixup(wrapper.element)
+    return { wrapper, stop, submit: () => wrapper.find('button[type="submit"]') }
+  }
+
+  it('keeps focus on Submit while a send is in flight: it is aria-disabled, not disabled', async () => {
+    const { wrapper, stop, submit } = mountWatched()
+    ;(submit().element as HTMLElement).focus()
+    await wrapper.setProps({ submitting: true })
+    await nextTick()
+    expect(submit().attributes('disabled')).toBeUndefined()
+    expect(submit().attributes('aria-disabled')).toBe('true')
+    expect(submit().classes()).toContain('p-disabled')
+    expect(document.activeElement).toBe(submit().element)
+
+    await wrapper.setProps({ submitting: false, banner: BANNER })
+    await nextTick()
+    expect(submit().attributes('aria-disabled')).toBeUndefined()
+    expect(document.activeElement).toBe(submit().element)
+    stop()
+    wrapper.unmount()
+  })
+
+  it('ignores a submit while one is in flight', async () => {
+    const { wrapper, stop } = mountWatched()
+    await fillValid(wrapper)
+    await wrapper.setProps({ submitting: true })
+    await wrapper.find('form').trigger('submit')
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    stop()
+    wrapper.unmount()
+  })
+
+  it('gives focus to Submit after a failed send left none: a text box is disabled while it sends', async () => {
+    const { wrapper, stop, submit } = mountWatched()
+    const box = inputOf(wrapper, 'Full name')
+    ;(box.element as HTMLElement).focus()
+    await wrapper.setProps({ submitting: true })
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve))
+    // Positive control: the disabled box really dropped focus.
+    expect(document.activeElement).toBe(document.body)
+
+    await wrapper.setProps({ submitting: false, banner: BANNER })
+    await nextTick()
+    expect(document.activeElement).toBe(submit().element)
+    stop()
+    wrapper.unmount()
+  })
+
+  it('gives focus to Submit after a form-level 422, and leaves focus that moved elsewhere alone', async () => {
+    const { wrapper, stop, submit } = mountWatched()
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: unknown, f?: { code: string, message: string }[]) => void }
+    vm.setServerErrors(undefined, [{ code: 'version_conflict', message: 'The form changed.' }])
+    await nextTick()
+    await nextTick()
+    expect(document.activeElement).toBe(submit().element)
+
+    const elsewhere = document.createElement('button')
+    document.body.append(elsewhere)
+    elsewhere.focus()
+    await wrapper.setProps({ banner: BANNER })
+    await nextTick()
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+    stop()
+    wrapper.unmount()
   })
 })

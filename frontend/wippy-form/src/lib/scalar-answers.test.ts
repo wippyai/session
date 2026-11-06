@@ -7,7 +7,7 @@ import { isValidEmail, isValidIsoDate, SCALAR_HANDLERS } from './scalar-answers'
 type FieldOf<T extends ScalarFormField['type']> = Extract<ScalarFormField, { type: T }>
 
 function field<T extends ScalarFormField['type']>(type: T, extra: Partial<FieldOf<T>> = {}): FieldOf<T> {
-  return { id: 'f', type, label: 'Field', required: false, ...extra } as FieldOf<T>
+  return { id: 'f', type, label: 'Field', required: false, min_length: 0, max_length: 500, ...extra } as FieldOf<T>
 }
 
 function evaluate(f: ScalarFormField, draft: string | boolean | undefined) {
@@ -36,17 +36,12 @@ describe('text', () => {
     expect(codes(required, ' a ')).toEqual([])
   })
 
-  it('defaults max_length to 500 and counts code points', () => {
-    expect(codes(field('text'), 'a'.repeat(500))).toEqual([])
-    expect(codes(field('text'), 'a'.repeat(501))).toEqual(['too_long'])
-    expect(codes(field('text'), '😀'.repeat(500))).toEqual([])
-    expect(codes(field('text'), '😀'.repeat(501))).toEqual(['too_long'])
-  })
-
-  it('caps max_length at 2,000 whatever the definition says', () => {
-    const big = field('text', { max_length: 5000 })
-    expect(codes(big, 'a'.repeat(2000))).toEqual([])
-    expect(codes(big, 'a'.repeat(2001))).toEqual(['too_long'])
+  it('reads max_length as the server set it and counts code points', () => {
+    const limited = field('text', { max_length: 500 })
+    expect(codes(limited, 'a'.repeat(500))).toEqual([])
+    expect(codes(limited, 'a'.repeat(501))).toEqual(['too_long'])
+    expect(codes(limited, '😀'.repeat(500))).toEqual([])
+    expect(codes(limited, '😀'.repeat(501))).toEqual(['too_long'])
   })
 
   it('honours a smaller max_length and a min_length', () => {
@@ -133,10 +128,10 @@ describe('textarea', () => {
     expect(codes(field('textarea', { required: true }), ' \n ')).toEqual(['required'])
   })
 
-  it('defaults to and caps at 8,000 characters', () => {
-    expect(codes(field('textarea'), 'a'.repeat(8000))).toEqual([])
-    expect(codes(field('textarea'), 'a'.repeat(8001))).toEqual(['too_long'])
-    expect(codes(field('textarea', { max_length: 9000 }), 'a'.repeat(8001))).toEqual(['too_long'])
+  it('reads max_length as the server set it', () => {
+    const limited = field('textarea', { max_length: 8000 })
+    expect(codes(limited, 'a'.repeat(8000))).toEqual([])
+    expect(codes(limited, 'a'.repeat(8001))).toEqual(['too_long'])
   })
 
   it('allows tab and line feed but rejects other control characters', () => {

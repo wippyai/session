@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { isOnStep, NUMBER_ABS_MAX, numberToPlainText, parseNumberText } from './decimal'
 
+describe('parseNumberText — digits a JSON number cannot hold', () => {
+  it('refuses a value that does not read back from a JSON number as written', () => {
+    expect(parseNumberText('2.00000000000000001')).toEqual({ kind: 'invalid' })
+    expect(parseNumberText('999999999999.99999')).toEqual({ kind: 'invalid' })
+    expect(parseNumberText('-999999999999.99999')).toEqual({ kind: 'invalid' })
+    expect(parseNumberText('0.1234567890123456789')).toEqual({ kind: 'invalid' })
+    expect(parseNumberText(`0.${'0'.repeat(400)}1`)).toEqual({ kind: 'invalid' })
+  })
+
+  it('keeps a value whose spelling differs only by zeros it does not need', () => {
+    expect(parseNumberText('1.50')).toEqual({ kind: 'number', value: 1.5 })
+    expect(parseNumberText('007')).toEqual({ kind: 'number', value: 7 })
+    expect(parseNumberText('5.')).toEqual({ kind: 'number', value: 5 })
+    expect(parseNumberText('-0')).toEqual({ kind: 'number', value: 0 })
+    expect(parseNumberText('-0.000')).toEqual({ kind: 'number', value: 0 })
+    expect(parseNumberText('0.0000001')).toEqual({ kind: 'number', value: 1e-7 })
+    expect(parseNumberText('0.30000000000000004')).toEqual({ kind: 'number', value: 0.30000000000000004 })
+    expect(parseNumberText('1000000000000')).toEqual({ kind: 'number', value: 1e12 })
+  })
+})
+
 describe('parseNumberText — strict: dot decimal, optional minus, no separators', () => {
   it('parses integers and decimals', () => {
     expect(parseNumberText('12')).toEqual({ kind: 'number', value: 12 })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { codePointLength, hasControlCharacters, isBlank, normalizeNewlines, trimAnswerText } from './text'
+import { codePointLength, hasControlCharacters, isWhitespaceOnly, normalizeNewlines, trimAnswerText } from './text'
 
 describe('trimAnswerText — the server\'s trim set', () => {
   it('strips ECMAScript whitespace at both ends and leaves the inside alone', () => {
@@ -21,15 +21,15 @@ describe('codePointLength', () => {
   })
 })
 
-describe('isBlank', () => {
+describe('isWhitespaceOnly', () => {
   it('is true for the empty string and for whitespace only', () => {
-    expect(isBlank('')).toBe(true)
-    expect(isBlank(' \t\n ')).toBe(true)
+    expect(isWhitespaceOnly('')).toBe(true)
+    expect(isWhitespaceOnly(' \t\n ')).toBe(true)
   })
 
   it('is false once any non-whitespace character is present, including zero-width ones', () => {
-    expect(isBlank(' a ')).toBe(false)
-    expect(isBlank(String.fromCharCode(0x200B))).toBe(false)
+    expect(isWhitespaceOnly(' a ')).toBe(false)
+    expect(isWhitespaceOnly(String.fromCharCode(0x200B))).toBe(false)
   })
 })
 

@@ -11,7 +11,7 @@ import type {
   TextFormField,
 } from './definition'
 import { isOnStep, NUMBER_ABS_MAX, numberToPlainText, parseNumberText } from './decimal'
-import { codePointLength, hasControlCharacters, isBlank, normalizeNewlines, trimAnswerText } from './text'
+import { codePointLength, hasControlCharacters, isWhitespaceOnly, lengthLimitMessage, normalizeNewlines, trimAnswerText } from './text'
 
 /**
  * Client-side rules and serialization for the six V2 standard fields,
@@ -40,9 +40,6 @@ export interface FieldHandler<F extends FormField> {
   display: (field: F, wire: FieldAnswer | undefined) => string | null
 }
 
-export const TEXT_DEFAULT_MAX = 500
-export const TEXT_MAX_CAP = 2000
-export const TEXTAREA_MAX_CAP = 8000
 const EMAIL_MAX = 254
 const EMAIL_LOCAL_MAX = 64
 
@@ -60,13 +57,6 @@ function missing(field: { required: boolean }): FieldOutcome {
 
 // ── text and textarea ────────────────────────────────────────────
 
-/** The longest accepted text: the definition's own limit, never above the type's cap. */
-export function effectiveMaxLength(field: TextFormField | TextareaFormField): number {
-  if (field.type === 'textarea')
-    return Math.min(field.max_length ?? TEXTAREA_MAX_CAP, TEXTAREA_MAX_CAP)
-  return Math.min(field.max_length ?? TEXT_DEFAULT_MAX, TEXT_MAX_CAP)
-}
-
 function evaluateText(field: TextFormField | TextareaFormField, draft: FieldAnswer | undefined): FieldOutcome {
   const multiline = field.type === 'textarea'
   const typed = typeof draft === 'string' ? draft : ''
@@ -76,15 +66,13 @@ function evaluateText(field: TextFormField | TextareaFormField, draft: FieldAnsw
   // only a line break is a control character error, not an unanswered field.
   if (hasControlCharacters(text, multiline))
     return fail('invalid_text', 'Remove control characters from this answer.')
-  if (isBlank(text))
+  if (isWhitespaceOnly(text))
     return missing(field)
   const length = codePointLength(text)
-  const min = field.min_length ?? 0
-  if (length < min)
-    return fail('too_short', `Use at least ${min} characters.`)
-  const max = effectiveMaxLength(field)
-  if (length > max)
-    return fail('too_long', `Use at most ${max} characters.`)
+  if (length < field.min_length)
+    return fail('too_short', `Use at least ${field.min_length} characters.`)
+  if (length > field.max_length)
+    return fail('too_long', lengthLimitMessage(field.max_length))
   // A text field's `pattern` is deliberately NOT checked here: it is written
   // by the agent, and a browser regex engine backtracks, so an overlapping
   // repeat such as `(a|a)*b` or `a*a*a*b` on a long value can freeze the
@@ -167,7 +155,7 @@ export function isValidIsoDate(text: string): boolean {
 
 function evaluateDate(field: DateFormField, draft: FieldAnswer | undefined): FieldOutcome {
   const text = typeof draft === 'string' ? draft : ''
-  if (isBlank(text))
+  if (isWhitespaceOnly(text))
     return missing(field)
   // Typed text that is not a date is an error, never a silently dropped value.
   if (!isValidIsoDate(text))
@@ -199,7 +187,7 @@ function textInitialDraft(field: { default?: string }, wire: FieldAnswer | undef
 }
 
 function textDisplay(_field: ScalarFormField, wire: FieldAnswer | undefined): string | null {
-  return typeof wire === 'string' && !isBlank(wire) ? wire : null
+  return typeof wire === 'string' && !isWhitespaceOnly(wire) ? wire : null
 }
 
 const textHandler: FieldHandler<TextFormField> = { evaluate: evaluateText, initialDraft: textInitialDraft, display: textDisplay }

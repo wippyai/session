@@ -2,7 +2,6 @@ import type { FieldAnswer, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
 import { evaluateField } from './answers'
 import { numberToPlainText } from './decimal'
-import { effectiveMaxLength } from './scalar-answers'
 
 /**
  * Runs the shared Lua/TypeScript conformance fixture through the client
@@ -26,8 +25,9 @@ import { effectiveMaxLength } from './scalar-answers'
  *
  * What the client checks: every answer case for a choice and the six standard
  * fields (expect `ok`, `same`, `unanswered`, `error`), and, for definition cases
- * that state a normalized `max_length`, that the client derives the same
- * effective limit from the raw field.
+ * that state a normalized `max_length`, that the raw field normalized here
+ * has the same limit. The server fills in `min_length` and `max_length`, so the
+ * checker reads them as they are and this runner does the same for a raw field.
  *
  * Skipped, counted and named by reason (`SkipReason`): definition validation
  * (the server vets definitions before a form exists); a value of the wrong JSON
@@ -71,9 +71,15 @@ function expandValue(raw: RawCase): unknown {
   return raw.field?.multiple ? [item] : item
 }
 
+/** The lengths the server fills in, checked against the fixture's own `normalized` cases. */
+const TEXT_LENGTHS: Record<string, { min_length: number, max_length: number }> = {
+  text: { min_length: 0, max_length: 500 },
+  textarea: { min_length: 0, max_length: 8000 },
+}
+
 /** A raw field of the fixture as the server hands it to the component. */
 function normalizedField(rawField: Record<string, unknown>): FormField {
-  const common = { id: 'f', label: 'Question', required: false, ...rawField }
+  const common = { id: 'f', label: 'Question', required: false, ...TEXT_LENGTHS[rawField.type as string], ...rawField }
   if (rawField.type !== 'choice')
     return common as unknown as FormField
   const options = (rawField.options as Array<string | { value: string, label: string }>)
@@ -124,7 +130,7 @@ export function runCase(raw: unknown, index: number): Verdict {
   if (isDefinitionCase) {
     const normalized = expected.normalized as Record<string, unknown> | undefined
     if (normalized && 'max_length' in normalized && (field.type === 'text' || field.type === 'textarea')) {
-      expect(effectiveMaxLength(field), name).toBe(normalized.max_length)
+      expect(field.max_length, name).toBe(normalized.max_length)
       return 'checked'
     }
     return skip('definition')

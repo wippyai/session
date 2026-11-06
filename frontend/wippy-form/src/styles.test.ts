@@ -21,6 +21,12 @@ function fallbackOf(name: string): string {
   return fallback
 }
 
+describe('styles.css: a stored answer', () => {
+  it('keeps its own spaces and line breaks', () => {
+    expect(ruleBody('\\.w-form__field-value')).toMatch(/white-space:\s*pre-wrap/)
+  })
+})
+
 describe('styles.css: the rule helpers', () => {
   it('ruleBody throws for a selector with no rule, so a missing rule cannot pass a "does not contain" assertion', () => {
     expect(() => ruleBody('\\.w-form__no-such-rule')).toThrow('no rule')

@@ -22,7 +22,7 @@ function lastValue(wrapper: ReturnType<typeof mountField>): unknown {
 }
 
 describe('text field', () => {
-  const field: FormField = { id: 'name', type: 'text', label: 'Full name', required: true, description: 'As on the parcel', placeholder: 'Ada Lovelace' }
+  const field: FormField = { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true, description: 'As on the parcel', placeholder: 'Ada Lovelace' }
 
   it('is an InputText labelled by its own label element', () => {
     const wrapper = mountField(field)
@@ -53,7 +53,7 @@ describe('text field', () => {
   })
 
   it('takes a placeholder from the definition, and only text and textarea do', () => {
-    expect(mountField({ id: 'a', type: 'textarea', label: 'A', required: false, placeholder: 'Say more' }).find('textarea').attributes('placeholder')).toBe('Say more')
+    expect(mountField({ id: 'a', type: 'textarea', min_length: 0, max_length: 8000, label: 'A', required: false, placeholder: 'Say more' }).find('textarea').attributes('placeholder')).toBe('Say more')
     // The contract gives `placeholder` to text and textarea alone; a stray key on another type is not shown.
     for (const type of ['email', 'number'] as const) {
       const stray = { id: 'a', type, label: 'A', required: false, placeholder: 'ignored' } as unknown as FormField
@@ -73,7 +73,7 @@ describe('text field', () => {
 })
 
 describe('textarea field', () => {
-  const field: FormField = { id: 'notes', type: 'textarea', label: 'Notes', required: false }
+  const field: FormField = { id: 'notes', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false }
 
   it('is a textarea whose newlines are kept', async () => {
     const wrapper = mountField(field)
@@ -354,12 +354,12 @@ describe('choice field through the dispatcher', () => {
 describe('read-only through the dispatcher', () => {
   it('renders no control for any type and shows the stored value', () => {
     const cases: Array<[FormField, FieldAnswer | undefined, string]> = [
-      [{ id: 'a', type: 'text', label: 'A', required: true }, 'Ada', 'Ada'],
+      [{ id: 'a', type: 'text', min_length: 0, max_length: 500, label: 'A', required: true }, 'Ada', 'Ada'],
       [{ id: 'b', type: 'email', label: 'B', required: false }, 'a@b.co', 'a@b.co'],
       [{ id: 'c', type: 'number', label: 'C', required: false }, 3, '3'],
       [{ id: 'd', type: 'date', label: 'D', required: false }, '2026-10-01', '2026-10-01'],
       [{ id: 'e', type: 'checkbox', label: 'E', required: false }, true, 'Yes'],
-      [{ id: 'f', type: 'textarea', label: 'F', required: false }, 'x', 'x'],
+      [{ id: 'f', type: 'textarea', min_length: 0, max_length: 8000, label: 'F', required: false }, 'x', 'x'],
     ]
     for (const [field, value, shown] of cases) {
       const wrapper = mountField(field, { readonly: true, disabled: true, modelValue: value })

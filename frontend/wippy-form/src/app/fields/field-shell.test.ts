@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import FieldShell from './field-shell.vue'
 
-const textField: FormField = { id: 'name', type: 'text', label: 'Full name', required: true, description: 'As on the parcel' }
+const textField: FormField = { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true, description: 'As on the parcel' }
 
 const CONTROL_SLOT = `<template #default="{ id, describedBy, invalid }">
   <input :id="id" :aria-describedby="describedBy" :aria-invalid="invalid ? 'true' : undefined">
@@ -74,6 +74,21 @@ describe('FieldShell — stacked layout (one labelled control)', () => {
   })
 })
 
+describe('FieldShell — styling API of the row and the stored answer items', () => {
+  it('names the row of a checkbox and its label', () => {
+    const wrapper = mountShell({ layout: 'inline', field: { id: 'ok', type: 'checkbox', label: 'I agree', required: true } })
+    const row = wrapper.find('.w-form__field-row')
+    expect(row.attributes('part')).toBe('field-row')
+  })
+
+  it('names each item of a stored choice', () => {
+    const field: FormField = { id: 'pick', type: 'choice', label: 'Pick', required: false, multiple: false, allow_other: false, options: [{ value: 'a', label: 'A' }] }
+    const wrapper = mountShell({ layout: 'group', readonly: true, field, modelValue: 'a' })
+    const item = wrapper.find('.w-form__field-item')
+    expect(item.attributes('part')).toBe('field-item')
+  })
+})
+
 describe('FieldShell — inline layout (checkbox)', () => {
   it('puts the control first and a clickable label that points at it', () => {
     const wrapper = mountShell({ layout: 'inline', field: { id: 'ok', type: 'checkbox', label: 'I agree', required: true } })
@@ -108,7 +123,7 @@ describe('FieldShell — read-only', () => {
   })
 
   it('keeps a text value\'s line breaks as real line breaks', () => {
-    const wrapper = mountShell({ readonly: true, field: { id: 'n', type: 'textarea', label: 'Notes', required: false }, modelValue: 'one\ntwo' })
+    const wrapper = mountShell({ readonly: true, field: { id: 'n', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false }, modelValue: 'one\ntwo' })
     expect(wrapper.find('[part~="field-value"]').html()).toContain('one<br>two')
   })
 

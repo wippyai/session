@@ -17,10 +17,22 @@ export type ParsedNumber
 // No plus sign, no exponent, no group separator, no comma decimal.
 const NUMBER_TEXT = /^-?(?:\d+(?:\.\d*)?|\.\d+)$/
 
+/** Typed number text without the zeros that do not change it: `007.50` is `7.5`, `-0.0` is `0`. */
+function withoutSpareZeros(text: string): string {
+  const negative = text.startsWith('-')
+  const [whole, fraction = ''] = (negative ? text.slice(1) : text).split('.')
+  const digits = whole.replace(/^0+/, '') || '0'
+  const decimals = fraction.replace(/0+$/, '')
+  const plain = decimals ? `${digits}.${decimals}` : digits
+  return negative && plain !== '0' ? `-${plain}` : plain
+}
+
 /**
  * Parses what was typed into a number field. Outer whitespace is ignored; an
  * empty result means the field is unanswered. Nothing is coerced: a comma
- * decimal, a thousands separator or an exponent is `invalid`, never guessed.
+ * decimal, a thousands separator or an exponent is `invalid`, never guessed. So
+ * are digits a JSON number cannot hold: `2.00000000000000001` would be stored
+ * as 2, and every later check would judge a value the user did not type.
  */
 export function parseNumberText(raw: string): ParsedNumber {
   const text = raw.trim()
@@ -32,7 +44,10 @@ export function parseNumberText(raw: string): ParsedNumber {
   if (!Number.isFinite(value))
     return { kind: 'invalid' }
   // `-0` would serialize as `0` anyway, but say so here so no caller sees it.
-  return { kind: 'number', value: value === 0 ? 0 : value }
+  const number = value === 0 ? 0 : value
+  if (numberToPlainText(number) !== withoutSpareZeros(text))
+    return { kind: 'invalid' }
+  return { kind: 'number', value: number }
 }
 
 /**

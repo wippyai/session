@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/definition'
+import type { ComponentPublicInstance } from 'vue'
 import type { SubmitBanner } from '../lib/submit-error'
 import Button from 'primevue/button'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
 import { ERROR_TEXT_CLASS } from '../lib/error-text'
+import { pageHasNoFocus } from '../lib/page-focus'
 import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
 import FormHeader from './form-header.vue'
@@ -20,6 +22,12 @@ import FormMessage from './form-message.vue'
  * otherwise stop the submit event with the browser's own bubble and bypass
  * the accessible error flow below (per-field errors linked by
  * `aria-describedby`, focus on the first invalid control, a status summary).
+ *
+ * Submit stays focusable while the form is blocked, by a send in flight or by
+ * being offline: it is `aria-disabled` and dimmed with the theme's `p-disabled`
+ * marker, because a focused button that becomes disabled hands focus to <body>.
+ * The fields are disabled during a send, so a box that had focus does lose it;
+ * a failed send then gives focus to Submit (`restoreFocusAfterFailure`).
  */
 const props = defineProps<{
   state: FormState
@@ -56,6 +64,8 @@ const fieldErrors = ref<Record<string, FieldError[]>>({})
 const formErrors = ref<FieldError[]>([])
 type FieldHandle = { focusFirstControl: () => void, focusOtherText: () => void }
 const fieldRefs: Record<string, FieldHandle | null> = {}
+const formEl = ref<HTMLFormElement | null>(null)
+const submitButton = ref<ComponentPublicInstance | null>(null)
 
 // Single polite live region for the form: submission-result banners and the
 // validation error summary both funnel through here instead of each having
@@ -71,7 +81,7 @@ function setFieldRef(id: string, el: unknown) {
   fieldRefs[id] = el as FieldHandle | null
 }
 
-const canSubmit = computed(() => !props.submitting && !props.offline)
+const sendBlocked = computed(() => props.submitting || !!props.offline)
 
 function focusFirstInvalid(ids: string[], blankOther: string[] = []) {
   const firstId = props.state.definition.fields.find(f => ids.includes(f.id))?.id
@@ -121,22 +131,34 @@ watch(errorSummaryText, (text) => {
     statusIsSummary = false
 })
 
+/** After a failed send that left no focus anywhere. Focus on another control of the page is left alone. */
+function restoreFocusAfterFailure() {
+  if (formEl.value && pageHasNoFocus(formEl.value))
+    (submitButton.value?.$el as HTMLElement | undefined)?.focus()
+}
+
 function setServerErrors(errors: Record<string, FieldError[]> | undefined, formLevel: FieldError[] | undefined) {
   fieldErrors.value = errors ?? {}
   formErrors.value = formLevel ?? []
-  focusFirstInvalid(Object.keys(fieldErrors.value))
+  const invalidIds = Object.keys(fieldErrors.value)
+  focusFirstInvalid(invalidIds)
+  if (invalidIds.length === 0)
+    void nextTick(restoreFocusAfterFailure)
   if (errorSummaryText.value !== '')
     announceErrorSummary()
 }
 
 // Starting a send clears the previous server errors, as it does the banner, so
 // a resent answer, such as one sent again with Retry, never shows an old 422
-// next to the new outcome.
+// next to the new outcome. It also empties the status region, so a failure with
+// the same text as the last one is new text and is announced.
 watch(() => props.submitting, (sending) => {
   if (!sending)
     return
   fieldErrors.value = {}
   formErrors.value = []
+  statusIsSummary = false
+  statusMessage.value = ''
 })
 
 // A changed answer drops that question's errors; the next submit re-checks it.
@@ -152,7 +174,11 @@ function currentAnswers(): FormAnswers {
   return serializeAnswers(props.state.definition, draft)
 }
 
+// Retry comes through here too: a value edited into something invalid since the
+// failed send has no wire answer, so sending without this check would drop it.
 function handleSubmit() {
+  if (sendBlocked.value)
+    return
   const errors = validateAnswers(props.state.definition, draft)
   const invalidIds = Object.keys(errors)
   if (invalidIds.length > 0) {
@@ -176,6 +202,7 @@ watch(() => props.banner, (banner) => {
     return
   statusIsSummary = false
   statusMessage.value = banner.message
+  void nextTick(restoreFocusAfterFailure)
 })
 
 const rootPart = computed(() => partAttrs('card'))
@@ -186,7 +213,7 @@ const sendPart = computed(() => partAttrs('send'))
 
 defineExpose({
   setServerErrors,
-  retry: () => emit('submit', currentAnswers()),
+  retry: handleSubmit,
   // See QuestionCardActive's own `hasUnsentInput` — a form the user changed
   // counts as unsent input a background "answered elsewhere" swap would
   // otherwise silently discard without explanation. An untouched form does
@@ -197,14 +224,16 @@ defineExpose({
 
 <template>
   <form
+    ref="formEl"
     :part="`${rootPart.part} ${fieldsPart.part}`"
     :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
+    :aria-busy="submitting ? 'true' : undefined"
     novalidate
     @submit.prevent="handleSubmit"
   >
     <div
       role="status"
-      class="w-form__sr"
+      class="sr-only"
     >
       {{ statusMessage }}
     </div>
@@ -269,12 +298,12 @@ defineExpose({
 
     <div>
       <Button
+        ref="submitButton"
         type="submit"
         :label="state.definition.submit_label || 'Submit'"
-        :loading="submitting"
-        :disabled="!canSubmit"
+        :aria-disabled="sendBlocked ? 'true' : undefined"
         :part="sendPart.part"
-        :class="sendPart.class"
+        :class="[sendPart.class, sendBlocked && 'p-disabled']"
       />
     </div>
   </form>

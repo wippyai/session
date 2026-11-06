@@ -22,8 +22,15 @@ export function codePointLength(raw: string): number {
   return Array.from(raw).length
 }
 
-/** True when `raw` is empty or only whitespace in the server's trim set. */
-export function isBlank(raw: string): boolean {
+export function lengthLimitMessage(max: number): string {
+  return `Use at most ${max.toLocaleString('en-US')} characters.`
+}
+
+/**
+ * True when `raw` is empty or only whitespace in the server's trim set, as the
+ * Lua `is_whitespace_only` says. A zero-width character is content here.
+ */
+export function isWhitespaceOnly(raw: string): boolean {
   return trimAnswerText(raw) === ''
 }
 

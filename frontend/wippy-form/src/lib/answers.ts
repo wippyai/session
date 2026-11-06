@@ -15,7 +15,7 @@ import type {
 import type { FieldHandler, FieldOutcome } from './scalar-answers'
 import { isChoiceField, isNotedAnswer, isOtherAnswer } from './definition'
 import { REQUIRED_MESSAGE, SCALAR_HANDLERS } from './scalar-answers'
-import { codePointLength, trimAnswerText } from './text'
+import { codePointLength, lengthLimitMessage, trimAnswerText } from './text'
 
 /**
  * The answer rules the component checks before sending, one handler per field
@@ -42,10 +42,6 @@ export type AnswerDraft = Record<string, FieldAnswer | undefined>
 /** True when the trimmed text is longer than `max` code points. An emoji counts as one, as on the server. */
 export function exceedsLength(raw: string, max: number): boolean {
   return codePointLength(trimAnswerText(raw)) > max
-}
-
-export function lengthLimitMessage(max: number): string {
-  return `Use at most ${max.toLocaleString('en-US')} characters.`
 }
 
 /** The wire shape of a chosen option: the plain value, or `{ value, note }` once the trimmed note is not blank. */

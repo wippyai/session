@@ -81,6 +81,8 @@ const rootPart = computed(() => partAttrs(
 const descriptionPart = computed(() => partAttrs('field-description'))
 const controlPart = computed(() => partAttrs('field-control'))
 const errorPart = computed(() => partAttrs('field-error'))
+const rowPart = computed(() => partAttrs('field-row'))
+const itemPart = computed(() => partAttrs('field-item'))
 const showMarker = computed(() => !!props.field.required && !props.readonly)
 
 const value = computed(() => readOnlyAnswer(props.field, props.modelValue))
@@ -105,7 +107,8 @@ defineExpose({
   >
     <div
       v-if="inlineEditable"
-      class="w-form__field-row"
+      :part="rowPart.part"
+      :class="rowPart.class"
     >
       <div
         :part="controlPart.part"
@@ -175,7 +178,8 @@ defineExpose({
         <p
           v-for="(item, i) in value.items"
           :key="i"
-          class="w-form__field-item"
+          :part="itemPart.part"
+          :class="itemPart.class"
         >
           {{ item.own ? `Other: ${item.label}` : item.label }}
           <span
