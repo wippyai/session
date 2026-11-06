@@ -706,4 +706,14 @@ describe('QuestionCardActive: the empty Other box message follows the required f
     expect(other.attributes('aria-invalid')).not.toBe('true')
     expect(wrapper.emitted('submit')).toBeUndefined()
   })
+
+  it('does nothing on Enter on a row of an Optional several-answer question with nothing ticked', async () => {
+    const wrapper = mountCard(optional(multiDef))
+    await wrapper.find('[role="checkbox"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain(TICK_ERROR)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.emitted('submit')).toBeUndefined()
+  })
 })
