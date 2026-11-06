@@ -709,7 +709,7 @@ local function checkpoint_request(session, messages, anchor)
     -- Keep the actual user text at user authority. Uploaded content and visual
     -- attachments before the checkpoint are represented by its summary. A form
     -- answer that started the turn stays marked and whole: an excerpt would cut
-    -- its JSON record. The form body limit bounds it, and admission fails a
+    -- its JSON record. The form size limits bound it, and admission fails a
     -- prompt that does not fit the model's window.
     local answer = type(request.metadata) == "table" and request.metadata[form_meta.ANSWER_KEY] or nil
     local data = request.data

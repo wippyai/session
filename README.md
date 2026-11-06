@@ -87,9 +87,9 @@ originating user-request text at user authority, followed by the checkpoint
 resume note and subsequent model/tool messages. Restored requests are limited to
 6000 UTF-8 bytes, including an omission marker when needed; excerpts retain both
 ends. A form answer is restored whole, because an excerpt would cut its JSON
-record. The 64 KiB body limit bounds it, and a prompt that does not fit the
-model's window fails. The original request and resume note precede retained steering even when
-its original anchor is unavailable. Later corrections take precedence, and
+record. The form size limits bound it, and a prompt that does not fit the
+model's window fails. The original request and resume note precede retained
+steering even when its original anchor is unavailable. Later corrections take precedence, and
 completed work stays completed. The checkpoint summary covers
 earlier progress and attachments; restoring the request does not reload those
 attachments. A later ordinary user message starts its own turn and prevents
