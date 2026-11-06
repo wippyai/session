@@ -286,6 +286,8 @@ end
 -- POST
 ---------------------------------------------------------------------------
 
+local UNSUPPORTED_FORM_VERSION = "Unsupported form_version"
+
 -- Checks the versioned envelope. The request carries the version of the form
 -- it answers (form.version), as read from GET. Returns the envelope or
 -- (nil, message).
@@ -296,7 +298,7 @@ local function parse_envelope(raw_body, form_version)
         return nil, "Request body must be a JSON object"
     end
     if body.form_version ~= form_version then
-        return nil, "Unsupported form_version"
+        return nil, UNSUPPORTED_FORM_VERSION
     end
     local request_id = body.request_id
     if type(request_id) ~= "string" or not string.find(request_id, "%S")
@@ -337,10 +339,22 @@ local function conflict_extra(artifact)
     }
 end
 
+-- Whether form errors from definition.validate_answers mean the stored form
+-- cannot be checked (a pattern that no longer compiles): nothing the user can fix.
+local function cannot_check(form_errors)
+    return form_errors ~= nil and form_errors[1] ~= nil and form_errors[1].code == "internal"
+end
+
+local function cannot_check_failure()
+    return failure(500, "internal", "This form cannot be checked right now.")
+end
+
 -- The canonical encoding of valid answers, or nil when they are not valid.
+-- The second result says the stored form could not check them at all.
 local function canonical_of(form, answers)
-    local normalized = definition.validate_answers(form.definition, answers)
-    return normalized and definition.encode_answers(form.definition, normalized) or nil
+    local normalized, _, form_errors = definition.validate_answers(form.definition, answers)
+    if not normalized then return nil, cannot_check(form_errors) end
+    return definition.encode_answers(form.definition, normalized), false
 end
 
 -- Classifies a request against an already accepted submission: an exact
@@ -353,7 +367,8 @@ end
 local function against_existing(artifact, form, submission, request_id, answers)
     if submission.request_id == request_id then
         local accepted = definition.encode_answers(form.definition, submission.answers)
-        local canonical = canonical_of(form, answers)
+        local canonical, unchecked = canonical_of(form, answers)
+        if unchecked then return cannot_check_failure() end
         if canonical and canonical == accepted then
             local delivery, delivery_err = delivery_of(submission, artifact.session_id)
             if delivery_err then return internal_failure("Failed to read the delivery state", delivery_err) end
@@ -436,6 +451,10 @@ function state_service.submit(user_id, artifact_id, raw_body)
         end
         local current_form, parse_err = form_artifact.parse(current)
         if not current_form then return nil, tostring(parse_err) end
+        -- The envelope was checked against the form read before the lock.
+        if current_form.version ~= envelope.form_version then
+            return nil, { unsupported_version = true }
+        end
         if form_meta.submission(current_form.meta) then
             return nil, { existing = current, form = current_form }
         end
@@ -505,13 +524,12 @@ function state_service.submit(user_id, artifact_id, raw_body)
     if not accepted then
         if type(accept_err) == "table" then
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
+            if accept_err.unsupported_version then
+                return failure(400, "invalid_request", UNSUPPORTED_FORM_VERSION)
+            end
             if accept_err.validation_failed then
                 local form_errors = accept_err.form_errors
-                if form_errors and form_errors[1] and form_errors[1].code == "internal" then
-                    -- The form itself cannot be checked (a stored pattern that
-                    -- no longer compiles): nothing the user can fix.
-                    return failure(500, "internal", "This form cannot be checked right now.")
-                end
+                if cannot_check(form_errors) then return cannot_check_failure() end
                 return 422, validation_body(accept_err.field_errors, form_errors)
             end
             if accept_err.existing then

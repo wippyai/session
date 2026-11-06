@@ -977,6 +977,18 @@ local function define_tests()
             test.eq(found["fields[0].label"], "blank")
             test.is_nil(found["fields[0].options"])
         end)
+
+        it("reports only the type for an unknown type with extra keys, which it has no list for", function()
+            local _, errors = definition.normalize(form({ { id = "r", type = "rating", label = "L", max = 5, colour = "red" } }))
+            test.eq(#errors, 1, definition.format_errors(errors))
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].path, "fields[0].type")
+            -- A field with no type at all still has its keys checked.
+            local _, untyped = definition.normalize(form({ { id = "r", label = "L", colour = "red" } }))
+            local found = codes(untyped)
+            test.eq(found["fields[0].type"], "required")
+            test.eq(found["fields[0].colour"], "unknown_key")
+        end)
     end)
 
     describe("the field types a tool accepts", function()

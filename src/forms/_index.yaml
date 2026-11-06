@@ -387,7 +387,7 @@ entries:
                   },
                   "pattern": {
                     "type": "string",
-                    "description": "text only: the whole answer must match this regular expression, at most 200 characters. The server matches it against the whole answer, so it needs no anchors. Allowed: literal characters; . for any character; ^ and $; classes [abc] [^abc] [a-z] (inside a class write [ as \\[, and put - first or last or write \\-); \\d and \\w (ASCII only); groups ( ) and (?: ); alternation |; the repeats * + ? {n} {n,} {n,m}, each with an optional lazy ? after it as in a{2,5}?, with counts of at most 100 and no leading zero. The whole pattern counts at most 100 with every repeat written out: a literal, a class, . ^ and $ count 1, a{n} and a{m,n} count n times what they repeat, a{m,} counts m + 1 times, * + ? count what they repeat once, nested repeats multiply, and alternatives add up, so (ab){5} counts 10 and (a{5}){3} counts 15. A backslash may only precede one of these characters: ^ $ \\ . * + ? ( ) [ ] { } | / (inside a class also -). Not allowed: lookahead or lookbehind, backreferences, named groups, flags, \\s \\S \\D \\W \\b \\B \\p \\x, any other backslash letter such as \\n or \\t, POSIX classes, groups nested more than 3 deep, and repeats of repeats such as a** or (a+)+."
+                    "description": "text only: the whole answer must match this regular expression, at most 200 characters. The server matches it against the whole answer, so it needs no anchors. Allowed: literal characters; . for any character; ^ and $; classes [abc] [^abc] [a-z] (inside a class write [ as \\[, and put - first or last or write \\-); \\d and \\w (ASCII only); groups ( ) and (?: ); alternation |; the repeats * + ? {n} {n,} {n,m}, each with an optional lazy ? after it as in a{2,5}?, with counts of at most 100 and no leading zero. The whole pattern counts at most 100 with every repeat written out: a literal, a class, . ^ $ and an empty group count 1, a{n} and a{m,n} count n times what they repeat, a{m,} counts m + 1 times, a repeat of zero counts what it repeats once, so a{0} counts 1, * + ? count what they repeat once, nested repeats multiply, and alternatives add up, so (ab){5} counts 10 and (a{5}){3} counts 15. A backslash may only precede one of these characters: ^ $ \\ . * + ? ( ) [ ] { } | / (inside a class also -). Not allowed: lookahead or lookbehind, backreferences, named groups, flags, \\s \\S \\D \\W \\b \\B \\p \\x, any other backslash letter such as \\n or \\t, POSIX classes, groups nested more than 3 deep, and repeats of repeats such as a** or (a+)+."
                   },
                   "placeholder": {
                     "type": "string",
@@ -463,9 +463,9 @@ entries:
         Never write a <wippy-form-answers> element yourself.
       - A default only prefills a field: it is not the user's answer until they submit it.
         A checkbox never starts checked; use a required checkbox for consent.
-      - Keep the form to the questions you need. A text, textarea or email field holds at
-        most what its max_length allows, and the fields of one form together at most 16000
-        characters.
+      - Keep the form to the questions you need. A text or textarea field holds at most
+        what its max_length allows, an email address at most 254 characters, and the
+        text, textarea and email fields of one form together at most 16000 characters.
       - A chosen option can carry a "note": the user's own words about that choice. Follow it.
       - A record with "late": true was sent after the conversation moved on. Treat it as
         context only: confirm with the user before acting on the earlier request.

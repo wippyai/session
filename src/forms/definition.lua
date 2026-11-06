@@ -145,9 +145,13 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         return nil
     end
     local before = #errors
-    -- The keys a field may carry depend on its type.
+    -- The keys a field may carry depend on its type. An unknown type has no
+    -- list of keys: the type is the mistake, so its keys are not judged.
     local standard = field_values.is_standard(raw.type)
-    check_unknown_keys(errors, path, raw, standard and field_values.KEYS[raw.type] or FIELD_KEYS)
+    local known_type = standard or raw.type == "choice"
+    if known_type or raw.type == nil then
+        check_unknown_keys(errors, path, raw, standard and field_values.KEYS[raw.type] or FIELD_KEYS)
+    end
 
     local id = raw.id
     if id == nil then
@@ -168,7 +172,7 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
     local unsupported = false
     if raw.type == nil then
         add_error(errors, path .. ".type", "required", "A field type is required.")
-    elseif (raw.type ~= "choice" and not standard) or (types and not types[raw.type]) then
+    elseif not known_type or (types and not types[raw.type]) then
         unsupported = true
         add_error(errors, path .. ".type", "unsupported_type", supported_types(types))
     end

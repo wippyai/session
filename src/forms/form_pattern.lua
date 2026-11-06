@@ -273,7 +273,9 @@ local function parse(chars: {string}, points: {integer})
                 if quantifier == "{" then
                     local copies
                     repeats_forever, copies = parse_braces()
-                    atom_size = atom_size * copies
+                    -- a{0} still compiles to an instruction for the repeat
+                    -- around it to copy, so a repeat counts its body once.
+                    atom_size = atom_size * math.max(copies, 1)
                 else
                     position = position + 1
                     repeats_forever = quantifier ~= "?"
@@ -314,8 +316,9 @@ local function parse(chars: {string}, points: {integer})
     -- Matching takes time in proportion to the compiled program, which the
     -- other bounds leave open: a{0,100} written 25 times is 200 characters and
     -- 2,500 steps per character of the answer. A literal, a class, a dot or an
-    -- anchor counts 1, a group is the sum of its branches, and {n}, {m,n} and
-    -- {m,} multiply what they repeat by n, n and m + 1. * + ? count it once.
+    -- anchor counts 1, a group is the sum of its branches and at least 1, and
+    -- {n}, {m,n} and {m,} multiply what they repeat by n, n and m + 1, and by 1
+    -- at the least, so a{0} counts 1. * + ? count it once.
     -- This is checked last, so a malformed pattern is reported as malformed.
     local _, expanded = parse_alternation(0)
     if expanded > form_pattern.MAX_EXPANDED then

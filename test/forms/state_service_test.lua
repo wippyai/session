@@ -1272,6 +1272,52 @@ local function define_tests()
                 test.eq(#user_rows(ctx.session_id), 0)
             end)
 
+            it("answers 500, not 409, to an exact replay when a stored pattern no longer compiles", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
+                local artifact_id = new_v2_form(ctx, def)
+                local request = v2_request({ code = "ABC" })
+                test.eq(post(artifact_id, request), 200)
+                rewrite_content(artifact_id, function(content)
+                    content.props.definition.fields[1].pattern = "("
+                end)
+                local status, body = post(artifact_id, request)
+                test.eq(status, 500, tostring(body and body.code))
+                test.eq(body.code, "internal")
+                test.eq(#user_rows(ctx.session_id), 1, "the answer accepted first stays")
+            end)
+
+            it("refuses a form version the form no longer has once the lock is held", function()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                -- After the first read and before the acceptance transaction:
+                -- the choice form becomes a version 2 form, so the request's
+                -- version passed the first check and no longer matches.
+                local original_new_id = state_service._new_message_id
+                state_service._new_message_id = function()
+                    state_service._new_message_id = original_new_id
+                    local artifact: any = artifact_repo.get(artifact_id)
+                    local content: any = json.decode(tostring(artifact.content))
+                    content.props["form-version"] = 2
+                    table.insert(content.props.definition.fields, { id = "name", type = "text", label = "Name",
+                        min_length = 0, max_length = 500 })
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                    return original_new_id()
+                end
+                local request = answer()
+                request.expected_content_version = nil
+                local status, body = post(artifact_id, request)
+                test.eq(status, 400, tostring(body and body.code))
+                test.eq(body.code, "invalid_request")
+                test.eq(body.message, "Unsupported form_version")
+                local artifact = artifact_repo.get(artifact_id)
+                test.eq(artifact.content_version, 2, "only the competing definition update committed")
+                test.is_nil(artifact.meta.session_form.submission, "the refused answer does not settle the form")
+                test.eq(#user_rows(ctx.session_id), 0, "the refused answer creates no pending row")
+                test.eq(#wakes, 0, "the refused answer does not wake the session")
+            end)
+
             -- Changes the first field of the stored form between the first read
             -- of a submission and its acceptance transaction, so the answer was
             -- valid for the form the first read saw.

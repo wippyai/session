@@ -390,6 +390,24 @@ local function define_tests()
             refused("(()()){0,51}")
         end)
 
+        it("counts a repeat of zero as what it repeats, once", function()
+            accepted("a{0}")
+            accepted("(?:a{0}b){50}")
+            refused("(?:a{0}b){51}")
+            accepted("(?:a{0,0}b){50}")
+            refused("(?:a{0,0}b){51}")
+            accepted("(?:(ab){0}c){33}")
+            refused("(?:(ab){0}c){34}")
+        end)
+
+        it("refuses a group of empty repeats that compiles to thousands of instructions", function()
+            -- 46 copies of a{0} repeated 99 times: each copy compiles to an
+            -- instruction, so this is about 4,500 of them, in 198 characters.
+            local crafted = "(?:(?:" .. string.rep("a{0}", 46) .. "){99}b)*"
+            test.eq(#crafted, 198)
+            refused(crafted)
+        end)
+
         it("reports a malformed pattern as malformed, whatever its size", function()
             local ok, code = form_pattern.check("a{100}a{100}(")
             test.is_nil(ok)
@@ -651,6 +669,18 @@ local function define_tests()
             end)
         end)
 
+        it("tells the model in the trait prompt the limits each text type has", function()
+            local trait, err = registry.get("wippy.session.forms:ask_user_fields")
+            test.is_nil(err)
+            local prompt = (string.gsub(tostring(trait.data.prompt), "%s+", " "))
+            local limits = field_values.LIMITS
+            test.contains(prompt, "A text or textarea field holds at most what its max_length allows")
+            test.contains(prompt, string.format("an email address at most %d characters", limits.EMAIL_MAX))
+            test.contains(prompt, string.format("together at most %d characters", limits.TEXT_BUDGET))
+            -- An email field has no max_length: a model that wrote one would get unknown_key.
+            test.is_nil(field_values.KEYS.email.max_length)
+        end)
+
         it("is one flat field object that names all seven types and does not require options", function()
             local item = field_schema()
             test.eq(item.additionalProperties, false)
@@ -772,6 +802,8 @@ local function define_tests()
                 test.contains(text, string.format("counts of at most %d", form_pattern.MAX_REPEAT))
                 test.contains(text, string.format("counts at most %d with every repeat written out", form_pattern.MAX_EXPANDED))
                 test.contains(text, "no leading zero")
+                test.contains(text, "an empty group count 1")
+                test.contains(text, "a repeat of zero counts what it repeats once, so a{0} counts 1")
                 test.is_true(form_pattern.check(string.format("a{%d}", form_pattern.MAX_REPEAT)))
                 test.is_nil(form_pattern.check(string.format("a{%d}", form_pattern.MAX_REPEAT + 1)))
                 test.is_nil(form_pattern.check("a{01}"))
