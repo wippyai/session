@@ -1,0 +1,350 @@
+<script setup lang="ts">
+import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/definition'
+import type { ComponentPublicInstance } from 'vue'
+import type { SubmitBanner } from '../lib/submit-error'
+import { Icon } from '@iconify/vue'
+import Button from 'primevue/button'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
+import { ERROR_TEXT_CLASS } from '../lib/error-text'
+import { pageHasNoFocus } from '../lib/page-focus'
+import { partAttrs } from '../lib/part-attrs'
+import { SENDING_LABEL, SENDING_STATUS_MESSAGE, SLOW_SEND_MS } from '../lib/send-state'
+import FormFieldControl from './fields/form-field.vue'
+import FormHeader from './form-header.vue'
+import FormMessage from './form-message.vue'
+
+/**
+ * The fields form: every field of the definition as its own control (choice
+ * radios/checkboxes and the V2 standard fields), one Submit button, and one
+ * polite status region. A form of choices only renders as the question card
+ * instead; this is the renderer for any form with a standard field.
+ *
+ * The `<form>` is `novalidate`: a native `type="email"` or `required` would
+ * otherwise stop the submit event with the browser's own bubble and bypass
+ * the accessible error flow below (per-field errors linked by
+ * `aria-describedby`, focus on the first invalid control, a status summary).
+ *
+ * Submit stays focusable while the form is blocked, by a send in flight or by
+ * being offline: it is `aria-disabled` and dimmed with the theme's `p-disabled`
+ * marker, because a focused button that becomes disabled hands focus to <body>.
+ * The fields are disabled during a send, so a box that had focus does lose it;
+ * a failed send then gives focus to Submit (`restoreFocusAfterFailure`).
+ *
+ * A send in flight also shows on the button itself: its label becomes
+ * "Sending…" and a spinner turns beside it (it stands still under reduced
+ * motion). The label change is what a screen reader hears from the focused
+ * button; the status region adds "Sending your answers." only when a send runs
+ * long.
+ */
+const props = defineProps<{
+  state: FormState
+  submitting: boolean
+  banner: SubmitBanner | null
+  /** True while the browser is offline. It blocks Submit, because a submission can only fail with no network. */
+  offline?: boolean
+}>()
+
+const emit = defineEmits<{
+  submit: [answers: FormAnswers]
+  retry: []
+}>()
+
+const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
+// One shared empty list: a fresh `[]` per render would hand every field a new
+// prop on each parent render and re-render all of them.
+const NO_ERRORS: FieldError[] = []
+
+// A PrimeVue `Message` is a live region (`role="alert"`, `aria-live="assertive"`).
+// The submit-failure banner is announced by the form's polite status region
+// instead, so the Message is made a plain element: its text is still shown,
+// and read by anyone browsing the form, but never spoken a second time.
+const QUIET_MESSAGE_PT = { root: { 'role': undefined, 'aria-live': undefined, 'aria-atomic': undefined } }
+
+// Keyed by field id: the raw value of each control — matches AnswerDraft.
+const draft = reactive<Record<string, FieldAnswer | undefined>>(
+  draftFromAnswers(props.state.definition, props.state.data),
+)
+// What the form started with, so "unsent input" means the user changed something.
+const initialSignature = draftSignature(props.state.definition, draft)
+
+const fieldErrors = ref<Record<string, FieldError[]>>({})
+const formErrors = ref<FieldError[]>([])
+type FieldHandle = { focusFirstControl: () => void, focusOtherText: () => void }
+const fieldRefs: Record<string, FieldHandle | null> = {}
+const formEl = ref<HTMLFormElement | null>(null)
+const submitButton = ref<ComponentPublicInstance | null>(null)
+
+// Single polite live region for the form: submission-result banners and the
+// validation error summary both funnel through here instead of each having
+// their own role="alert" (which double-announces and can't be dismissed). The
+// banner's own PrimeVue `Message` is made a plain element for that reason
+// (`QUIET_MESSAGE_PT`), so a failure is announced once, here.
+const statusMessage = ref('')
+// True while the region holds the validation summary, which is kept in step
+// with the errors still showing; false once a submit-failure message took it.
+let statusIsSummary = false
+
+function setFieldRef(id: string, el: unknown) {
+  fieldRefs[id] = el as FieldHandle | null
+}
+
+const sendBlocked = computed(() => props.submitting || !!props.offline)
+
+function focusFirstInvalid(ids: string[], blankOther: string[] = []) {
+  const firstId = props.state.definition.fields.find(f => ids.includes(f.id))?.id
+  if (!firstId)
+    return
+  void nextTick(() => {
+    const field = fieldRefs[firstId]
+    if (blankOther.includes(firstId))
+      field?.focusOtherText()
+    else
+      field?.focusFirstControl()
+  })
+}
+
+function errorSummary(count: number): string {
+  return count === 1 ? '1 question needs attention.' : `${count} questions need attention.`
+}
+
+// What the validation summary says: how many questions (fields) have an error,
+// then each form-level message as its own text. A form-level error is about
+// the form, not a question, so it is never counted as one.
+const errorSummaryText = computed(() => {
+  const parts: string[] = []
+  const questions = Object.keys(fieldErrors.value).length
+  if (questions > 0)
+    parts.push(errorSummary(questions))
+  for (const error of formErrors.value)
+    parts.push(error.message)
+  return parts.join(' ')
+})
+
+function announceErrorSummary() {
+  statusIsSummary = true
+  statusMessage.value = errorSummaryText.value
+}
+
+// A fixed question drops its error as the user types, so the summary would
+// otherwise keep saying how many needed attention at the last submit. It is
+// updated only when its text changes (once per fixed question, not once per
+// key) and emptied when nothing is left. A polite live region does not
+// announce text that has not changed.
+watch(errorSummaryText, (text) => {
+  if (!statusIsSummary)
+    return
+  statusMessage.value = text
+  if (text === '')
+    statusIsSummary = false
+})
+
+/** After a failed send that left no focus anywhere. Focus on another control of the page is left alone. */
+function restoreFocusAfterFailure() {
+  if (formEl.value && pageHasNoFocus(formEl.value))
+    (submitButton.value?.$el as HTMLElement | undefined)?.focus()
+}
+
+function setServerErrors(errors: Record<string, FieldError[]> | undefined, formLevel: FieldError[] | undefined) {
+  fieldErrors.value = errors ?? {}
+  formErrors.value = formLevel ?? []
+  const invalidIds = Object.keys(fieldErrors.value)
+  focusFirstInvalid(invalidIds)
+  if (invalidIds.length === 0)
+    void nextTick(restoreFocusAfterFailure)
+  if (errorSummaryText.value !== '')
+    announceErrorSummary()
+}
+
+let slowSendTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearSlowSendTimer() {
+  if (slowSendTimer)
+    clearTimeout(slowSendTimer)
+  slowSendTimer = null
+}
+
+onBeforeUnmount(clearSlowSendTimer)
+
+// Starting a send clears the previous server errors, as it does the banner, so
+// a resent answer, such as one sent again with Retry, never shows an old 422
+// next to the new outcome. It also empties the status region, so a failure with
+// the same text as the last one is new text and is announced. A send that runs
+// long is then announced once; one that ends sooner says nothing here, because
+// the button label already changed. When the send ends that line is removed, so
+// it never outlives the send (a failure's own message replaces it as usual).
+watch(() => props.submitting, (sending) => {
+  clearSlowSendTimer()
+  if (!sending) {
+    if (statusMessage.value === SENDING_STATUS_MESSAGE)
+      statusMessage.value = ''
+    return
+  }
+  fieldErrors.value = {}
+  formErrors.value = []
+  statusIsSummary = false
+  statusMessage.value = ''
+  slowSendTimer = setTimeout(() => {
+    slowSendTimer = null
+    statusMessage.value = SENDING_STATUS_MESSAGE
+  }, SLOW_SEND_MS)
+})
+
+// A changed answer drops that question's errors; the next submit re-checks it.
+function updateField(id: string, value: FieldAnswer | undefined) {
+  draft[id] = value
+  if (fieldErrors.value[id]) {
+    const { [id]: _cleared, ...rest } = fieldErrors.value
+    fieldErrors.value = rest
+  }
+}
+
+function currentAnswers(): FormAnswers {
+  return serializeAnswers(props.state.definition, draft)
+}
+
+// Retry comes through here too: a value edited into something invalid since the
+// failed send has no wire answer, so sending without this check would drop it.
+function handleSubmit() {
+  if (sendBlocked.value)
+    return
+  const errors = validateAnswers(props.state.definition, draft)
+  const invalidIds = Object.keys(errors)
+  if (invalidIds.length > 0) {
+    fieldErrors.value = errors
+    formErrors.value = []
+    // A blank Other is the one failure where the text box, not the group, needs focus.
+    const blankOther = invalidIds.filter(id => errors[id].some(e => e.code === 'blank'))
+    focusFirstInvalid(invalidIds, blankOther)
+    announceErrorSummary()
+    return
+  }
+  fieldErrors.value = {}
+  formErrors.value = []
+  emit('submit', currentAnswers())
+}
+
+// Mirror the submit-outcome banner into the shared live region so a
+// network/server failure is announced the same way a validation failure is.
+watch(() => props.banner, (banner) => {
+  if (!banner)
+    return
+  statusIsSummary = false
+  statusMessage.value = banner.message
+  void nextTick(restoreFocusAfterFailure)
+})
+
+const rootPart = computed(() => partAttrs('card'))
+const fieldsPart = computed(() => partAttrs('fields'))
+const noticePart = computed(() => partAttrs('notice'))
+const formErrorPart = computed(() => partAttrs('fields-error'))
+const sendPart = computed(() => partAttrs('send', props.submitting && 'sending'))
+// Only a send in flight changes the label; an offline form is blocked, not sending.
+const submitLabel = computed(() => props.submitting ? SENDING_LABEL : props.state.definition.submit_label || 'Submit')
+
+defineExpose({
+  setServerErrors,
+  retry: handleSubmit,
+  // See QuestionCardActive's own `hasUnsentInput` — a form the user changed
+  // counts as unsent input a background "answered elsewhere" swap would
+  // otherwise silently discard without explanation. An untouched form does
+  // not, even one whose controls start filled from defaults or a checkbox.
+  hasUnsentInput: () => draftSignature(props.state.definition, draft) !== initialSignature,
+})
+</script>
+
+<template>
+  <form
+    ref="formEl"
+    :part="`${rootPart.part} ${fieldsPart.part}`"
+    :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
+    :aria-busy="submitting ? 'true' : undefined"
+    novalidate
+    @submit.prevent="handleSubmit"
+  >
+    <div
+      role="status"
+      class="sr-only"
+    >
+      {{ statusMessage }}
+    </div>
+
+    <p
+      v-if="offline"
+      role="status"
+      :part="noticePart.part"
+      :class="noticePart.class"
+    >
+      {{ OFFLINE_MESSAGE }}
+    </p>
+
+    <FormHeader
+      :title="state.definition.title"
+      :description="state.definition.description"
+    >
+      <p
+        v-if="state.stale"
+        :part="noticePart.part"
+        :class="noticePart.class"
+      >
+        Asked earlier — the conversation has moved on. You can still answer; the assistant will use it as
+        context and confirm before acting on the earlier request.
+      </p>
+    </FormHeader>
+
+    <FormFieldControl
+      v-for="field in state.definition.fields"
+      :key="field.id"
+      :ref="(el) => setFieldRef(field.id, el)"
+      :field="field"
+      :model-value="draft[field.id]"
+      :errors="fieldErrors[field.id] ?? NO_ERRORS"
+      :disabled="submitting"
+      :readonly="false"
+      @update:model-value="(v) => updateField(field.id, v)"
+    />
+
+    <ul
+      v-if="formErrors.length > 0"
+      :part="formErrorPart.part"
+      :class="`${formErrorPart.class} ${ERROR_TEXT_CLASS}`"
+    >
+      <li
+        v-for="(err, i) in formErrors"
+        :key="i"
+      >
+        {{ err.message }}
+      </li>
+    </ul>
+
+    <FormMessage
+      v-if="banner"
+      :severity="banner.retryable ? 'warn' : 'error'"
+      :retry="banner.retryable"
+      :pt="QUIET_MESSAGE_PT"
+      @retry="emit('retry')"
+    >
+      {{ banner.message }}
+    </FormMessage>
+
+    <div>
+      <Button
+        ref="submitButton"
+        type="submit"
+        :label="submitLabel"
+        :aria-disabled="sendBlocked ? 'true' : undefined"
+        :part="sendPart.part"
+        :class="[sendPart.class, sendBlocked && 'p-disabled']"
+      >
+        <template #icon="iconProps">
+          <Icon
+            v-if="submitting"
+            icon="tabler:loader-2"
+            aria-hidden="true"
+            :class="[iconProps.class, 'animate-spin motion-reduce:animate-none']"
+          />
+        </template>
+      </Button>
+    </div>
+  </form>
+</template>

@@ -136,7 +136,10 @@ function Invoke-Prepare {
     $config = [ordered]@{
         version = '1.0'
         logger = [ordered]@{ level = 'error' }
-        override = [ordered]@{ 'wippy.session.process:context_cleanup.service:lifecycle.auto_start' = $false }
+        override = [ordered]@{
+            'wippy.session.process:context_cleanup.service:lifecycle.auto_start' = $false
+            'app.forms:fixtures:directory' = "$repository/test/forms/fixtures"
+        }
         registry = [ordered]@{
             dependency_vendor_dir = "$workspace/modules/vendor"
             dependency_lock_path = "$workspace/wippy.lock"

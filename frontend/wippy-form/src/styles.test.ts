@@ -21,6 +21,20 @@ function fallbackOf(name: string): string {
   return fallback
 }
 
+describe('styles.css: a stored answer', () => {
+  it('keeps its own spaces and line breaks', () => {
+    expect(ruleBody('\\.w-form__field-value')).toMatch(/white-space:\s*pre-wrap/)
+  })
+})
+
+describe('styles.css: Submit while a send is in flight', () => {
+  it('shows the progress cursor on the sending button, and gives it pointer events so the cursor shows through the theme\'s inert `p-disabled`', () => {
+    const body = ruleBody('\\.w-form \\.w-form__send--sending')
+    expect(body).toMatch(/cursor:\s*progress/)
+    expect(body).toMatch(/pointer-events:\s*auto/)
+  })
+})
+
 describe('styles.css: the rule helpers', () => {
   it('ruleBody throws for a selector with no rule, so a missing rule cannot pass a "does not contain" assertion', () => {
     expect(() => ruleBody('\\.w-form__no-such-rule')).toThrow('no rule')
@@ -157,5 +171,52 @@ describe('styles.css: the status line shows the theme focus ring', () => {
     expect(body).toMatch(/width:\s*fit-content/)
     expect(body).toMatch(/max-width:\s*100%/)
     expect(body).toMatch(/border-radius:\s*var\(--_row-radius\)/)
+  })
+})
+
+// The fields form reads the same tokens as the card. The space between
+// fields, the label weight and the date width are its own tokens, each a
+// public `--wippy-form-*` token read through a private `--_x`, like the rest.
+describe('styles.css — fields form tokens and parts', () => {
+  it('reads the field gap and the label weight through public tokens', () => {
+    const body = ruleBody(':host')
+    expect(body).toMatch(/--_field-gap:\s*var\(--wippy-form-field-gap,\s*16px\)/)
+    expect(body).toMatch(/--_label-weight:\s*var\(--wippy-form-label-weight,\s*500\)/)
+  })
+
+  it('spaces fields with the token, and sets the label weight from it', () => {
+    expect(ruleBody('\\.w-form__fields')).toMatch(/gap:\s*var\(--_field-gap\)/)
+    expect(ruleBody('\\.w-form__field-label')).toMatch(/font-weight:\s*var\(--_label-weight\)/)
+  })
+
+  it('draws the description and read-only note muted, through --_muted', () => {
+    expect(ruleBody('\\.w-form__field-description')).toMatch(/color:\s*var\(--_muted\)/)
+    expect(ruleBody('\\.w-form__field-note')).toMatch(/color:\s*var\(--_muted\)/)
+  })
+
+  // The theme makes the popup calendar at least as wide as its input, so the
+  // way to a calendar of a sensible size is a date box of a sensible size, not
+  // an override of the overlay.
+  it('bounds the date control to its own width token, full width only when the form is narrower', () => {
+    expect(ruleBody(':host')).toMatch(/--_date-width:\s*var\(--wippy-form-date-width,\s*20rem\)/)
+    const body = ruleBody('\\.w-form__field-input--date')
+    expect(body).toMatch(/width:\s*min\(100%,\s*var\(--_date-width\)\)/)
+    expect(body).toMatch(/max-width:\s*100%/)
+  })
+
+  it('does not override the calendar: no rule names it, and the only !important left is the reduced-motion one', () => {
+    const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(withoutComments).not.toMatch(/field-calendar/)
+    expect(withoutComments).not.toMatch(/min-width:\s*0\s*!important/)
+    // Every rule that carries !important, by selector.
+    const important = [...withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => body.includes('!important'))
+      .map(([, selector]) => selector.trim())
+    expect(important).toEqual(['.w-form *'])
+  })
+
+  it('has no raw .p-* rule for the PrimeVue inputs (comments aside)', () => {
+    const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(withoutComments).not.toMatch(/\.p-(inputtext|textarea|checkbox|datepicker|radiobutton)/)
   })
 })

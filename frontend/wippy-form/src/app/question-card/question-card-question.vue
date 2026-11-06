@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
-import type { FormField } from '../../lib/definition'
+import type { ChoiceFormField } from '../../lib/definition'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
-import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX, trimAnswerText } from '../../lib/answers'
+import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX } from '../../lib/answers'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf } from '../../lib/focus-key'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
+import { trimAnswerText } from '../../lib/text'
 import FormMessage from '../form-message.vue'
 import QuestionCardComposer from './question-card-composer.vue'
 import QuestionCardLengthAlert from './question-card-length-alert.vue'
@@ -16,7 +17,7 @@ import QuestionCardSendButton from './question-card-send-button.vue'
 
 /** One question: the notice, description and hint, the answer rows with Other, the send button, the error and the keyboard hint. */
 const props = defineProps<{
-  question: FormField
+  question: ChoiceFormField
   controller: QuestionCardController
   qid: string
   stale: boolean

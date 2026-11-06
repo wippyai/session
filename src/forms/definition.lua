@@ -1,8 +1,13 @@
 local json = require("json")
 local ordered_json = require("ordered_json")
+local form_text = require("form_text")
+local form_checks = require("form_checks")
+local field_values = require("field_values")
 
--- Session forms V1 contract: the definition an agent authors (choice fields
--- only) and the answers a user submits for it.
+-- Session forms contract: the definition an agent authors and the answers a
+-- user submits for it. A field is a choice (defined here) or one of the
+-- standard types text, textarea, number, email, date and checkbox (defined
+-- in field_values.lua).
 --
 -- Pure functions, no I/O. Every rejection carries a stable `code`, a `path`
 -- (definition) or field id (answers) and a plain `message`. Array positions
@@ -15,7 +20,26 @@ local ordered_json = require("ordered_json")
 
 local definition = {}
 
-definition.FORM_VERSION = 1
+-- The version of a form follows its definition: a form of choice fields only
+-- is version 1, exactly as it was before standard fields existed, and a form
+-- with any other field is version 2. A reader that only knows version 1 shows
+-- a notice for a version 2 form instead of rendering it wrongly.
+definition.VERSIONS = { CHOICES = 1, FIELDS = 2 }
+
+-- Every field type, in the order messages list them.
+definition.TYPES = { "choice", "text", "textarea", "number", "email", "date", "checkbox" }
+definition.TYPE_NAMES = table.concat(definition.TYPES, ", ")
+
+-- The field types of the ask_user tool (trait wippy.session.forms:ask_user).
+-- The ask_user_fields tool passes no limit and accepts every type.
+definition.CHOICE_TYPES = { choice = true }
+
+function definition.version_of(def: any): integer
+    for _, field in ipairs(def.fields) do
+        if field.type ~= "choice" then return definition.VERSIONS.FIELDS end
+    end
+    return definition.VERSIONS.CHOICES
+end
 
 definition.LIMITS = {
     TITLE = 160,
@@ -33,12 +57,6 @@ definition.LIMITS = {
 
 local FIELD_ID_PATTERN = "^[a-z][a-z0-9_]*$"
 local FIELD_ID_MAX = 40
-
--- A valid Other/note answer is at most LIMIT UTF-8 characters (4 bytes
--- each) plus whatever surrounding whitespace a real client sends. This
--- bounds every per-byte scan on the raw value to a small multiple of the
--- limit, independent of the 64 KiB body cap, before any of them run.
-local RAW_TEXT_MULTIPLIER = 8
 
 local ROOT_KEYS = {
     title = true, description = true, submit_label = true, answered_message = true, fields = true,
@@ -74,206 +92,11 @@ local function is_object(value: any): boolean
     return true
 end
 
--- Decodes the UTF-8 character at byte `index` of `text`. Returns its code
--- point and the index of the next character, or nil when the bytes there are
--- not valid UTF-8: a malformed or truncated sequence, an overlong form, a
--- surrogate or a value past U+10FFFF. The runtime (Lua 5.3, Wippy
--- modification) has no utf8 library, global or required, so this is the one
--- decoder every text rule below uses.
-local function decode_at(text: string, index: integer): (integer?, integer)
-    local byte = string.byte(text, index)
-    local extra, minimum, value
-    if byte < 0x80 then
-        return byte, index + 1
-    elseif byte >= 0xC2 and byte <= 0xDF then
-        extra, minimum, value = 1, 0x80, byte - 0xC0
-    elseif byte >= 0xE0 and byte <= 0xEF then
-        extra, minimum, value = 2, 0x800, byte - 0xE0
-    elseif byte >= 0xF0 and byte <= 0xF4 then
-        extra, minimum, value = 3, 0x10000, byte - 0xF0
-    else
-        return nil, index
-    end
-    if index + extra > #text then return nil, index end
-    for offset = 1, extra do
-        local continuation = string.byte(text, index + offset)
-        if continuation < 0x80 or continuation > 0xBF then return nil, index end
-        value = value * 64 + (continuation - 0x80)
-    end
-    if value < minimum or value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF) then
-        return nil, index
-    end
-    return value, index + extra + 1
-end
-
--- Number of Unicode code points in `text`, or nil when it is not valid
--- UTF-8. Limits count characters as users see them, as json.validate's
--- maxLength does.
-local function char_length(text: string): number?
-    local count = 0
-    local index = 1
-    local size = #text
-    while index <= size do
-        local value
-        value, index = decode_at(text, index)
-        if not value then return nil end
-        count = count + 1
-    end
-    return count
-end
-
--- The characters JavaScript's String.prototype.trim removes: ECMAScript
--- WhiteSpace (tab, vertical tab, form feed, U+FEFF and every Unicode space
--- separator) and LineTerminator (LF, CR, U+2028, U+2029). The form component
--- trims Other text and notes with it, so the server trims them, and decides
--- they are blank, with exactly this set. U+200B ZERO WIDTH SPACE is not in it.
-local WHITESPACE = {
-    [0x0009] = true, [0x000A] = true, [0x000B] = true, [0x000C] = true, [0x000D] = true,
-    [0x0020] = true, [0x00A0] = true, [0x1680] = true,
-    [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true, [0x2004] = true,
-    [0x2005] = true, [0x2006] = true, [0x2007] = true, [0x2008] = true, [0x2009] = true,
-    [0x200A] = true, [0x2028] = true, [0x2029] = true, [0x202F] = true, [0x205F] = true,
-    [0x3000] = true, [0xFEFF] = true,
-}
-
--- Invisible format characters. An agent-authored title, label or message
--- made up only of these and WHITESPACE shows nothing, so it is blank too.
-local ZERO_WIDTH = { [0x200B] = true, [0x200C] = true, [0x200D] = true, [0x2060] = true }
-
--- True when `text` (valid UTF-8) shows nothing: empty, or every character
--- in WHITESPACE or ZERO_WIDTH. For agent-authored definition text; answer
--- text follows JavaScript trim instead (trim).
-local function is_blank(text: string): boolean
-    local index = 1
-    local size = #text
-    while index <= size do
-        local value
-        value, index = decode_at(text, index)
-        if not value or not (WHITESPACE[value] or ZERO_WIDTH[value]) then
-            return false
-        end
-    end
-    return true
-end
-
-local function add_error(errors: {any}, path: string, code: string, message: string)
-    table.insert(errors, { path = path, code = code, message = message })
-end
-
--- True when `text` (valid UTF-8) has a control character: ASCII C0 (and
--- DEL), other than tab and newline where `multiline`; C1 (U+0080-U+009F);
--- the bidi override/isolate controls (U+202A-U+202E, U+2066-U+2069); or the
--- line/paragraph separators U+2028/U+2029. Question text is shown as-is, so
--- these are refused rather than silently changed or left to confuse a
--- renderer that treats them as directional or line-breaking control.
-local function has_control_characters(text: string, multiline: boolean): boolean
-    local index = 1
-    local size = #text
-    while index <= size do
-        local value
-        value, index = decode_at(text, index)
-        if not value then return true end
-        if value < 0x80 then
-            local is_c0 = value < 32 or value == 127
-            if is_c0 and multiline and (value == 9 or value == 10) then
-                is_c0 = false
-            end
-            if is_c0 then return true end
-        elseif (value >= 0x80 and value <= 0x9F)
-            or (value >= 0x202A and value <= 0x202E)
-            or (value >= 0x2066 and value <= 0x2069)
-            or value == 0x2028 or value == 0x2029 then
-            return true
-        end
-    end
-    return false
-end
-
--- `text` without the WHITESPACE characters at either end, as JavaScript's
--- String.prototype.trim gives it. One forward pass, so it stays linear on a
--- long run of spaces, where a "^%s*(.-)%s*$" pattern backtracks
--- quadratically. Text that is not valid UTF-8 is returned as it is, for the
--- caller's UTF-8 check to refuse.
-local function trim(text: string): string
-    local index = 1
-    local size = #text
-    local first, last = nil, 0
-    while index <= size do
-        local value, next_index = decode_at(text, index)
-        if not value then return text end
-        if not WHITESPACE[value] then
-            first = first or index
-            last = next_index - 1
-        end
-        index = next_index
-    end
-    if not first then return "" end
-    return string.sub(text, first, last)
-end
-
--- Checks an optional or required plain-text value. Returns the value to keep
--- (nil for an omitted optional value) and whether it was valid. opts.strict
--- applies the rules for new definitions (control characters); stored
--- definitions are read without them so a later tightening never makes an
--- existing form unreadable.
-local function check_text(errors: {any}, path: string, value: any,
-    opts: {required: boolean, min: number?, max: number, strict: boolean?, multiline: boolean?})
-    if value == nil then
-        if opts.required then
-            add_error(errors, path, "required", "A value is required.")
-            return nil, false
-        end
-        return nil, true
-    end
-    if type(value) ~= "string" then
-        add_error(errors, path, "invalid_type", "Must be a string.")
-        return nil, false
-    end
-    local length = char_length(value)
-    if not length then
-        add_error(errors, path, "invalid_text", "Must be valid UTF-8 text.")
-        return nil, false
-    end
-    if opts.required and is_blank(value) then
-        add_error(errors, path, "blank", "Must contain visible text.")
-        return nil, false
-    end
-    if opts.strict and has_control_characters(value, opts.multiline == true) then
-        add_error(errors, path, "control_characters", opts.multiline
-            and "Must not contain control characters other than tabs and line breaks."
-            or "Must not contain control characters or line breaks.")
-        return nil, false
-    end
-    if length > opts.max then
-        add_error(errors, path, "too_long", string.format("Must be at most %d characters.", opts.max))
-        return nil, false
-    end
-    if not opts.required and length == 0 then
-        return nil, true
-    end
-    return value, true
-end
-
-local function check_boolean(errors: {any}, path: string, value: any): boolean
-    if value == nil then return false end
-    if type(value) ~= "boolean" then
-        add_error(errors, path, "invalid_type", "Must be true or false.")
-        return false
-    end
-    return value
-end
-
-local function check_unknown_keys(errors: {any}, path: string, value: table, allowed: {[string]: boolean})
-    local unknown = {}
-    for key in pairs(value) do
-        if not allowed[key] then table.insert(unknown, tostring(key)) end
-    end
-    table.sort(unknown)
-    for _, key in ipairs(unknown) do
-        add_error(errors, path == "" and key or (path .. "." .. key), "unknown_key",
-            "Unknown key \"" .. key .. "\".")
-    end
-end
+local is_blank = form_text.is_blank
+local add_error = form_checks.add_error
+local check_text = form_checks.check_text
+local check_boolean = form_checks.check_boolean
+local check_unknown_keys = form_checks.check_unknown_keys
 
 ---------------------------------------------------------------------------
 -- Definition
@@ -302,13 +125,31 @@ local function normalize_option(errors: {any}, path: string, raw: any, strict: b
     return { value = value, label = label, description = description }
 end
 
-local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: {[string]: boolean}, strict: boolean): any
+-- The supported-types message for a tool that accepts only `types`, or
+-- for every type when `types` is nil.
+local function supported_types(types: {[string]: boolean}?): string
+    if not types then return "Supported types: " .. definition.TYPE_NAMES .. "." end
+    local names = {}
+    for _, name in ipairs(definition.TYPES) do
+        if types[name] then table.insert(names, name) end
+    end
+    return "Supported types: " .. table.concat(names, ", ") .. "."
+end
+
+local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: {[string]: boolean}, strict: boolean,
+    types: {[string]: boolean}?): any
     if type(raw) ~= "table" or not is_object(raw) or next(raw) == nil then
         add_error(errors, path, "invalid_type", "A field is an object.")
         return nil
     end
     local before = #errors
-    check_unknown_keys(errors, path, raw, FIELD_KEYS)
+    -- The keys a field may carry depend on its type. An unknown type has no
+    -- list of keys: the type is the mistake, so its keys are not judged.
+    local standard = field_values.is_standard(raw.type)
+    local known_type = standard or raw.type == "choice"
+    if known_type or raw.type == nil then
+        check_unknown_keys(errors, path, raw, standard and field_values.KEYS[raw.type] or FIELD_KEYS)
+    end
 
     local id = raw.id
     if id == nil then
@@ -324,10 +165,14 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
         seen_ids[id] = true
     end
 
+    -- An unknown type, and a known type the calling tool does not accept
+    -- (`types`), are both reported with the types that tool does accept.
+    local unsupported = false
     if raw.type == nil then
         add_error(errors, path .. ".type", "required", "A field type is required.")
-    elseif raw.type ~= "choice" then
-        add_error(errors, path .. ".type", "unsupported_type", "Only the \"choice\" type is supported.")
+    elseif not known_type or (types and not types[raw.type]) then
+        unsupported = true
+        add_error(errors, path .. ".type", "unsupported_type", supported_types(types))
     end
 
     local label = check_text(errors, path .. ".label", raw.label,
@@ -335,6 +180,19 @@ local function normalize_field(errors: {any}, path: string, raw: any, seen_ids: 
     local description = check_text(errors, path .. ".description", raw.description,
         { required = false, max = definition.LIMITS.DESCRIPTION, strict = strict, multiline = true })
     local required = check_boolean(errors, path .. ".required", raw.required)
+
+    -- A field of an unsupported type is not a choice that forgot its options:
+    -- the type is the one thing to fix, so no rule of any type is applied to it.
+    if unsupported then return nil end
+
+    if standard then
+        local field = field_values.normalize(errors, path, raw, {
+            id = id, type = raw.type, label = label, description = description, required = required,
+        }, strict)
+        if #errors > before then return nil end
+        return field
+    end
+
     local multiple = check_boolean(errors, path .. ".multiple", raw.multiple)
     local allow_other = check_boolean(errors, path .. ".allow_other", raw.allow_other)
 
@@ -383,11 +241,16 @@ end
 -- (nil, errors) where errors is a list of { path, code, message }.
 -- Strings in `options` become { value = s, label = s }; booleans default to
 -- false; empty optional descriptions are dropped.
--- opts.stored skips the control-character rule so a form accepted earlier
--- stays readable.
-function definition.normalize(raw: any, opts: {stored: boolean?}?): (any, {any}?)
+-- opts.stored skips the rules that could refuse a form accepted earlier, so
+-- it stays readable: the control-character rule and, for standard fields, the
+-- policy checks (pattern subset, default, ranges and the text budget). The
+-- structural checks still apply.
+-- opts.types limits the field types to the ones the calling tool accepts,
+-- such as definition.CHOICE_TYPES; without it every type is accepted.
+function definition.normalize(raw: any, opts: {stored: boolean?, types: {[string]: boolean}?}?): (any, {any}?)
     local errors = {}
     local strict = not (opts and opts.stored)
+    local types = opts and opts.types
     if type(raw) ~= "table" or not is_object(raw) or next(raw) == nil then
         add_error(errors, "", "invalid_type", "The form definition must be an object with title and fields.")
         return nil, errors
@@ -424,8 +287,16 @@ function definition.normalize(raw: any, opts: {stored: boolean?}?): (any, {any}?
     else
         local seen_ids = {}
         for index, raw_field in ipairs(raw.fields) do
-            local field = normalize_field(errors, string.format("fields[%d]", index - 1), raw_field, seen_ids, strict)
+            local field = normalize_field(errors, string.format("fields[%d]", index - 1), raw_field, seen_ids, strict, types)
             if field then table.insert(fields, field) end
+        end
+        -- Every answer of the form must fit the request body cap: see
+        -- field_values.LIMITS.TEXT_BUDGET. Not applied to a stored form.
+        local budget = field_values.text_budget(fields)
+        if strict and budget > field_values.LIMITS.TEXT_BUDGET then
+            add_error(errors, "fields", "text_budget_exceeded", string.format(
+                "The text, textarea and email fields can hold %d characters in all, over the %d allowed. "
+                .. "Lower max_length on some of them, or use fewer.", budget, field_values.LIMITS.TEXT_BUDGET))
         end
     end
 
@@ -473,30 +344,29 @@ local function option_index(field: any)
     return index
 end
 
--- The checks the user's own text of an answer (the other answer and a
--- note) shares: raw size, UTF-8, control characters and length. `names.long`
--- starts the "too long" message and `names.text` the others. Returns the
--- text with its outer whitespace dropped, as the form component does before
--- sending (it can be empty), or nil plus the error.
-local function check_user_text(raw: string, limit: number, names: {long: string, text: string}): (string?, any)
-    -- Reject an absurdly long raw value before any per-byte scan below runs
-    -- on it; a real answer never needs this much raw text.
-    if #raw > limit * RAW_TEXT_MULTIPLIER then
-        return nil, { code = "too_long", message = string.format("%s must be at most %d characters.", names.long, limit) }
-    end
-    local text = trim(raw)
-    local length = char_length(text)
-    if not length then
-        return nil, { code = "invalid_text", message = names.text .. " must be valid UTF-8 text." }
-    end
-    if has_control_characters(text, true) then
-        return nil, { code = "invalid_text", message = names.text
-            .. " must not contain control characters other than tabs and line breaks." }
-    end
-    if length > limit then
-        return nil, { code = "too_long", message = string.format("%s must be at most %d characters.", names.long, limit) }
-    end
-    return text, nil
+-- What each problem of form_text.read_answer is called and said for the Other
+-- text and for a note. Both are trimmed, as the form component does before
+-- sending, and may have tabs and line breaks. A blank Other text is refused;
+-- a blank note is dropped (check_noted).
+local OTHER_WORDING = {
+    too_long = { code = "too_long",
+        message = string.format("The other answer must be at most %d characters.", definition.LIMITS.OTHER_TEXT) },
+    not_utf8 = { code = "invalid_text", message = "The other answer must be valid UTF-8 text." },
+    control_characters = { code = "invalid_text",
+        message = "The other answer must not contain control characters other than tabs and line breaks." },
+    blank = { code = "blank", message = "Enter the other answer." },
+}
+local NOTE_WORDING = {
+    too_long = { code = "too_long",
+        message = string.format("A note must be at most %d characters.", definition.LIMITS.NOTE_TEXT) },
+    not_utf8 = { code = "invalid_text", message = "The note must be valid UTF-8 text." },
+    control_characters = { code = "invalid_text",
+        message = "The note must not contain control characters other than tabs and line breaks." },
+}
+
+local function refusal(wording: {[string]: any}, problem: string): any
+    local entry = wording[problem] :: any
+    return { code = entry.code, message = entry.message }
 end
 
 -- Validates the `{ other = "text" }` object. Returns the normalized object or
@@ -510,16 +380,12 @@ local function check_other(field: any, value: table): (any, any)
             return nil, { code = "invalid_type", message = "An other answer is an object with only \"other\"." }
         end
     end
-    local raw = value.other
-    if type(raw) ~= "string" then
+    if type(value.other) ~= "string" then
         return nil, { code = "invalid_type", message = "The other answer must be text." }
     end
-    local text, text_err = check_user_text(raw, definition.LIMITS.OTHER_TEXT,
-        { long = "The other answer", text = "The other answer" })
-    if text_err then return nil, text_err end
-    if text == "" then
-        return nil, { code = "blank", message = "Enter the other answer." }
-    end
+    local text, _, problem = form_text.read_answer(value.other, {
+        max = definition.LIMITS.OTHER_TEXT, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = true })
+    if problem then return nil, refusal(OTHER_WORDING, problem) end
     return { other = text }, nil
 end
 
@@ -536,16 +402,16 @@ local function check_noted(value: table, positions: {[string]: number}): (any, a
     if type(chosen) ~= "string" or not positions[chosen] then
         return nil, { code = "invalid_option", message = "Choose one of the listed options." }
     end
-    local raw = value.note
-    if raw == nil then return chosen, nil end
-    if type(raw) ~= "string" then
+    local note = value.note
+    if note == nil then return chosen, nil end
+    if type(note) ~= "string" then
         return nil, { code = "invalid_type", message = "A note must be text." }
     end
-    local note, note_err = check_user_text(raw, definition.LIMITS.NOTE_TEXT,
-        { long = "A note", text = "The note" })
-    if note_err then return nil, note_err end
-    if note == "" then return chosen, nil end
-    return { value = chosen, note = note }, nil
+    local kept, _, problem = form_text.read_answer(note, {
+        max = definition.LIMITS.NOTE_TEXT, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = true })
+    if problem == "blank" then return chosen, nil end
+    if problem then return nil, refusal(NOTE_WORDING, problem) end
+    return { value = chosen, note = kept }, nil
 end
 
 -- An answer object is either an own answer `{ other }` or a noted option
@@ -629,7 +495,10 @@ end
 --   field_errors       - { [field_id] = { { code, message } } } (first
 --                        violation per field), or nil when valid
 --   form_errors        - list of { code, message, field? } for problems that
---                        belong to no defined field, or nil when valid
+--                        belong to no defined field, or nil when valid. The
+--                        code "internal" is a fault in the stored form (a
+--                        pattern that no longer compiles), not in the
+--                        answers: the caller answers 500, not 422
 function definition.validate_answers(def: any, answers: any): (any, any, any)
     local field_errors = {}
     local form_errors = {}
@@ -659,17 +528,27 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
     local has_field_errors = false
     for _, field in ipairs(def.fields) do
         local value = answers[field.id]
-        local positions = option_index(field)
         local result, err = nil, nil
-        if value ~= nil then
-            if field.multiple then
-                result, err = check_multiple(field, value, positions)
-            else
-                result, err = check_single(field, value, positions)
+        if field.type == "choice" then
+            local positions = option_index(field)
+            if value ~= nil then
+                if field.multiple then
+                    result, err = check_multiple(field, value, positions)
+                else
+                    result, err = check_single(field, value, positions)
+                end
             end
-        end
-        if not err and result == nil and field.required then
-            err = required_error()
+            if not err and result == nil and field.required then
+                err = required_error()
+            end
+        else
+            -- A standard field decides `required` itself: an unchecked
+            -- required checkbox is a value (false) that still fails it.
+            result, err = field_values.check_answer(field, value)
+            if err and err.internal then
+                -- A fault in the stored form, not in the answers.
+                return nil, nil, { { code = "internal", field = field.id, message = err.message } }
+            end
         end
         if err then
             field_errors[field.id] = { err }
@@ -685,11 +564,12 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
     return normalized, nil, nil
 end
 
--- Encodes one normalized answer value (string, { value, note }, { other }, or
--- a list of them) with a fixed key order, so equal answers encode equally.
+-- Encodes one normalized answer value (a string, a number or a boolean,
+-- { value, note }, { other }, or a list of choice answers) with a fixed key
+-- order, so equal answers encode equally.
 local function encode_value(value: any): string
-    if type(value) == "string" then
-        return (json.encode(value))
+    if type(value) ~= "table" then
+        return field_values.literal(value)
     end
     if is_array(value) and #value > 0 then
         local parts = {}

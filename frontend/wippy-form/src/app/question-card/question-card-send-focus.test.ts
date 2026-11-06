@@ -1,10 +1,11 @@
-import type { FormDefinition } from '../../lib/definition'
+import type { ChoiceFormDefinition } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import buttonCss from '@wippy-fe/theme/primevue/button.css?raw'
 import commonCss from '@wippy-fe/theme/primevue/common.css?raw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuestionCard } from '../../composables/use-question-card'
+import { applyFocusFixup } from '../../test-support/dom'
 import { choiceField, definitionOf, formState } from '../../test-support/fixtures'
 import { hostError } from '../../test-support/host-error'
 import { artifactElement, mountWippyForm } from '../../test-support/mount-form'
@@ -31,8 +32,8 @@ const FORM_ERROR = 'This form changed since you loaded it.'
 const singleQuestion = choiceField({ id: 'a', label: 'Deploy now?', required: true, options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }] })
 const packagesQuestion = choiceField({ id: 'b', label: 'Which packages?', required: true, options: [{ value: 'proxy', label: 'proxy' }, { value: 'theme', label: 'theme' }], multiple: true })
 
-const reviewDefinition: FormDefinition = { ...definitionOf(singleQuestion, packagesQuestion), title: 'Release' }
-const sendDefinition: FormDefinition = { ...definitionOf(packagesQuestion), title: 'Pick' }
+const reviewDefinition: ChoiceFormDefinition = { ...definitionOf(singleQuestion, packagesQuestion), title: 'Release' }
+const sendDefinition: ChoiceFormDefinition = { ...definitionOf(packagesQuestion), title: 'Pick' }
 
 interface Deferred {
   promise: Promise<never>
@@ -64,26 +65,9 @@ async function settle() {
  * test below proves the emulation really takes focus away. Returns a stop
  * function.
  */
-function applyFocusFixup(root: Element): () => void {
-  const observer = new MutationObserver((records) => {
-    for (const record of records) {
-      const el = record.target as HTMLElement
-      if (el !== document.activeElement || !el.matches(':disabled'))
-        continue
-      // jsdom's blur() does nothing for a disabled element, so the attribute
-      // is lifted for the call and put back (a browser needs no such step).
-      el.removeAttribute('disabled')
-      el.blur()
-      el.setAttribute('disabled', '')
-    }
-  })
-  observer.observe(root, { attributes: true, attributeFilter: ['disabled'], subtree: true })
-  return () => observer.disconnect()
-}
-
 const cleanups: Array<() => void> = []
 
-function mountForm(definition: FormDefinition, submit: ReturnType<typeof vi.fn>) {
+function mountForm(definition: ChoiceFormDefinition, submit: ReturnType<typeof vi.fn>) {
   artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(formState({ definition })), submit } as never)
   const wrapper = mountWippyForm({ formVersion: 1, definition, state: 'active' }, artifactElement('artifact-1'), { attachToBody: true, realTransition: true })
   cleanups.push(applyFocusFixup(wrapper.element))
@@ -100,7 +84,7 @@ afterEach(() => {
 
 type Wrapper = ReturnType<typeof mountForm>
 
-async function loaded(definition: FormDefinition, submit: ReturnType<typeof vi.fn>) {
+async function loaded(definition: ChoiceFormDefinition, submit: ReturnType<typeof vi.fn>) {
   const wrapper = mountForm(definition, submit)
   await settle()
   return wrapper

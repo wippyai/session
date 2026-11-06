@@ -1,4 +1,5 @@
 local definition = require("definition")
+local field_values = require("field_values")
 local ordered_json = require("ordered_json")
 local message_repo = require("message_repo")
 
@@ -86,7 +87,7 @@ end
 
 local function option_labels(field: any): {[string]: string}
     local labels: {[string]: string} = {}
-    for _, option in ipairs(field.options) do labels[option.value] = option.label end
+    for _, option in ipairs(field.options or {}) do labels[option.value] = option.label end
     return labels
 end
 
@@ -107,25 +108,32 @@ end
 -- order with its text and its answer, so the agent needs nothing else to act
 -- on it. An answer is {"value","label"} for a chosen option (plus "note"
 -- when the user added one), {"other"} for the user's own answer, a list of
--- those for a several-answer question, or null for a question left
--- unanswered. A late answer adds "late_notice". The stored submission keeps
--- only values (definition.encode_answers), so the record is derived from it
--- and the immutable definition. read_form returns the same record.
+-- those for a several-answer question, the text, number or true/false the
+-- user gave for a standard field (text, textarea, email, date, number,
+-- checkbox), or null for a question left unanswered. A late answer adds
+-- "late_notice". "form_version" is 1 for a form of choices only and 2 for a
+-- form with a standard field. The stored submission keeps only values
+-- (definition.encode_answers), so the record is derived from it and the
+-- immutable definition. read_form returns the same record.
 -- params: { artifact_id, definition (normalized), answers (normalized, or
 -- nil), late }
 function answer_text.record_json(params: any): string
     local def = params.definition
     local questions = {}
     for _, field in ipairs(def.fields) do
-        local labels = option_labels(field)
         local value = params.answers and params.answers[field.id]
         local answer = "null"
-        if value ~= nil and definition.is_array(value) then
-            local items = {}
-            for _, item in ipairs(value) do table.insert(items, record_item(labels, item)) end
-            answer = ordered_json.array(items)
+        if value ~= nil and field.type ~= "choice" then
+            answer = field_values.literal(value)
         elseif value ~= nil then
-            answer = record_item(labels, value)
+            local labels = option_labels(field)
+            if definition.is_array(value) then
+                local items = {}
+                for _, item in ipairs(value) do table.insert(items, record_item(labels, item)) end
+                answer = ordered_json.array(items)
+            else
+                answer = record_item(labels, value)
+            end
         end
         table.insert(questions, { field.id, raw = ordered_json.object({
             { "question", field.label }, { "answer", raw = answer },
@@ -133,7 +141,7 @@ function answer_text.record_json(params: any): string
     end
     local entries = {
         { "form_id", tostring(params.artifact_id) },
-        { "form_version", definition.FORM_VERSION },
+        { "form_version", definition.version_of(def) },
         { "title", def.title },
         { "late", params.late == true },
     }
@@ -145,19 +153,26 @@ end
 -- The questions of an unanswered form with their options, so an agent that
 -- lost the original tool call can still restate them.
 function answer_text.questions_json(def: any): string
+    -- A form with a standard field names the type of every question; a form
+    -- of choices only is described as it always was.
+    local typed = definition.version_of(def) == definition.VERSIONS.FIELDS
     local questions = {}
     for _, field in ipairs(def.fields) do
-        local options = {}
-        for _, option in ipairs(field.options) do
-            table.insert(options, ordered_json.object({ { "value", option.value }, { "label", option.label } }))
+        local entries: {any} = { { "question", field.label } }
+        if typed then table.insert(entries, { "type", field.type }) end
+        if field.type == "choice" then
+            local options = {}
+            for _, option in ipairs(field.options) do
+                table.insert(options, ordered_json.object({ { "value", option.value }, { "label", option.label } }))
+            end
+            table.insert(entries, { "multiple", field.multiple == true })
+            table.insert(entries, { "required", field.required == true })
+            table.insert(entries, { "allow_other", field.allow_other == true })
+            table.insert(entries, { "options", raw = ordered_json.array(options) })
+        else
+            for _, entry in ipairs(field_values.question_entries(field)) do table.insert(entries, entry) end
         end
-        table.insert(questions, { field.id, raw = ordered_json.object({
-            { "question", field.label },
-            { "multiple", field.multiple == true },
-            { "required", field.required == true },
-            { "allow_other", field.allow_other == true },
-            { "options", raw = ordered_json.array(options) },
-        }) })
+        table.insert(questions, { field.id, raw = ordered_json.object(entries) })
     end
     return ordered_json.object(questions)
 end

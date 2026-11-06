@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
-import type { FormDefinition } from '../../lib/definition'
+import type { ChoiceFormDefinition } from '../../lib/definition'
 import { computed } from 'vue'
 import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { reviewItemKey } from '../../lib/focus-key'
@@ -11,7 +11,7 @@ import QuestionCardSendButton from './question-card-send-button.vue'
 
 /** The review step of a card with several questions: every answer, each one a button that goes back to change it, then "Send answers". */
 const props = defineProps<{
-  definition: FormDefinition
+  definition: ChoiceFormDefinition
   controller: QuestionCardController
   /** True while offline or a send is in flight. "Send answers" stays focusable but ignores activation. */
   disabled?: boolean

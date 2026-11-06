@@ -26,6 +26,7 @@ local wait_for_boot = require("wait_for_boot")
 local prompt = require("prompt")
 local openai_mapper = require("openai_mapper")
 local google_mapper = require("google_mapper")
+local compiler = require("compiler")
 
 -- Session forms inside the session process, on the real database: creation
 -- through the ask_user tool and the `_control.forms` effect in
@@ -36,12 +37,24 @@ local google_mapper = require("google_mapper")
 -- show of an answer that is not admitted yet.
 
 local TOOL_ID = "wippy.session.forms:ask_user_tool"
+local FIELDS_TOOL_ID = "wippy.session.forms:ask_user_fields_tool"
+local TOOL_NAMES = { [TOOL_ID] = "ask_user", [FIELDS_TOOL_ID] = "ask_user_fields" }
 
 local DEFINITION = {
     title = "Delivery preference",
     fields = {
         { id = "delivery", type = "choice", label = "How should the parcel be delivered?",
             required = true, options = { "Courier", "Pickup point", "Locker" } },
+    },
+}
+
+-- A form with standard fields (version 2).
+local DETAILS_DEFINITION = {
+    title = "Delivery details",
+    fields = {
+        { id = "name", type = "text", label = "Your name", required = true, max_length = 40 },
+        { id = "parcels", type = "number", label = "Parcels", integer = true, min = 1 },
+        { id = "terms", type = "checkbox", label = "I agree", required = true },
     },
 }
 
@@ -118,15 +131,18 @@ local function define_tests()
             return out
         end
 
-        -- One ask_user call through the real tool and process_tools.
+        -- One call of a forms tool (ask_user unless `opts.tool_id` names another)
+        -- through the real tool and process_tools.
         local function ask(ctx: any, args, opts: any?)
+            local tool = opts and opts.tool_id or TOOL_ID
+            local name = TOOL_NAMES[tool]
             local call_id = "call-" .. uuid.v7()
             local _, ids: any, store_err = ctx.writer:add_response("", opts and opts.metadata or {}, {
-                { id = call_id, name = "ask_user", arguments = args, registry_id = TOOL_ID,
+                { id = call_id, name = name, arguments = args, registry_id = tool,
                     type = consts.MSG_TYPE.FUNCTION },
             })
             test.is_nil(store_err)
-            local tool_result, tool_err = funcs.new():call(TOOL_ID, args)
+            local tool_result, tool_err = funcs.new():call(tool, args)
             if opts and opts.tool_result then tool_result, tool_err = opts.tool_result, nil end
             if opts and opts.artifacts then tool_result._control.artifacts = opts.artifacts end
             local caller = {
@@ -138,9 +154,9 @@ local function define_tests()
                     return { [call_id] = { result = tool_result, tool_call = tools[call_id] } }
                 end,
             }
-            local validated = { [call_id] = { valid = true, name = "ask_user", args = args, registry_id = TOOL_ID } }
+            local validated = { [call_id] = { valid = true, name = name, args = args, registry_id = tool } }
             local result, err = message_handlers.process_tools(ctx, {
-                tool_calls = { { id = call_id, name = "ask_user", registry_id = TOOL_ID, arguments = args } },
+                tool_calls = { { id = call_id, name = name, registry_id = tool, arguments = args } },
                 call_message_ids = ids, caller = caller, validated_tools = validated,
                 message_id = "user-message", agent = { id = "agent:forms" },
             })
@@ -243,9 +259,9 @@ local function define_tests()
             return artifacts[1].artifact_id
         end
 
-        local function submit(artifact_id, answers)
+        local function submit(artifact_id, answers, form_version)
             local status, body = state_service.submit(user_id, artifact_id, json.encode({
-                form_version = 1, request_id = uuid.v7(), expected_content_version = 1,
+                form_version = form_version or 1, request_id = uuid.v7(), expected_content_version = 1,
                 answers = answers or { delivery = "Courier" },
             }))
             test.eq(status, 200, body)
@@ -561,6 +577,52 @@ local function define_tests()
                 test.eq(#rows_of(ctx, consts.MSG_TYPE.ARTIFACT), 0)
             end)
 
+            it("refuses standard fields through ask_user and stores nothing", function()
+                local ctx = new_ctx()
+                local result, err, call_id, ids = ask(ctx, DETAILS_DEFINITION)
+                test.is_nil(err)
+                test.is_true(has_continue(result), "the agent gets a step to use a tool it has")
+                local call_row = message_repo.get((ids :: any)[call_id])
+                test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                local text = tostring(call_row.metadata.result)
+                test.contains(text, "fields[0].type: unsupported_type")
+                test.contains(text, "Supported types: choice.")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 0)
+            end)
+
+            it("stores a form with standard fields as version 2 and ends the turn", function()
+                local ctx = new_ctx()
+                local result, err = ask(ctx, DETAILS_DEFINITION, { tool_id = FIELDS_TOOL_ID })
+                test.is_nil(err)
+                test.is_false(has_continue(result), "a created form ends the turn")
+                local artifact: any = artifact_repo.get(form_id_of(ctx))
+                local content = json.decode(tostring(artifact.content))
+                test.eq(content.props["form-version"], 2)
+                test.eq(content.props.definition.fields[1].type, "text")
+                test.eq(content.props.definition.fields[1].max_length, 40)
+                test.eq(content.props.definition.fields[1].min_length, 0)
+                test.eq(content.props.definition.fields[2].integer, true)
+                test.eq(artifact.meta.session_form.version, 1, "the record layout is a separate number from the form version")
+            end)
+
+            it("returns a tool error naming the path and code of each standard field that is not valid", function()
+                local ctx = new_ctx()
+                local result, err, call_id, ids = ask(ctx, { title = "Broken", fields = {
+                    { id = "n", type = "number", label = "N", min = 5, max = 1 },
+                    { id = "c", type = "text", label = "C", pattern = "(?=a)a" },
+                    { id = "d", type = "date", label = "D", default = "2023-02-30" },
+                } }, { tool_id = FIELDS_TOOL_ID })
+                test.is_nil(err)
+                test.is_true(has_continue(result), "the agent gets a step to correct the definition")
+                local call_row = message_repo.get((ids :: any)[call_id])
+                test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                local text = tostring(call_row.metadata.result)
+                test.contains(text, "fields[0].min: invalid_range")
+                test.contains(text, "fields[1].pattern: unsupported_pattern")
+                test.contains(text, "fields[2].default: invalid_default")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 0)
+            end)
+
             it("allows one form per turn and marks the refused call as an error", function()
                 local ctx = new_ctx()
                 local _, first_err = ask(ctx, DEFINITION)
@@ -579,6 +641,43 @@ local function define_tests()
                 local _, later_err = ask(ctx, DEFINITION)
                 test.is_nil(later_err)
                 test.eq(#artifact_repo.list_by_session(ctx.session_id), 2)
+            end)
+
+            it("gives an agent with both traits both tools and both prompts", function()
+                local compiled: any, err = compiler.compile({
+                    id = "app:forms_both_traits_agent",
+                    traits = { "wippy.session.forms:ask_user", "wippy.session.forms:ask_user_fields" },
+                })
+                test.is_nil(err)
+                test.eq(compiled.tools.ask_user.registry_id, TOOL_ID)
+                test.eq(compiled.tools.ask_user_fields.registry_id, FIELDS_TOOL_ID)
+                test.eq(compiled.tools.read_form.registry_id, "wippy.session.forms:read_form_tool")
+                test.contains(compiled.prompt, "with the ask_user tool")
+                test.contains(compiled.prompt, "with the ask_user_fields tool")
+            end)
+
+            it("shares the one form limit of a turn between ask_user and ask_user_fields", function()
+                local ctx = new_ctx()
+                local _, first_err = ask(ctx, DEFINITION)
+                test.is_nil(first_err)
+                local result, err, call_id, ids = ask(ctx, DETAILS_DEFINITION, { tool_id = FIELDS_TOOL_ID })
+                test.is_nil(err, "a refused form does not fail the turn")
+                test.is_true(has_continue(result), "the agent sees the tool error and the turn goes on")
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 1)
+                local call_row = message_repo.get((ids :: any)[call_id])
+                test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(call_row.metadata.result), "one_form_per_turn")
+
+                -- The same holds in the other order, in a later turn.
+                ctx.turn_state.id = "turn-" .. uuid.v7()
+                local _, fields_err = ask(ctx, DETAILS_DEFINITION, { tool_id = FIELDS_TOOL_ID })
+                test.is_nil(fields_err)
+                local _, second_err, second_call, second_ids = ask(ctx, DEFINITION)
+                test.is_nil(second_err)
+                test.eq(#artifact_repo.list_by_session(ctx.session_id), 2)
+                local second_row = message_repo.get((second_ids :: any)[second_call])
+                test.eq(second_row.metadata.status, consts.FUNC_STATUS.ERROR)
+                test.contains(tostring(second_row.metadata.result), "one_form_per_turn")
             end)
 
             it("creates one form from two calls in one batch, refuses the second and ends the turn", function()
@@ -854,7 +953,7 @@ local function define_tests()
                 local result, err = ask(ctx, DEFINITION)
 
                 test.is_nil(err)
-                test.is_false(has_continue(result), "D11: a created form takes no further step")
+                test.is_false(has_continue(result), "a created form takes no further step")
                 local compaction: any = find_next_op(result, consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS)
                 test.not_nil(compaction, "the requested compaction still waits for the settled round")
                 test.is_true(compaction.requested_only)
@@ -1127,6 +1226,24 @@ local function define_tests()
                 test.is_nil(index_containing(text, "&lt;wippy-form-answers"))
             end)
 
+            it("keeps the whole record of an 8000-character textarea in a restored request", function()
+                local details = string.rep("It's <a> & b\n", 600) .. string.rep("d", 200)
+                test.eq(#details, 8000)
+                local ctx = new_ctx()
+                ask(ctx, { title = "Limits", fields = {
+                    { id = "details", type = "textarea", label = "Details", required = true, max_length = 8000 },
+                } }, { tool_id = FIELDS_TOOL_ID })
+                submit(form_id_of(ctx), { details = details }, 2)
+                local admitted: any = message_handlers.admit_answer(ctx)
+                checkpoint_after(ctx, admitted.next_ops[1].message_id)
+
+                local record = prompt_user_texts(ctx):match("record='(.-)'>")
+                test.not_nil(record)
+                local decoded: any, decode_err = json.decode(record)
+                test.is_nil(decode_err)
+                test.eq(decoded.answers.details.answer, details)
+            end)
+
             it("bounds the turn spans around an answer that starts the next turn", function()
                 local ctx = new_ctx()
                 local bus: any = running_turn(ctx)
@@ -1278,6 +1395,33 @@ local function define_tests()
                 local none, foreign_err = foreign:call("wippy.session.forms:read_form_tool", { form_id = form_id })
                 test.is_nil(none)
                 test.contains(tostring(foreign_err), "No form")
+            end)
+
+            it("reads a form with standard fields, then its answer record with the values as typed", function()
+                local ctx = new_ctx()
+                ask(ctx, DETAILS_DEFINITION, { tool_id = FIELDS_TOOL_ID })
+                local form_id = form_id_of(ctx)
+                local caller = funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
+                local open = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(open.message, '"status":"unanswered"')
+                test.contains(open.message,
+                    '"name":{"question":"Your name","type":"text","required":true,"min_length":0,"max_length":40}')
+                test.contains(open.message,
+                    '"parcels":{"question":"Parcels","type":"number","required":false,"integer":true,"min":1}')
+                test.contains(open.message, '"terms":{"question":"I agree","type":"checkbox","required":true}')
+
+                submit(form_id, { name = "Ann Lee", parcels = 3, terms = true }, 2)
+                local hidden = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(hidden.message, '"status":"answer_pending"')
+                test.is_false(string.find(hidden.message, "Ann Lee", 1, true) ~= nil)
+
+                answer_admission.admit_in_order(ctx, nil)
+                local answered = caller:call("wippy.session.forms:read_form_tool", { form_id = form_id })
+                test.contains(answered.message, '"status":"answered"')
+                test.contains(answered.message, '"form_version":2')
+                test.contains(answered.message, '"name":{"question":"Your name","answer":"Ann Lee"}')
+                test.contains(answered.message, '"parcels":{"question":"Parcels","answer":3}')
+                test.contains(answered.message, '"terms":{"question":"I agree","answer":true}')
             end)
 
             it("gives read_form in a running turn no values of an answer the turn may not see yet", function()

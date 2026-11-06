@@ -1,10 +1,13 @@
 local test = require("test")
 local json = require("json")
 local sql = require("sql")
+local fs = require("fs")
 local uuid = require("uuid")
 local security = require("security")
+local funcs = require("funcs")
 local consts = require("consts")
 local definition = require("definition")
+local form_pattern = require("form_pattern")
 local state_service = require("state_service")
 local control_handlers = require("control_handlers")
 local answer_admission = require("answer_admission")
@@ -173,6 +176,48 @@ local function define_tests()
             test.contains(raw, '"submitted_at":null')
             test.contains(raw, '"answer_message_id":null')
             test.contains(raw, '"delivery":null')
+        end)
+
+        -- The bytes come from the V1 release, not from the code under test, so
+        -- a change to how a choice form is read, shown or answered fails here.
+        it("reads, shows and answers a form stored by the V1 release byte for byte as V1 did", function()
+            local volume, volume_err = fs.get("app.forms:fixtures")
+            test.is_nil(volume_err, "app.forms:fixtures comes from the make test override")
+            local raw, read_err = (volume :: any):readfile("v1_stored_form.json")
+            test.is_nil(read_err)
+            local frozen: any = json.decode(tostring(raw))
+
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
+                { frozen.content, artifact_id })
+            db:release()
+            test.is_nil(update_err)
+
+            local function with_ids(text: string, values: any?): string
+                local filled = string.gsub(string.gsub(text, "@ARTIFACT@", artifact_id), "@SESSION@", ctx.session_id)
+                for name, value in pairs(values or {}) do filled = string.gsub(filled, name, value) end
+                return filled
+            end
+
+            local read_status, _, state_before = get(artifact_id)
+            test.eq(read_status, 200)
+            test.eq(state_before, with_ids(frozen.state_before))
+
+            local status, body, response = post(artifact_id, frozen.request)
+            test.eq(status, 200, tostring(body and body.code))
+            local answered = { ["@MESSAGE@"] = body.answer_message_id }
+            test.eq(response, with_ids(frozen.response, answered))
+
+            local artifact: any = artifact_repo.get(artifact_id)
+            test.eq(artifact.content, frozen.content_after)
+            local row: any = message_repo.get(body.answer_message_id)
+            test.eq(row.data, with_ids(frozen.message, answered))
+            answered["@SUBMITTED_AT@"] = artifact.meta.session_form.submission.submitted_at
+            local _, _, state_after = get(artifact_id)
+            test.eq(state_after, with_ids(frozen.state_after, answered))
         end)
 
         it("marks an active form stale only after another user message", function()
@@ -591,6 +636,27 @@ local function define_tests()
             test.eq(no_request, 400)
         end)
 
+        it("takes expected_content_version as a positive whole number, however it is written", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local function with_version(spelling: string)
+                return post(artifact_id, '{"form_version":1,"request_id":"r-version","expected_content_version":'
+                    .. spelling .. ',"answers":{"delivery":"Courier"}}')
+            end
+            for _, bad in ipairs({ "0", "-1", "1.5", "0.5", "\"1\"", "true", "[]" }) do
+                local status, body = with_version(bad)
+                test.eq(status, 400, bad)
+                test.eq(body.code, "invalid_request", bad)
+            end
+            test.eq(#user_rows(ctx.session_id), 0, "none of them stored an answer")
+            local conflict_status, conflict = with_version("2.0")
+            test.eq(conflict_status, 409, "2.0 is the whole number 2, which is not the current version")
+            test.eq(conflict.code, "version_conflict")
+            local ok_status, ok = with_version("1.0")
+            test.eq(ok_status, 200, "1.0 is the whole number 1, the current version")
+            test.eq(ok.success, true)
+        end)
+
         it("answers 413 for a body over 64 KiB", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
@@ -974,6 +1040,642 @@ local function define_tests()
             state_service._new_message_id = original.new_id
             local retry_status = post(artifact_id, answer())
             test.eq(retry_status, 200)
+        end)
+
+        -- Standard fields (V2): a form with any field that is not a choice is
+        -- version 2 end to end; a choice-only form stays version 1.
+        describe("with standard fields", function()
+            local V2_DEFINITION = {
+                title = "Delivery details",
+                fields = {
+                    { id = "name", type = "text", label = "Your name", required = true, max_length = 40 },
+                    { id = "email", type = "email", label = "Email" },
+                    { id = "parcels", type = "number", label = "Parcels", integer = true, min = 1, max = 10,
+                        required = true },
+                    { id = "ready", type = "date", label = "Ready on", min = "2026-01-01" },
+                    { id = "notes", type = "textarea", label = "Notes" },
+                    { id = "terms", type = "checkbox", label = "I agree", required = true },
+                    { id = "courier", type = "choice", label = "Courier", options = { "A", "B" } },
+                },
+            }
+
+            local function new_v2_form(ctx, def: any?)
+                local normalized, errors = definition.normalize(def or V2_DEFINITION)
+                test.is_nil(errors, definition.format_errors(errors))
+                local artifact_id = uuid.v7()
+                local _, err = control_handlers.control_forms(ctx, {
+                    forms = { { artifact_id = artifact_id, definition = normalized } },
+                    turn_id = "turn-" .. uuid.v7(), call_id = "call-1", tool_message_id = "tool-row-1",
+                })
+                test.is_nil(err)
+                return artifact_id
+            end
+
+            local function v2_answers()
+                return { name = "Ann Lee", email = "  ann@example.org ", parcels = 3.0, ready = "2026-05-06",
+                    notes = "Line one\nLine two", terms = true, courier = "A" }
+            end
+
+            local function v2_request(answers: any?, request_id: any?, version: any?)
+                return { form_version = 2, request_id = request_id or uuid.v7(), expected_content_version = version or 1,
+                    answers = answers or v2_answers() }
+            end
+
+            -- Replaces the stored content of a form, as an older or damaged
+            -- record would hold it.
+            local function rewrite_content(artifact_id: string, change: any)
+                local row: any = artifact_repo.get(artifact_id)
+                local content: any = json.decode(tostring(row.content))
+                change(content)
+                local db, db_err = sql.get(consts.get_db_resource())
+                test.is_nil(db_err)
+                local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
+                    { json.encode(content), artifact_id })
+                db:release()
+                test.is_nil(update_err)
+            end
+
+            it("stores a form with a standard field as version 2 and a choice-only form as version 1", function()
+                local ctx = new_session()
+                local v2_id = new_v2_form(ctx)
+                local v1_id = new_form(ctx)
+                local v2_row: any = artifact_repo.get(v2_id)
+                local v1_row: any = artifact_repo.get(v1_id)
+                test.eq(json.decode(tostring(v2_row.content)).props["form-version"], 2)
+                test.eq(json.decode(tostring(v1_row.content)).props["form-version"], 1)
+
+                local _, v2_state = get(v2_id)
+                test.eq(v2_state.form_version, 2)
+                local _, v1_state = get(v1_id)
+                test.eq(v1_state.form_version, 1)
+            end)
+
+            it("reads the definition with its defaults filled in", function()
+                local ctx = new_session()
+                local _, state = get(new_v2_form(ctx))
+                local fields = state.definition.fields
+                test.eq(fields[1].type, "text")
+                test.eq(fields[1].min_length, 0)
+                test.eq(fields[1].max_length, 40)
+                test.eq(fields[2].type, "email")
+                test.eq(fields[3].integer, true)
+                test.eq(fields[3].min, 1)
+                test.eq(fields[5].max_length, 8000)
+                test.eq(fields[6].type, "checkbox")
+                test.eq(fields[7].options[1].value, "A")
+            end)
+
+            it("answers 400 when the envelope names another form version, in both directions", function()
+                local ctx = new_session()
+                local v2_id = new_v2_form(ctx)
+                local v1_id = new_form(ctx)
+                local old_envelope = v2_request()
+                old_envelope.form_version = 1
+                local status, body = post(v2_id, old_envelope)
+                test.eq(status, 400)
+                test.eq(body.code, "invalid_request")
+                local new_envelope = answer()
+                new_envelope.form_version = 2
+                local v1_status, v1_body = post(v1_id, new_envelope)
+                test.eq(v1_status, 400)
+                test.eq(v1_body.code, "invalid_request")
+                test.eq(#user_rows(ctx.session_id), 0)
+                test.eq(post(v2_id, v2_request()), 200)
+                test.eq(post(v1_id, answer()), 200)
+            end)
+
+            it("accepts standard answers, stores them canonically and reads them back", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local status, body = post(artifact_id, v2_request())
+                test.eq(status, 200)
+                test.eq(body.success, true)
+
+                local submission = artifact_repo.get(artifact_id).meta.session_form.submission
+                test.eq(submission.answers.email, "ann@example.org", "an address is stored trimmed")
+                test.eq(submission.answers.parcels, 3)
+                test.eq(math.type(submission.answers.parcels), "integer", "a whole number is stored as an integer")
+                test.eq(submission.answers.terms, true)
+                test.eq(submission.answers.notes, "Line one\nLine two")
+                test.eq(submission.answers.courier, "A")
+
+                local status_after, state, raw = get(artifact_id)
+                test.eq(status_after, 200)
+                test.eq(state.data.name, "Ann Lee")
+                test.eq(state.data.parcels, 3)
+                test.contains(raw, '"parcels":3,')
+                test.contains(raw, '"terms":true,')
+                test.contains(raw, '"email":"ann@example.org",')
+            end)
+
+            it("keeps an optional checkbox that was left unchecked as an answer", function()
+                local ctx = new_session()
+                local def = { title = "Consent", fields = {
+                    { id = "news", type = "checkbox", label = "Send me news" },
+                    { id = "terms", type = "checkbox", label = "Terms", required = true },
+                } }
+                local artifact_id = new_v2_form(ctx, def)
+                local status = post(artifact_id, v2_request({ news = false, terms = true }))
+                test.eq(status, 200)
+                local _, state, raw = get(artifact_id)
+                test.eq(state.data.news, false)
+                test.contains(raw, '"news":false')
+            end)
+
+            it("returns a stable code for each field that is not valid", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local status, body = post(artifact_id, v2_request({
+                    name = "", email = "nope", parcels = 11, ready = "2025-12-31", terms = false, notes = 5,
+                    courier = "Z", ghost = 1,
+                }))
+                test.eq(status, 422)
+                test.eq(body.code, "validation_failed")
+                test.eq(body.errors.name[1].code, "required")
+                test.eq(body.errors.email[1].code, "invalid_email")
+                test.eq(body.errors.parcels[1].code, "above_max")
+                test.eq(body.errors.ready[1].code, "below_min")
+                test.eq(body.errors.terms[1].code, "required")
+                test.eq(body.errors.notes[1].code, "invalid_type")
+                test.eq(body.errors.courier[1].code, "invalid_option")
+                test.eq(body.form_errors[1].code, "unknown_field")
+                test.is_nil(string.find(tostring(body.errors.email[1].message), "nope", 1, true), "no value is echoed")
+                test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                test.eq(#user_rows(ctx.session_id), 0)
+
+                local string_status, as_string = post(artifact_id, v2_request({ name = "A", parcels = "3", terms = true }))
+                test.eq(string_status, 422)
+                test.eq(as_string.errors.parcels[1].code, "invalid_type", "a numeric string is not a number")
+            end)
+
+            it("reads a null answer as an answer not sent", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local body = '{"form_version":2,"request_id":"r-null","expected_content_version":1,"answers":'
+                    .. '{"name":"Ann","parcels":2,"terms":true,"email":null,"notes":null}}'
+                local status = post(artifact_id, body)
+                test.eq(status, 200)
+                local answers = artifact_repo.get(artifact_id).meta.session_form.submission.answers
+                test.is_nil(answers.email)
+                test.is_nil(answers.notes)
+                test.eq(answers.name, "Ann")
+            end)
+
+            it("answers 400 for a number the runtime cannot read", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local body = '{"form_version":2,"request_id":"r-big","answers":{"name":"Ann","parcels":1e400,"terms":true}}'
+                local status, response = post(artifact_id, body)
+                test.eq(status, 400)
+                test.eq(response.code, "invalid_request")
+                test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
+            it("replays a retry whose keys, spacing and number spellings differ", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local request_id = uuid.v7()
+                local first_body = '{"form_version":2,"request_id":' .. (json.encode(request_id))
+                    .. ',"expected_content_version":1,"answers":{"name":"Ann Lee","email":"ann@example.org",'
+                    .. '"parcels":3,"ready":"2026-05-06","terms":true,"courier":"A"}}'
+                local retry_body = '{"answers":{"courier":"A","terms":true,"parcels":3.0,"ready":"2026-05-06",'
+                    .. '"email":"  ann@example.org  ","name":"Ann Lee"},"expected_content_version":1,'
+                    .. '"request_id":' .. (json.encode(request_id)) .. ',"form_version":2}'
+                local status, first = post(artifact_id, first_body)
+                test.eq(status, 200)
+                test.eq(first.replayed, false)
+                local retry_status, retry = post(artifact_id, retry_body)
+                test.eq(retry_status, 200, "a retry, not a request_conflict")
+                test.eq(retry.replayed, true)
+                test.eq(retry.answer_message_id, first.answer_message_id)
+                test.eq(#user_rows(ctx.session_id), 1)
+                test.eq(#wakes, 1)
+            end)
+
+            it("rejects the same request id with a different standard answer", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local request = v2_request()
+                test.eq(post(artifact_id, request), 200)
+                request.answers.parcels = 4
+                local status, body = post(artifact_id, request)
+                test.eq(status, 409)
+                test.eq(body.code, "request_conflict")
+                request.answers.parcels = 3
+                request.answers.terms = true
+                request.answers.notes = "Line one\nLine two "
+                local note_status, note_body = post(artifact_id, request)
+                test.eq(note_status, 409, "text is stored as typed, so trailing spaces are a different answer")
+                test.eq(note_body.code, "request_conflict")
+            end)
+
+            it("writes the answer message with the version and the answers as JSON literals", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                local status, body = post(artifact_id, v2_request({ name = "Ann", parcels = 2.0, terms = true }))
+                test.eq(status, 200)
+                local row: any = message_repo.get(body.answer_message_id)
+                test.contains(row.data, '"form_version":2,')
+                test.contains(row.data, '"name":{"question":"Your name","answer":"Ann"}')
+                test.contains(row.data, '"parcels":{"question":"Parcels","answer":2}')
+                test.contains(row.data, '"terms":{"question":"I agree","answer":true}')
+                test.contains(row.data, '"email":{"question":"Email","answer":null}')
+                test.contains(row.data, '"courier":{"question":"Courier","answer":null}')
+            end)
+
+            it("refuses a stored version lower than the definition needs and any unknown version", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx)
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 1 end)
+                local status, body = get(artifact_id)
+                test.eq(status, 400)
+                test.eq(body.code, "not_a_form")
+                local post_status, post_body = post(artifact_id, v2_request())
+                test.eq(post_status, 400)
+                test.eq(post_body.code, "not_a_form")
+
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 3 end)
+                test.eq(get(artifact_id), 400)
+
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 2 end)
+                test.eq(get(artifact_id), 200)
+            end)
+
+            it("reads a stored version only when it is the version the definition has", function()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 2 end)
+                local status, body = get(artifact_id)
+                test.eq(status, 400, "a choice-only form is version 1, whatever its record says")
+                test.eq(body.code, "not_a_form")
+                rewrite_content(artifact_id, function(content) content.props["form-version"] = 1 end)
+                test.eq(get(artifact_id), 200)
+            end)
+
+            it("answers 500, not 422, when a stored pattern no longer compiles, and still reads the form", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
+                local artifact_id = new_v2_form(ctx, def)
+                rewrite_content(artifact_id, function(content)
+                    content.props.definition.fields[1].pattern = "("
+                end)
+                test.eq(get(artifact_id), 200)
+                local status, body = post(artifact_id, v2_request({ code = "ABC" }))
+                test.eq(status, 500)
+                test.eq(body.code, "internal")
+                test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
+            it("answers 500, not 409, to an exact replay when a stored pattern no longer compiles", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
+                local artifact_id = new_v2_form(ctx, def)
+                local request = v2_request({ code = "ABC" })
+                test.eq(post(artifact_id, request), 200)
+                rewrite_content(artifact_id, function(content)
+                    content.props.definition.fields[1].pattern = "("
+                end)
+                local status, body = post(artifact_id, request)
+                test.eq(status, 500, tostring(body and body.code))
+                test.eq(body.code, "internal")
+                test.eq(#user_rows(ctx.session_id), 1, "the answer accepted first stays")
+            end)
+
+            it("refuses a form version the form no longer has once the lock is held", function()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                -- After the first read and before the acceptance transaction:
+                -- the choice form becomes a version 2 form, so the request's
+                -- version passed the first check and no longer matches.
+                local original_new_id = state_service._new_message_id
+                state_service._new_message_id = function()
+                    state_service._new_message_id = original_new_id
+                    local artifact: any = artifact_repo.get(artifact_id)
+                    local content: any = json.decode(tostring(artifact.content))
+                    content.props["form-version"] = 2
+                    table.insert(content.props.definition.fields, { id = "name", type = "text", label = "Name",
+                        min_length = 0, max_length = 500 })
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                    return original_new_id()
+                end
+                local request = answer()
+                request.expected_content_version = nil
+                local status, body = post(artifact_id, request)
+                test.eq(status, 400, tostring(body and body.code))
+                test.eq(body.code, "invalid_request")
+                test.eq(body.message, "Unsupported form_version")
+                local artifact = artifact_repo.get(artifact_id)
+                test.eq(artifact.content_version, 2, "only the competing definition update committed")
+                test.is_nil(artifact.meta.session_form.submission, "the refused answer does not settle the form")
+                test.eq(#user_rows(ctx.session_id), 0, "the refused answer creates no pending row")
+                test.eq(#wakes, 0, "the refused answer does not wake the session")
+            end)
+
+            -- Changes the first field of the stored form between the first read
+            -- of a submission and its acceptance transaction, so the answer was
+            -- valid for the form the first read saw.
+            local function change_before_acceptance(artifact_id: string, change: any)
+                local original_new_id = state_service._new_message_id
+                state_service._new_message_id = function()
+                    state_service._new_message_id = original_new_id
+                    local artifact: any = artifact_repo.get(artifact_id)
+                    local content: any = json.decode(tostring(artifact.content))
+                    change(content.props.definition.fields[1])
+                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
+                    test.is_nil(update_err)
+                    return original_new_id()
+                end
+            end
+
+            local function answer_field(artifact_id: string, value: any)
+                local request = v2_request({ f = value })
+                request.expected_content_version = nil
+                return post(artifact_id, request)
+            end
+
+            local function as_email(field)
+                field.type, field.min_length, field.max_length = "email", nil, nil
+            end
+
+            for _, case in ipairs({
+                { name = "a text length", field = { type = "text", max_length = 40 }, value = "abcd",
+                    change = function(field) field.max_length = 2 end, code = "too_long" },
+                { name = "a text pattern", field = { type = "text", pattern = "[a-z]+" }, value = "abc",
+                    change = function(field) field.pattern = "[0-9]+" end, code = "pattern_mismatch" },
+                { name = "a textarea length", field = { type = "textarea", max_length = 100 }, value = "abcd",
+                    change = function(field) field.max_length = 2 end, code = "too_long" },
+                { name = "a number bound", field = { type = "number", max = 10 }, value = 5,
+                    change = function(field) field.max = 1 end, code = "above_max" },
+                { name = "an email field", field = { type = "text" }, value = "not an address",
+                    change = as_email, code = "invalid_email" },
+                { name = "a date bound", field = { type = "date" }, value = "2026-05-06",
+                    change = function(field) field.max = "2026-01-01" end, code = "above_max" },
+                { name = "a required checkbox", field = { type = "checkbox" }, value = false,
+                    change = function(field) field.required = true end, code = "required" },
+            }) do
+                it("revalidates " .. case.name .. " against a definition changed before acceptance", function()
+                    local ctx = new_session()
+                    local field = { id = "f", label = "Field" }
+                    for key, value in pairs(case.field) do field[key] = value end
+                    local artifact_id = new_v2_form(ctx, { title = "Form", fields = { field } })
+                    change_before_acceptance(artifact_id, case.change)
+                    local status, body = answer_field(artifact_id, case.value)
+                    test.eq(status, 422, tostring(body and body.code))
+                    test.eq(body.code, "validation_failed")
+                    test.eq(body.errors.f[1].code, case.code)
+                    local artifact = artifact_repo.get(artifact_id)
+                    test.eq(artifact.content_version, 2, "only the competing definition update committed")
+                    test.is_nil(artifact.meta.session_form.submission, "the rejected answer does not settle the form")
+                    test.eq(#user_rows(ctx.session_id), 0, "the rejected answer creates no pending row")
+                    test.eq(#wakes, 0, "the rejected answer does not wake the session")
+                end)
+            end
+
+            it("stores the normalization of a definition changed before acceptance", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx, { title = "Form",
+                    fields = { { id = "f", type = "text", label = "Field" } } })
+                change_before_acceptance(artifact_id, as_email)
+                local status, body = answer_field(artifact_id, "  ann@example.org ")
+                test.eq(status, 200, tostring(body and body.code))
+                local artifact = artifact_repo.get(artifact_id)
+                test.eq(artifact.meta.session_form.submission.answers.f, "ann@example.org")
+            end)
+
+            it("answers 500 when a pattern stops compiling before acceptance, and stores nothing", function()
+                local ctx = new_session()
+                local artifact_id = new_v2_form(ctx, { title = "Form",
+                    fields = { { id = "f", type = "text", label = "Field", pattern = "[a-z]+" } } })
+                change_before_acceptance(artifact_id, function(field) field.pattern = "(" end)
+                local status, body = answer_field(artifact_id, "abc")
+                test.eq(status, 500)
+                test.eq(body.code, "internal")
+                test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
+                test.eq(#user_rows(ctx.session_id), 0)
+            end)
+
+            it("compiles a form's pattern once across writing the form, answering it and replaying the answer", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = {
+                    { id = "code", type = "text", label = "Code", pattern = "replay-[0-9]{3}" },
+                } }
+                local original_compile = form_pattern._compile_source
+                local sources = {} :: {string}
+                form_pattern._compile_source = function(source: string)
+                    table.insert(sources, source)
+                    return original_compile(source)
+                end
+                local ok, failure = pcall(function()
+                    local artifact_id = new_v2_form(ctx, def)
+                    test.eq(#sources, 1, "writing the form checks the pattern: one compile")
+                    local request = v2_request({ code = "replay-123" })
+                    test.eq(post(artifact_id, request), 200)
+                    test.eq(#sources, 1, "answering reuses the compiled pattern")
+                    local status, replay = post(artifact_id, request)
+                    test.eq(status, 200)
+                    test.eq(replay.replayed, true)
+                    test.eq(#sources, 1, "a replay validates the answers again and still does not compile")
+                end)
+                form_pattern._compile_source = original_compile
+                if not ok then error(failure, 0) end
+            end)
+
+            it("answers 422 pattern_mismatch for an answer that does not match the pattern, and accepts one that does", function()
+                local ctx = new_session()
+                local def = { title = "Code", fields = {
+                    { id = "code", type = "text", label = "Code", required = true, pattern = "[A-Z]{2}[0-9]{4}" },
+                } }
+                local artifact_id = new_v2_form(ctx, def)
+                for _, wrong in ipairs({ "ab1234", "AB123", "AB12345", " AB1234", "AB1234 " }) do
+                    local status, body = post(artifact_id, v2_request({ code = wrong }))
+                    test.eq(status, 422, wrong)
+                    test.eq(body.code, "validation_failed", wrong)
+                    test.eq(body.errors.code[1].code, "pattern_mismatch", wrong)
+                    test.is_nil(string.find(tostring(body.errors.code[1].message), wrong, 1, true),
+                        "no value is echoed: " .. wrong)
+                end
+                test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                test.eq(#user_rows(ctx.session_id), 0)
+                test.eq(#wakes, 0)
+
+                local request = v2_request({ code = "AB1234" })
+                local status, accepted = post(artifact_id, request)
+                test.eq(status, 200)
+                test.eq(accepted.success, true)
+                test.eq(accepted.replayed, false)
+                test.eq(#wakes, 1)
+                local _, state = get(artifact_id)
+                test.eq(state.data.code, "AB1234")
+                local replay_status, replay = post(artifact_id, request)
+                test.eq(replay_status, 200)
+                test.eq(replay.replayed, true)
+            end)
+
+            -- A default only prefills a field: it is never an answer. The
+            -- server never submits it, so a form whose fields all have
+            -- defaults is unanswered until the user sends something.
+            describe("a form whose fields all have defaults", function()
+                local REQUIRED_DEFAULTS = {
+                    title = "Delivery defaults",
+                    fields = {
+                        { id = "name", type = "text", label = "Your name", required = true, default = "Ann Lee" },
+                        { id = "parcels", type = "number", label = "Parcels", required = true, default = 3 },
+                        { id = "terms", type = "checkbox", label = "I agree", required = true, default = false },
+                        { id = "email", type = "email", label = "Email", default = "ann@example.org" },
+                        { id = "ready", type = "date", label = "Ready on", default = "2026-05-06" },
+                        { id = "notes", type = "textarea", label = "Notes", default = "Leave at the door" },
+                    },
+                }
+                local OPTIONAL_DEFAULTS = {
+                    title = "Optional defaults",
+                    fields = {
+                        { id = "email", type = "email", label = "Email", default = "ann@example.org" },
+                        { id = "ready", type = "date", label = "Ready on", default = "2026-05-06" },
+                        { id = "count", type = "number", label = "Count", default = 2 },
+                        { id = "news", type = "checkbox", label = "News", default = false },
+                    },
+                }
+                local EMPTY = '{"form_version":2,"request_id":"r-nothing","expected_content_version":1,"answers":{}}'
+
+                local function reader_of(ctx)
+                    return funcs.new():with_context({ agent_run = { host = { session_id = ctx.session_id } } })
+                end
+
+                it("is unanswered before anything is sent: no answer, no message, no wake-up", function()
+                    local ctx = new_session()
+                    local artifact_id = new_v2_form(ctx, REQUIRED_DEFAULTS)
+                    local status, state, raw = get(artifact_id)
+                    test.eq(status, 200)
+                    test.eq(state.status, "active")
+                    test.is_nil(state.data)
+                    test.contains(raw, '"data":null')
+                    test.contains(raw, '"submitted_at":null')
+                    test.contains(raw, '"answer_message_id":null')
+                    test.contains(raw, '"delivery":null')
+                    -- The form still carries what to prefill.
+                    test.eq(state.definition.fields[1].default, "Ann Lee")
+                    test.eq(state.definition.fields[2].default, 3)
+                    test.eq(state.definition.fields[3].default, false)
+                    test.eq(#user_rows(ctx.session_id), 0, "no answer message")
+                    test.eq(#wakes, 0, "no wake-up")
+                    test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
+
+                    local open, open_err = reader_of(ctx):call("wippy.session.forms:read_form_tool",
+                        { form_id = artifact_id })
+                    test.is_nil(open_err)
+                    test.contains(open.message, '"status":"unanswered"')
+                    test.contains(open.message, '"default":"Ann Lee"')
+                    test.is_nil((string.find(open.message, "answered_at", 1, true)))
+                end)
+
+                it("refuses an answer that leaves the required fields out, and stays unanswered", function()
+                    local ctx = new_session()
+                    local artifact_id = new_v2_form(ctx, REQUIRED_DEFAULTS)
+                    local status, body = post(artifact_id, EMPTY)
+                    test.eq(status, 422)
+                    test.eq(body.errors.name[1].code, "required", "the default is not the answer")
+                    test.eq(body.errors.parcels[1].code, "required")
+                    test.eq(body.errors.terms[1].code, "required")
+                    test.is_nil(body.errors.email, "an optional field left out is just unanswered")
+                    test.is_nil(body.errors.ready)
+                    test.is_nil(body.errors.notes)
+                    test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                    test.eq(#user_rows(ctx.session_id), 0)
+                    test.eq(#wakes, 0)
+
+                    local _, state = get(artifact_id)
+                    test.eq(state.status, "active")
+                    test.is_nil(state.data)
+                    local open = reader_of(ctx):call("wippy.session.forms:read_form_tool", { form_id = artifact_id })
+                    test.contains(open.message, '"status":"unanswered"')
+                end)
+
+                it("takes an empty answer to optional fields as no answer, and records no default", function()
+                    local ctx = new_session()
+                    local artifact_id = new_v2_form(ctx, OPTIONAL_DEFAULTS)
+                    test.eq(select(2, get(artifact_id)).status, "active")
+                    local status, body = post(artifact_id, EMPTY)
+                    test.eq(status, 200)
+                    test.eq(body.success, true)
+                    test.eq(#wakes, 1, "an accepted answer wakes the session; before it, nothing did")
+
+                    local answers = artifact_repo.get(artifact_id).meta.session_form.submission.answers
+                    test.is_nil(next(answers), "no default was stored as an answer")
+                    local _, state, raw = get(artifact_id)
+                    test.eq(state.status, "idle")
+                    test.contains(raw, '"data":{}')
+
+                    local row: any = message_repo.get(body.answer_message_id)
+                    test.contains(row.data, '"email":{"question":"Email","answer":null}')
+                    test.contains(row.data, '"ready":{"question":"Ready on","answer":null}')
+                    test.contains(row.data, '"count":{"question":"Count","answer":null}')
+                    test.contains(row.data, '"news":{"question":"News","answer":null}')
+                    test.is_nil(string.find(tostring(row.data), "ann@example.org", 1, true), "the default is not in the record")
+                    test.is_nil((string.find(tostring(row.data), "2026-05-06", 1, true)))
+
+                    local pending = reader_of(ctx):call("wippy.session.forms:read_form_tool", { form_id = artifact_id })
+                    test.contains(pending.message, '"status":"answer_pending"')
+                    test.is_nil((string.find(pending.message, "ann@example.org", 1, true)))
+                end)
+            end)
+
+            -- The largest answers a valid form can take, with the
+            -- characters the record escapes six-fold, through acceptance and
+            -- the answer message.
+            it("accepts the largest text a form can hold, and keeps it exact in the record", function()
+                local ctx = new_session()
+                local def = { title = "Letters", fields = {
+                    { id = "first", type = "textarea", label = "First" },
+                    { id = "second", type = "textarea", label = "Second" },
+                } }
+                local artifact_id = new_v2_form(ctx, def)
+                local text = string.rep("'<>&", 2000)
+                test.eq(#text, 8000)
+                -- Written by hand: a browser's JSON.stringify leaves ', < > and &
+                -- as they are, where json.encode would write < > & as six-byte
+                -- escapes and push the body over the cap.
+                local request = '{"form_version":2,"request_id":"r-largest","expected_content_version":1,'
+                    .. '"answers":{"first":"' .. text .. '","second":"' .. text .. '"}}'
+                test.lt(#request, state_service.MAX_BODY_BYTES)
+                local status, body = post(artifact_id, request)
+                test.eq(status, 200)
+
+                local row: any = message_repo.get(body.answer_message_id)
+                test.gt(#row.data, 90000, "each of the 16,000 characters is written as a six-byte escape")
+                local record = string.match(tostring(row.data), "record='([^']*)'")
+                test.not_nil(record)
+                local decoded: any = json.decode(record)
+                test.eq(decoded.answers.first.answer, text)
+                test.eq(decoded.answers.second.answer, text)
+
+                local _, state = get(artifact_id)
+                test.eq(state.data.first, text)
+                local stored = artifact_repo.get(artifact_id).meta.session_form.submission.answers
+                test.eq(stored.second, text)
+            end)
+
+            it("accepts the largest request a valid form can send under the 64 KiB body cap", function()
+                local ctx = new_session()
+                local fields = {}
+                local answers = {}
+                for index = 1, 20 do
+                    local id = string.format("f%037d_x", index)
+                    test.eq(#id, 40)
+                    table.insert(fields, { id = id, type = index == 20 and "textarea" or "text", label = "Q" .. index,
+                        max_length = 800 })
+                    answers[id] = string.rep("😀", 800)
+                end
+                local artifact_id = new_v2_form(ctx, { title = "Everything", fields = fields })
+                local request_id = string.rep("r", 128)
+                local raw = json.encode(v2_request(answers, request_id))
+                test.gt(#raw, 64000)
+                test.lt(#raw, state_service.MAX_BODY_BYTES, "a valid form never needs more than the cap")
+                local status, body = post(artifact_id, raw)
+                test.eq(status, 200, tostring(body and body.message))
+                local row: any = message_repo.get(body.answer_message_id)
+                test.gt(#row.data, 64000)
+            end)
         end)
 
         -- A session delete and a form answer for the same form meet on the

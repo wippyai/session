@@ -1,4 +1,4 @@
-import type { FormDefinition } from '../../lib/definition'
+import type { ChoiceFormDefinition } from '../../lib/definition'
 import type { SubmitBanner } from '../../lib/submit-error'
 import { flushPromises, mount } from '@vue/test-utils'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
@@ -27,7 +27,7 @@ const FORM_ERROR = 'This form changed since you loaded it.'
 const BANNER_ERROR = 'Could not submit this form.'
 const TICK_ERROR = 'Tick at least one answer, or type your own.'
 
-const singleDef: FormDefinition = {
+const singleDef: ChoiceFormDefinition = {
   title: 'Deploy',
   fields: [{
     id: 'f1',
@@ -40,7 +40,7 @@ const singleDef: FormDefinition = {
   }],
 }
 
-const multiDef: FormDefinition = {
+const multiDef: ChoiceFormDefinition = {
   title: 'Pick',
   fields: [{
     id: 'f1',
@@ -57,7 +57,7 @@ type ServerErrors = Record<string, { code: string, message: string }[]>
 type ErrorList = { code: string, message: string }[]
 interface CardVm { setServerErrors: (fields?: ServerErrors, form?: ErrorList) => void }
 
-function mountCard(definition: FormDefinition, banner: SubmitBanner | null = null) {
+function mountCard(definition: ChoiceFormDefinition, banner: SubmitBanner | null = null) {
   return mount(QuestionCardActive, {
     props: { state: formState({ definition }), submitting: false, banner },
     attachTo: document.body,
@@ -93,7 +93,7 @@ describe('QuestionCardActive: an error is announced once', () => {
   })
 
   it('keeps a form-level error to one announcing element while the reader moves between questions and into the review', async () => {
-    const twoQuestions: FormDefinition = {
+    const twoQuestions: ChoiceFormDefinition = {
       title: 'Release',
       fields: [
         { ...singleDef.fields[0], id: 'a', allow_other: false },
@@ -274,7 +274,7 @@ describe('QuestionCardActive: the focused control names the error', () => {
   })
 
   it('describes the Send button of a several-answer question by the banner: it is the control that just failed and still has focus', async () => {
-    const noOther: FormDefinition = {
+    const noOther: ChoiceFormDefinition = {
       title: 'Pick',
       fields: [{ ...multiDef.fields[0], allow_other: false }],
     }
@@ -287,7 +287,7 @@ describe('QuestionCardActive: the focused control names the error', () => {
   })
 
   it('describes "Send answers" on the review step by the banner and by a form-level error', async () => {
-    const twoQuestions: FormDefinition = {
+    const twoQuestions: ChoiceFormDefinition = {
       title: 'Release',
       fields: [
         { ...singleDef.fields[0], id: 'a', allow_other: false },
@@ -387,7 +387,7 @@ describe('QuestionCardActive: focus after a failed send that started in a note',
   })
 
   it('leaves focus to the move to the next question when the card has several', async () => {
-    const twoQuestions: FormDefinition = {
+    const twoQuestions: ChoiceFormDefinition = {
       title: 'Release',
       fields: [
         { ...singleDef.fields[0], id: 'a', allow_other: false },
@@ -534,7 +534,7 @@ describe('QuestionCardActive: the rest of the error text takes the severity util
   })
 
   it('draws the review footer and a missing required answer in them, and no other review row', async () => {
-    const threeQuestions: FormDefinition = {
+    const threeQuestions: ChoiceFormDefinition = {
       title: 'Release',
       fields: [
         { ...singleDef.fields[0], id: 'a', label: 'Required, left open', allow_other: false },
@@ -674,7 +674,7 @@ describe('QuestionCardActive: Enter in an empty Other box says why nothing was s
 
 describe('QuestionCardActive: the empty Other box message follows the required flag', () => {
   const OTHER_EMPTY_ERROR = 'Type your answer, or choose another option.'
-  const optional = (def: FormDefinition): FormDefinition => ({ ...def, fields: def.fields.map(f => ({ ...f, required: false })) })
+  const optional = (def: ChoiceFormDefinition): ChoiceFormDefinition => ({ ...def, fields: def.fields.map(f => ({ ...f, required: false })) })
 
   it.each([
     ['single', singleDef, OTHER_EMPTY_ERROR],

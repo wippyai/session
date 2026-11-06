@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { HostState } from '../composables/use-host-reflection'
-import type { FormAnswers } from '../lib/definition'
+import type { FormAnswers, FormDefinition } from '../lib/definition'
 import type { SubmitBanner } from '../lib/submit-error'
 import { computed, nextTick, ref, watch } from 'vue'
 import { useDeliveryNudge } from '../composables/use-delivery-nudge'
@@ -10,9 +10,12 @@ import { useHostReflection } from '../composables/use-host-reflection'
 import { useOnlineStatus } from '../composables/use-online-status'
 import { useComponentProps, useComponentPropsErrors } from '../constants'
 import { useArtifactId } from '../element-context'
+import { isChoiceFormState, isKnownFieldType, isSupportedFormVersion } from '../lib/definition'
 import { CANNOT_SUBMIT_MESSAGE, LOAD_FAILED_MESSAGE, NEEDS_NEWER_HOST_MESSAGE, SUBMIT_FAILED_MESSAGE } from '../lib/messages'
+import ActiveForm from './active-form.vue'
 import FormMessage from './form-message.vue'
 import FormNotice from './form-notice.vue'
+import IdleForm from './idle-form.vue'
 import QuestionCardActive from './question-card/question-card-active.vue'
 import QuestionCardSummary from './question-card/question-card-summary.vue'
 
@@ -21,7 +24,6 @@ const RELOAD_FAILED_NOTICE = 'Could not refresh this form. Showing what you last
 const ANSWERED_ELSEWHERE_NOTICE = 'This form was already answered elsewhere, so your draft was not saved. The saved answer is shown below.'
 const ANSWERED_IN_CHAT_MESSAGE = 'This form was answered. Your answer is in the chat.'
 const NEEDS_NEWER_HOST_NOTICE = `${NEEDS_NEWER_HOST_MESSAGE} If you already answered it, your answer is in the chat.`
-const SUPPORTED_FORM_VERSION = 1
 
 const props = useComponentProps()
 const propErrors = useComponentPropsErrors()
@@ -51,8 +53,10 @@ watch(artifactId, () => {
   banner.value = null
   sendOutcomeUncertain = false
 })
-const cardRef = ref<InstanceType<typeof QuestionCardActive> | null>(null)
-const summaryRef = ref<InstanceType<typeof QuestionCardSummary> | null>(null)
+// The question card or the fields form, whichever renders the active form.
+const activeRef = ref<InstanceType<typeof QuestionCardActive> | InstanceType<typeof ActiveForm> | null>(null)
+// The answered view of either.
+const summaryRef = ref<InstanceType<typeof QuestionCardSummary> | InstanceType<typeof IdleForm> | null>(null)
 
 // Set before our own accepted submit flips `state` to idle, so the watcher below
 // does not report that change as an answer from elsewhere. It is not set when
@@ -60,9 +64,9 @@ const summaryRef = ref<InstanceType<typeof QuestionCardSummary> | null>(null)
 let suppressAnsweredElsewhereWatch = false
 
 // A background reload can flip `state` to idle because another tab or client
-// answered first. A card holding unsent input says its draft was dropped. A card
+// answered first. A form holding unsent input says its draft was dropped. A form
 // nothing was entered into has nothing to explain. The input is read before the
-// card unmounts, which is why this watcher runs before the render. The reader's
+// form unmounts, which is why this watcher runs before the render. The reader's
 // own send is never reported: not while it is in flight (the server publishes the
 // artifact before it returns the POST) and not after one whose outcome is unknown.
 watch(() => state.value?.status, (status, previousStatus) => {
@@ -74,18 +78,35 @@ watch(() => state.value?.status, (status, previousStatus) => {
     suppressAnsweredElsewhereWatch = false
     return
   }
-  if (cardRef.value?.hasUnsentInput())
+  if (activeRef.value?.hasUnsentInput())
     answeredElsewhere.value = true
 })
 
-// A form version other than 1, named by the prop or by the loaded state, never
-// gets an interactive card.
+/** True when a field of `def` has a type this component cannot render, a type from a newer version. */
+function hasUnknownFieldType(def: FormDefinition | undefined): boolean {
+  return !!def?.fields?.some(field => !isKnownFieldType(field.type))
+}
+
+// A form version this component does not render (1 and 2 render), named by the
+// prop or by the loaded state, never gets an interactive form. Neither does a
+// field of a type this component does not know, so a question is never
+// silently dropped from the form.
 const unsupportedVersion = computed(() => {
   const propVersion = props.value.formVersion
-  if (propVersion !== undefined && propVersion !== SUPPORTED_FORM_VERSION)
+  if (propVersion !== undefined && !isSupportedFormVersion(propVersion))
     return true
   const stateVersion = state.value?.form_version
-  return stateVersion !== undefined && stateVersion !== SUPPORTED_FORM_VERSION
+  if (stateVersion !== undefined && !isSupportedFormVersion(stateVersion))
+    return true
+  return hasUnknownFieldType(definition.value) || hasUnknownFieldType(state.value?.definition)
+})
+
+// A form of choices only (version 1) renders as the question card. A form with
+// a standard field, alone or beside choices, renders as the fields form, where
+// a choice is plain radio buttons or checkboxes with no notes.
+const choiceState = computed(() => {
+  const current = state.value
+  return current && isChoiceFormState(current) ? current : null
 })
 
 // Shown with the definition's questions disabled when the form cannot be answered here.
@@ -101,16 +122,19 @@ const notice = computed(() => {
 
 const cardStep = ref<'active' | 'review'>('active')
 const cardCollapsed = ref(false)
-// `unsupported` outranks every other value because no interactive card renders for it.
-// `loading` covers the time before the first GET resolves.
+// `unsupported` outranks every other value because no interactive form renders for it.
+// `loading` covers the time before the first GET resolves. The fields form has
+// no review step and cannot collapse, so it stays `active` until answered.
 const hostState = computed<HostState>(() => {
   if (unsupportedVersion.value || status.value === 'unsupported')
     return 'unsupported'
   if (state.value === null)
     return 'loading'
-  return state.value.status === 'idle' ? 'answered' : cardStep.value
+  if (state.value.status === 'idle')
+    return 'answered'
+  return choiceState.value ? cardStep.value : 'active'
 })
-const hostCollapsed = computed(() => !unsupportedVersion.value && state.value?.status === 'active' && cardCollapsed.value)
+const hostCollapsed = computed(() => !unsupportedVersion.value && choiceState.value !== null && state.value?.status === 'active' && cardCollapsed.value)
 useHostReflection(hostState, hostCollapsed)
 
 async function handleSubmit(answers: FormAnswers) {
@@ -136,7 +160,7 @@ async function handleSubmit(answers: FormAnswers) {
       answer_message_id: accepted.answer_message_id,
       delivery: accepted.delivery,
     }
-    // The submit button is gone with the card, so focus moves to the summary.
+    // The submit button is gone with the form, so focus moves to the summary.
     void nextTick(() => summaryRef.value?.focusStatus())
     // The accepted response lacks the canonical `submitted_at` and normalized data.
     reload()
@@ -144,7 +168,7 @@ async function handleSubmit(answers: FormAnswers) {
   }
 
   if (outcome.fieldErrors || outcome.formErrors) {
-    cardRef.value?.setServerErrors(outcome.fieldErrors, outcome.formErrors)
+    activeRef.value?.setServerErrors(outcome.fieldErrors, outcome.formErrors)
     return
   }
 
@@ -168,7 +192,7 @@ async function handleSubmit(answers: FormAnswers) {
 }
 
 function handleRetry() {
-  cardRef.value?.retry()
+  activeRef.value?.retry()
 }
 </script>
 
@@ -210,12 +234,12 @@ function handleRetry() {
         {{ RELOAD_FAILED_NOTICE }}
       </p>
 
-      <!-- Keyed by the artifact, so a rebind discards the card and the draft it holds. -->
+      <!-- Keyed by the artifact, so a rebind discards the form and the draft it holds. -->
       <QuestionCardActive
-        v-if="state.status === 'active'"
+        v-if="state.status === 'active' && choiceState"
         :key="state.artifact_id"
-        ref="cardRef"
-        :state="state"
+        ref="activeRef"
+        :state="choiceState"
         :submitting="submitting"
         :banner="banner"
         :offline="!isOnline"
@@ -223,6 +247,17 @@ function handleRetry() {
         @retry="handleRetry"
         @step-change="(v) => { cardStep = v }"
         @collapsed-change="(v) => { cardCollapsed = v }"
+      />
+      <ActiveForm
+        v-else-if="state.status === 'active'"
+        :key="state.artifact_id"
+        ref="activeRef"
+        :state="state"
+        :submitting="submitting"
+        :banner="banner"
+        :offline="!isOnline"
+        @submit="handleSubmit"
+        @retry="handleRetry"
       />
       <template v-else>
         <p
@@ -233,6 +268,13 @@ function handleRetry() {
           {{ ANSWERED_ELSEWHERE_NOTICE }}
         </p>
         <QuestionCardSummary
+          v-if="choiceState"
+          :key="state.artifact_id"
+          ref="summaryRef"
+          :state="choiceState"
+        />
+        <IdleForm
+          v-else
           :key="state.artifact_id"
           ref="summaryRef"
           :state="state"

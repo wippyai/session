@@ -45,6 +45,9 @@
   --_row-px: var(--wippy-form-row-padding-x, 10px);
   --_gap: var(--wippy-form-gap, 4px);
   --_key: var(--wippy-form-key-size, 20px);
+  --_field-gap: var(--wippy-form-field-gap, 16px);
+  --_label-weight: var(--wippy-form-label-weight, 500);
+  --_date-width: var(--wippy-form-date-width, 20rem);
 
   /* Content-sized, with no height: 100%, so the card does not stretch in a taller container. */
   display: block;
@@ -368,6 +371,11 @@ span.w-form__option-mark {
   width: 14px;
   height: 14px;
 }
+/* The fields form's Submit while a send is in flight. The theme's `p-disabled` marker makes the button inert to the pointer, which also hides its cursor, so pointer events come back here for the progress cursor. The form ignores a click then. Two classes, to outrank the theme's one. */
+.w-form .w-form__send--sending {
+  pointer-events: auto;
+  cursor: progress;
+}
 
 /* ---------- Review ---------- */
 .w-form__review {
@@ -492,6 +500,123 @@ span.w-form__option-mark {
   width: 16px;
   height: 16px;
   color: var(--_accent);
+}
+
+/* ---------- Fields form: the standard fields, and choices beside them ----------
+ * Everything here reads the same tokens as the card above. The only new ones
+ * are the space between fields, the label weight and the date control width.
+ * The root is also a ".w-form" card, so font, color, surface, border and
+ * padding come with it. Error text and the required marker take
+ * ERROR_TEXT_CLASS on the element (src/lib/error-text.ts), not a token. */
+.w-form__fields {
+  gap: var(--_field-gap);
+}
+.w-form__fields-title {
+  margin: 0;
+  font-size: var(--_q-size);
+  font-weight: var(--_q-weight);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.w-form__fields-error {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--_small);
+}
+.w-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.w-form__field-label {
+  padding: 0;
+  font-weight: var(--_label-weight);
+  overflow-wrap: anywhere;
+}
+.w-form__field-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.w-form__field--inline .w-form__field-control {
+  flex: none;
+}
+.w-form__field-description {
+  margin: 0;
+  font-size: var(--_small);
+  color: var(--_muted);
+}
+.w-form__field-control {
+  min-width: 0;
+}
+.w-form__field-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.w-form__field-value--empty {
+  color: var(--_muted);
+}
+.w-form__field-item {
+  margin: 0;
+}
+.w-form__field-note {
+  display: block;
+  font-size: var(--_small);
+  color: var(--_muted);
+  white-space: pre-wrap;
+}
+.w-form__field-error {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--_small);
+}
+.w-form__field-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.w-form__field-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.w-form__field-option-label {
+  overflow-wrap: anywhere;
+}
+.w-form__field-option-description {
+  display: block;
+  font-size: var(--_small);
+  color: var(--_muted);
+}
+.w-form__field-other {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/*
+ * The date control. A date does not need the width of the whole form, and the
+ * theme opens the popup calendar at least as wide as the input it belongs to
+ * (so a form-wide box made a form-wide calendar). The control is bounded to its
+ * own width, full width only where the form is narrower than that, and the
+ * calendar follows it. The class is on the picker through the `date` state of
+ * the `field-input` part; the calendar itself (the `field-calendar` part) is
+ * left to the theme.
+ */
+.w-form__field-input--date {
+  width: min(100%, var(--_date-width));
+  max-width: 100%;
 }
 
 @container (max-width: 520px) {

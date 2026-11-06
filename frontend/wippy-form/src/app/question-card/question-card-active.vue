@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import type { FieldError, FormAnswers, FormState } from '../../lib/definition'
+import type { ChoiceFormState, FieldError, FormAnswers } from '../../lib/definition'
 import type { FocusTarget } from '../../lib/focus-key'
 import type { SubmitBanner } from '../../lib/submit-error'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
-import { trimAnswerText } from '../../lib/answers'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf, optionKey } from '../../lib/focus-key'
 import { TICK_ANSWER_MESSAGE } from '../../lib/messages'
+import { pageHasNoFocus } from '../../lib/page-focus'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
+import { trimAnswerText } from '../../lib/text'
 import FormMessage from '../form-message.vue'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardHeading from './question-card-heading.vue'
@@ -21,7 +22,7 @@ import QuestionCardReview from './question-card-review.vue'
  * `submit`, which sends them and reports the outcome back through the props.
  */
 const props = defineProps<{
-  state: FormState
+  state: ChoiceFormState
   submitting: boolean
   banner: SubmitBanner | null
   offline?: boolean
@@ -186,14 +187,6 @@ watch(controller.focusSeq, () => {
 })
 
 /** True when nothing on the page has focus, because it is on <body> or the root element, as after a focused control is removed. */
-function pageHasNoFocus(): boolean {
-  const doc = cardRoot.value?.ownerDocument
-  if (!doc)
-    return false
-  const active = doc.activeElement
-  return !active || active === doc.body || active === doc.documentElement
-}
-
 /**
  * After a failed send, keeps the reader inside the card. The send buttons stay
  * focusable while a send is in flight, so usually the one pressed still has
@@ -205,7 +198,7 @@ function pageHasNoFocus(): boolean {
  * such as the chat box, is left alone.
  */
 function restoreFocusAfterFailure() {
-  if (!pageHasNoFocus())
+  if (!cardRoot.value || !pageHasNoFocus(cardRoot.value))
     return
   controller.requestFocus(controller.inReview.value ? 'send-all' : 'first')
 }

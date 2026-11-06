@@ -1,0 +1,286 @@
+import type { FieldAnswer, FormField } from './definition'
+import { describe, expect, it } from 'vitest'
+import { evaluateField } from './answers'
+import { numberToPlainText } from './decimal'
+
+/**
+ * Runs the shared Lua/TypeScript conformance fixture through the client
+ * checker. The fixture (`test/forms/fixtures/v2_conformance.json`) is owned by
+ * the Session server tests, which run the same file through the definition
+ * normalizer and answer validator, so a rule cannot change on one side only.
+ * Its format is documented at the top of `test/forms/v2_conformance_test.lua`:
+ *
+ *   field | fields   one field as an agent writes it (or several)
+ *   value            the wire answer; absent or null = no answer
+ *   value_concat     instead of `value`: strings and `{ repeat, times }`
+ *                    objects joined into one long string
+ *   value_as         with `value_concat` on a choice: `other` makes the string
+ *                    an Other answer, `note` the note of option `a`
+ *   expect           { ok: v } accepted and stored as v
+ *                    { same: true } accepted and stored exactly as sent
+ *                    { unanswered: true } accepted, nothing stored
+ *                    { error: code } refused with this code
+ *                    { definition_ok } / { definition_error, path } /
+ *                    { normalized } about the definition itself
+ *
+ * What the client checks: every answer case for a choice and the six standard
+ * fields (expect `ok`, `same`, `unanswered`, `error`), and, for definition cases
+ * that state a normalized `max_length`, that the raw field normalized here
+ * has the same limit. The server fills in `min_length` and `max_length`, so the
+ * checker reads them as they are and this runner does the same for a raw field.
+ *
+ * Skipped, counted and named by reason (`SkipReason`): definition validation
+ * (the server vets definitions before a form exists); a value of the wrong JSON
+ * type for its field (a control always hands the checker the right kind of
+ * draft); an unanswered optional checkbox (the UI always sends an explicit
+ * boolean); a carriage return in a textarea value (the client turns every
+ * line break into LF before sending); and every case about a text field's
+ * `pattern`. The pattern is agent-authored and a browser regex engine
+ * backtracks without bound (`(a|a)*b`, `a*a*a*a*b` on a long value can freeze
+ * the tab), so the client never evaluates it: the server (RE2, linear time)
+ * checks it on submit and its 422 `pattern_mismatch` shows on the field. Any
+ * other shape fails loudly.
+ */
+
+const FIELD_TYPES = new Set(['choice', 'text', 'textarea', 'number', 'email', 'date', 'checkbox'])
+
+export interface RawCase {
+  name?: string
+  field?: Record<string, unknown>
+  fields?: unknown[]
+  value?: unknown
+  value_concat?: Array<string | { repeat: string, times: number }>
+  value_as?: 'other' | 'note'
+  expect?: Record<string, unknown>
+}
+
+export type SkipReason = 'definition' | 'pattern' | 'wrong-type' | 'checkbox-absent' | 'textarea-cr'
+export type Verdict = 'checked' | `skipped:${SkipReason}`
+
+function skip(reason: SkipReason): Verdict {
+  return `skipped:${reason}`
+}
+
+function expandValue(raw: RawCase): unknown {
+  if (raw.value_concat === undefined)
+    return raw.value
+  const joined = raw.value_concat.map(part => typeof part === 'string' ? part : part.repeat.repeat(part.times)).join('')
+  if (raw.value_as === undefined)
+    return joined
+  const item = raw.value_as === 'other' ? { other: joined } : { value: 'a', note: joined }
+  return raw.field?.multiple ? [item] : item
+}
+
+/** The lengths the server fills in, checked against the fixture's own `normalized` cases. */
+const TEXT_LENGTHS: Record<string, { min_length: number, max_length: number }> = {
+  text: { min_length: 0, max_length: 500 },
+  textarea: { min_length: 0, max_length: 8000 },
+}
+
+/** A raw field of the fixture as the server hands it to the component. */
+function normalizedField(rawField: Record<string, unknown>): FormField {
+  const common = { id: 'f', label: 'Question', required: false, ...TEXT_LENGTHS[rawField.type as string], ...rawField }
+  if (rawField.type !== 'choice')
+    return common as unknown as FormField
+  const options = (rawField.options as Array<string | { value: string, label: string }>)
+    .map(option => typeof option === 'string' ? { value: option, label: option } : option)
+  return { multiple: false, allow_other: false, ...common, options } as unknown as FormField
+}
+
+/** The draft a control would hold for this wire value, or `null` when no control can hold such a value. */
+function draftFor(field: FormField, value: unknown): FieldAnswer | undefined | null {
+  if (value === null || value === undefined)
+    return undefined
+  switch (field.type) {
+    case 'choice':
+      return value as FieldAnswer
+    case 'number':
+      return typeof value === 'number' ? numberToPlainText(value) : null
+    case 'checkbox':
+      return typeof value === 'boolean' ? value : null
+    default:
+      return typeof value === 'string' ? value : null
+  }
+}
+
+export function runCase(raw: unknown, index: number): Verdict {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+    throw new Error(`conformance case ${index}: not an object`)
+  const entry = raw as RawCase
+  const name = entry.name ?? `case ${index}`
+  const expected = entry.expect
+  if (!expected || typeof expected !== 'object')
+    throw new Error(`conformance case ${index} (${name}): no expect`)
+
+  // Several fields: always a definition case.
+  if (entry.fields !== undefined)
+    return skip('definition')
+  const rawField = entry.field
+  if (!rawField || typeof rawField.type !== 'string')
+    throw new Error(`conformance case ${index} (${name}): no field`)
+
+  const isDefinitionCase = 'definition_ok' in expected || 'definition_error' in expected || 'normalized' in expected
+  if (!FIELD_TYPES.has(rawField.type)) {
+    if (isDefinitionCase)
+      return skip('definition')
+    throw new Error(`conformance case ${index} (${name}): unknown field type ${rawField.type}`)
+  }
+  const field = normalizedField(rawField)
+
+  if (isDefinitionCase) {
+    const normalized = expected.normalized as Record<string, unknown> | undefined
+    if (normalized && 'max_length' in normalized && (field.type === 'text' || field.type === 'textarea')) {
+      expect(field.max_length, name).toBe(normalized.max_length)
+      return 'checked'
+    }
+    return skip('definition')
+  }
+
+  const knownExpectation = 'ok' in expected || 'same' in expected || 'unanswered' in expected || 'error' in expected
+  if (!knownExpectation)
+    throw new Error(`conformance case ${index} (${name}): unrecognized expect (keys: ${Object.keys(expected).join(', ')})`)
+
+  // The browser never evaluates a pattern; the server's 422 shows on the field instead.
+  if (rawField.pattern !== undefined)
+    return skip('pattern')
+
+  const value = expandValue(entry)
+  // The server answers a wrong JSON type with `invalid_type`; no control can send one.
+  if (expected.error === 'invalid_type')
+    return skip('wrong-type')
+  const draft = draftFor(field, value)
+  if (draft === null)
+    return skip('wrong-type')
+  // The client turns every line break of a textarea into LF, so it never sends the CR the server refuses.
+  if (field.type === 'textarea' && typeof value === 'string' && value.includes(String.fromCharCode(13)))
+    return skip('textarea-cr')
+  // A checkbox always reports a boolean, so an optional one is never absent.
+  if (field.type === 'checkbox' && draft === undefined && !field.required)
+    return skip('checkbox-absent')
+
+  const outcome = evaluateField(field, draft)
+  if (typeof expected.error === 'string') {
+    expect(outcome.errors.map(e => e.code), name).toContain(expected.error)
+    expect(outcome.errors[0].code, name).toBe(expected.error)
+    return 'checked'
+  }
+  expect(outcome.errors, name).toEqual([])
+  if (expected.unanswered)
+    expect(outcome.answer, name).toBeUndefined()
+  else if (expected.same)
+    expect(outcome.answer, name).toEqual(value)
+  else
+    expect(outcome.answer, name).toEqual(expected.ok)
+  return 'checked'
+}
+
+// ── the runner itself, proven on inline cases ────────────────────
+
+describe('conformance runner (inline cases)', () => {
+  const text = { type: 'text', max_length: 5 }
+
+  it('checks accepted values: same, ok and unanswered', () => {
+    expect(runCase({ name: 'same', field: text, value: 'abc', expect: { same: true } }, 0)).toBe('checked')
+    expect(runCase({ name: 'ok', field: { type: 'email' }, value: ' a@b.co ', expect: { ok: 'a@b.co' } }, 1)).toBe('checked')
+    expect(runCase({ name: 'number', field: { type: 'number', integer: true }, value: 3, expect: { ok: 3 } }, 2)).toBe('checked')
+    expect(runCase({ name: 'blank', field: text, value: '  ', expect: { unanswered: true } }, 3)).toBe('checked')
+    expect(runCase({ name: 'absent', field: text, expect: { unanswered: true } }, 4)).toBe('checked')
+  })
+
+  it('checks refused values by error code, and joins value_concat', () => {
+    expect(runCase({ name: 'long', field: text, value: 'abcdef', expect: { error: 'too_long' } }, 0)).toBe('checked')
+    expect(runCase({ name: 'long', field: text, value_concat: [{ repeat: 'a', times: 5 }, 'b'], expect: { error: 'too_long' } }, 1)).toBe('checked')
+    expect(runCase({ name: 'absent', field: { type: 'text', required: true }, expect: { error: 'required' } }, 2)).toBe('checked')
+  })
+
+  it('fails when the client disagrees with the fixture', () => {
+    expect(() => runCase({ name: 'wrong', field: text, value: 'abcdef', expect: { same: true } }, 0)).toThrow()
+    expect(() => runCase({ name: 'wrong', field: text, value: 'abc', expect: { error: 'too_long' } }, 1)).toThrow()
+    expect(() => runCase({ name: 'wrong', field: text, value: 'abc', expect: { ok: 'abd' } }, 2)).toThrow()
+  })
+
+  it('checks choice answers, and wraps value_concat as an Other answer or a note', () => {
+    const choice = { type: 'choice', options: ['a', 'b'], allow_other: true }
+    expect(runCase({ name: 'same', field: choice, value: 'a', expect: { same: true } }, 0)).toBe('checked')
+    expect(runCase({ name: 'other', field: choice, value_concat: ['x'], value_as: 'other', expect: { same: true } }, 1)).toBe('checked')
+    expect(runCase({ name: 'note', field: { ...choice, multiple: true }, value_concat: ['x'], value_as: 'note', expect: { ok: [{ value: 'a', note: 'x' }] } }, 2)).toBe('checked')
+    expect(() => runCase({ name: 'wrong', field: choice, value: 'a', expect: { error: 'required' } }, 3)).toThrow()
+  })
+
+  it('compares the effective max_length of a normalized definition', () => {
+    expect(runCase({ name: 'defaults', field: { type: 'text' }, expect: { normalized: { max_length: 500 } } }, 0)).toBe('checked')
+    expect(runCase({ name: 'cap', field: { type: 'textarea' }, expect: { normalized: { max_length: 8000 } } }, 1)).toBe('checked')
+    expect(() => runCase({ name: 'wrong', field: { type: 'text' }, expect: { normalized: { max_length: 400 } } }, 2)).toThrow()
+  })
+
+  it('skips what the UI cannot produce or the server alone decides, naming the reason', () => {
+    expect(runCase({ name: 'type', field: { type: 'number' }, value: '3', expect: { error: 'invalid_type' } }, 0)).toBe('skipped:wrong-type')
+    expect(runCase({ name: 'wrong json type', field: { type: 'number' }, value: true, expect: { error: 'whatever' } }, 1)).toBe('skipped:wrong-type')
+    expect(runCase({ name: 'definition', field: { type: 'number', min: 5, max: 1 }, expect: { definition_error: 'invalid_range', path: 'fields[0].max' } }, 2)).toBe('skipped:definition')
+    expect(runCase({ name: 'several', fields: [{ type: 'text' }], expect: { definition_ok: true } }, 4)).toBe('skipped:definition')
+    expect(runCase({ name: 'checkbox', field: { type: 'checkbox' }, expect: { unanswered: true } }, 5)).toBe('skipped:checkbox-absent')
+    expect(runCase({ name: 'cr', field: { type: 'textarea' }, value: 'a\r\nb', expect: { error: 'invalid_text' } }, 6)).toBe('skipped:textarea-cr')
+  })
+
+  it('skips every answer case about a pattern, whatever it expects: the server alone evaluates patterns', () => {
+    const pattern = { type: 'text', pattern: '[A-Z]{2}\\d{3}' }
+    expect(runCase({ name: 'mismatch', field: pattern, value: 'xx', expect: { error: 'pattern_mismatch' } }, 0)).toBe('skipped:pattern')
+    expect(runCase({ name: 'match', field: pattern, value: 'AB123', expect: { same: true } }, 1)).toBe('skipped:pattern')
+    expect(runCase({ name: 'backtracks', field: { type: 'text', max_length: 2000, pattern: '(a|a)*b' }, value_concat: [{ repeat: 'a', times: 2000 }], expect: { error: 'pattern_mismatch' } }, 2)).toBe('skipped:pattern')
+  })
+
+  it('fails loudly on a shape it does not understand', () => {
+    expect(() => runCase('nope', 0)).toThrow('not an object')
+    expect(() => runCase({ name: 'x', field: { type: 'text' } }, 1)).toThrow('no expect')
+    expect(() => runCase({ name: 'x', expect: { same: true } }, 2)).toThrow('no field')
+    expect(() => runCase({ name: 'x', field: { type: 'text' }, value: 'a', expect: { mystery: true } }, 3)).toThrow('unrecognized expect')
+  })
+})
+
+// ── the shared fixture file ──────────────────────────────────────
+
+const fixtureFiles = import.meta.glob('../../../../test/forms/fixtures/v2_conformance.json', { eager: true, import: 'default' }) as Record<string, unknown>
+const fixture = Object.values(fixtureFiles)[0]
+
+describe('conformance fixture (test/forms/fixtures/v2_conformance.json)', () => {
+  // A missing file fails the suite: a skip would let the client and the server
+  // drift apart unnoticed (a moved or renamed fixture, a checkout without
+  // `test/`). The Session server tests own the file.
+  it('exists', () => {
+    expect(fixture, 'test/forms/fixtures/v2_conformance.json is missing, so the client checker is not compared with the server').toBeDefined()
+  })
+
+  const cases = Array.isArray(fixture) ? fixture as unknown[] : []
+
+  it('is a list of cases with unique names', () => {
+    expect(cases.length).toBeGreaterThan(400)
+    const names = cases.map(c => (c as RawCase).name)
+    expect(new Set(names).size).toBe(names.length)
+  })
+
+  it('agrees with the client checker on every case it covers', () => {
+    const failures: string[] = []
+    const skipped: Record<string, number> = {}
+    let checked = 0
+    for (const [index, raw] of cases.entries()) {
+      try {
+        const verdict = runCase(raw, index)
+        if (verdict === 'checked')
+          checked++
+        else
+          skipped[verdict.slice('skipped:'.length)] = (skipped[verdict.slice('skipped:'.length)] ?? 0) + 1
+      }
+      catch (error) {
+        failures.push(`${(raw as RawCase).name ?? index}: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`)
+      }
+    }
+    const skippedTotal = Object.values(skipped).reduce((sum, n) => sum + n, 0)
+    // The counts go to the test output, so a drop in coverage is visible.
+    console.warn(`conformance: ${checked} of ${cases.length} cases checked, ${skippedTotal} skipped (${Object.entries(skipped).map(([reason, n]) => `${reason} ${n}`).join(', ')})`)
+    // One list of every disagreement, not just the first.
+    expect(failures).toEqual([])
+    // A fixture whose every case was skipped would prove nothing.
+    expect(checked).toBeGreaterThan(150)
+    expect(checked + skippedTotal).toBe(cases.length)
+  })
+})

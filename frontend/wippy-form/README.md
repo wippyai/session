@@ -1,17 +1,21 @@
 # @wippy-session/wippy-form
 
-The `<wippy-form>` web component renders one Session `ask_user` form artifact as a question card and sends the answer back to the owning session through the Host's artifact-state API. Agents never write the tag. The Session `ask_user` tool creates it.
+The `<wippy-form>` web component renders one Session form artifact, as a question card or a fields form, and sends the answer back to the owning session through the Host's artifact-state API. Agents never write the tag. The Session `ask_user` and `ask_user_fields` tools create it.
 
 ## What it renders
 
-A question card. A form with several questions shows one at a time, with a counter and a review step before sending. Each question supports per-answer notes and, when the definition allows it, an Other free-text row. After the answer is accepted, the card becomes a read-only summary. A definition with no fields shows an error message instead of a card.
+A form of choice questions only (form version 1) renders as a question card. A form with several questions shows one at a time, with a counter and a review step before sending. Each question supports per-answer notes and, when the definition allows it, an Other free-text row. After the answer is accepted, the card becomes a read-only summary. See "Question card" below.
+
+A form with at least one standard field (`text`, `textarea`, `number`, `email`, `date`, `checkbox`), alone or mixed with choices (form version 2), renders as a fields form: one labelled control per field and a single Submit button (`ActiveForm` while open, `IdleForm` once answered, both built on `FieldShell` and `FormHeader`). A choice inside it is a plain radio group or checkbox group, with no per-option notes and no click-to-answer. See "Fields form" below.
+
+A form that cannot be answered here shows its questions as disabled controls under a message (`FormNotice`). A definition with no fields shows an error message instead of a form.
 
 ## Props
 
 | Prop (HTML attribute) | Type | Default | Description |
 | --- | --- | --- | --- |
-| `form-version` | `number` | `1` | Form definition schema version. A value other than 1, from this prop or from the loaded state's `form_version`, disables the card and shows a "needs a newer version of the app" notice. |
-| `definition` | `object` | `null` | The questions: `title`, optional `description`, and `fields`, each `{ id, type: "choice", label, description?, required, options: [{value, label, description?}], multiple, allow_other }`. Optional `submit_label` and `answered_message` are accepted and not shown. |
+| `form-version` | `number` | `1` | Form definition schema version. 1 is a form of choices only and 2 is a form with at least one standard field; both render. A higher value, from this prop or from the loaded state's `form_version`, disables the form and shows a "needs a newer version of the app" notice. So does a field whose `type` this version does not know, so a question is never silently dropped. |
+| `definition` | `object` | `null` | The questions: `title`, optional `description`, and `fields`. A field is `{ id, type, label, description?, required }` plus the keys of its type. A `choice` adds `options: [{value, label, description?}]`, `multiple` and `allow_other`, and "Fields form" lists the keys of the standard types. Optional `submit_label` is the fields form's Submit button text (the card does not show it), and optional `answered_message` is accepted and not shown. |
 | `state` | `string` | `"active"` | The lifecycle mirrored from the artifact: `"active"` while the form can be answered, `"idle"` once it was answered. A change of this prop reloads the form state from the Host. |
 
 ## Events
@@ -27,13 +31,23 @@ The base element dispatches these events. They bubble and cross the shadow bound
 
 ## Answer shapes
 
-A field's answer is one of three shapes, or an array of them for a multiple-choice field. They match the state API of the Session module.
+A choice field's answer is one of three shapes, or an array of them for a multiple-choice field. They match the state API of the Session module.
 
 - A plain option value: `"backfill"`.
 - A chosen option with a note: `{ "value": "backfill", "note": "Regenerate the lockfile too." }`. A note that trims to blank sends the plain value.
 - A free-text own answer: `{ "other": "Hold the release." }`.
 
 Notes are limited to 1,000 Unicode code points and Other text to 2,000. The types are in `src/lib/definition.ts` and the limits in `src/lib/answers.ts`.
+
+A standard field's answer is one JSON scalar. The key is left out when an optional field is not answered:
+
+| Type | Answer sent | Notes |
+| --- | --- | --- |
+| `text`, `textarea` | string, exactly as typed | Inner and outer whitespace kept. A whitespace-only value is unanswered. Line breaks are LF |
+| `email` | string, trimmed | Case kept |
+| `number` | JSON number | Never a numeric string. A whole value is sent as an integer (`3.0` becomes `3`) |
+| `date` | `"YYYY-MM-DD"` string | No timezone, not trimmed |
+| `checkbox` | `true` or `false` | Always explicit: an optional box left unchecked sends `false` |
 
 ## Styling API
 
@@ -121,7 +135,7 @@ The component reflects these onto the `wippy-form` element, for styling only.
 | `card-state` | `loading`, `active`, `review`, `answered`, `unsupported` | Named `card-state` because `state` is an observed prop. `unsupported` outranks the others and covers an unrecognized form version and a Host without the artifact-state API. `loading` lasts until the first GET resolves |
 | `collapsed` | present or absent | Present while the active card is collapsed |
 
-When the Host has no artifact-state API, the component shows the questions with their options disabled under a notice. The notice says the form was answered, when the `state` prop is `idle`, or that a newer Web Host is needed. Both point to the chat for an answer already sent.
+When the Host has no artifact-state API, the component shows the questions as disabled controls under a notice. The notice says the form was answered, when the `state` prop is `idle`, or that a newer Web Host is needed. Both point to the chat for an answer already sent.
 
 ### Keyboard
 
@@ -174,3 +188,124 @@ wippy-form::part(option-selected) {
 
 - The send buttons and the composer send buttons are PrimeVue defaults. They follow the theme's primary colour and not `--wippy-form-accent`, because a `.p-button` override would shadow the theme.
 - The note and Other textareas use the theme's `.p-textarea` colours, and no token exists for them. Their only local rule is `flex: 1 1 auto; min-width: 0` in `src/styles.css`, because the theme's input group rule does not grow a bare `Textarea`.
+
+---
+
+## Fields form
+
+The renderer for a form that has at least one standard field (form version 2). Every field of the definition is one labelled control, in definition order, followed by one Submit button. It is built from `src/app/active-form.vue` (open), `src/app/idle-form.vue` (answered), `src/app/form-header.vue` (the title and description they share with `src/app/form-notice.vue`), `src/app/fields/*` (the fields) and `src/lib/answers.ts` with `src/lib/scalar-answers.ts` (the checks before sending). It follows the same styling contract as the question card: `--wippy-form-*` tokens, `part` names with `<part>-<state>` state parts and matching `w-form__` classes, host attributes.
+
+A form with only choices never reaches it (that is the question card). A form that mixes choices with standard fields renders its choices here as a radio group (one answer) or a checkbox group (several), without per-option notes.
+
+### Fields
+
+| Type | Control | What it adds | Draft held while editing |
+| --- | --- | --- | --- |
+| `text` | PrimeVue `InputText` | `type="text"`, `placeholder` | The typed text |
+| `email` | `InputText` | `type="email"`, `inputmode="email"`, `autocomplete="off"` (an agent may ask for someone else's address, so the browser must not offer the user's own); no `placeholder` | The typed text |
+| `number` | `InputText` | `type="text"`, `autocomplete="off"`, and an on-screen keyboard chosen by what can be typed (see "Number keyboard" below); not `InputNumber` (it clamps to min/max, rounds extra digits and strips the locale's group character); no `placeholder` | The typed text, judged by a strict parser: dot decimal, optional minus, no separators or exponent |
+| `textarea` | `Textarea` (auto-resize, three rows) | `placeholder`; Enter adds a line and never submits | The typed text with its line breaks |
+| `date` | `DatePicker`, `updateModelType="string"`, `dateFormat="yy-mm-dd"` | A calendar from its button, and on a touch screen also by tapping the box (not on focus); `min`/`max` grey out days; typing allowed | The text in the box, as typed. A date the picker reads from loose text (`2026-6-5`) is held as the full date (`2026-06-05`), and the box shows that once it is left. A year below 1000 is kept with four digits (`0999-05-15`) and a typed year below 100 is reported as typed (`0050-03-04`, which PrimeVue alone would read as 1950) |
+| `checkbox` | `Checkbox` (binary) | The label is clickable | An explicit boolean |
+
+`placeholder` belongs to `text` and `textarea` only (the server refuses it on any other type, and the other controls ignore it).
+
+A definition `default` prefills the control; clearing an optional prefilled value sends nothing for that field. A checkbox starts unchecked (its only possible default is `false`).
+
+### Number keyboard
+
+A phone shows the on-screen keyboard its `inputmode` asks for, and the two digit keypads cannot type everything the parser accepts: `numeric` has no minus key and no separator, `decimal` has no minus key on iOS and shows the locale's own separator (a comma in many locales, which the dot-only parser rejects). So the field asks for a digit keypad only where it cannot lock the user out:
+
+| Field | `inputmode` |
+| --- | --- |
+| `integer: true` with `min` of 0 or more | `numeric` |
+| Not `integer`, `min` of 0 or more, and the browser's locale writes decimals with a dot (`Intl.NumberFormat(undefined)`) | `decimal` |
+| Anything else (no `min`, a negative `min`, or a fraction in a comma-decimal locale) | `text`, the full keyboard |
+
+Whatever the keyboard, the parser takes only a dot for decimals, and its message is "Enter a number, using a dot for decimals (for example 12 or -3.5)."
+
+### Client-side checks
+
+A convenience mirror of the server's rules, run on submit so an obvious mistake is named before a round trip. The Session state API stays the authority, and its 422 errors show on the same fields. Codes are the server's; messages never echo the value. `test/forms/fixtures/v2_conformance.json` is run through both implementations (`src/lib/conformance.test.ts` here).
+
+| Type | Checks (code) |
+| --- | --- |
+| all | Required: no non-whitespace content, no number, an unchecked checkbox (`required`) |
+| `text`, `textarea` | Control characters, tab and line feed allowed in a textarea only (`invalid_text`); `min_length` (`too_short`); `max_length`, default 500 for text and 8,000 for a textarea, never above 2,000 and 8,000 (`too_long`), counted in code points. A text field's `pattern` is not checked here (see "Pattern" below) |
+| `email` | ASCII address, one `@`, dot-atom local part up to 64, DNS-label domain with a dot, 254 in all (`invalid_email`) |
+| `number` | Strict text (`invalid_number`); at most 1e12 in absolute value (`invalid_number`); `integer` (`not_integer`); `min`, `max` (`below_min`, `above_max`); `step` from `min`, else from 0, with exact decimal arithmetic and no tolerance (`not_on_step`) |
+| `date` | A real calendar day written `YYYY-MM-DD`, years 0001 to 9999, not trimmed (`invalid_date`); `min`, `max` inclusive (`below_min`, `above_max`) |
+
+### Pattern: checked on submit by the server, never in the browser
+
+A `text` field may carry a `pattern` (a full-match expression). The component does not evaluate it. The pattern is written by the agent, and a browser regular-expression engine backtracks: an overlapping repeat such as `(a|a)*b` or `a*a*a*a*b` against a 2,000-character answer can freeze the user's tab, and the accepted pattern subset does not rule those out. The server checks the pattern with a linear-time engine (RE2), so it is the only place the pattern runs. A pattern counts at most 100 with every repeat written out (`form_pattern.MAX_EXPANDED`), which keeps that check to about 8 ms on a 2,000-character ASCII answer. A value that does not match is sent like any other, and the server answers `422` with `pattern_mismatch` under that field's id. The form shows it exactly like a client error: the message under the field, linked to the real input by `aria-describedby`, the field marked invalid (`aria-invalid`, the `field-invalid` part), focus on the first invalid field, and what the user typed kept in the box. Any other per-field code in a `422` is shown the same way, and `form_errors` appear under the fields. The only cost is one round trip for a pattern mistake, which the server's message names. `src/lib/scalar-answers.ts` builds no regular expression from a definition, and `src/lib/scalar-answers.test.ts` fails if that changes.
+
+### Tokens
+
+All the shared tokens of the question card apply to the root (`--wippy-form-font`, `-font-size`, `-small-size`, `-question-size`, `-question-weight` for the title, `-surface`, `-border`, `-radius`, `-padding`, `-text`, `-text-muted`, `-focus`). Three tokens are new:
+
+| Token | Default (as coded) | Used for |
+| --- | --- | --- |
+| `--wippy-form-field-gap` | 16px | Space between fields, and between the form's header, fields, errors and button |
+| `--wippy-form-label-weight` | `500` | Field label weight |
+| `--wippy-form-date-width` | `20rem` | Width of the date control, which is full width only when the form is narrower than that. The theme opens the calendar at least as wide as the control, so the calendar follows this width; set it larger to get a wider box and calendar |
+
+The inputs themselves are PrimeVue controls, so their surface, border and focus styling is the theme's (there are no input tokens, and no `.p-*` override).
+
+### Parts and classes
+
+Same convention as the question card: a state adds a part `<part>-<state>` and a class `w-form__<part>--<state>`.
+
+| Part | States | What it is |
+| --- | --- | --- |
+| `card`, `fields` | `answered` (the answered view), `unsupported` (a notice) on `card` | The whole form; the same element carries both parts and the `w-form` class |
+| `fields-title` | | Form title |
+| `form-description` | | The form's own description (shared with the card) |
+| `notice` | | "Asked earlier" and offline lines (shared with the card) |
+| `fields-error` | | Form-level errors from a 422 (also spoken in the status region, see "Accessibility and keyboard") |
+| `field` | `required`, `invalid`, `readonly`, `disabled`, `group`, `inline` | One field. `group` is a choice (fieldset), `inline` is a checkbox |
+| `field-label` | | The label (or the legend of a choice) |
+| `field-marker` | | The "(required)" text, shown on an editable required field |
+| `field-description` | | The field's own description |
+| `field-control` | | Wrapper around the control |
+| `field-row` | | The row of an editable checkbox: its control and its label side by side |
+| `field-input` | `date` (on the date picker) | The PrimeVue control: the input, the textarea, the checkbox, the date picker. The `date` state is what `--wippy-form-date-width` bounds |
+| `field-calendar` | | The date picker's calendar panel (class `w-form__field-calendar`). It opens in the theme plugin's overlay layer, not inside the form, so it is never clipped by the message around a short form; it carries the form's `w-theme-dark` or `w-theme-light` class, so it follows the theme. Its width follows the date control (see `--wippy-form-date-width`); no rule in this package overrides it |
+| `field-error` | | The error list; linked to the control by `aria-describedby` |
+| `field-value` | `empty` | The stored answer in the read-only view ("Skipped" when empty). Spaces and line breaks show as stored |
+| `field-item` | | One chosen answer of a choice in the read-only view |
+| `field-note` | | The note on a chosen option in the read-only view |
+| `field-options` | | A choice's group of rows |
+| `field-option` | `other` | One radio or checkbox row |
+| `field-option-input`, `field-option-label`, `field-option-description` | | Pieces of a row |
+| `field-other`, `field-other-input` | | The Other row's label and text box |
+| `status` | | Delivery and answered-time lines in the read-only view (shared with the card) |
+| `send` | `sending` (fields form only) | The Submit button (shared with the card). The `sending` state lasts while a send is in flight: the label reads "Sending…", a spinner icon turns beside it (still under `prefers-reduced-motion`), and the pointer shows `cursor: progress`. An offline form is blocked but not `sending` |
+
+### Host attributes
+
+`card-state` is reflected as for the card: `loading`, `active`, `answered`, `unsupported`. A fields form never reports `review` and has no `collapsed`.
+
+### Accessibility and keyboard
+
+- Every control has a label whose `for` points at the real input. The description and the error list are linked by `aria-describedby` on that input (for a checkbox or a date picker, whose wrapper would otherwise take the attribute, through the PrimeVue pass-through). A choice is a `fieldset` with a `legend`, described as a whole, and every radio or checkbox in it, and the Other text box, carries the same `aria-describedby` (the field description and the error list, so a screen reader that lands on one input reads the blank-Other message) and `aria-invalid` while the group is in error (a `group` role may not carry `aria-invalid`, so it sits on the inputs). A single choice adds a `radiogroup` role with `aria-required` around its radios; a multiple choice adds no role and no `aria-required`, because its fieldset already is the group and `aria-required` is not allowed on that role (the "(required)" text in the legend says it). `aria-invalid` and `aria-required` follow the state.
+- The form is `novalidate`, so the browser's own bubble never replaces the form's error flow. A failed submit names each field, focuses the first invalid control, and announces "N questions need attention." in one polite status region. Only fields in error count as questions: a form-level error from a 422 is spoken as its own text after the count ("2 questions need attention. This form changed since you loaded it."), or alone when no field is in error. As the user fixes questions the text in that region is updated, once per fixed question and not once per key, and emptied when nothing is left. Errors carry no `role="alert"` of their own, and neither does the submit-failure message (a PrimeVue `Message`, which is `role="alert"` and `aria-live="assertive"` by default). Its role and live attributes are removed through the pass-through, so its text is shown with its Retry button and announced once, by the status region. Starting a send clears the previous server errors, as it does the banner.
+- Submit stays focusable while a send is in flight or the browser is offline: it is `aria-disabled` and carries the theme's `p-disabled` marker instead of the `disabled` attribute, and the form ignores a submit then. The fields are disabled during a send, so a box that had focus loses it, and a failed send that left no focus gives it to Submit. Focus on another control of the page is left alone.
+- A send in flight shows on Submit itself: the label becomes "Sending…" (and returns to the form's `submit_label`, or "Submit", when the send fails), with a Tabler `loader-2` icon, hidden from screen readers, that spins with Tailwind's `animate-spin` and stops under `motion-reduce`. The changed label is what a screen reader reads from the focused button. The status region says "Sending your answers." only when a send runs longer than 2 seconds, and drops that line when the send ends, so a fast send is announced once. The `p-disabled` marker makes the button inert to the pointer, so `.w-form .w-form__send--sending` gives pointer events back to show `cursor: progress`; a click is still ignored by the form.
+- Retry checks the answers as Submit does, so a value edited into something invalid after a failed send is named on its field and not left out of the answer.
+- The status region is emptied when a send starts, so a failure with the same text as the last one is announced again.
+- Required is text ("(required)"), never colour alone. A read-only answer is plain selectable text.
+- Enter in a single-line field submits the form; Enter in a textarea adds a line; Space toggles a checkbox.
+- Date: type `YYYY-MM-DD` one key at a time, press the calendar button or ArrowDown to open the calendar, Tab and Shift+Tab move inside it, Escape closes it. The box always shows what the user typed, including after an error appears and after the box is left. Text the picker cannot parse is never dropped or replaced by the last good date: it stays in the box and is named on submit (`invalid_date`, or `below_min` / `above_max` for a well-formed date out of range). The calendar opens in the theme plugin's overlay layer inside the component's shadow root. On a touch screen PrimeVue sets `inputmode="none"` on the box (no keyboard), and the field does not open on focus, so a tap on the box opens the calendar when the primary pointer is coarse (`matchMedia('(pointer: coarse)')`, read at the tap) and the field is enabled; a click with a mouse and focus from a keyboard do not open it. Typing with an input method (IME composition) works: the box is written only with what the user typed. A state reload that hands over the same field leaves an open calendar on the month the user navigated to (`min` and `max` become a new `Date` only when their text changes).
+- Date focus: when the calendar closes with focus still inside it (a day picked from the keyboard, or Escape), focus goes to the date box, also when PrimeVue's own delayed re-focus of its day cells has moved it into the calendar after the pick. Focus the user has already moved elsewhere (a click outside, Tab) is left where it is.
+- How the date box keeps the typed text. PrimeVue's `DatePicker` box is uncontrolled: it follows only the last date the picker accepted, and Vue writes that date over the box on every re-render of the box (an error appearing, the form changing, a submit disabling the control), which would erase each key as it is typed. The field owns the box text and hands it to the box as its `value` through the picker's pass-through, so every render writes exactly what was typed (Vue skips a write that changes nothing, so the caret stays). The one thing PrimeVue still does on its own is reset the box to the last accepted date when it loses focus; the typed text is put back after that.
+
+### Known gaps
+
+- The error text and the "(required)" marker take `ERROR_TEXT_CLASS` from `src/lib/error-text.ts`, the theme's severity utilities the question card uses, and not `--wippy-form-danger`. The submit-failure message takes `ERROR_TEXT_CLASS`, or `WARN_TEXT_CLASS` when it can be retried, through `FormMessage`, as on the card.
+- The unchecked checkbox and input edge contrast is the theme's, left to a theme-level fix. There is no local `.p-*` override.
+- A `pattern` mistake is only reported after submit (by the server), not as the user types; see "Pattern" above.
+- The calendar's day cells have no accessible name beyond the day number (PrimeVue's default); the panel itself is a dialog labelled "Choose Date". Not changed here.
+- The theme (and PrimeVue's own alignment of an overlay) opens the calendar at least as wide as the date control. The date control is bounded to `--wippy-form-date-width` (20rem), so the calendar follows that width on its own. There is no override of the calendar and no `!important` in `styles.css` for it (`styles.test.ts` checks both).
+- The calendar cannot show a year below 100: PrimeVue reads one as a two-digit year, so the calendar opens on 19xx or 20xx for such a date. The box and the saved answer keep the year as typed.
+- In the Dark theme the textarea is darker than the single-line inputs. Both are the same PrimeVue components this form uses for the other fields; the difference is in the theme's own styles (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`), so it is a theme-level change, not something to override here.

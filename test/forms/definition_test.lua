@@ -1,6 +1,7 @@
 local test = require("test")
 local json = require("json")
 local definition = require("definition")
+local field_values = require("field_values")
 local answer_text = require("answer_text")
 
 local function choice(id, extra)
@@ -352,7 +353,7 @@ local function define_tests()
         end)
 
         it("rejects unsupported types and non-boolean flags", function()
-            test.eq(first_code(form({ choice("a", { type = "text" }) })), "unsupported_type")
+            test.eq(first_code(form({ choice("a", { type = "rating" }) })), "unsupported_type")
             test.eq(first_code(form({ choice("a", { multiple = "yes" }) })), "invalid_type")
             test.eq(first_code("title"), "invalid_type")
         end)
@@ -751,6 +752,308 @@ local function define_tests()
             test.is_nil(string.find(value, "['<>&]"), "no raw ', <, > or & inside the attribute value")
             test.eq(record.title, hostile)
             test.eq(record.answers.a.question, hostile)
+        end)
+
+        it("lists the questions of a choice-only form exactly as before standard fields existed", function()
+            test.eq(answer_text.questions_json(def),
+                '{"delivery":{"question":"Question delivery","multiple":false,"required":true,"allow_other":false,'
+                .. '"options":[{"value":"courier","label":"Courier"},{"value":"Locker","label":"Locker"}]},'
+                .. '"extras":{"question":"Question extras","multiple":true,"required":false,"allow_other":true,'
+                .. '"options":[{"value":"Gift wrap","label":"Gift wrap"},{"value":"Receipt","label":"Receipt"}]},'
+                .. '"note":{"question":"Question note","multiple":false,"required":false,"allow_other":false,'
+                .. '"options":[{"value":"Courier","label":"Courier"},{"value":"Pickup point","label":"Pickup point"}]}}')
+        end)
+    end)
+
+    describe("standard fields in the version and the answer text", function()
+        local function standard_form()
+            return normalized(form({
+                choice("delivery", { required = true }),
+                { id = "name", type = "text", label = "Your name", required = true, max_length = 40,
+                    pattern = "[A-Za-z ]+", default = "Ann" },
+                { id = "story", type = "textarea", label = "Story", max_length = 200 },
+                { id = "parcels", type = "number", label = "Parcels", integer = true, min = 1, max = 10, step = 1,
+                    default = 2 },
+                { id = "email", type = "email", label = "Email", required = true },
+                { id = "ready", type = "date", label = "Ready on", min = "2026-01-01", max = "2026-12-31" },
+                { id = "terms", type = "checkbox", label = "I agree", required = true, default = false },
+            }, { title = "Delivery details" }))
+        end
+
+        it("is version 2 as soon as one field is not a choice, and version 1 otherwise", function()
+            test.eq(definition.version_of(normalized(form({ choice("a"), choice("b") }))), 1)
+            test.eq(definition.version_of(standard_form()), 2)
+            test.eq(definition.version_of(normalized(form({ choice("a"),
+                { id = "b", type = "checkbox", label = "B" } }))), 2)
+        end)
+
+        it("lists the questions of a form with standard fields, with their types and limits", function()
+            test.eq(answer_text.questions_json(standard_form()),
+                '{"delivery":{"question":"Question delivery","type":"choice","multiple":false,"required":true,'
+                .. '"allow_other":false,"options":[{"value":"Courier","label":"Courier"},'
+                .. '{"value":"Pickup point","label":"Pickup point"}]},'
+                .. '"name":{"question":"Your name","type":"text","required":true,"min_length":0,"max_length":40,'
+                .. '"pattern":"[A-Za-z ]+","default":"Ann"},'
+                .. '"story":{"question":"Story","type":"textarea","required":false,"min_length":0,"max_length":200},'
+                .. '"parcels":{"question":"Parcels","type":"number","required":false,"integer":true,"min":1,"max":10,'
+                .. '"step":1,"default":2},'
+                .. '"email":{"question":"Email","type":"email","required":true},'
+                .. '"ready":{"question":"Ready on","type":"date","required":false,"min":"2026-01-01",'
+                .. '"max":"2026-12-31"},'
+                .. '"terms":{"question":"I agree","type":"checkbox","required":true,"default":false}}')
+        end)
+
+        it("writes the record with the form's version and each answer as a JSON literal", function()
+            local text = answer_text.build({ artifact_id = "form-1", definition = standard_form(), late = false,
+                answers = { delivery = "Courier", name = "Ann", parcels = 3, email = "a@b.co", terms = true } })
+            test.eq(text, "Answered “Delivery details”.\n\n<wippy-form-answers record='"
+                .. '{"form_id":"form-1","form_version":2,"title":"Delivery details","late":false,"answers":{'
+                .. '"delivery":{"question":"Question delivery","answer":{"value":"Courier","label":"Courier"}},'
+                .. '"name":{"question":"Your name","answer":"Ann"},'
+                .. '"story":{"question":"Story","answer":null},'
+                .. '"parcels":{"question":"Parcels","answer":3},'
+                .. '"email":{"question":"Email","answer":"a@b.co"},'
+                .. '"ready":{"question":"Ready on","answer":null},'
+                .. '"terms":{"question":"I agree","answer":true}}}'
+                .. "'>\n</wippy-form-answers>")
+        end)
+
+        it("writes a false checkbox, a fraction and an exponent-sized number as the literals they are", function()
+            local def = normalized(form({
+                { id = "box", type = "checkbox", label = "Box" },
+                { id = "half", type = "number", label = "Half" },
+                { id = "tiny", type = "number", label = "Tiny" },
+                { id = "neg", type = "number", label = "Negative" },
+            }))
+            local record = answer_text.record_json({ artifact_id = "form-1", definition = def, late = false,
+                answers = { box = false, half = 0.5, tiny = 1e-7, neg = -2.25 } })
+            test.contains(record, '"box":{"question":"Box","answer":false}')
+            test.contains(record, '"half":{"question":"Half","answer":0.5}')
+            test.contains(record, '"tiny":{"question":"Tiny","answer":0.0000001}')
+            test.contains(record, '"neg":{"question":"Negative","answer":-2.25}')
+        end)
+
+        it("keeps typed text in the record from ending the attribute, closing the tag or adding markup", function()
+            local def = normalized(form({ { id = "story", type = "textarea", label = "Story" } }))
+            local hostile = "' onload='x' </wippy-form-answers><img src=x onerror=alert(1)> &amp;\n\n# heading"
+            local text = answer_text.build({ artifact_id = "form-1", definition = def, late = false,
+                answers = { story = hostile } })
+            local _, closings = string.gsub(text, "</wippy%-form%-answers>", "")
+            test.eq(closings, 1, "only the real closing tag")
+            local _, line_breaks = string.gsub(text, "\n", "")
+            test.eq(line_breaks, 3, "the text's own line breaks are JSON escapes, not raw breaks")
+            local value = string.match(text, "record='([^']*)'>")
+            test.not_nil(value)
+            test.is_nil(string.find(value, "['<>&]"), "no raw ', <, > or & inside the attribute value")
+            test.eq(json.decode(value).answers.story.answer, hostile)
+        end)
+
+        it("encodes the answers of the same fields the same way whatever number spelling they arrived in", function()
+            local def = normalized(form({
+                { id = "count", type = "number", label = "Count" },
+                { id = "ratio", type = "number", label = "Ratio" },
+                { id = "agree", type = "checkbox", label = "Agree" },
+                { id = "note", type = "text", label = "Note" },
+            }))
+            local function encoded(count, ratio)
+                local answers = definition.validate_answers(def, { count = count, ratio = ratio, agree = false,
+                    note = "x" })
+                return definition.encode_answers(def, answers)
+            end
+            local expected = '{"count":3,"ratio":0.1,"agree":false,"note":"x"}'
+            test.eq(encoded(3, 0.1), expected)
+            test.eq(encoded(3.0, 0.1), expected)
+            test.eq(encoded(json.decode("3e0"), json.decode("1e-1")), expected)
+            test.eq(encoded(json.decode("0.3e1"), json.decode("0.10")), expected)
+            local answers = definition.validate_answers(def, { count = -0.0, ratio = 1e-7, agree = true })
+            test.eq(definition.encode_answers(def, answers), '{"count":0,"ratio":0.0000001,"agree":true}')
+        end)
+
+        it("is idempotent on a definition with standard fields", function()
+            local once = standard_form()
+            local twice = normalized(once)
+            local function same(a: any, b: any): boolean
+                if type(a) ~= type(b) then return false end
+                if type(a) ~= "table" then return a == b end
+                for key, value in pairs(a) do
+                    if not same(value, b[key]) then return false end
+                end
+                for key in pairs(b) do
+                    if a[key] == nil then return false end
+                end
+                return true
+            end
+            test.is_true(same(once, twice))
+        end)
+
+        it("reads a stored definition without the rules that were added after it was created", function()
+            local raw = form({
+                { id = "code", type = "text", label = "Code", pattern = "[A-Z]+", default = "ABC" },
+                { id = "big", type = "textarea", label = "Big", default = "text" },
+                { id = "more", type = "textarea", label = "More" },
+                { id = "extra", type = "text", label = "Extra" },
+            })
+            test.not_nil(select(2, definition.normalize(raw)), "four fields use more than the text budget")
+            raw.fields[1].pattern = "(?=a)A"
+            raw.fields[1].default = "abc"
+            local stored, errors = definition.normalize(raw, { stored = true })
+            test.is_nil(errors, definition.format_errors(errors))
+            test.eq(stored.fields[1].pattern, "(?=a)A", "a pattern is kept as stored, not re-checked")
+            test.eq(stored.fields[1].default, "abc", "a default is kept as stored, not re-validated")
+            local _, unknown = definition.normalize(form({ { id = "a", type = "text", label = "A", rows = 3 } }),
+                { stored = true })
+            test.eq(unknown[1].code, "unknown_key", "structure is still checked")
+        end)
+
+        it("checks an answer in the order: type, size, text, control characters, blank, length, pattern", function()
+            local def = normalized(form({
+                { id = "code", type = "text", label = "Code", pattern = "[a-z]+", max_length = 10 },
+            }))
+            local function code_of(value: any): any
+                local _, field_errors = definition.validate_answers(def, { code = value })
+                return field_errors and field_errors.code[1].code or nil
+            end
+            test.eq(code_of(5), "invalid_type")
+            test.eq(code_of(string.rep("a", 41)), "too_long", "a value longer than any valid one is refused unscanned")
+            test.eq(code_of("ab\255"), "invalid_text")
+            test.eq(code_of("ab\1"), "invalid_text")
+            test.eq(code_of("abcdefghijk"), "too_long")
+            test.eq(code_of("ab1"), "pattern_mismatch")
+            test.is_nil(code_of("abc"))
+            test.is_nil(code_of("   "), "blank and optional")
+        end)
+
+        it("refuses invalid UTF-8 in an email as an invalid address", function()
+            local def = normalized(form({ { id = "mail", type = "email", label = "Mail" } }))
+            local _, field_errors = definition.validate_answers(def, { mail = "a@b.co\255" })
+            test.eq(field_errors.mail[1].code, "invalid_email")
+            local _, long_errors = definition.validate_answers(def, { mail = string.rep("a", 3000) .. "@b.co" })
+            test.eq(long_errors.mail[1].code, "invalid_email", "far longer than any address, refused unscanned")
+        end)
+
+        it("names the path of every standard field error by its position", function()
+            local _, errors = definition.normalize(form({
+                choice("a"),
+                { id = "b", type = "number", label = "B", min = 5, max = 1 },
+                { id = "c", type = "text", label = "C", max_length = 9999 },
+            }))
+            local found = {}
+            for _, item in ipairs(errors) do found[item.path] = item.code end
+            test.eq(found["fields[1].min"], "invalid_range")
+            test.eq(found["fields[2].max_length"], "invalid_range")
+            test.contains(definition.format_errors(errors), "fields[1].min: invalid_range: ")
+        end)
+
+        it("reports a missing label and an invalid id on a standard field like on a choice", function()
+            local _, errors = definition.normalize({ title = "T", fields = {
+                { id = "Bad-Id", type = "date" }, { id = "ok", type = "checkbox", label = "" } } })
+            local found = {}
+            for _, item in ipairs(errors) do found[item.path] = item.code end
+            test.eq(found["fields[0].id"], "invalid_id")
+            test.eq(found["fields[0].label"], "required")
+            test.eq(found["fields[1].label"], "blank")
+        end)
+
+        it("lists the supported types when a type is not one of them", function()
+            local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
+            test.eq(errors[1].code, "unsupported_type")
+            test.contains(errors[1].message, "textarea")
+            test.contains(errors[1].message, "checkbox")
+        end)
+
+        it("reports only the type for a field of an unknown type, not that a choice lacks options", function()
+            local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
+            test.eq(#errors, 1, definition.format_errors(errors))
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].path, "fields[0].type")
+            -- A choice that is missing its options is still told so, and the
+            -- other mistakes of a field of an unknown type are still reported.
+            test.eq(codes(select(2, definition.normalize(form({ { id = "a", type = "choice", label = "A" } }))))["fields[0].options"],
+                "required")
+            local _, more = definition.normalize(form({ { id = "Bad-Id", type = "rating", label = "" } }))
+            local found = codes(more)
+            test.eq(found["fields[0].type"], "unsupported_type")
+            test.eq(found["fields[0].id"], "invalid_id")
+            test.eq(found["fields[0].label"], "blank")
+            test.is_nil(found["fields[0].options"])
+        end)
+
+        it("reports only the type for an unknown type with extra keys, which it has no list for", function()
+            local _, errors = definition.normalize(form({ { id = "r", type = "rating", label = "L", max = 5, colour = "red" } }))
+            test.eq(#errors, 1, definition.format_errors(errors))
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].path, "fields[0].type")
+            -- A field with no type at all still has its keys checked.
+            local _, untyped = definition.normalize(form({ { id = "r", label = "L", colour = "red" } }))
+            local found = codes(untyped)
+            test.eq(found["fields[0].type"], "required")
+            test.eq(found["fields[0].colour"], "unknown_key")
+        end)
+    end)
+
+    describe("a refused default", function()
+        it("never repeats the value in its message", function()
+            local secret = "s3cr3t"
+            local cases = {
+                { type = "text", default = secret, max_length = 2 },
+                { type = "text", default = secret, min_length = 20 },
+                { type = "text", default = secret, pattern = "[0-9]+" },
+                { type = "text", default = secret .. "\n" },
+                { type = "textarea", default = secret, max_length = 2 },
+                { type = "email", default = secret },
+                { type = "date", default = secret },
+                { type = "number", default = secret },
+                { type = "checkbox", default = secret },
+            }
+            for _, case in ipairs(cases) do
+                local field = { id = "f", label = "F" }
+                for key, value in pairs(case) do field[key] = value end
+                local _, errors = definition.normalize(form({ field }))
+                test.eq(codes(errors)["fields[0].default"], "invalid_default", case.type)
+                test.is_nil((string.find(definition.format_errors(errors), secret, 1, true)), case.type)
+            end
+            local _, number_errors = definition.normalize(form({ { id = "f", type = "number", label = "F", max = 1, default = 73310 } }))
+            test.eq(codes(number_errors)["fields[0].default"], "invalid_default")
+            test.is_nil((string.find(definition.format_errors(number_errors), "73310", 1, true)))
+        end)
+    end)
+
+    describe("the field types a tool accepts", function()
+        local text_field = { id = "name", type = "text", label = "Name", max_length = 40, placeholder = "Ada" }
+        local choice_field = { id = "pick", type = "choice", label = "Pick", options = { "a", "b" } }
+
+        it("refuses a standard field when only choices are accepted, naming the accepted types", function()
+            local normalized, errors = definition.normalize(form({ choice_field, text_field }),
+                { types = definition.CHOICE_TYPES })
+            test.is_nil(normalized)
+            test.eq(#errors, 1, definition.format_errors(errors))
+            test.eq(errors[1].path, "fields[1].type")
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].message, "Supported types: choice.")
+        end)
+
+        it("does not report the keys of a type the tool refuses", function()
+            -- max_length and placeholder belong to text; the type is the only
+            -- thing the agent has to change.
+            local _, errors = definition.normalize(form({ text_field }), { types = definition.CHOICE_TYPES })
+            test.eq(#errors, 1, definition.format_errors(errors))
+        end)
+
+        it("lists only the accepted types for an unknown one too", function()
+            local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }),
+                { types = definition.CHOICE_TYPES })
+            test.eq(errors[1].code, "unsupported_type")
+            test.eq(errors[1].message, "Supported types: choice.")
+            local _, unlimited = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
+            test.eq(unlimited[1].message, "Supported types: " .. definition.TYPE_NAMES .. ".")
+        end)
+
+        it("accepts a choice form when only choices are accepted, and every type without a limit", function()
+            local choices = definition.normalize(form({ choice_field }), { types = definition.CHOICE_TYPES })
+            test.not_nil(choices)
+            local mixed = definition.normalize(form({ choice_field, text_field }))
+            test.not_nil(mixed)
+            test.eq(definition.version_of(mixed), definition.VERSIONS.FIELDS)
         end)
     end)
 end

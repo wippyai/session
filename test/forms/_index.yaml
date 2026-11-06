@@ -16,7 +16,99 @@ entries:
       - time
     imports:
       definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
       answer_text: wippy.session.forms:answer_text
+      test: wippy.test:test
+    method: run
+
+  # The tests run from a workspace outside the repository, so `directory` is
+  # only the fallback for a run from test/: make test and make.ps1 point this
+  # entry at the checkout's test/forms/fixtures through the workspace config
+  # (`override` in scripts/test-workspace.sh and make.ps1).
+  - name: fixtures
+    kind: fs.directory
+    meta:
+      comment: Shared JSON fixtures for the form rules, such as the V2 conformance cases the form component is tested against too
+    base: project
+    directory: ./forms/fixtures
+
+  - name: v2_conformance_test
+    kind: function.lua
+    meta:
+      name: V2 standard fields conformance
+      type: test
+      suite: session
+      comment: Every case of the shared V2 conformance fixture through the definition normalizer and the answer validator
+    source: file://v2_conformance_test.lua
+    modules:
+      - json
+      - fs
+    imports:
+      definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
+      form_text: wippy.session.forms:form_text
+      test: wippy.test:test
+    method: run
+
+  - name: field_values_test
+    kind: function.lua
+    meta:
+      name: Standard field rules
+      type: test
+      suite: session
+      comment: Decimal number text and step arithmetic, the pattern subset checker, a stored form whose pattern no longer compiles, the ask_user schema against the accepted keys, and the shared text helpers
+    source: file://field_values_test.lua
+    modules:
+      - json
+      - registry
+    imports:
+      definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
+      form_pattern: wippy.session.forms:form_pattern
+      form_text: wippy.session.forms:form_text
+      test: wippy.test:test
+    method: run
+
+  - name: form_checks_test
+    kind: function.lua
+    meta:
+      name: Definition key checks
+      type: test
+      suite: session
+      comment: The checks of the raw keys of an agent-authored definition that the definition and the standard fields share, such as plain-text values, flags and unknown keys
+    source: file://form_checks_test.lua
+    imports:
+      form_checks: wippy.session.forms:form_checks
+      test: wippy.test:test
+    method: run
+
+  - name: text_pipelines_test
+    kind: function.lua
+    meta:
+      name: Free-text answers
+      type: test
+      suite: session
+      comment: The sequence every free-text answer takes (size guard, trim, UTF-8, control characters, blank, length), pinned for the Other text and note of a choice and for the text, textarea and email fields, and the shared helper on its own
+    source: file://text_pipelines_test.lua
+    imports:
+      definition: wippy.session.forms:definition
+      form_text: wippy.session.forms:form_text
+      test: wippy.test:test
+    method: run
+
+  - name: runtime_probe_test
+    kind: function.lua
+    meta:
+      name: Runtime facts behind the V2 field rules
+      type: test
+      suite: session
+      comment: Number decoding and arithmetic, null handling, date parsing and regexp behavior of the runtime that the V2 standard field rules rely on, asserted as observed so a runtime change shows up
+    source: file://runtime_probe_test.lua
+    modules:
+      - json
+      - time
+      - text
+    imports:
       test: wippy.test:test
     method: run
 
@@ -43,14 +135,17 @@ entries:
       comment: GET state shapes and POST acceptance, replay, conflicts, validation, ownership, size cap and atomic rollback on the real database
     source: file://state_service_test.lua
     modules:
+      - fs
       - json
       - sql
       - time
       - uuid
       - security
+      - funcs
     imports:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
+      form_pattern: wippy.session.forms:form_pattern
       state_service: wippy.session.forms:state_service
       control_handlers: wippy.session.process:control_handlers
       answer_admission: wippy.session.process:answer_admission

@@ -1,4 +1,4 @@
-import type { FormState } from '../../lib/definition'
+import type { ChoiceFormState } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { describe, expect, it } from 'vitest'
@@ -9,7 +9,7 @@ const definition = definitionOf(choiceField({ required: true }))
 
 const baseState = formState({ status: 'idle', definition, content_version: 2, data: { f1: 'a' }, submitted_at: '2026-01-01T00:00:00.000Z', answer_message_id: 'msg-1', delivery: 'complete' })
 
-function mountSummary(overrides: Partial<FormState> = {}) {
+function mountSummary(overrides: Partial<ChoiceFormState> = {}) {
   return mount(QuestionCardSummary, { props: { state: { ...baseState, ...overrides } }, attachTo: document.body, global: { plugins: [PrimeVuePlugin] } })
 }
 

@@ -198,8 +198,10 @@ source snapshots without Git metadata.
 Dependencies, the database, environment file, backups, and benchmark reports
 stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
 backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
-location or `TEST_CONFIG` for an external runtime configuration. These targets
-require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+location or `TEST_CONFIG` for an external runtime configuration. An external
+configuration must also carry the `app.forms:fixtures:directory` override that
+`make prepare` writes, or the form fixture suites cannot find their files. These
+targets require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
 
 ## Session retirement
 
@@ -629,24 +631,36 @@ Only `session:`-prefixed topics are relayed to clients.
 
 ## Session Forms
 
-Session forms let an agent ask the user structured choice questions with the
-`ask_user` tool and get the answer back as an ordinary user message. A form
-is stored as a `wippy-component-tag-1.0` artifact (see Artifacts above) with
-one extra metadata key, `meta.session_form`; no new SQL table is used.
+Session forms let an agent ask the user structured questions in the chat and
+get the answer back as an ordinary user message. A form is stored as a
+`wippy-component-tag-1.0` artifact (see Artifacts above) with one extra
+metadata key, `meta.session_form`; no new SQL table is used.
 
 ### Enable
 
-Add the trait to an agent:
+Add one of the two traits to an agent:
 
 ```yaml
 traits:
+  # Choice questions only.
   - id: wippy.session.forms:ask_user
+  # Or: choice questions and the standard fields.
+  # - id: wippy.session.forms:ask_user_fields
 ```
 
-The agent gets `ask_user` (create a form; ends the turn) and `read_form`
-(read an earlier form's questions, or its answer record, by `form_id`). Every
-agent, with or without the trait, gets a bounded index of the session's forms
-injected into its prompt so it can find a form id without the trait.
+| Trait | Tool it adds | Field types |
+| --- | --- | --- |
+| `wippy.session.forms:ask_user` | `ask_user` | `choice` |
+| `wippy.session.forms:ask_user_fields` | `ask_user_fields` | `choice`, `text`, `textarea`, `number`, `email`, `date`, `checkbox` |
+
+The tool creates a form and ends the turn. Each tool's schema lists only its
+own field types, and the server refuses any other type from it with
+`unsupported_type`, so an agent with `ask_user` can never create a form with
+standard fields. Both traits also add `read_form` (read an earlier form's
+questions, or its answer record, by `form_id`). Attach one of them: the two
+tools have different names, so an agent with both gets both tools and both
+prompts. Every agent, with or without a trait, gets a bounded index of the
+session's forms injected into its prompt so it can find a form id.
 
 ### API
 
@@ -657,8 +671,13 @@ commits the accepted answer and its user message in one transaction, then
 wakes the owning session process; a missed wake-up is recovered from the
 stored row on the next session start.
 
-V1 supports choice fields only: single selection, multiple selection,
-optional/required, notes on a chosen option, and a free-text "Other" answer.
+A form holds choice fields (single or multiple selection, notes on a chosen
+option, a free-text "Other" answer) and standard fields: `text`, `textarea`,
+`email`, `number`, `date` and `checkbox`, each optional or required. A form
+with only choice fields is form version 1; a form with any standard field is
+version 2, and an older `wippy-form` shows a "needs a newer version" notice
+for it. The server checks every answer, including a text field's `pattern`,
+which the browser never evaluates.
 
 ### Answers and steering
 
@@ -676,7 +695,7 @@ that asks a form still ends there; steering sent during that turn starts the
 next turn.
 
 See [Session Forms (framework)](https://docs.wippy.ai/en/framework/session-forms)
-for the full `ask_user` / `read_form` contract, the answer record shape, late
+for the full `ask_user`, `ask_user_fields` and `read_form` contract, the answer record shape, late
 answers, and how an answer is admitted into the conversation, and
 [Session Forms (frontend)](https://docs.wippy.ai/en/frontend/micro-frontends/session-forms)
 for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
