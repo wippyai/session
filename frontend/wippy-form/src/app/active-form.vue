@@ -2,12 +2,14 @@
 import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/definition'
 import type { ComponentPublicInstance } from 'vue'
 import type { SubmitBanner } from '../lib/submit-error'
+import { Icon } from '@iconify/vue'
 import Button from 'primevue/button'
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
 import { ERROR_TEXT_CLASS } from '../lib/error-text'
 import { pageHasNoFocus } from '../lib/page-focus'
 import { partAttrs } from '../lib/part-attrs'
+import { SENDING_LABEL, SENDING_STATUS_MESSAGE, SLOW_SEND_MS } from '../lib/send-state'
 import FormFieldControl from './fields/form-field.vue'
 import FormHeader from './form-header.vue'
 import FormMessage from './form-message.vue'
@@ -28,6 +30,12 @@ import FormMessage from './form-message.vue'
  * marker, because a focused button that becomes disabled hands focus to <body>.
  * The fields are disabled during a send, so a box that had focus does lose it;
  * a failed send then gives focus to Submit (`restoreFocusAfterFailure`).
+ *
+ * A send in flight also shows on the button itself: its label becomes
+ * "Sending…" and a spinner turns beside it (it stands still under reduced
+ * motion). The label change is what a screen reader hears from the focused
+ * button; the status region adds "Sending your answers." only when a send runs
+ * long.
  */
 const props = defineProps<{
   state: FormState
@@ -148,17 +156,38 @@ function setServerErrors(errors: Record<string, FieldError[]> | undefined, formL
     announceErrorSummary()
 }
 
+let slowSendTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearSlowSendTimer() {
+  if (slowSendTimer)
+    clearTimeout(slowSendTimer)
+  slowSendTimer = null
+}
+
+onBeforeUnmount(clearSlowSendTimer)
+
 // Starting a send clears the previous server errors, as it does the banner, so
 // a resent answer, such as one sent again with Retry, never shows an old 422
 // next to the new outcome. It also empties the status region, so a failure with
-// the same text as the last one is new text and is announced.
+// the same text as the last one is new text and is announced. A send that runs
+// long is then announced once; one that ends sooner says nothing here, because
+// the button label already changed. When the send ends that line is removed, so
+// it never outlives the send (a failure's own message replaces it as usual).
 watch(() => props.submitting, (sending) => {
-  if (!sending)
+  clearSlowSendTimer()
+  if (!sending) {
+    if (statusMessage.value === SENDING_STATUS_MESSAGE)
+      statusMessage.value = ''
     return
+  }
   fieldErrors.value = {}
   formErrors.value = []
   statusIsSummary = false
   statusMessage.value = ''
+  slowSendTimer = setTimeout(() => {
+    slowSendTimer = null
+    statusMessage.value = SENDING_STATUS_MESSAGE
+  }, SLOW_SEND_MS)
 })
 
 // A changed answer drops that question's errors; the next submit re-checks it.
@@ -209,7 +238,9 @@ const rootPart = computed(() => partAttrs('card'))
 const fieldsPart = computed(() => partAttrs('fields'))
 const noticePart = computed(() => partAttrs('notice'))
 const formErrorPart = computed(() => partAttrs('fields-error'))
-const sendPart = computed(() => partAttrs('send'))
+const sendPart = computed(() => partAttrs('send', props.submitting && 'sending'))
+// Only a send in flight changes the label; an offline form is blocked, not sending.
+const submitLabel = computed(() => props.submitting ? SENDING_LABEL : props.state.definition.submit_label || 'Submit')
 
 defineExpose({
   setServerErrors,
@@ -300,11 +331,20 @@ defineExpose({
       <Button
         ref="submitButton"
         type="submit"
-        :label="state.definition.submit_label || 'Submit'"
+        :label="submitLabel"
         :aria-disabled="sendBlocked ? 'true' : undefined"
         :part="sendPart.part"
         :class="[sendPart.class, sendBlocked && 'p-disabled']"
-      />
+      >
+        <template #icon="iconProps">
+          <Icon
+            v-if="submitting"
+            icon="tabler:loader-2"
+            aria-hidden="true"
+            :class="[iconProps.class, 'animate-spin motion-reduce:animate-none']"
+          />
+        </template>
+      </Button>
     </div>
   </form>
 </template>

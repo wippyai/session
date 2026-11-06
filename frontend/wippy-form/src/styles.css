@@ -371,6 +371,11 @@ span.w-form__option-mark {
   width: 14px;
   height: 14px;
 }
+/* The fields form's Submit while a send is in flight. The theme's `p-disabled` marker makes the button inert to the pointer, which also hides its cursor, so pointer events come back here for the progress cursor. The form ignores a click then. Two classes, to outrank the theme's one. */
+.w-form .w-form__send--sending {
+  pointer-events: auto;
+  cursor: progress;
+}
 
 /* ---------- Review ---------- */
 .w-form__review {

@@ -27,6 +27,14 @@ describe('styles.css: a stored answer', () => {
   })
 })
 
+describe('styles.css: Submit while a send is in flight', () => {
+  it('shows the progress cursor on the sending button, and gives it pointer events so the cursor shows through the theme\'s inert `p-disabled`', () => {
+    const body = ruleBody('\\.w-form \\.w-form__send--sending')
+    expect(body).toMatch(/cursor:\s*progress/)
+    expect(body).toMatch(/pointer-events:\s*auto/)
+  })
+})
+
 describe('styles.css: the rule helpers', () => {
   it('ruleBody throws for a selector with no rule, so a missing rule cannot pass a "does not contain" assertion', () => {
     expect(() => ruleBody('\\.w-form__no-such-rule')).toThrow('no rule')

@@ -1,8 +1,9 @@
 import type { FormState } from '../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
+import { SLOW_SEND_MS } from '../lib/send-state'
 import { applyFocusFixup } from '../test-support/dom'
 import ActiveForm from './active-form.vue'
 
@@ -557,5 +558,106 @@ describe('ActiveForm — focus around a send', () => {
     elsewhere.remove()
     stop()
     wrapper.unmount()
+  })
+})
+
+describe('ActiveForm — Submit while a send is in flight', () => {
+  const BANNER = { message: 'Could not send.', retryable: true }
+  const submit = (wrapper: ReturnType<typeof mountForm>) => wrapper.find('button[type="submit"]')
+
+  it('reads "Sending…" while the send runs and gets its label back after a failed send', async () => {
+    const wrapper = mountForm()
+    expect(submit(wrapper).text()).toBe('Submit')
+    await wrapper.setProps({ submitting: true })
+    expect(submit(wrapper).text()).toBe('Sending…')
+    await wrapper.setProps({ submitting: false, banner: BANNER })
+    expect(submit(wrapper).text()).toBe('Submit')
+  })
+
+  it('swaps a custom submit label too, and restores it', async () => {
+    const wrapper = mountForm({ ...v2State, definition: { ...v2State.definition, submit_label: 'Place order' } })
+    expect(submit(wrapper).text()).toBe('Place order')
+    await wrapper.setProps({ submitting: true })
+    expect(submit(wrapper).text()).toBe('Sending…')
+    await wrapper.setProps({ submitting: false })
+    expect(submit(wrapper).text()).toBe('Place order')
+  })
+
+  it('keeps the button focusable and aria-disabled, never disabled, so focus stays on it', async () => {
+    const wrapper = mountForm()
+    const stop = applyFocusFixup(wrapper.element)
+    ;(submit(wrapper).element as HTMLElement).focus()
+    await wrapper.setProps({ submitting: true })
+    expect(submit(wrapper).attributes('disabled')).toBeUndefined()
+    expect(submit(wrapper).attributes('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(submit(wrapper).element)
+    stop()
+  })
+
+  it('shows a spinner that stops under reduced motion, hidden from screen readers, only while sending', async () => {
+    const wrapper = mountForm()
+    expect(submit(wrapper).find('.animate-spin').exists()).toBe(false)
+    await wrapper.setProps({ submitting: true })
+    const spinner = submit(wrapper).find('.animate-spin')
+    expect(spinner.exists()).toBe(true)
+    expect(spinner.classes()).toContain('motion-reduce:animate-none')
+    expect(spinner.attributes('aria-hidden')).toBe('true')
+    await wrapper.setProps({ submitting: false })
+    expect(submit(wrapper).find('.animate-spin').exists()).toBe(false)
+  })
+
+  it('adds the send-sending part and class while sending, and not while only offline', async () => {
+    const wrapper = mountForm()
+    expect(submit(wrapper).attributes('part')).toBe('send')
+    await wrapper.setProps({ submitting: true })
+    expect(submit(wrapper).attributes('part')).toBe('send send-sending')
+    expect(submit(wrapper).classes()).toEqual(expect.arrayContaining(['w-form__send', 'w-form__send--sending']))
+    await wrapper.setProps({ submitting: false, offline: true })
+    expect(submit(wrapper).attributes('part')).toBe('send')
+    expect(submit(wrapper).text()).toBe('Submit')
+    expect(submit(wrapper).attributes('aria-disabled')).toBe('true')
+  })
+
+  describe('the status region', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const statusOf = (wrapper: ReturnType<typeof mountForm>) => wrapper.find('[role="status"]').text()
+
+    it('stays silent for a send that ends quickly', async () => {
+      const wrapper = mountForm()
+      await wrapper.setProps({ submitting: true })
+      vi.advanceTimersByTime(SLOW_SEND_MS - 1)
+      await nextTick()
+      expect(statusOf(wrapper)).toBe('')
+      await wrapper.setProps({ submitting: false, banner: BANNER })
+      vi.advanceTimersByTime(SLOW_SEND_MS)
+      await nextTick()
+      expect(statusOf(wrapper)).toBe(BANNER.message)
+    })
+
+    it('says "Sending your answers." once a send runs long, and hands the region to the failure after it', async () => {
+      const wrapper = mountForm()
+      await wrapper.setProps({ submitting: true })
+      vi.advanceTimersByTime(SLOW_SEND_MS)
+      await nextTick()
+      expect(statusOf(wrapper)).toBe('Sending your answers.')
+      await wrapper.setProps({ submitting: false, banner: BANNER })
+      expect(statusOf(wrapper)).toBe(BANNER.message)
+    })
+
+    it('empties the region when a slow send ends without a message', async () => {
+      const wrapper = mountForm()
+      await wrapper.setProps({ submitting: true })
+      vi.advanceTimersByTime(SLOW_SEND_MS)
+      await nextTick()
+      await wrapper.setProps({ submitting: false })
+      expect(statusOf(wrapper)).toBe('')
+    })
   })
 })
