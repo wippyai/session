@@ -1226,6 +1226,24 @@ local function define_tests()
                 test.is_nil(index_containing(text, "&lt;wippy-form-answers"))
             end)
 
+            it("keeps the whole record of an 8000-character textarea in a restored request", function()
+                local details = string.rep("It's <a> & b\n", 600) .. string.rep("d", 200)
+                test.eq(#details, 8000)
+                local ctx = new_ctx()
+                ask(ctx, { title = "Limits", fields = {
+                    { id = "details", type = "textarea", label = "Details", required = true, max_length = 8000 },
+                } }, { tool_id = FIELDS_TOOL_ID })
+                submit(form_id_of(ctx), { details = details }, 2)
+                local admitted: any = message_handlers.admit_answer(ctx)
+                checkpoint_after(ctx, admitted.next_ops[1].message_id)
+
+                local record = prompt_user_texts(ctx):match("record='(.-)'>")
+                test.not_nil(record)
+                local decoded: any, decode_err = json.decode(record)
+                test.is_nil(decode_err)
+                test.eq(decoded.answers.details.answer, details)
+            end)
+
             it("bounds the turn spans around an answer that starts the next turn", function()
                 local ctx = new_ctx()
                 local bus: any = running_turn(ctx)
