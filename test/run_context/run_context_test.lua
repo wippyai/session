@@ -475,6 +475,43 @@ local function define_tests()
             test.contains(result.text, "delivery arrives Friday")
         end)
 
+        test.it("keeps each tool result beside its own call identity in checkpoint prompt text", function()
+            local calls = {
+                { id = uuid.v7(), call_id = "lookup-first", query = "first delivery", result = "first arrives Friday" },
+                { id = uuid.v7(), call_id = "lookup-second", query = "second delivery", result = "second arrives Monday" },
+            }
+            for _, call in ipairs(calls) do
+                local _, create_err = message_repo.create(call.id, test_data.session_id, "function",
+                    '{"query":"' .. call.query .. '"}', {
+                        function_name = "LookupDelivery", call_id = call.call_id,
+                        status = "success", result = call.result
+                    })
+                test.is_nil(create_err)
+            end
+            local result, err = open_binding():get_prompt({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "range", from_id = test_data.assistant_message_id, to_id = calls[2].id },
+                format = "text", cache_markers = false
+            })
+            for _, call in ipairs(calls) do
+                local _, delete_err = message_repo.delete(call.id)
+                test.is_nil(delete_err)
+            end
+            test.is_nil(err)
+            for index, call in ipairs(calls) do
+                local other = calls[3 - index]
+                local found = false
+                for line in result.text:gmatch("[^\n]+") do
+                    if line:find(call.result, 1, true) then
+                        found = true
+                        test.contains(line, "id=" .. call.call_id)
+                        test.is_nil(line:find("id=" .. other.call_id, 1, true))
+                    end
+                end
+                test.eq(found, true)
+            end
+        end)
+
         test.it("applies selector max_chars to prompt slices", function()
             local result, err = open_binding():get_prompt({
                 host = { kind = "session", session_id = test_data.session_id },

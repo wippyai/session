@@ -275,15 +275,18 @@ local function prompt_to_text(messages)
         if type(msg.function_call) == "table" then
             local call = msg.function_call
             identity = " " .. tostring(call.name) .. " id=" .. tostring(call.id or "")
-            if type(call.arguments) == "table" then
-                local encoded, encode_err = json.encode(call.arguments)
+            local arguments = call.arguments
+            if type(arguments) == "table" then
+                local encoded, encode_err = json.encode(arguments)
                 if encode_err then return nil, encode_err end
-                text = encoded
-            elseif call.arguments ~= nil then
-                text = tostring(call.arguments)
+                arguments = encoded
+            end
+            if arguments ~= nil then
+                text = text == "" and tostring(arguments) or (text .. " " .. tostring(arguments))
             end
         elseif msg.function_call_id ~= nil then
-            identity = " " .. tostring(msg.name) .. " id=" .. tostring(msg.function_call_id)
+            local name = msg.name ~= nil and (" " .. tostring(msg.name)) or ""
+            identity = name .. " id=" .. tostring(msg.function_call_id)
         end
         parts[#parts + 1] = string.format("[%s%s] %s", role, identity, text)
     end
