@@ -178,6 +178,78 @@ local function define_tests()
             test.is_nil(message_repo.get(id))
         end)
     end)
+
+    -- The session list orders by last_message_date, so only a stored message
+    -- may move it. Status, title, config and metadata writes keep it.
+    test.describe("Session writer message recency", function()
+        local OLD_DATE = 946684800
+        local fixtures = {}
+        local function new_session(title)
+            local context_id, session_id = uuid.v7(), uuid.v7()
+            assert(context_repo.create(context_id, "primary", "{}"))
+            assert(session_repo.create(session_id, security.actor():id(), context_id, title, "test"))
+            assert(session_repo.update_session_meta(session_id, {last_message_date = OLD_DATE}))
+            fixtures[#fixtures + 1] = {session_id = session_id, context_id = context_id}
+            return session_id, assert(writer.new(session_id)), assert(session_repo.get(session_id))
+        end
+        test.before_all(function()
+            wait_for_boot.run()
+        end)
+        test.after_all(function()
+            for _, fixture in ipairs(fixtures) do
+                session_repo.delete(fixture.session_id)
+                context_repo.delete(fixture.context_id)
+            end
+        end)
+        for _, change in ipairs({
+            {name = "an idle status",
+                write = function(w) return w:update_status(consts.STATUS.IDLE) end,
+                check = function(row) test.eq(row.status, consts.STATUS.IDLE) end},
+            {name = "a failed status with its error",
+                write = function(w) return w:update_status(consts.STATUS.FAILED, "boom") end,
+                check = function(row)
+                    test.eq(row.status, consts.STATUS.FAILED)
+                    test.eq(row.meta.error, "boom")
+                end},
+            {name = "a status with its interaction",
+                write = function(w)
+                    return w:update_meta({status = consts.STATUS.RUNNING, meta = {interaction = {revision = 7}}})
+                end,
+                check = function(row)
+                    test.eq(row.status, consts.STATUS.RUNNING)
+                    test.eq(row.meta.interaction.revision, 7)
+                end},
+            {name = "a title",
+                write = function(w) return w:update_title("Renamed") end,
+                check = function(row) test.eq(row.title, "Renamed") end},
+            {name = "an automatic initial title", title = "",
+                write = function(w) return w:update_initial_title("Automatic title") end,
+                check = function(row) test.eq(row.title, "Automatic title") end},
+            {name = "a config",
+                write = function(w) return w:update_meta({config = {model = "changed"}}) end,
+                check = function(row) test.eq(row.config.model, "changed") end},
+            {name = "public metadata",
+                write = function(w) return w:update_meta({public_meta = {label = "changed"}}) end,
+                check = function(row) test.eq(row.public_meta.label, "changed") end},
+        }) do
+            test.it("keeps last_message_date when the writer stores " .. change.name, function()
+                local session_id, persistence, before = new_session(change.title or "Recency")
+                local ok, err = change.write(persistence)
+                local after = assert(session_repo.get(session_id))
+                test.is_nil(err)
+                test.is_true(ok)
+                change.check(after)
+                test.eq(after.last_message_date, before.last_message_date)
+            end)
+        end
+        test.it("moves last_message_date when the writer stores a message", function()
+            local session_id, persistence, before = new_session("Recency")
+            local _, err = persistence:add_message(consts.MSG_TYPE.USER, "hello")
+            local after = assert(session_repo.get(session_id))
+            test.is_nil(err)
+            test.is_true(after.last_message_date ~= before.last_message_date)
+        end)
+    end)
 end
 
 return {run = test.run_cases(define_tests)}
