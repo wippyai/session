@@ -5,7 +5,7 @@
  * describe the data.
  */
 
-import type { ArtifactFormDelivery } from '@wippy-fe/proxy'
+import type { ArtifactFormChoiceField, ArtifactFormDefinition, ArtifactFormDelivery, ArtifactFormField } from '@wippy-fe/proxy'
 
 export interface FormFieldOption {
   value: string
@@ -98,6 +98,21 @@ export interface SubmitAccepted {
 
 /** What `artifactState(id).submit()` resolves with. Every failure, including a 422 with field errors, rejects with the Host's `ArtifactStateError`. */
 export type SubmitResult = SubmitAccepted
+
+function isChoiceField(field: ArtifactFormField): field is ArtifactFormChoiceField {
+  return field.type === 'choice'
+}
+
+/**
+ * The read boundary for a stored definition. The proxy types every field kind,
+ * while this component renders only choice fields, and only for form version 1,
+ * which holds nothing else. Other kinds come with a newer form version, which
+ * shows the "needs a newer version" message instead of the card, so they are
+ * left out here.
+ */
+export function choiceDefinition(definition: ArtifactFormDefinition): FormDefinition {
+  return { ...definition, fields: definition.fields.filter(isChoiceField) }
+}
 
 export function isOtherAnswer(value: unknown): value is OtherAnswer {
   return !!value && typeof value === 'object' && !Array.isArray(value) && typeof (value as OtherAnswer).other === 'string'

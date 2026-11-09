@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'vitest'
-import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText, isNotedAnswer } from './definition'
+import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText, choiceDefinition, isNotedAnswer } from './definition'
+
+describe('choiceDefinition', () => {
+  const choice = (id: string) => ({ id, type: 'choice' as const, label: id, required: true, options: [{ value: 'a', label: 'A' }], multiple: false, allow_other: false })
+
+  it('keeps a choice-only definition as it is (positive control)', () => {
+    const definition = { title: 'T', description: 'D', submit_label: 'Send', answered_message: 'Done', fields: [choice('f1'), choice('f2')] }
+    expect(choiceDefinition(definition)).toEqual(definition)
+  })
+
+  it('leaves out the field kinds of a newer form version and keeps the choice fields in order', () => {
+    const definition = {
+      title: 'T',
+      fields: [
+        choice('f1'),
+        { id: 't', type: 'text' as const, label: 'Text', required: false, min_length: 0, max_length: 1000 },
+        { id: 'n', type: 'number' as const, label: 'Number', required: false, integer: true },
+        choice('f2'),
+        { id: 'c', type: 'checkbox' as const, label: 'Check', required: false },
+      ],
+    }
+    expect(choiceDefinition(definition)).toEqual({ title: 'T', fields: [choice('f1'), choice('f2')] })
+  })
+
+  it('does not mutate its input', () => {
+    const definition = { title: 'T', fields: [choice('f1'), { id: 'e', type: 'email' as const, label: 'Email', required: false }] }
+    choiceDefinition(definition)
+    expect(definition.fields).toHaveLength(2)
+  })
+})
 
 describe('isNotedAnswer', () => {
   it('is true only for the { value, note } shape', () => {

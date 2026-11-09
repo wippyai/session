@@ -35,9 +35,11 @@ export function buildNotedValue(value: string, note: string): SingleFieldAnswer 
  * every `{ value }` object, but the server stores a note only when it is not
  * blank (`definition.lua`, `check_noted`), so a `{ value }` object without a
  * usable note is the plain option value. An item that has none of the three
- * shapes cannot come from the server and is dropped.
+ * shapes cannot come from the server for a choice field and is dropped. That
+ * includes a number or a boolean, which answers a field kind of a newer form
+ * version.
  */
-function normalizeHostChoice(item: ArtifactFormChoiceAnswer): SingleFieldAnswer | null {
+function normalizeHostChoice(item: ArtifactFormChoiceAnswer | number | boolean): SingleFieldAnswer | null {
   if (typeof item === 'string')
     return item
   if (isOtherAnswer(item))

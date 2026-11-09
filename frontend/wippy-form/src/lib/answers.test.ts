@@ -85,6 +85,10 @@ describe('normalizeHostAnswers', () => {
       .toEqual({ f2: ['a'] })
   })
 
+  it('drops number and boolean answers, which belong to field kinds of a newer form version', () => {
+    expect(normalizeHostAnswers({ f1: 'a', f2: 0, f3: 3, f4: false, f5: true })).toEqual({ f1: 'a' })
+  })
+
   it('does not mutate its input', () => {
     const input = { f1: { value: 'a' } }
     normalizeHostAnswers(input)
