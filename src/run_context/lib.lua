@@ -271,9 +271,23 @@ local function prompt_to_text(messages)
         elseif msg.content ~= nil then
             text = tostring(msg.content)
         end
-        parts[#parts + 1] = string.format("[%s] %s", role, text)
+        local identity = ""
+        if type(msg.function_call) == "table" then
+            local call = msg.function_call
+            identity = " " .. tostring(call.name) .. " id=" .. tostring(call.id or "")
+            if type(call.arguments) == "table" then
+                local encoded, encode_err = json.encode(call.arguments)
+                if encode_err then return nil, encode_err end
+                text = encoded
+            elseif call.arguments ~= nil then
+                text = tostring(call.arguments)
+            end
+        elseif msg.function_call_id ~= nil then
+            identity = " " .. tostring(msg.name) .. " id=" .. tostring(msg.function_call_id)
+        end
+        parts[#parts + 1] = string.format("[%s%s] %s", role, identity, text)
     end
-    return table.concat(parts, "\n")
+    return table.concat(parts, "\n"), nil
 end
 
 function M.get_prompt(args)
@@ -319,7 +333,9 @@ function M.get_prompt(args)
         truncated = hist.truncated
     }
     if format == "text" or format == "both" then
-        result.text = prompt_to_text(prompt_messages)
+        local text, text_err = prompt_to_text(prompt_messages)
+        if text_err then return nil, text_err end
+        result.text = text
     end
     if format ~= "text" then
         result.messages = prompt_messages

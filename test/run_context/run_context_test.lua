@@ -452,6 +452,29 @@ local function define_tests()
             test.eq(result.range.to_id, test_data.assistant_message_id)
         end)
 
+        test.it("keeps tool identity, arguments and outcomes in checkpoint prompt text", function()
+            local tool_id = uuid.v7()
+            local call_id = "lookup-call"
+            local _, create_err = message_repo.create(tool_id, test_data.session_id, "function",
+                '{"query":"current delivery"}', {
+                    function_name = "LookupDelivery", call_id = call_id,
+                    status = "success", result = "delivery arrives Friday"
+                })
+            test.is_nil(create_err)
+            local result, err = open_binding():get_prompt({
+                host = { kind = "session", session_id = test_data.session_id },
+                selector = { mode = "range", from_id = test_data.assistant_message_id, to_id = tool_id },
+                format = "both", cache_markers = false
+            })
+            local _, delete_err = message_repo.delete(tool_id)
+            test.is_nil(delete_err)
+            test.is_nil(err)
+            test.contains(result.text, "LookupDelivery")
+            test.contains(result.text, "current delivery")
+            test.contains(result.text, call_id)
+            test.contains(result.text, "delivery arrives Friday")
+        end)
+
         test.it("applies selector max_chars to prompt slices", function()
             local result, err = open_binding():get_prompt({
                 host = { kind = "session", session_id = test_data.session_id },
