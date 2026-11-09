@@ -505,7 +505,8 @@ local function define_tests()
                     if line:find(call.result, 1, true) then
                         found = true
                         test.contains(line, "id=" .. call.call_id)
-                        test.is_nil(line:find("id=" .. other.call_id, 1, true))
+                        local foreign = line:find("id=" .. other.call_id, 1, true)
+                        test.is_nil(foreign)
                     end
                 end
                 test.eq(found, true)
