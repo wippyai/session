@@ -12,9 +12,9 @@
     "package.json"
   ],
   "dependencies": {
-    "@wippy-fe/theme": "^0.0.67",
-    "@wippy-fe/webcomponent-core": "^0.0.67",
-    "@wippy-fe/webcomponent-vue": "^0.0.67",
+    "@wippy-fe/theme": "^0.0.68",
+    "@wippy-fe/webcomponent-core": "^0.0.68",
+    "@wippy-fe/webcomponent-vue": "^0.0.68",
     "primevue": "^4.3.3"
   },
   "devDependencies": {
@@ -23,9 +23,9 @@
     "@typescript-eslint/parser": "^7.0.0",
     "@vitejs/plugin-vue": "^5.0.0",
     "@vue/test-utils": "^2.5.1",
-    "@wippy-fe/proxy": "^0.0.67",
-    "@wippy-fe/shared": "^0.0.67",
-    "@wippy-fe/vite-plugin": "^0.0.67",
+    "@wippy-fe/proxy": "^0.0.68",
+    "@wippy-fe/shared": "^0.0.68",
+    "@wippy-fe/vite-plugin": "^0.0.68",
     "autoprefixer": "^10.6.2",
     "cross-env": "^7.0.3",
     "eslint": "^8.57.0",
@@ -44,7 +44,7 @@
   },
   "peerDependencies": {
     "@iconify/vue": "^5.0.0",
-    "@wippy-fe/proxy": "^0.0.67",
+    "@wippy-fe/proxy": "^0.0.68",
     "pinia": "^4.0.0",
     "vue": "^3.5.0"
   },
