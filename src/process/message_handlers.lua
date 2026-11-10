@@ -45,6 +45,7 @@ type SessionContext = {
     set_attention_context: any?,
     model_step_at: number?,
     model_cache_ttl: string?,
+    model_cache_expires_at: number?,
 }
 
 type AttentionToolContext = {
@@ -660,28 +661,52 @@ local function model_route(model: any): table?
     return type(route) == "table" and route or nil
 end
 
+local function expiring_prompt_cache(agent: any): table?
+    local options = agent and type(agent.agent_options) == "table" and agent.agent_options.prompt_cache or nil
+    if type(options) == "table" and options.drop_expired_thinking == true then return options end
+    return nil
+end
+
 local function prompt_cache_expired(ctx: SessionContext, agent: any, idle_seconds: number): boolean
+    local options = expiring_prompt_cache(agent)
+    if not options then return false end
     if idle_seconds <= CACHE_LIFETIME_SECONDS["5m"] + CACHE_EXPIRY_MARGIN_SECONDS then return false end
-    local options = type(agent.agent_options) == "table" and agent.agent_options.prompt_cache or nil
-    if type(options) ~= "table" then options = {} end
-    local enabled, ttl = options.drop_expired_thinking, options.ttl
-    if type(enabled) ~= "boolean" or ttl == nil then
+    local ttl = options.ttl
+    if ttl == nil then
         local route = model_route(agent.model)
-        if route then
-            if type(enabled) ~= "boolean" then enabled = route.drop_expired_thinking end
-            if ttl == nil and type(route.options) == "table" then ttl = route.options.cache_ttl end
-        end
+        if route and type(route.options) == "table" then ttl = route.options.cache_ttl end
     end
-    if enabled ~= true then return false end
     local lifetime = CACHE_LIFETIME_SECONDS[ttl == nil and "5m" or ttl]
     if not lifetime then return false end
     local written = ctx.model_cache_ttl or stored_meta(ctx, "model_cache_ttl")
-    if written ~= nil then
-        local written_lifetime = CACHE_LIFETIME_SECONDS[written]
-        if not written_lifetime then return false end
-        lifetime = math.max(lifetime, written_lifetime)
-    end
+    if written ~= nil and not CACHE_LIFETIME_SECONDS[written] then return false end
+    local expires_at = ctx.model_cache_expires_at or stored_meta(ctx, "model_cache_expires_at")
+    if expires_at and time.now():unix() <= expires_at + CACHE_EXPIRY_MARGIN_SECONDS then return false end
     return idle_seconds > lifetime + CACHE_EXPIRY_MARGIN_SECONDS
+end
+
+local function remember_cache_activity(ctx: SessionContext, tokens: any)
+    local now = time.now():unix()
+    local ttl = ctx.model_cache_ttl or stored_meta(ctx, "model_cache_ttl")
+    local expires_at = ctx.model_cache_expires_at or stored_meta(ctx, "model_cache_expires_at")
+    local written = longest_cache_ttl(tokens)
+    local read = type(tokens) == "table" and (tokens.cache_read_tokens or tokens.cache_read_input_tokens) or nil
+    local cache_read = type(read) == "number" and read > 0
+    local lifetime = ttl and CACHE_LIFETIME_SECONDS[ttl] or nil
+    if lifetime and expires_at and expires_at <= now and not cache_read then
+        ttl, lifetime = nil, nil
+    end
+    if cache_read and lifetime then
+        expires_at = math.max(expires_at or 0, now + lifetime)
+    end
+    if written then
+        local written_lifetime = CACHE_LIFETIME_SECONDS[written]
+        if not written_lifetime or not ttl or (lifetime and written_lifetime > lifetime) then ttl = written end
+        if written_lifetime then expires_at = math.max(expires_at or 0, now + written_lifetime) end
+    end
+    ctx.model_step_at = now
+    ctx.model_cache_ttl = ttl
+    ctx.model_cache_expires_at = expires_at
 end
 
 local CONTROL_TABLE_FIELDS = { "artifacts", "context", "memory", "config" }
@@ -931,9 +956,13 @@ function message_handlers.finish_turn(ctx)
         interaction = ctx.interaction,
     }
     local interaction = input_policy.snapshot(ctx, candidate, candidate.current_agent)
-    local ok, err = ctx.writer:update_meta({ status = target_status,
-        meta = { interaction = interaction, model_step_at = ctx.model_step_at,
-            model_cache_ttl = ctx.model_cache_ttl } })
+    local meta = { interaction = interaction }
+    if expiring_prompt_cache(candidate.current_agent) then
+        meta.model_step_at = ctx.model_step_at
+        meta.model_cache_ttl = ctx.model_cache_ttl
+        meta.model_cache_expires_at = ctx.model_cache_expires_at
+    end
+    local ok, err = ctx.writer:update_meta({ status = target_status, meta = meta })
     if not ok then
         return nil, err or "Failed to persist turn completion"
     end
@@ -1684,8 +1713,9 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local result, exec_err, exec_details = agent:step(builder, runtime_options)
-    ctx.model_step_at = time.now():unix()
-    ctx.model_cache_ttl = longest_cache_ttl(type(result) == "table" and result.tokens or nil) or ctx.model_cache_ttl
+    if expiring_prompt_cache(agent) then
+        remember_cache_activity(ctx, type(result) == "table" and result.tokens or nil)
+    end
     local memory_recall_error = type(result) == "table" and result.memory_recall_error or nil
     if exec_err or type(result) ~= "table" then
         local error_code = consts.ERROR_CODES.AGENT_ERROR

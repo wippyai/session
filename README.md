@@ -330,22 +330,32 @@ refresh the dependency lock from the published packages.
   its anchor row in history, but that row's earlier generation remains stale.
   The current tool round always keeps its blocks.
 - **Expired thinking.** Opt in with
-  `agent_options.prompt_cache.drop_expired_thinking = true` on the agent, or
-  with `drop_expired_thinking: true` on the first route of the model card
-  (`providers[1]`); a boolean on the agent wins over the card. When a user
+  `agent_options.prompt_cache.drop_expired_thinking = true` on the agent or a
+  trait. A model route cannot enable this feature. With the option unset or
+  false, the session performs no extra model resolution and writes no cache
+  tracking metadata. When a user
   message opens a turn after the session has been idle for longer than the
   prompt cache lifetime, the session stops replaying the thinking blocks of the
-  turns before that message. The provider cache has expired by then, so no
-  cached prefix is lost, and the history written to the cache again is smaller
-  by those blocks. The lifetime is `agent_options.prompt_cache.ttl` of the agent
-  that takes the turn, else `options.cache_ttl` of that card route, else `5m`;
-  `5m` and `1h` are known. When the provider reports the lifetime of its cache
-  writes (`tokens.cache_write_by_ttl`), the longer of the two applies, and an
-  unknown reported lifetime expires nothing. One minute is added. The idle time
+  completed turns before that message. Stored blocks remain unchanged; only
+  their projection into later requests changes. The estimated lifetime is
+  `agent_options.prompt_cache.ttl` of the agent that takes the turn, else
+  `options.cache_ttl` of the first model-card route (`providers[1]`), else `5m`;
+  `5m` and `1h` are known. The route is resolved only for an opted-in agent
+  without an explicit TTL, once the shortest supported lifetime has passed.
+  Cache writes (`tokens.cache_write_by_ttl`) extend the latest outstanding
+  expiry time; a shorter later write never shortens it. A cache read refreshes
+  the longest outstanding lifetime conservatively because read usage does not
+  identify the lifetime of the prefix it reads. An unknown reported lifetime
+  expires nothing. One minute is added to each expiry estimate. The idle time
   is measured from the last stored message or from the last model step,
-  whichever is later. The session keeps the time of that step and the reported
-  lifetime, and stores them in `meta.model_step_at` and `meta.model_cache_ttl`
-  when a turn ends, so a restarted process reads them back. The session marks
+  whichever is later. Both the configured idle lifetime and outstanding cache
+  expiry must pass. The session stores the last step time, reported lifetime
+  and latest expiry in `meta.model_step_at`, `meta.model_cache_ttl` and
+  `meta.model_cache_expires_at` when a turn ends, so a restarted process reads
+  them back. An estimate that expires too early can discard a warm prefix,
+  increase token cost and latency, and remove reasoning context the model
+  could otherwise use. An estimate that expires too late retains larger
+  prompts longer. The session marks
   the opening message with `metadata.expires_thinking` before the first request
   of the turn, and the prompt builder leaves the blocks of every assistant row
   before the newest such message out of the prompt, so every later request sends
