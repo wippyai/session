@@ -175,6 +175,7 @@ entries:
     modules:
       - uuid
       - json
+      - time
     imports:
       checkpoint: wippy.session.funcs:checkpoint
       command_bus: wippy.session.process:command_bus

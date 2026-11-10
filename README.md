@@ -329,6 +329,37 @@ refresh the dependency lock from the published packages.
   Rows without the generation field count as stale. An inclusive checkpoint keeps
   its anchor row in history, but that row's earlier generation remains stale.
   The current tool round always keeps its blocks.
+- **Expired thinking.** Opt in with
+  `agent_options.prompt_cache.drop_expired_thinking = true` on the agent, or
+  with `drop_expired_thinking: true` on the first route of the model card
+  (`providers[1]`); a boolean on the agent wins over the card. When a user
+  message opens a turn after the session has been idle for longer than the
+  prompt cache lifetime, the session stops replaying the thinking blocks of the
+  turns before that message. The provider cache has expired by then, so no
+  cached prefix is lost, and the history written to the cache again is smaller
+  by those blocks. The lifetime is `agent_options.prompt_cache.ttl` of the agent
+  that takes the turn, else `options.cache_ttl` of that card route, else `5m`;
+  `5m` and `1h` are known. When the provider reports the lifetime of its cache
+  writes (`tokens.cache_write_by_ttl`), the longer of the two applies, and an
+  unknown reported lifetime expires nothing. One minute is added. The idle time
+  is measured from the last stored message or from the last model step,
+  whichever is later. The session keeps the time of that step and the reported
+  lifetime, and stores them in `meta.model_step_at` and `meta.model_cache_ttl`
+  when a turn ends, so a restarted process reads them back. The session marks
+  the opening message with `metadata.expires_thinking` before the first request
+  of the turn, and the prompt builder leaves the blocks of every assistant row
+  before the newest such message out of the prompt, so every later request sends
+  the same history. Blocks leave only from the start of the history and never
+  return, also after the option is turned off. A turn that follows without such
+  a pause keeps replaying earlier blocks, and so does an agent without the
+  option. A mark takes effect only when its message has text and the turn before
+  it ended with an answer that has text. After a tool round with no such answer
+  the message continues that round for the provider, which must keep its blocks,
+  and a message without text can later render as nothing and join the turns
+  around it; in both cases the blocks leave at the next marked message that
+  qualifies. Other values of `ttl`, an unreadable timestamp and a turn that no
+  admitted user message opened leave the history as it is. Only drivers that
+  replay `thinking_blocks` (Claude and Bedrock) are affected.
 - **Lifecycle notes.** Messages from `activate` and `before_step` are sent as
   positional notes after the history and stored once, where they were first sent:
   developer messages as developer rows and system messages as system rows, each
