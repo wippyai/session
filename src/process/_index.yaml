@@ -144,13 +144,13 @@ entries:
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
       prompt_builder: wippy.session:prompt_builder
-      input_metadata: wippy.session:input_metadata
       message_order: wippy.session.persist:message_order
       tool_caller: wippy.agent.tools:caller
       lifecycle_controller: wippy.agent:lifecycle_controller
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      llm: wippy.llm:llm
       input_policy: wippy.session.process:input_policy
       control_handlers: wippy.session.process:control_handlers
       session_handlers: wippy.session.process:session_handlers

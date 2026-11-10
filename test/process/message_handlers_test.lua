@@ -10,7 +10,10 @@ local control_handlers = require("control_handlers")
 local output = require("output")
 local uuid = require("uuid")
 local json = require("json")
+local time = require("time")
 local google_mapper = require("google_mapper")
+local claude_mapper = require("claude_mapper")
+local bedrock_mapper = require("bedrock_mapper")
 local checkpoint = require("checkpoint")
 local llm = require("llm")
 local reader = require("reader")
@@ -4330,6 +4333,658 @@ local function define_tests()
                 positional = true })), "the note follows the user message in the first request")
             test.contains(first[#first - 1], "Pack the document.")
             assert_prefix(first, provider_view(requests[2]))
+        end)
+
+        describe("expired thinking", function()
+            local EXPIRES = { prompt_cache = { drop_expired_thinking = true } }
+            local resolve_model = message_handlers._resolve_model
+            after_each(function() message_handlers._resolve_model = resolve_model end)
+
+            local function written(ttl: string): table
+                return { prompt_tokens = 10, completion_tokens = 2, cache_write_by_ttl = { [ttl] = 100 } }
+            end
+
+            local function stamp(seconds_ago: number): string
+                return time.unix(time.now():unix() - seconds_ago, 0):utc():format(time.RFC3339NANO)
+            end
+
+            local function conversation(agent_options: table?, last_date: any): (any, {any}, {any}, any)
+                local requests = {}
+                local agent = fake_agent(nil)
+                agent.agent_options = agent_options or {}
+                agent.tool_rounds = 0
+                agent.step = function(self, builder, options)
+                    local _, err = builder:drop_stale_thinking(function(message)
+                        return options.thinking_is_current(message, "fp")
+                    end)
+                    assert(not err, err)
+                    local view = {}
+                    for _, message in ipairs(builder:get_messages()) do
+                        if message.role ~= "cache_marker" then
+                            local blocks = type(message.metadata) == "table" and message.metadata.thinking_blocks or nil
+                            view[#view + 1] = json.encode({ role = message.role, content = message.content,
+                                call = message.function_call, thinking = blocks and blocks[1].signature or nil })
+                        end
+                    end
+                    if self.inspect_prompt then self.inspect_prompt(builder:get_messages()) end
+                    requests[#requests + 1] = view
+                    local thinking = {{ type = "thinking", thinking = "", signature = "step-" .. #requests }}
+                    if self.tool_rounds > 0 then
+                        self.tool_rounds = self.tool_rounds - 1
+                        return tool_response({ prefix_fingerprint = "fp", tokens = self.tokens,
+                            metadata = { thinking_blocks = thinking } })
+                    end
+                    return { result = "Answer " .. #requests .. ".", prefix_fingerprint = "fp", tokens = self.tokens,
+                        metadata = { thinking_blocks = thinking } }
+                end
+                local ctx, captured = mock_ctx(agent, { max_turn_iterations = 0, max_repeated_tool_calls = 0 })
+                local history = {
+                    { message_id = "msg-earlier", type = consts.MSG_TYPE.USER, data = "Earlier request.",
+                        metadata = {}, date = stamp(7200) },
+                    { message_id = "answer-earlier", type = consts.MSG_TYPE.ASSISTANT, data = "Earlier answer.",
+                        date = last_date, metadata = { prefix_fingerprint = "fp", generation_checkpoint_id = "",
+                            thinking_blocks = {{ type = "thinking", thinking = "", signature = "earlier" }} } },
+                }
+                local add_message = ctx.writer.add_message
+                ctx.writer.add_message = function(self, msg_type, content, metadata)
+                    local id, err = add_message(self, msg_type, content, metadata)
+                    history[#history + 1] = { message_id = id, type = msg_type, data = content,
+                        metadata = captured.stored[#captured.stored].metadata, date = stamp(0) }
+                    return id, err
+                end
+                ctx.writer.admit_message = function(_self, msg_type, content, metadata)
+                    local id = "msg-user-" .. tostring(#history + 1)
+                    history[#history + 1] = { message_id = id, type = msg_type, data = content,
+                        metadata = metadata, date = stamp(0) }
+                    return id, nil, false
+                end
+                ctx.writer.update_message_meta = function(_self, id, meta)
+                    for _, row in ipairs(history) do
+                        if row.message_id == id then
+                            for key, value in pairs(meta) do row.metadata[key] = value end
+                            return true
+                        end
+                    end
+                    return nil, "message not found"
+                end
+                local query = {}
+                function query:from_checkpoint() return self end
+                function query:after(_message_id) return self end
+                function query:count() return #history, nil end
+                function query:all() return history, nil end
+                function query:last(_limit)
+                    return { all = function() return { history[#history] }, nil end }
+                end
+                ctx.reader.messages = function() return query end
+                ctx.upstream.message_received = function() end
+                return ctx, history, requests, agent
+            end
+
+            local function send(ctx: any, text: string): any
+                local accepted, err = message_handlers.handle_message(ctx, { data = { text = text }, request_id = "req-" .. text })
+                assert(not err, err)
+                local _, step_err = message_handlers.agent_step(ctx, accepted.next_ops[1])
+                assert(not step_err, step_err)
+                return accepted.next_ops[1]
+            end
+
+            local function row_of(history: {any}, id: string): any
+                for _, row in ipairs(history) do
+                    if row.message_id == id then return row end
+                end
+                return nil
+            end
+
+            local function pause(ctx: any, history: {any}, seconds: number)
+                history[#history].date = stamp(seconds)
+                ctx.model_step_at = time.now():unix() - seconds
+                if ctx.model_cache_expires_at then ctx.model_cache_expires_at = ctx.model_cache_expires_at - seconds end
+            end
+
+            local function thinking_sent(view: {string}): string
+                local signatures = {}
+                for _, entry in ipairs(view) do
+                    local signature = json.decode(entry).thinking
+                    if signature then signatures[#signatures + 1] = signature end
+                end
+                return table.concat(signatures, ",")
+            end
+
+            it("stops replaying earlier thinking on a turn that starts after the cache lifetime", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(400))
+
+                local op = send(ctx, "next")
+
+                test.is_true(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[1]), "")
+                test.is_nil(ctx.turn_state.idle_seconds)
+            end)
+
+            it("extends the first request of that turn on its later steps", function()
+                local ctx, _, requests, agent = conversation(EXPIRES, stamp(400))
+                agent.tool_rounds = 1
+
+                local op = send(ctx, "next")
+                local _, err = message_handlers.agent_continue(ctx, { message_id = op.message_id, request_id = op.request_id })
+
+                test.is_nil(err)
+                test.eq(thinking_sent(requests[2]), "step-1")
+                assert_prefix(requests[1], requests[2])
+            end)
+
+            it("keeps earlier thinking while the cache is alive", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(240))
+
+                local op = send(ctx, "next")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[1]), "earlier")
+            end)
+
+            it("keeps earlier thinking unless the agent opts in", function()
+                for _, options in ipairs({ {}, { prompt_cache = { ttl = "5m" } },
+                    { prompt_cache = { drop_expired_thinking = "yes" } } }) do
+                    local ctx, history, requests = conversation(options, stamp(7200))
+
+                    local op = send(ctx, "next")
+
+                    test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                    test.eq(thinking_sent(requests[1]), "earlier")
+                end
+            end)
+
+            it("measures the idle time against the configured cache lifetime", function()
+                local hour = { prompt_cache = { ttl = "1h", drop_expired_thinking = true } }
+                for _, case in ipairs({
+                    { options = hour, idle = 3000, sent = "earlier" },
+                    { options = hour, idle = 3630, sent = "earlier" },
+                    { options = hour, idle = 3700, sent = "" },
+                    { options = { prompt_cache = { ttl = "5m", drop_expired_thinking = true } }, idle = 330, sent = "earlier" },
+                    { options = { prompt_cache = { ttl = "5m", drop_expired_thinking = true } }, idle = 400, sent = "" },
+                    { options = { prompt_cache = { ttl = "2h", drop_expired_thinking = true } }, idle = 86400, sent = "earlier" },
+                    { options = { prompt_cache = { ttl = 3600, drop_expired_thinking = true } }, idle = 86400, sent = "earlier" },
+                }) do
+                    local ctx, _, requests = conversation(case.options, stamp(case.idle))
+
+                    send(ctx, "next")
+
+                    test.eq(thinking_sent(requests[1]), case.sent,
+                        "idle " .. tostring(case.idle) .. " under ttl " .. tostring(case.options.prompt_cache.ttl))
+                end
+            end)
+
+            it("reads stored dates in every shape and ignores unreadable ones", function()
+                for _, case in ipairs({
+                    { date = time.now():unix() - 7200, sent = "" },
+                    { date = "2020-01-01T00:00:00Z", sent = "" },
+                    { date = "2020-01-01T00:00:00.123456789+02:00", sent = "" },
+                    { date = "yesterday", sent = "earlier" },
+                    { date = "", sent = "earlier" },
+                    { date = false, sent = "earlier" },
+                    { date = {}, sent = "earlier" },
+                }) do
+                    local ctx, _, requests = conversation(EXPIRES, case.date)
+
+                    send(ctx, "next")
+
+                    test.eq(thinking_sent(requests[1]), case.sent, "date " .. tostring(case.date))
+                end
+            end)
+
+            it("keeps earlier thinking when the last message has no date", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(7200))
+                history[#history].date = nil
+
+                send(ctx, "next")
+
+                test.eq(thinking_sent(requests[1]), "earlier")
+            end)
+
+            it("keeps earlier thinking when the mark cannot be stored", function()
+                local ctx, _, requests = conversation(EXPIRES, stamp(7200))
+                ctx.writer.update_message_meta = function() return nil, "storage unavailable" end
+
+                send(ctx, "next")
+
+                test.eq(thinking_sent(requests[1]), "earlier")
+            end)
+
+            it("never brings expired thinking back", function()
+                local ctx, history, requests, agent = conversation(EXPIRES, stamp(7200))
+
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                agent.agent_options = {}
+                send(ctx, "second")
+
+                test.eq(thinking_sent(requests[#requests]), "step-1", "the turn after the mark keeps its own blocks")
+                local marks = 0
+                for _, row in ipairs(history) do
+                    if row.metadata.expires_thinking then marks = marks + 1 end
+                end
+                test.eq(marks, 1)
+            end)
+
+            it("moves forward with each turn that starts after the cache lifetime", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(7200))
+
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                pause(ctx, history, 7200)
+                send(ctx, "second")
+
+                test.eq(thinking_sent(requests[#requests]), "")
+            end)
+
+            it("keeps the blocks of a turn that follows without a pause", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(7200))
+
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                local op = send(ctx, "second")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[#requests]), "step-1")
+            end)
+
+            it("keeps the tool round that an interrupted turn left behind", function()
+                local ctx, history, requests, agent = conversation(EXPIRES, stamp(7200))
+                agent.tool_rounds = 1
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                pause(ctx, history, 7200)
+                agent.tool_rounds = 1
+
+                local op = send(ctx, "second")
+                local _, err = message_handlers.agent_continue(ctx, { message_id = op.message_id, request_id = op.request_id })
+
+                test.is_nil(err)
+                test.is_true(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[2]), "step-1")
+                test.eq(thinking_sent(requests[3]), "step-1,step-2")
+                assert_prefix(requests[2], requests[3])
+            end)
+
+            it("preserves Claude and Bedrock thinking through a tool loop across an idle gap", function()
+                for _, mapper in ipairs({ claude_mapper, bedrock_mapper }) do
+                    local ctx, history, _, agent = conversation(EXPIRES, stamp(7200))
+                    local signatures = {}
+                    agent.inspect_prompt = function(messages)
+                        local sent = {}
+                        for _, message in ipairs(mapper.map_messages(messages).messages) do
+                            for _, part in ipairs(message.content) do
+                                local reasoning = part.reasoningContent and part.reasoningContent.reasoningText
+                                if part.type == "thinking" then sent[#sent + 1] = part.signature
+                                elseif reasoning then sent[#sent + 1] = reasoning.signature end
+                            end
+                        end
+                        signatures[#signatures + 1] = table.concat(sent, ",")
+                    end
+                    agent.tool_rounds = 2
+                    local op = send(ctx, "next")
+                    pause(ctx, history, 7200)
+                    test.is_nil(select(2, message_handlers.agent_continue(ctx,
+                        { message_id = op.message_id, request_id = op.request_id })))
+                    pause(ctx, history, 7200)
+                    test.is_nil(select(2, message_handlers.agent_continue(ctx,
+                        { message_id = op.message_id, request_id = op.request_id })))
+                    test.eq(signatures[1], "", "only completed earlier turns expire")
+                    test.eq(signatures[2], "step-1")
+                    test.eq(signatures[3], "step-1,step-2")
+                end
+            end)
+
+            it("counts a step that stored no message as activity", function()
+                local ctx, history, requests, agent = conversation(EXPIRES, stamp(30))
+                local step = agent.step
+                agent.step = function(...)
+                    step(...)
+                    return { stopped = true, result = "" }
+                end
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                agent.step = step
+                for _, row in ipairs(history) do row.date = stamp(7200) end
+
+                local op = send(ctx, "second")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[#requests]), "earlier")
+            end)
+
+            it("counts a step that stored no message after the process has restarted", function()
+                local hour = { prompt_cache = { ttl = "1h", drop_expired_thinking = true } }
+                for _, case in ipairs({ { since_step = 3100, marked = nil, sent = "earlier,step-1" },
+                    { since_step = 3700, marked = true, sent = "earlier,step-1" } }) do
+                    local ctx, history, requests, agent = conversation(hour, stamp(30))
+                    local meta = {}
+                    ctx.writer.update_meta = function(_self, updates)
+                        for key, value in pairs(updates.meta or {}) do meta[key] = value end
+                        return true
+                    end
+                    ctx.reader.state = function() return { title = "t", meta = meta, config = {} } end
+                    agent.tool_rounds = 1
+                    local op = send(ctx, "first")
+                    local step = agent.step
+                    agent.step = function(...)
+                        step(...)
+                        return { result = "" }
+                    end
+                    test.is_nil(select(2, message_handlers.agent_continue(ctx,
+                        { message_id = op.message_id, request_id = op.request_id })))
+                    test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                    agent.step = step
+                    test.eq(type(meta.model_step_at), "number", "the turn end stores the time of its last model step")
+
+                    for _, row in ipairs(history) do row.date = stamp(3700) end
+                    meta.model_step_at = time.now():unix() - case.since_step
+                    ctx.model_step_at = nil
+                    local second = send(ctx, "second")
+
+                    test.eq(row_of(history, second.message_id).metadata.expires_thinking, case.marked)
+                    test.eq(thinking_sent(requests[#requests]), case.sent)
+                end
+            end)
+
+            it("measures from the stored messages once the process has restarted", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(30))
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                for _, row in ipairs(history) do row.date = stamp(7200) end
+                ctx.model_step_at = nil
+
+                local op = send(ctx, "second")
+
+                test.is_true(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[#requests]), "")
+            end)
+
+            it("waits for the lifetime the provider reported for its cache writes", function()
+                for _, case in ipairs({ { idle = 400, marked = nil, sent = "earlier,step-1" },
+                    { idle = 3700, marked = true, sent = "" } }) do
+                    local ctx, history, requests, agent = conversation(EXPIRES, stamp(30))
+                    agent.tokens = written("1h")
+                    send(ctx, "first")
+                    test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                    pause(ctx, history, case.idle)
+
+                    local op = send(ctx, "second")
+
+                    test.eq(row_of(history, op.message_id).metadata.expires_thinking, case.marked)
+                    test.eq(thinking_sent(requests[#requests]), case.sent)
+                end
+            end)
+
+            it("preserves the latest expiry when a later cache write is shorter", function()
+                local ctx, history, requests, agent = conversation(EXPIRES, stamp(30))
+                agent.tokens = written("1h")
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                local expiry = ctx.model_cache_expires_at
+                test.eq(type(expiry), "number")
+                agent.tokens = written("5m")
+                send(ctx, "second")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                test.eq(ctx.model_cache_expires_at, expiry)
+                pause(ctx, history, 400)
+
+                local op = send(ctx, "third")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[#requests]), "earlier,step-1,step-2")
+            end)
+
+            it("refreshes the outstanding lifetime on a cache read", function()
+                local ctx, history, _, agent = conversation(EXPIRES, stamp(30))
+                agent.tokens = written("1h")
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                pause(ctx, history, 3000)
+                agent.tokens = written("5m")
+                agent.tokens.cache_read_tokens = 100
+                send(ctx, "second")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                test.is_true(ctx.model_cache_expires_at >= time.now():unix() + 3600)
+                pause(ctx, history, 700)
+
+                local op = send(ctx, "third")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+            end)
+
+            for _, case in ipairs({ { label = "unset", options = {} },
+                { label = "false", options = { prompt_cache = { drop_expired_thinking = false } } } }) do
+                it("keeps metadata and resolver work identical when the option is " .. case.label, function()
+                    local asked = 0
+                    message_handlers._resolve_model = function()
+                        asked = asked + 1
+                        return { providers = { { drop_expired_thinking = true, options = { cache_ttl = "1h" } } } }
+                    end
+                    local ctx, _, _, agent = conversation(case.options, stamp(7200))
+                    local meta: {[string]: any} = { preserved = "untouched" }
+                    ctx.reader.state = function() return { title = "t", meta = meta, config = {} } end
+                    ctx.writer.update_meta = function(_self, update)
+                        for key, value in pairs(update.meta or {}) do meta[key] = value end
+                        return true
+                    end
+                    agent.tokens = written("1h")
+                    send(ctx, "next")
+                    test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                    test.eq(asked, 0)
+                    local keys = {}
+                    for key in pairs(meta) do keys[#keys + 1] = key end
+                    table.sort(keys)
+                    test.eq(table.concat(keys, ","), "interaction,preserved,tokens")
+                    test.eq(meta.preserved, "untouched")
+                    test.eq(meta.interaction, ctx.interaction)
+                    test.eq(meta.tokens.prompt_tokens, 10)
+                    test.eq(meta.tokens.completion_tokens, 2)
+                    local token_fields = 0
+                    for _ in pairs(meta.tokens) do token_fields = token_fields + 1 end
+                    test.eq(token_fields, 2)
+                    test.is_nil(ctx.model_step_at)
+                    test.is_nil(ctx.model_cache_ttl)
+                    test.is_nil(ctx.model_cache_expires_at)
+                end)
+            end
+
+            it("refreshes the remembered lifetime on a read after its estimated expiry", function()
+                local ctx, history, _, agent = conversation(EXPIRES, stamp(30))
+                agent.tokens = written("1h")
+                agent.tool_rounds = 1
+                local op = send(ctx, "first")
+                pause(ctx, history, 3700)
+                agent.tokens = written("5m")
+                agent.tokens.cache_read_tokens = 100
+
+                test.is_nil(select(2, message_handlers.agent_continue(ctx,
+                    { message_id = op.message_id, request_id = op.request_id })))
+
+                test.eq(ctx.model_cache_ttl, "1h")
+                test.is_true(ctx.model_cache_expires_at >= time.now():unix() + 3600)
+            end)
+
+            it("stops tracking writes when an opted-in agent disables the feature", function()
+                local ctx, _, _, agent = conversation(EXPIRES, stamp(30))
+                local meta = {}
+                local tracking_writes = 0
+                ctx.reader.state = function() return { title = "t", meta = meta, config = {} } end
+                ctx.writer.update_meta = function(_self, update)
+                    if update.meta and update.meta.model_step_at then tracking_writes = tracking_writes + 1 end
+                    for key, value in pairs(update.meta or {}) do meta[key] = value end
+                    return true
+                end
+                agent.tokens = written("1h")
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                test.eq(tracking_writes, 1)
+                local saved = json.encode({ meta.model_step_at, meta.model_cache_ttl, meta.model_cache_expires_at })
+                for _, options in ipairs({ {}, { prompt_cache = { drop_expired_thinking = false } } }) do
+                    agent.agent_options = options
+                    send(ctx, "disabled")
+                    test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                    test.eq(tracking_writes, 1)
+                    test.eq(json.encode({ meta.model_step_at, meta.model_cache_ttl, meta.model_cache_expires_at }), saved)
+                end
+            end)
+
+            it("keeps the reported lifetime while later steps report none", function()
+                local ctx, history, requests, agent = conversation(EXPIRES, stamp(30))
+                agent.tokens = written("1h")
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                agent.tokens = { prompt_tokens = 10, completion_tokens = 2 }
+                send(ctx, "second")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                pause(ctx, history, 400)
+
+                local op = send(ctx, "third")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[#requests]), "earlier,step-1,step-2")
+            end)
+
+            it("keeps earlier thinking when the provider reports a lifetime it does not know", function()
+                local ctx, history, requests, agent = conversation(EXPIRES, stamp(30))
+                agent.tokens = written("30m")
+                send(ctx, "first")
+                test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                pause(ctx, history, 86400)
+
+                local op = send(ctx, "second")
+
+                test.is_nil(row_of(history, op.message_id).metadata.expires_thinking)
+                test.eq(thinking_sent(requests[#requests]), "earlier,step-1")
+            end)
+
+            it("reads the reported lifetime back after the process has restarted", function()
+                for _, case in ipairs({ { idle = 400, marked = nil }, { idle = 3700, marked = true } }) do
+                    local ctx, history, _, agent = conversation(EXPIRES, stamp(30))
+                    local meta = {}
+                    ctx.writer.update_meta = function(_self, updates)
+                        for key, value in pairs(updates.meta or {}) do meta[key] = value end
+                        return true
+                    end
+                    ctx.reader.state = function() return { title = "t", meta = meta, config = {} } end
+                    agent.tokens = written("1h")
+                    send(ctx, "first")
+                    test.is_nil(select(2, message_handlers.finish_turn(ctx)))
+                    test.eq(meta.model_cache_ttl, "1h", "the turn end stores the lifetime of its cache writes")
+
+                    for _, row in ipairs(history) do row.date = stamp(case.idle) end
+                    meta.model_step_at = time.now():unix() - case.idle
+                    meta.model_cache_expires_at = meta.model_cache_expires_at - case.idle
+                    ctx.model_step_at, ctx.model_cache_ttl, ctx.model_cache_expires_at = nil, nil, nil
+                    local op = send(ctx, "second")
+
+                    test.eq(row_of(history, op.message_id).metadata.expires_thinking, case.marked)
+                end
+            end)
+
+            it("takes the lifetime from the model card only after agent opt-in", function()
+                local asked = {}
+                message_handlers._resolve_model = function(model)
+                    asked[#asked + 1] = model
+                    return { providers = { { drop_expired_thinking = true, options = { cache_ttl = "1h" } } } }
+                end
+                for _, case in ipairs({ { idle = 400, sent = "earlier" }, { idle = 3700, sent = "" } }) do
+                    local ctx, _, requests = conversation(EXPIRES, stamp(case.idle))
+
+                    send(ctx, "next")
+
+                    test.eq(thinking_sent(requests[1]), case.sent, "idle " .. tostring(case.idle))
+                end
+                test.eq(asked[#asked], "model:test")
+            end)
+
+            it("requires agent opt-in and lets its lifetime override the model card", function()
+                local asked = 0
+                message_handlers._resolve_model = function()
+                    asked = asked + 1
+                    return { providers = { { drop_expired_thinking = true, options = { cache_ttl = "1h" } } } }
+                end
+                for _, case in ipairs({
+                    { options = { prompt_cache = { drop_expired_thinking = false } }, idle = 86400, sent = "earlier" },
+                    { options = { prompt_cache = { ttl = "5m" } }, idle = 400, sent = "earlier" },
+                    { options = { prompt_cache = { ttl = "5m", drop_expired_thinking = true } }, idle = 400, sent = "" },
+                    { options = { prompt_cache = { ttl = "2h" } }, idle = 86400, sent = "earlier" },
+                }) do
+                    local ctx, _, requests = conversation(case.options, stamp(case.idle))
+
+                    send(ctx, "next")
+
+                    test.eq(thinking_sent(requests[1]), case.sent)
+                end
+                test.eq(asked, 0)
+            end)
+
+            it("reads the model card only from its first route", function()
+                message_handlers._resolve_model = function()
+                    return { providers = { { options = { cache_ttl = "1h" } }, { options = { cache_ttl = "5m" } } } }
+                end
+                local ctx, _, requests = conversation(EXPIRES, stamp(400))
+
+                send(ctx, "next")
+
+                test.eq(thinking_sent(requests[1]), "earlier")
+            end)
+
+            it("keeps earlier thinking when the model card cannot be read", function()
+                for _, resolve in ipairs({
+                    function() error("registry unavailable") end,
+                    function() return nil, "not found" end,
+                    function() return "card" end,
+                    function() return { providers = "none" } end,
+                    function() return { providers = { "route" } } end,
+                    function() return { providers = { { drop_expired_thinking = "yes" } } } end,
+                }) do
+                    message_handlers._resolve_model = resolve
+                    local ctx, _, requests = conversation({}, stamp(86400))
+
+                    send(ctx, "next")
+
+                    test.eq(thinking_sent(requests[1]), "earlier")
+                end
+            end)
+
+            it("does not read the model card while the shortest lifetime has not passed", function()
+                local asked = 0
+                message_handlers._resolve_model = function()
+                    asked = asked + 1
+                    return nil
+                end
+                local ctx = conversation(EXPIRES, stamp(300))
+
+                send(ctx, "next")
+
+                test.eq(asked, 0)
+            end)
+
+            it("does not carry the idle time of one message over to another", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(7200))
+                local accepted = assert(message_handlers.handle_message(ctx, { data = { text = "next" }, request_id = "req-next" }))
+                history[#history + 1] = { message_id = "msg-other", type = consts.MSG_TYPE.USER, data = "Other.",
+                    metadata = {}, date = stamp(0) }
+
+                local _, err = message_handlers.agent_step(ctx, { message_id = "msg-other", request_id = "req-other", from_user = true })
+
+                test.is_nil(err)
+                test.is_nil(row_of(history, accepted.message_id).metadata.expires_thinking)
+                test.is_nil(row_of(history, "msg-other").metadata.expires_thinking)
+                test.eq(thinking_sent(requests[1]), "earlier")
+            end)
+
+            it("leaves a step that no admitted message opened alone", function()
+                local ctx, history, requests = conversation(EXPIRES, stamp(7200))
+                history[#history + 1] = { message_id = "msg-user", type = consts.MSG_TYPE.USER, data = "Next.",
+                    metadata = {}, date = stamp(0) }
+
+                local _, err = user_step(ctx)
+
+                test.is_nil(err)
+                test.is_nil(row_of(history, "msg-user").metadata.expires_thinking)
+                test.eq(thinking_sent(requests[1]), "earlier")
+            end)
         end)
 
         describe("turn note gates", function()

@@ -175,6 +175,7 @@ entries:
     modules:
       - uuid
       - json
+      - time
     imports:
       checkpoint: wippy.session.funcs:checkpoint
       command_bus: wippy.session.process:command_bus
@@ -183,6 +184,8 @@ entries:
       llm: wippy.llm:llm
       message_handlers: wippy.session.process:message_handlers
       output: wippy.llm:output
+      claude_mapper: wippy.llm.claude:mapper
+      bedrock_mapper: wippy.llm.bedrock:mapper
       google_mapper: wippy.llm.google:mapper
       reader: wippy.session.persist:reader
       session: wippy.session.process:session

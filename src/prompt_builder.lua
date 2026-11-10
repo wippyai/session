@@ -323,6 +323,29 @@ end
 prompt_builder._authorize_visual = authorize_visual_via_contract
 prompt_builder._resolve_visual = resolve_visual_via_contract
 
+local function has_text(value: any): boolean
+    return type(value) == "string" and value:find("%S") ~= nil
+end
+
+local function thinking_expiry_index(messages: {any}): number?
+    local boundary: number? = nil
+    local answered = true
+    for index, msg in ipairs(messages) do
+        local metadata = type(msg.metadata) == "table" and msg.metadata or {}
+        if msg.type == consts.MSG_TYPE.FUNCTION or msg.type == consts.MSG_TYPE.PRIVATE_FUNCTION
+            or msg.type == consts.MSG_TYPE.DELEGATION then
+            if tostring(metadata.function_name) ~= "" and metadata.status then answered = false end
+        elseif msg.type == consts.MSG_TYPE.ASSISTANT then
+            if has_text(msg.data) then answered = true end
+        -- A message that follows tool results continues that round, whose blocks providers require.
+        elseif msg.type == consts.MSG_TYPE.USER and type(metadata.input) ~= "table"
+            and metadata.expires_thinking == true and answered and has_text(msg.data) then
+            boundary = index
+        end
+    end
+    return boundary
+end
+
 function prompt_builder.build(messages, contexts, session_meta, options, checkpoint_prefix)
     if not messages then
         return nil, "Messages are required"
@@ -392,6 +415,11 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
         end
     end
 
+    local thinking_expired: {[any]: boolean} = {}
+    for index = 1, (thinking_expiry_index(messages) or 1) - 1 do
+        thinking_expired[messages[index]] = true
+    end
+
     -- A stored row renders as itself on every request. The builder merges adjacent
     -- messages of one role and drivers hoist unpositioned developer messages into
     -- the top-level instructions; either would edit what an earlier request sent.
@@ -402,9 +430,10 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
         return copy
     end
 
-    -- A row stored blank renders as nothing; providers reject empty text blocks.
-    local function has_text(value: any): boolean
-        return type(value) == "string" and value:find("%S") ~= nil
+    local function replayed(msg: any, metadata: table?): table
+        local copy = in_place(metadata)
+        if thinking_expired[msg] then copy.thinking_blocks = nil end
+        return copy
     end
 
     -- The calls of one response follow its assistant row, and each row holds a call
@@ -518,9 +547,9 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
             -- Always use add_assistant and let prompt library handle thinking blocks internally.
             -- A row with no text stays only for the thinking blocks of its tool round.
             if has_text(msg.data) then
-                builder:add_assistant(msg.data :: string, in_place(metadata))
+                builder:add_assistant(msg.data :: string, replayed(msg, metadata))
             elseif type(metadata.thinking_blocks) == "table" and #metadata.thinking_blocks > 0 then
-                builder:add_assistant("", in_place(metadata))
+                builder:add_assistant("", replayed(msg, metadata))
             end
         elseif msg.type == consts.MSG_TYPE.DEVELOPER then
             if has_text(msg.data) then
