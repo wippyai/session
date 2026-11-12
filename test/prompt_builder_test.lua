@@ -333,6 +333,217 @@ local function define_tests()
             end)
         end)
 
+        describe("expired thinking", function()
+            local function block(signature)
+                return {{ type = "thinking", thinking = "", signature = signature }}
+            end
+
+            local function user(id, metadata)
+                return { message_id = "user-" .. id, type = consts.MSG_TYPE.USER, data = "Question " .. id .. ".",
+                    metadata = metadata or {} }
+            end
+
+            local function round(id)
+                return { message_id = "round-" .. id, type = consts.MSG_TYPE.ASSISTANT, data = "",
+                    metadata = { thinking_blocks = block("round-" .. id) } }
+            end
+
+            local function call(id)
+                return { message_id = "call-" .. id, type = consts.MSG_TYPE.FUNCTION, data = json.encode({ tag = id }),
+                    metadata = { function_name = "search", call_id = "c" .. id,
+                        status = consts.FUNC_STATUS.SUCCESS, result = "result " .. id } }
+            end
+
+            local function answer(id)
+                return { message_id = "answer-" .. id, type = consts.MSG_TYPE.ASSISTANT, data = "Answer " .. id .. ".",
+                    metadata = { thinking_blocks = block("answer-" .. id) } }
+            end
+
+            local function turn(id, user_metadata)
+                return { user(id, user_metadata), round(id), call(id), answer(id) }
+            end
+
+            local function interrupted(id, user_metadata)
+                return { user(id, user_metadata), round(id), call(id) }
+            end
+
+            local function history(...)
+                local rows = {}
+                for _, part in ipairs({ ... }) do
+                    for _, row in ipairs(part) do rows[#rows + 1] = row end
+                end
+                return rows
+            end
+
+            local EXPIRES = { expires_thinking = true }
+
+            local function build(rows)
+                return assert(prompt_builder.build(rows, {}, {}, {
+                    include_contexts = false, include_files = false, cache_markers = false,
+                }))
+            end
+
+            local function replayed(rows)
+                local signatures = {}
+                for _, message in ipairs(build(rows):get_messages()) do
+                    local blocks = type(message.metadata) == "table" and message.metadata.thinking_blocks or nil
+                    if blocks then signatures[#signatures + 1] = blocks[1].signature end
+                end
+                return table.concat(signatures, ",")
+            end
+
+            local function wire(mapped)
+                local parts = {}
+                for _, message in ipairs(mapped.messages) do
+                    for _, part in ipairs(message.content) do
+                        local reasoning = part.reasoningContent and part.reasoningContent.reasoningText
+                        if part.type == "thinking" then parts[#parts + 1] = "T:" .. part.signature
+                        elseif reasoning then parts[#parts + 1] = "T:" .. reasoning.signature
+                        elseif part.type == "tool_use" or part.toolUse then parts[#parts + 1] = "U"
+                        elseif part.type == "tool_result" or part.toolResult then parts[#parts + 1] = "R"
+                        elseif part.text then parts[#parts + 1] = "X" end
+                    end
+                end
+                return table.concat(parts, " ")
+            end
+
+            -- What a provider receives once the agent has applied the library's own removal.
+            local function sent(rows, mapper)
+                local builder = build(rows)
+                local _, err = builder:drop_stale_thinking(function() return true end)
+                test.is_nil(err)
+                return wire(mapper.map_messages(builder:get_messages()))
+            end
+
+            local function assert_extends(rows, later_rows)
+                local extended = history(rows, later_rows)
+                for _, mapper in ipairs({ claude_mapper, bedrock_mapper }) do
+                    local first, second = sent(rows, mapper), sent(extended, mapper)
+                    test.eq(second:sub(1, #first + 1), first .. " ", "a later step must extend the first request of the turn")
+                end
+            end
+
+            it("stops replaying the blocks of the turns before the one that expires thinking", function()
+                test.eq(replayed(history(turn("1"), turn("2", EXPIRES), turn("3"))),
+                    "round-2,answer-2,round-3,answer-3")
+            end)
+
+            it("follows the newest turn that expires thinking", function()
+                test.eq(replayed(history(turn("1", EXPIRES), turn("2"), turn("3", EXPIRES), turn("4"))),
+                    "round-3,answer-3,round-4,answer-4")
+            end)
+
+            it("replays every block without such a turn", function()
+                local rows = history(turn("1"), turn("2"))
+                test.eq(replayed(rows), "round-1,answer-1,round-2,answer-2")
+                for _, mapper in ipairs({ claude_mapper, bedrock_mapper }) do
+                    test.eq(sent(rows, mapper), "X T:round-1 U R T:answer-1 X X T:round-2 U R T:answer-2 X")
+                end
+            end)
+
+            it("ignores the mark on steering input", function()
+                local rows = history(turn("1"), turn("2"), {
+                    { message_id = "steer", type = consts.MSG_TYPE.USER, data = "Also this.",
+                        metadata = { expires_thinking = true, input = { state = "applied", after_message_id = "answer-2" } } },
+                })
+                test.eq(replayed(rows), "round-1,answer-1,round-2,answer-2")
+            end)
+
+            it("leaves stored rows as they are", function()
+                local rows = history(turn("1"), turn("2", EXPIRES))
+                build(rows)
+                test.eq(rows[2].metadata.thinking_blocks[1].signature, "round-1")
+                test.eq(rows[4].metadata.thinking_blocks[1].signature, "answer-1")
+            end)
+
+            it("sends Claude and Bedrock the history without the expired blocks", function()
+                local rows = history(turn("1"), turn("2", EXPIRES), turn("3"))
+                for _, mapper in ipairs({ claude_mapper, bedrock_mapper }) do
+                    test.eq(sent(rows, mapper), "X U R X X T:round-2 U R T:answer-2 X X T:round-3 U R T:answer-3 X")
+                end
+            end)
+
+            it("extends the first request of the expiring turn on its later steps", function()
+                local rows = history(turn("1"), turn("2"), { user("3", EXPIRES) })
+                test.eq(sent(rows, claude_mapper), "X U R X X U R X X")
+                assert_extends(rows, { round("3"), call("3") })
+                assert_extends(history(rows, { round("3"), call("3") }), { answer("3"), user("4"), round("4"), call("4") })
+            end)
+
+            it("keeps every block when the turn before ended inside a tool round", function()
+                local rows = history(turn("1"), interrupted("2"), { user("3", EXPIRES) })
+                test.eq(replayed(rows), "round-1,answer-1,round-2")
+                assert_extends(rows, { round("3"), call("3") })
+            end)
+
+            it("keeps an earlier expiry when a later one follows a tool round", function()
+                local rows = history(turn("1"), turn("2", EXPIRES), interrupted("3"), { user("4", EXPIRES) })
+                test.eq(replayed(rows), "round-2,answer-2,round-3")
+                assert_extends(rows, { round("4"), call("4") })
+            end)
+
+            it("sees the tool round behind notices, steering and rows that render nothing", function()
+                local rows = history(turn("1"), interrupted("2"), {
+                    { message_id = "failed", type = consts.MSG_TYPE.SYSTEM, data = "Turn failed.", metadata = {} },
+                    { message_id = "note", type = consts.MSG_TYPE.DEVELOPER, data = "The preceding turn is interrupted.",
+                        metadata = { preserve_position = true } },
+                    { message_id = "steer", type = consts.MSG_TYPE.USER, data = "Also this.",
+                        metadata = { input = { state = "applied", after_message_id = "call-2" } } },
+                    { message_id = "blank", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = {} },
+                }, { user("3", EXPIRES) })
+                test.eq(replayed(rows), "round-1,answer-1,round-2")
+                assert_extends(rows, { round("3"), call("3") })
+            end)
+
+            it("treats a call without its assistant row as a tool round", function()
+                local rows = history(turn("1"), { user("2"), round("2"),
+                    { message_id = "note", type = consts.MSG_TYPE.DEVELOPER, data = "Note.", metadata = {} },
+                    call("2") }, { user("3", EXPIRES) })
+                test.eq(replayed(rows), "round-1,answer-1,round-2")
+                assert_extends(rows, { round("3"), call("3") })
+            end)
+
+            it("stays stable when a user row between two assistant rows renders nothing", function()
+                local silent = { message_id = "user-2", type = consts.MSG_TYPE.USER, data = "", metadata = {} }
+                local rows = history(turn("1"), { silent, round("2"), call("2") }, { user("3", EXPIRES) })
+                test.eq(replayed(rows), "round-1,answer-1,round-2")
+                assert_extends(rows, { round("3"), call("3") })
+            end)
+
+            it("ignores the mark on a message without text", function()
+                local silent = { message_id = "user-2", type = consts.MSG_TYPE.USER, data = " ", metadata = EXPIRES }
+                local rows = history(turn("1"), { silent, round("2"), call("2") })
+                test.eq(replayed(rows), "round-1,answer-1,round-2")
+                for _, mapper in ipairs({ claude_mapper, bedrock_mapper }) do
+                    test.eq(sent(rows, mapper), "X T:round-1 U R T:answer-1 X T:round-2 U R",
+                        "the answer and the round share a turn that still opens with its thinking")
+                end
+                assert_extends(rows, { user("3"), round("3"), call("3") })
+            end)
+
+            it("treats a turn that ended on thinking without text as a tool round", function()
+                local terminal = { message_id = "terminal-2", type = consts.MSG_TYPE.ASSISTANT, data = "",
+                    metadata = { thinking_blocks = block("terminal-2") } }
+                local rows = history(turn("1"), interrupted("2"), { terminal, user("3", EXPIRES) })
+                test.eq(replayed(rows), "round-1,answer-1,round-2,terminal-2")
+                for _, mapper in ipairs({ claude_mapper, bedrock_mapper }) do
+                    test.eq(sent(rows, mapper), "X T:round-1 U R T:answer-1 X X T:round-2 U R X",
+                        "the round the message continues keeps its thinking")
+                end
+                assert_extends(rows, { round("3"), call("3") })
+            end)
+
+            it("builds a blank assistant row whose metadata was not decoded", function()
+                local builder, err = prompt_builder.build({
+                    user("1"),
+                    { message_id = "broken", type = consts.MSG_TYPE.ASSISTANT, data = "", metadata = "{" },
+                    user("2", EXPIRES),
+                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+                test.is_nil(err)
+                test.eq(#builder:get_messages(), 2)
+            end)
+        end)
+
         describe("stored row rendering", function()
             local function build(rows)
                 local builder, err = prompt_builder.build(rows, {}, {}, {
