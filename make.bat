@@ -1,4 +1,4 @@
 @echo off
 setlocal
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0make.ps1" %*
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0make.ps1" %*
 exit /b %ERRORLEVEL%

@@ -103,6 +103,8 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
         reader = {
             messages = function(_self) return empty_query end,
             list_pending_inputs = function(_self) return {}, nil end,
+            list_pending_answers = function(_self) return {}, nil end,
+            get_message = function(_self) return nil, "Message not found in session" end,
             contexts = function(_self) return empty_query end,
             state = function(_self) return { title = "t", meta = {}, config = {} } end,
             get_full_context = function(_self) return {}, nil end,
@@ -1519,6 +1521,31 @@ local function define_tests()
             local answers = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
             test.is_nil(answers[1].metadata.presentation)
             test.eq(answers[2].metadata.presentation.artifact_refs[1].artifact_id, "artifact-1")
+        end)
+    end)
+
+    describe("truncated reply delivery", function()
+        it("announces a truncated reply with its stored date", function()
+            local agent = fake_agent(nil)
+            agent.step = function() return { result = "Partial answer", truncated = true, tool_calls = {} } end
+            local ctx = mock_ctx(agent)
+            local stored_date = "2026-09-30T20:27:19.007000000+02:00"
+            local add_response = ctx.writer.add_response
+            ctx.writer.add_response = function(self, ...)
+                local id, ids, add_err = add_response(self, ...)
+                return id, ids, add_err, stored_date
+            end
+            local content = nil
+            ctx.upstream.send_message_update = function(_self, _id, kind, payload)
+                if kind == consts.UPSTREAM_TYPES.CONTENT then content = payload end
+            end
+
+            local _, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.not_nil(content)
+            test.eq((content :: any).content, "Partial answer")
+            test.eq((content :: any).date, stored_date)
         end)
     end)
 
@@ -3163,6 +3190,60 @@ local function define_tests()
             test.eq(#seen, 2)
             test.eq(seen[1].context_id, ctx.session_id)
             test.eq(seen[2].context_id, ctx.session_id)
+        end)
+    end)
+
+    describe("stop during the model call", function()
+        -- Stop cancels a model call in flight, but a call can finish first.
+        -- Its reply is then stored and sent to the clients at once, so the
+        -- chat does not gain it silently on a later reload.
+        it("stores the reply and announces it live, and runs nothing after it", function()
+            local ctx, captured = mock_ctx(fake_agent(nil))
+            -- The reply row's date, taken when it was stored, long after the
+            -- step started.
+            local stored_date = "2026-09-30T20:27:19.007000000+02:00"
+            local add_response = ctx.writer.add_response
+            ctx.writer.add_response = function(self, ...)
+                local id, ids, err = add_response(self, ...)
+                return id, ids, err, stored_date
+            end
+            local updates = {} :: {any}
+            ctx.upstream.send_message_update = function(_self, id, kind, payload)
+                table.insert(updates, { id = id, kind = kind, payload = payload })
+            end
+            ctx.upstream.response_beginning = function(_self, response_id)
+                table.insert(updates, { id = response_id, kind = consts.UPSTREAM_TYPES.RESPONSE_STARTED })
+            end
+            ctx.agent_ctx.load_agent = function()
+                return {
+                    id = "agent:documents", model = "model:test", tool_wrappers = {}, agent_options = {},
+                    step = function()
+                        -- The user pressed Stop while the model was answering.
+                        ctx.stop_requested = true
+                        return { result = "Done working.", tool_calls = {} }
+                    end,
+                }
+            end
+
+            local result, err = user_step(ctx)
+
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(#result.next_ops, 0)
+            local replies = stored_of_type(captured, consts.MSG_TYPE.ASSISTANT)
+            test.eq(#replies, 1)
+            test.eq(replies[1].content, "Done working.")
+            local started, content = nil, nil
+            for _, update in ipairs(updates) do
+                if update.kind == consts.UPSTREAM_TYPES.RESPONSE_STARTED then started = update end
+                if update.kind == consts.UPSTREAM_TYPES.CONTENT then content = update end
+            end
+            test.not_nil(started)
+            test.not_nil(content, "the stored reply is also sent live")
+            test.eq((content :: any).id, (started :: any).id, "on the response the clients are showing")
+            test.eq((content :: any).payload.content, "Done working.")
+            test.eq((content :: any).payload.date, stored_date,
+                "the stored row's date, not the time the response started")
         end)
     end)
 

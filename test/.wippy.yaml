@@ -4,4 +4,4 @@ override:
   "wippy.session.process:context_cleanup.service:lifecycle.auto_start": false
 workspace:
   replacements:
-    wippy/session: ..
+    wippy/session: ../src
