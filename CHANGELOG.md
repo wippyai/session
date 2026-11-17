@@ -9,6 +9,19 @@
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
 
+## [0.7.0](https://github.com/wippyai/session/compare/v0.6.21...v0.7.0) (2026-11-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **forms:** reading another user's artifact returns 404 instead of 403. An enforced Stop stores the session as idle instead of failed, and a session stored as running with no live process reads as idle. Sessions finish 10 seconds after the last client leaves. The forms UI needs the ui_server requirement (default app:gateway).
+* **forms:** reading another user's artifact returns 404 instead of 403. An enforced Stop stores the session as idle instead of failed, and a session stored as running with no live process reads as idle. Sessions finish 10 seconds after the last client leaves. The forms UI needs the ui_server requirement (default app:gateway).
+
+### Features
+
+* **forms:** Session Forms V1 (ask_user trait and form state API) ([fc2cf42](https://github.com/wippyai/session/commit/fc2cf425c7db12d3887f0600c247ae761efd4695))
+* **forms:** Session Forms V1 (ask_user trait and form state API) ([90c223c](https://github.com/wippyai/session/commit/90c223caffd0f1e1b006081120682eb036cdfcbc))
+
 ## [0.6.21](https://github.com/wippyai/session/compare/v0.6.20...v0.6.21) (2026-11-10)
 
 
