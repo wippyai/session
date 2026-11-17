@@ -1,0 +1,515 @@
+@import "@wippy-fe/theme/theme-config.css";
+@import 'tailwind.css';
+
+/* Long labels and descriptions wrap instead of overflowing the chat column. */
+:host,
+[data-wippy-theme-root] {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/*
+ * Question card styling API: `--wippy-form-*` tokens, `part`s, `w-form__*`
+ * classes and host attributes, documented in the README. Each value is read
+ * through a private `--_x` variable whose fallback is a semantic `--p-*` theme
+ * variable, so a facade retint or a dark-mode flip restyles the card without
+ * edits here. The card background is the theme's content background. The
+ * border is transparent.
+ */
+:host {
+  --_font: var(--wippy-form-font, inherit);
+  --_size: var(--wippy-form-font-size, 14px);
+  --_q-size: var(--wippy-form-question-size, 15px);
+  --_q-weight: var(--wippy-form-question-weight, 600);
+  --_small: var(--wippy-form-small-size, 13px);
+  --_surface: var(--wippy-form-surface, var(--p-content-background));
+  --_border: var(--wippy-form-border, transparent);
+  --_text: var(--wippy-form-text, var(--p-text-color));
+  --_muted: var(--wippy-form-text-muted, var(--p-text-muted-color));
+  /* Muted text on an answer row. The row is darker than the card, and the hovered row darker still, so the plain muted colour falls under 4.5:1 on them in the default light theme (about 4.0, and 3.3 on hover). The theme's hover-muted text colour reaches 4.5:1 on both rows in the light and the dark theme. */
+  --_muted-row: var(--wippy-form-text-muted-on-row, var(--p-text-hover-muted-color));
+  --_row: var(--wippy-form-row, color-mix(in srgb, var(--p-content-hover-background) 40%, var(--p-content-border-color)));
+  --_row-hover: var(--wippy-form-row-hover, color-mix(in srgb, var(--p-content-border-color) 90%, var(--p-text-color)));
+  --_accent: var(--wippy-form-accent, var(--p-primary-color));
+  --_accent-soft: var(--wippy-form-accent-soft, var(--p-highlight-background));
+  --_on-accent: var(--wippy-form-accent-contrast, var(--p-primary-contrast-color));
+  /* Border of a review row with a missing required answer. The hex is a fallback for host-less dev, where no theme is loaded. */
+  --_danger: var(--wippy-form-danger, var(--p-danger-500, #b91c1c));
+  --_focus: var(--wippy-form-focus, var(--_accent));
+  --_key-border: var(--wippy-form-key-border, color-mix(in srgb, var(--p-text-muted-color) 55%, var(--p-content-border-color)));
+  --_code-bg: var(--wippy-form-code-bg, color-mix(in srgb, var(--p-text-color) 8%, transparent));
+  --_radius: var(--wippy-form-radius, 12px);
+  --_row-radius: var(--wippy-form-row-radius, 8px);
+  --_pad: var(--wippy-form-padding, 10px);
+  --_row-py: var(--wippy-form-row-padding-y, 6px);
+  --_row-px: var(--wippy-form-row-padding-x, 10px);
+  --_gap: var(--wippy-form-gap, 4px);
+  --_key: var(--wippy-form-key-size, 20px);
+
+  /* Content-sized, with no height: 100%, so the card does not stretch in a taller container. */
+  display: block;
+  container-type: inline-size;
+}
+
+.w-form {
+  font-family: var(--_font);
+  font-size: var(--_size);
+  line-height: 1.4;
+  color: var(--_text);
+  background: var(--_surface);
+  border: 1px solid var(--_border);
+  border-radius: var(--_radius);
+  padding: var(--_pad);
+  outline: none;
+  display: flex;
+  flex-direction: column;
+}
+/* The card root takes focus by script, after a collapse or after Escape in the Other box, so it shows a ring. */
+.w-form:focus-visible {
+  outline: 2px solid var(--_focus);
+  outline-offset: 2px;
+}
+
+.w-form__code {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--_code-bg);
+  padding: 0 0.3em;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Title ---------- */
+.w-form__title {
+  margin: 0 0 6px;
+  font-size: var(--_small);
+  color: var(--_muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.w-form__title svg {
+  width: 14px;
+  height: 14px;
+  color: var(--_accent);
+  flex: none;
+}
+/* The form description sits under the title, in the scale of the field description and hint. */
+.w-form__form-description {
+  margin: 0 0 8px;
+  font-size: var(--_small);
+  color: var(--_muted);
+}
+
+/* ---------- Header: nav / question / actions ---------- */
+.w-form__header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'nav question actions';
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: start;
+}
+.w-form__header--single {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'question actions';
+}
+.w-form__nav {
+  grid-area: nav;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border: 1px solid var(--_border);
+  border-radius: 999px;
+  background: var(--_row);
+}
+/* The Button size comes from its `size="small"` prop, so only the icon colour, which the `text` variant does not set, is set here. */
+.w-form .w-form__prev,
+.w-form .w-form__next {
+  color: var(--_muted-row);
+}
+.w-form .w-form__prev svg,
+.w-form .w-form__next svg {
+  width: 14px;
+  height: 14px;
+}
+.w-form__counter {
+  min-width: 2.8em;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--_accent);
+}
+.w-form__question {
+  grid-area: question;
+  margin: 0;
+  font-size: var(--_q-size);
+  font-weight: var(--_q-weight);
+  line-height: 1.35;
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+}
+:host([collapsed]) .w-form__question {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-form__actions {
+  grid-area: actions;
+  display: flex;
+  gap: 2px;
+}
+.w-form .w-form__collapse {
+  /* Sized by the Button's `size="small"` prop. */
+  color: var(--_muted);
+}
+
+/* ---------- Notice / hint ---------- */
+.w-form__notice {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  font-size: var(--_small);
+  color: var(--_muted-row);
+  background: var(--_row);
+  border-radius: var(--_row-radius);
+  max-width: 72ch;
+}
+.w-form__description,
+.w-form__hint {
+  margin: 4px 0 0;
+  font-size: var(--_small);
+  color: var(--_muted);
+}
+
+/* ---------- Options ---------- */
+.w-form__options {
+  display: grid;
+  gap: var(--_gap);
+  margin-top: 8px;
+}
+.w-form__option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  column-gap: 6px;
+  align-items: center;
+  padding: var(--_row-py) var(--_row-px);
+  background: var(--_row);
+  border: 1px solid transparent;
+  border-radius: var(--_row-radius);
+  cursor: pointer;
+}
+.w-form__option:hover {
+  background: var(--_row-hover);
+}
+.w-form__option:has(.w-form__option-main:focus-visible) {
+  outline: 2px solid var(--_focus);
+  outline-offset: 1px;
+}
+.w-form__option--selected {
+  background: var(--_accent-soft);
+  border-color: var(--_accent);
+}
+.w-form__option--selected:hover {
+  background: color-mix(in srgb, var(--_accent-soft) 85%, var(--_accent));
+}
+.w-form__option--other {
+  grid-template-columns: minmax(0, 1fr) auto;
+  cursor: text;
+}
+.w-form__option-main {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  outline: none;
+}
+.w-form__option-label {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  display: inline-flex;
+  /* `center`, because the checkbox and the check mark have no text baseline to align to. */
+  align-items: center;
+  gap: 7px;
+}
+.w-form__option-description {
+  font-size: var(--_small);
+  color: var(--_muted-row);
+  overflow-wrap: anywhere;
+}
+.w-form__option-mark {
+  display: inline-grid;
+  place-items: center;
+  color: var(--_accent);
+  flex: none;
+}
+/* Sizes only the single-choice check mark. The several-answer mark is a PrimeVue Checkbox, which sizes itself. */
+span.w-form__option-mark {
+  width: 15px;
+  height: 15px;
+}
+.w-form__option-mark svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3;
+}
+.w-form__option-note {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  margin-top: 2px;
+  font-size: var(--_small);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--_muted-row);
+}
+.w-form__option-note svg {
+  width: 12px;
+  height: 12px;
+  position: relative;
+  top: 1px;
+  flex: none;
+}
+.w-form .w-form__note-toggle {
+  /* Sized by the Button's `size="small"` prop. */
+  color: var(--_muted-row);
+  opacity: 0;
+}
+.w-form__option:hover .w-form__note-toggle,
+.w-form__option:focus-within .w-form__note-toggle,
+.w-form__option--has-note .w-form__note-toggle,
+.w-form__option--editing .w-form__note-toggle {
+  opacity: 1;
+}
+.w-form__option--has-note .w-form__note-toggle,
+.w-form__option--editing .w-form__note-toggle {
+  color: var(--_accent);
+}
+@media (hover: none) {
+  /* The same two-class selector as the resting rule above, which a single-class selector would lose to on specificity. Touch devices have no hover to reveal the toggle. */
+  .w-form .w-form__note-toggle {
+    opacity: 1;
+  }
+}
+/*
+ * A fixed-height box that centers the digit on both axes. The font uses
+ * longhands because the `font` shorthand with `var(--_font)`, which can be
+ * `inherit`, is invalid at computed-value time.
+ */
+.w-form__option-key {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--_key);
+  height: var(--_key);
+  padding: 0 4px;
+  font-family: var(--_font);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--_muted-row);
+  border: 1px solid var(--_key-border);
+  border-radius: 5px;
+}
+@supports (text-box: trim-both cap alphabetic) {
+  .w-form__option-key {
+    text-box: trim-both cap alphabetic;
+  }
+}
+.w-form__option--selected .w-form__option-key {
+  background: var(--_accent);
+  border-color: var(--_accent);
+  color: var(--_on-accent);
+}
+
+/* ---------- Composer: the note and Other input ---------- */
+.w-form__composer--note {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+}
+.w-form__note-input,
+.w-form__other-input {
+  /* The theme's inputgroup.css grows only `.p-inputtext` and `.p-inputwrapper` to fill a group, not the `.p-textarea` of a bare Textarea. These two lines make it fill the row and wrap. */
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 10em;
+}
+
+/* ---------- Error / keys / footer ---------- */
+/* Shared by the question error and the length alerts under the note and Other boxes. */
+.w-form__error {
+  margin: 6px 0 0;
+}
+/* No rule here colours error or warning text. The text takes the severity utilities of src/lib/error-text.ts. `--wippy-form-danger` is only the border of a review row with a missing answer. */
+.w-form__keys {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--_muted);
+}
+.w-form__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+.w-form__footer-text {
+  margin: 0 auto 0 0;
+  font-size: var(--_small);
+}
+.w-form__send,
+.w-form__send-all {
+  gap: 6px;
+}
+.w-form__send-all svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------- Review ---------- */
+.w-form__review {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--_gap);
+}
+.w-form__review-edit {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  padding: var(--_row-py) var(--_row-px);
+  background: var(--_row);
+  border: 1px solid transparent;
+  border-radius: var(--_row-radius);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.w-form__review-edit:hover {
+  background: var(--_row-hover);
+}
+.w-form__review-number {
+  grid-row: 1 / span 2;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--_muted-row);
+  font-variant-numeric: tabular-nums;
+  padding-top: 1px;
+}
+.w-form__review-question {
+  font-size: var(--_small);
+  color: var(--_muted-row);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-form__review-answer {
+  font-weight: 500;
+}
+.w-form__review-item--missing .w-form__review-edit {
+  border-color: var(--_danger);
+}
+.w-form__review-item--missing .w-form__review-answer {
+  font-weight: 400;
+}
+.w-form__answer-item {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.w-form__answer-note {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  font-weight: 400;
+  font-size: var(--_small);
+  color: var(--_muted-row);
+  white-space: pre-wrap;
+}
+.w-form__answer-note svg {
+  width: 12px;
+  height: 12px;
+  position: relative;
+  top: 1px;
+  flex: none;
+}
+.w-form__answer-empty,
+.w-form__answer-own {
+  font-weight: 400;
+  color: var(--_muted-row);
+}
+
+/* ---------- Answered summary ---------- */
+.w-form__summary {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.w-form__summary-item {
+  display: grid;
+  gap: 1px;
+}
+.w-form__summary-question {
+  font-size: var(--_small);
+  color: var(--_muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.w-form__summary-answer {
+  margin: 0;
+  font-weight: 500;
+}
+/* The status line takes focus by script after a send. It shows the theme's focus ring (`--p-focus-ring-*`, which `--wippy-form-focus` can recolour), and the ring hugs the text instead of spanning the card. The literal fallbacks are the theme's defaults, for host-less dev. */
+.w-form__status {
+  margin: 10px 0 0;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: var(--_row-radius);
+  font-size: 12px;
+  color: var(--_muted);
+}
+.w-form__status:focus-visible {
+  outline-width: var(--p-focus-ring-width, 1px);
+  outline-style: var(--p-focus-ring-style, solid);
+  outline-color: var(--wippy-form-focus, var(--p-focus-ring-color, var(--_accent)));
+  outline-offset: var(--p-focus-ring-offset, 2px);
+}
+.w-form__card--answered .w-form__title {
+  font-size: var(--_q-size);
+  font-weight: var(--_q-weight);
+  color: var(--_text);
+}
+.w-form__card--answered .w-form__title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--_accent);
+}
+
+@container (max-width: 520px) {
+  .w-form__header:not(.w-form__header--single) {
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: 'nav . actions' 'question question question';
+  }
+  .w-form__keys {
+    display: none;
+  }
+}
+@media (hover: none) {
+  .w-form__keys {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w-form * {
+    transition: none !important;
+  }
+}

@@ -2,6 +2,7 @@ local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
+local session_status = require("session_status")
 
 type GetSessionResponse = {
     success: boolean,
@@ -63,7 +64,8 @@ local function handler()
     local latest_message, _ = message_repo.get_latest(session_id)
     local message_count, _ = message_repo.count_by_session(session_id)
 
-    session.interaction = session.meta and session.meta.interaction
+    -- A turn the runtime stopped reads as idle (session_status).
+    session.status, session.interaction = session_status.effective(session)
     session.current_agent = ""
     session.current_model = ""
 

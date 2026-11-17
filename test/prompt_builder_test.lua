@@ -8,6 +8,8 @@ local google_mapper = require("google_mapper")
 local openai_mapper = require("openai_mapper")
 local bedrock_mapper = require("bedrock_mapper")
 local context_attachments = require("context_attachments")
+local answer_text = require("answer_text")
+local form_meta = require("form_meta")
 
 local function define_tests()
     describe('Required stored Attention v2 prompt projection', function()
@@ -2254,6 +2256,59 @@ local function define_tests()
                     include_files = false, cache_markers = false,
                 })):get_messages()
                 test.eq(built[1].content[1].text, original.data)
+            end)
+
+            -- A real answer row over the excerpt budget: four questions, each
+            -- answered with 2000 characters of the user's own text.
+            local function long_answer_data(other)
+                local fields, answers = {}, {}
+                for index = 1, 4 do
+                    local id = "question_" .. index
+                    fields[index] = { id = id, label = "Question " .. index, options = {} }
+                    answers[id] = { other = other }
+                end
+                return answer_text.build({ artifact_id = "form-1", answers = answers,
+                    definition = { title = "Limits", fields = fields } })
+            end
+
+            local function restored_text(data, metadata)
+                local window = assistant_anchor_window()
+                window[1].metadata.source_id = "original-request"
+                local original = { message_id = "original-request", type = consts.MSG_TYPE.USER,
+                    data = data, metadata = metadata }
+                local built = assert(prompt_builder.from_session(mock_reader(window, "asst-9", original), {
+                    include_files = false, cache_markers = false,
+                })):get_messages()
+                return built[1].content[1].text
+            end
+
+            it("restores a form answer over the excerpt budget byte for byte", function()
+                local other = "It's <fine> & " .. string.rep("界", 662)
+                local data = long_answer_data(other)
+                test.ok(#data > 6000, "the record must exceed the 6000-byte budget")
+
+                local text = restored_text(data, { [form_meta.ANSWER_KEY] = { artifact_id = "form-1" } })
+
+                test.eq(text, data, "a form answer must never be excerpted")
+                local record = text:match("record='(.-)'>")
+                test.not_nil(record)
+                local decoded, decode_err = json.decode(record)
+                test.is_nil(decode_err)
+                test.eq(decoded.form_id, "form-1")
+                for index = 1, 4 do
+                    test.eq(decoded.answers["question_" .. index].answer.other, other)
+                end
+            end)
+
+            it("still excerpts an ordinary request with the same long text", function()
+                local data = long_answer_data(string.rep("x", 2000))
+                test.ok(#data > 6000, "the request must exceed the 6000-byte budget")
+
+                local text = restored_text(data, {})
+
+                test.ok(#text < #data, "an ordinary request must be cut")
+                test.contains(text, "omitted")
+                test.contains(text, "&lt;wippy-form-answers")
             end)
 
             it("preserves Stop feedback and a new request without resurrecting the old task", function()

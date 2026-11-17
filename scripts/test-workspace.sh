@@ -21,7 +21,7 @@ jq -n --arg repository "$repository" --arg workspace "$workspace" --arg framewor
    override: {"wippy.session.process:context_cleanup.service:lifecycle.auto_start": false},
    registry: {dependency_vendor_dir: ($workspace + "/modules/vendor"),
               dependency_lock_path: ($workspace + "/wippy.lock")},
-   workspace: {replacements: ({"wippy/session": $repository} +
+   workspace: {replacements: ({"wippy/session": ($repository + "/src")} +
      if $framework == "" then {} else {
        "wippy/agent": ($framework + "/src/agent/src"),
        "wippy/llm": ($framework + "/src/llm/src"),

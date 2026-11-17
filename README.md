@@ -74,7 +74,8 @@ Accepted steering is pending until the current response and its tool batch
 finish. The next model request includes it after those results in persisted
 message order, within the same turn. Stop prevents the next continuation at
 the operation boundary. Unused steering remains pending after Stop or recovery
-and is included when the user starts another turn.
+and is included when the user starts another turn, ahead of the message that
+starts it. Steering sent after that message follows it.
 
 Manual renames and generated titles persist before notifying the live session.
 Title notifications publish through the existing session owner's inbox using the
@@ -85,8 +86,10 @@ When a checkpoint falls inside a turn, the next agent prompt retains the
 originating user-request text at user authority, followed by the checkpoint
 resume note and subsequent model/tool messages. Restored requests are limited to
 6000 UTF-8 bytes, including an omission marker when needed; excerpts retain both
-ends. The original request and resume note precede retained steering even when
-its original anchor is unavailable. Later corrections take precedence, and
+ends. A form answer is restored whole, because an excerpt would cut its JSON
+record. The form size limits bound it, and a prompt that does not fit the
+model's window fails. The original request and resume note precede retained
+steering even when its original anchor is unavailable. Later corrections take precedence, and
 completed work stays completed. The checkpoint summary covers
 earlier progress and attachments; restoring the request does not reload those
 attachments. A later ordinary user message starts its own turn and prevents
@@ -115,18 +118,53 @@ without `interaction` retain legacy status behavior. Steering metadata uses
 application. The messages endpoint returns `pending_inputs` independently of
 history pagination.
 
+A page reload does not end a turn. The user hub tells the session plugin when
+the user's last client disconnects, and a reload closes the old connection a
+fraction of a second before the new one opens. The plugin therefore waits 10
+seconds after the last client leaves before it finishes the user's sessions,
+and a client that connects again within that time cancels the wait. A running
+turn then ends the way it does without a reload, so it applies the steering
+sent during it and admits the form answers accepted during it. When no client
+returns within 10 seconds, the plugin retires the sessions (see Session
+retirement below): a running turn finishes, applies the steering sent during
+it and admits the form answers accepted during it, and the session exits when
+its accepted work is done. A Stop that arrives meanwhile still ends the turn;
+unused steering then remains pending, and so do the form answers accepted
+during the turn. The next session start admits those answers and starts a turn
+for them. If a client connects again after the 10 seconds while the session
+is still retiring, it takes the retirement back. If the session already exited,
+the plugin starts it again for form answers that are still pending, and
+steering alone starts nothing.
+
+A turn cut off by a runtime stop is settled when the user's session plugin
+starts again: pending tool calls are repaired, the interruption message is
+persisted, and the session is stored idle, with `can_send` true, because a new
+message is how the user continues it.
+Until then, REST responses report such a session the same way.
+
+When a turn does not stop within 10 seconds of a Stop (for example, a model or
+tool call that ignores the cancellation), the session plugin cancels the session
+process, and terminates it if it still runs 10 seconds later. That exit is the
+Stop the user asked for, not a failure. Pending tool calls are repaired, form
+answers sent during the stopped turn are delivered without a new turn, and the
+session is stored idle with `can_send` true. Clients get no error.
+
 On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
 when Wippy is not on PATH. The test target clears only its own test database.
 
 ## Runtime tests and benchmarks
 
 `make test-postgres` checks the
-affected persistence paths and real handoffs against PostgreSQL. Supply a fresh
-disposable database with `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and
-`PGPASSWORD`; the target never drops it. `make test-postgres-full` runs every
-normal suite and leaves opt-in benchmarks to `make bench`. CI uses this full
-gate with PostgreSQL 17. The harness
-supplies the application's user-table contract and runs these checks in UTC.
+affected persistence paths, the forms suites and real handoffs against
+PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
+`PGDATABASE`, `PGUSER`, and `PGPASSWORD`; the target never drops it.
+`make test-postgres-full` runs every normal suite and leaves opt-in benchmarks
+to `make bench`. CI uses this full gate with PostgreSQL 17. The harness
+supplies the application's user-table contract (a trigger registers the users
+that test rows name; the foreign keys stay enforced) and runs these checks in
+UTC. Dates are written in UTC, and message dates are read back at microsecond
+precision, because the PostgreSQL driver returns a timestamp column cut to
+whole seconds.
 
 On Unix, `make install test` runs the suite against the locked dependencies.
 `make test-runtime` exercises
@@ -315,7 +353,7 @@ refresh the dependency lock from the published packages.
   that ends at those gates leaves no note. It is written before the model call, so
   it stays when the provider fails or Stop arrives during the call. A retried turn
   or a reopened session finds the stored row and replays its minute. When a
-  checkpoint removes the request and the excerpt of the request is restored, the
+  checkpoint removes the request and the request is restored, the
   note is restored with it. The prompt builder renders system rows that carry
   `preserve_position` in place; other system rows (turn and agent-change notices)
   stay out of the prompt.
@@ -416,7 +454,7 @@ These history edits change the prefix by design:
   prompt, which also changes the prefix fingerprint. Memory stays there because it
   must survive checkpoints and can be deleted or cleared, which a positional row
   could not do.
-- The restored excerpt of a request, with its turn note, leaves the prompt when the
+- The restored request, with its turn note, leaves the prompt when the
   next user turn starts.
 - A step whose output is discarded (a provider failure, Stop with no text, a
   truncated step with no text, which stores only the truncation notice) discards
@@ -578,6 +616,11 @@ return {
 `_control.artifacts` is a list; one tool call may produce several artifacts. A
 failing tool returns no `_control`.
 
+An entry with an `id` updates that artifact. The update sets `title` and
+`content` when they are given, and it sets only `content_type`, `description`,
+`icon` and `status` in `meta`. Every other `meta` key, such as `display_type`,
+`page_id` and `preview`, is kept.
+
 ### HTTP API
 
 `GET /artifact/{id}` returns metadata for one artifact.
@@ -591,11 +634,14 @@ failing tool returns no `_control`.
 | `title`, `created_at`, `updated_at` | columns |
 | `content_type`, `description`, `icon`, `status` | from `meta` |
 | `page_id`, `is_view_reference`, `params` | `view_ref` only |
-| `content_version` | constant `1`; see limitations |
+| `content_version` | revision of the content; starts at 1 and rises by one each time the content changes |
 
 `GET /artifact/{id}/content` returns raw bytes with `Content-Type` from
 `meta.content_type`, or `text/plain` when absent. A `view_ref` is rendered
 server-side.
+
+Both endpoints answer another user's artifact exactly like a missing one: 404
+with the body `{"success": false, "error": "Artifact not found"}`.
 
 `GET /artifacts?session_id=&limit=&cursor=` returns an actor-scoped catalog,
 metadata only. Pagination is keyset over `(created_at DESC, artifact_id DESC)`.
@@ -616,16 +662,107 @@ Only `session:`-prefixed topics are relayed to clients.
 ### Limitations
 
 - `kind` is stored verbatim from `type` with no enum check.
-- Updating an artifact replaces `meta` wholesale. The update path supplies only
-  `content_type`, `description`, `icon` and `status`, so `display_type`,
-  `page_id` and `preview` do not survive an update.
 - Supplying both `title` and `content` matches the create path first, so an
   update shaped that way produces a second artifact with a new id.
-- `content_version` is constant, so a client caching on it will not refetch
-  updated content. Use `updated_at`.
 - A delegated tool call produces no artifact; the control payload is ignored.
 - SQLite does not cascade artifact deletion with its session. Orphaned rows
-  remain listable, and fetching one returns HTTP 500.
+  remain listable, and fetching one returns HTTP 404.
+
+## Session Forms
+
+Session forms let an agent ask the user structured choice questions with the
+`ask_user` tool and get the answer back as an ordinary user message. A form
+is stored as a `wippy-component-tag-1.0` artifact (see Artifacts above) with
+one extra metadata key, `meta.session_form`; no new SQL table is used.
+
+### Enable
+
+Add the trait to an agent:
+
+```yaml
+traits:
+  - id: wippy.session.forms:ask_user
+```
+
+The agent gets `ask_user` (create a form; ends the turn) and `read_form`
+(read an earlier form's questions, or its answer record, by `form_id`). Every
+agent, with or without the trait, gets a bounded index of the session's forms
+injected into its prompt so it can find a form id without the trait.
+
+### API
+
+`GET` and `POST /artifact/{id}/state` read a form's canonical state and accept
+its answer. Both are served by `wippy.session.forms:state_service` behind the
+HTTP handling in `src/api/artifact_state_access.lua`. A submission
+commits the accepted answer and its user message in one transaction, then
+wakes the owning session process; a missed wake-up is recovered from the
+stored row on the next session start.
+
+V1 supports choice fields only: single selection, multiple selection,
+optional/required, notes on a chosen option, and a free-text "Other" answer.
+
+### Answers and steering
+
+A form answer is not typed input, so the session input policy never steers
+it into a running turn. An answer accepted during a turn stays pending, and
+the running turn cannot read it: the form index and `read_form` report it as
+pending. When the turn ends, the session admits the answer and starts a new
+turn for it. Answers and steered messages keep the order in which the user
+sent them. A step applies steered messages only up to the first pending
+answer, and a message sent before an answer stays ahead of it in the prompt.
+When the user stops a turn, its answers are delivered without starting a new
+turn, and steering sent after them stays pending as after any Stop. This also
+holds when the session plugin has to enforce the Stop. A turn
+that asks a form still ends there; steering sent during that turn starts the
+next turn.
+
+See [Session Forms (framework)](https://docs.wippy.ai/en/framework/session-forms)
+for the full `ask_user` / `read_form` contract, the answer record shape, late
+answers, and how an answer is admitted into the conversation, and
+[Session Forms (frontend)](https://docs.wippy.ai/en/frontend/micro-frontends/session-forms)
+for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
+from the browser side.
+
+## Upgrading to 0.7.0
+
+Session 0.7.0 adds Session Forms. Check these points before you upgrade.
+
+- **New requirement `ui_server`.** The module now serves the `wippy-form` and
+  `wippy-form-answers` bundles from an HTTP server. The default is
+  `app:gateway`. If your HTTP server has another name, the static routes
+  (`/wippy-session-forms` and `/wippy-session-form-answers`) do not work until
+  you set the parameter on the dependency:
+
+  ```yaml
+  - name: dep.wippy.session
+    kind: ns.dependency
+    component: wippy/session
+    parameters:
+      - name: ui_server
+        value: app:your_server
+  ```
+
+- **Web Host 1.0.65 or later.** The form card needs the Host's artifact-state
+  API. An older Host shows the questions disabled and cannot send answers.
+- **Other users' artifacts answer 404, not 403.** `GET /artifact/{id}` and
+  `GET /artifact/{id}/content` answer an artifact that belongs to someone else
+  exactly like a missing one. A client that reads the 403 must read the 404.
+- **Sessions finish 10 seconds after the last client leaves.** The plugin used
+  to finish them as soon as the last client disconnected. A client that
+  connects again within the 10 seconds cancels the wait, so a page reload does
+  not end a turn.
+- **An enforced Stop leaves the session idle.** When a turn does not stop in
+  time and the plugin has to cancel the session process, the session is
+  stored as `idle` (it was `failed`), clients get no error, and Send stays
+  enabled. Form answers accepted during that turn are admitted without
+  starting a new turn.
+- **Steering accepted after a turn's first message stays after it.** A steering
+  row accepted after the row that starts the turn is anchored after that row,
+  so the model reads the two in the order they were accepted. Steering left
+  pending by a stopped or recovered turn still goes ahead of the new message.
+- **A stored `running` status reads as `idle`** while no session process is
+  registered for the session. This is what the API returns for a turn that a
+  crash or a restart cut off. The stored row is not changed.
 
 [wippy-documentation]: https://docs.wippy.ai
 [releases-page]: https://github.com/wippyai/module-session/releases

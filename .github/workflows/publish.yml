@@ -42,5 +42,5 @@ jobs:
           test -n "${WIPPY_TOKEN:-}" || { echo 'WIPPY_TOKEN is required; the Framework companion publisher can publish this release when the token is managed there.' >&2; exit 1; }
           python3 framework/scripts/release_notes.py --line session/CHANGELOG.md "$version" > release-notes.txt
           test -s release-notes.txt
-          "$WIPPY" publish --config session --version "$version" --dry-run
-          "$WIPPY" publish --config session --version "$version" --release-notes "$(cat release-notes.txt)"
+          "$WIPPY" publish --config session/src --version "$version" --dry-run
+          "$WIPPY" publish --config session/src --version "$version" --release-notes "$(cat release-notes.txt)"

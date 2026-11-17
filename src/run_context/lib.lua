@@ -3,6 +3,7 @@ local consts = require("consts")
 local session = require("session")
 local prompt_builder = require("prompt_builder")
 local message_repo = require("message_repo")
+local answer_text = require("answer_text")
 
 local M = {}
 
@@ -163,12 +164,20 @@ local function decode_data(data)
     return data
 end
 
+-- The history event of a stored row, or nil for a form answer the session
+-- has not admitted yet: it is not part of the conversation. A user row is
+-- read the way the prompt reads it (answer_text.model_text).
 local function normalize_event(msg)
+    local raw = msg.data
+    if msg.type == consts.MSG_TYPE.USER then
+        raw = answer_text.model_text(msg)
+        if raw == nil then return nil end
+    end
     return {
         id = msg.message_id,
         role = msg.type,
-        content = decode_data(msg.data),
-        raw_content = msg.data,
+        content = decode_data(raw),
+        raw_content = raw,
         metadata = type(msg.metadata) == "table" and msg.metadata or {},
         created_at = msg.date
     }
@@ -209,7 +218,8 @@ local function history_result(reader, args)
 
     local events = {}
     for _, msg in ipairs(messages or {}) do
-        events[#events + 1] = normalize_event(msg)
+        local event = normalize_event(msg)
+        if event then events[#events + 1] = event end
     end
     local truncated
     events, truncated = clamp_events(events, sel.max_chars)

@@ -2,6 +2,7 @@ local session = require("session")
 local llm = require("llm")
 local prompt = require("prompt")
 local text_clamp = require("text_clamp")
+local answer_text = require("answer_text")
 
 type TitleResult = {
     success: boolean,
@@ -31,7 +32,10 @@ local PROMPTS = {
 -- lifecycle guidance) are context sent to the model, not what it was about.
 local function add_conversation_part(parts: {string}, msg: any)
     if msg.type == "user" then
-        table.insert(parts, "User: " .. (msg.data or ""))
+        -- A form answer the session has not admitted yet is not part of the
+        -- conversation, so the model must not see it.
+        local text = answer_text.model_text(msg)
+        if text then table.insert(parts, "User: " .. text) end
     elseif msg.type == "assistant" and msg.data and msg.data ~= "" then
         local content = text_clamp.head(msg.data, CONFIG.max_assistant_content)
         if #msg.data > CONFIG.max_assistant_content then

@@ -13,7 +13,7 @@ permissions:
 
 env:
   WIPPY_TEST_REQUIRE_ADMISSION: "1"
-  FRAMEWORK_REF: bc903313d0854f96114b3ea9d03d2ee34569cb5d
+  FRAMEWORK_REF: b000b42e07b8259e4f4423b9c2efc56e7d8ccb26
 
 jobs:
   lint:
@@ -48,6 +48,17 @@ jobs:
       - name: Lint
         run: make lint
 
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Lint UI packages
+        run: make lint-ui
+
+      - name: Check UI packaging (dist vs. source, registry metadata vs. package.json)
+        run: make check-ui
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -79,6 +90,14 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Test UI packages
+        run: make test-ui
 
   runtime:
     name: Required runtime handoff
@@ -157,4 +176,5 @@ jobs:
       - name: Verify timestamp persistence outside UTC
         run: |
           make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.persist:utc_timestamp_test
+          make test TEST_TIMEZONE=America/New_York TEST_FILTER=app.process:attention_history_test
           make test-postgres TEST_TIMEZONE=America/New_York POSTGRES_TEST_FILTER=app.persist:utc_timestamp_test

@@ -59,6 +59,7 @@ entries:
       text_clamp: wippy.session:text_clamp
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
+      answer_text: wippy.session.forms:answer_text
       tool_result: wippy.session:tool_result
     method: handle
 
@@ -94,6 +95,7 @@ entries:
     imports:
       prompt: wippy.llm:prompt
       text_clamp: wippy.session:text_clamp
+      answer_text: wippy.session.forms:answer_text
       llm: wippy.llm:llm
       session: wippy.session.persist:reader
     method: handle

@@ -198,6 +198,10 @@ function session_reader:list_pending_inputs()
     return session._message_repo.list_pending_inputs(self.session_id)
 end
 
+function session_reader:list_pending_answers(limit)
+    return session._message_repo.list_pending_answers(self.session_id, limit)
+end
+
 -- The time note stored for the user turn that source_id opened, if any.
 function session_reader:get_turn_note(source_id)
     local rows, err = session._message_repo.list_turn_notes(self.session_id, source_id)
