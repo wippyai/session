@@ -15,12 +15,10 @@
 ### ⚠ BREAKING CHANGES
 
 * **forms:** reading another user's artifact returns 404 instead of 403. An enforced Stop stores the session as idle instead of failed, and a session stored as running with no live process reads as idle. Sessions finish 10 seconds after the last client leaves. The forms UI needs the ui_server requirement (default app:gateway).
-* **forms:** reading another user's artifact returns 404 instead of 403. An enforced Stop stores the session as idle instead of failed, and a session stored as running with no live process reads as idle. Sessions finish 10 seconds after the last client leaves. The forms UI needs the ui_server requirement (default app:gateway).
 
 ### Features
 
 * **forms:** Session Forms V1 (ask_user trait and form state API) ([fc2cf42](https://github.com/wippyai/session/commit/fc2cf425c7db12d3887f0600c247ae761efd4695))
-* **forms:** Session Forms V1 (ask_user trait and form state API) ([90c223c](https://github.com/wippyai/session/commit/90c223caffd0f1e1b006081120682eb036cdfcbc))
 
 ## [0.6.21](https://github.com/wippyai/session/compare/v0.6.20...v0.6.21) (2026-11-10)
 
