@@ -229,6 +229,16 @@ function shownMonth(): string | undefined {
   return document.querySelector('.p-datepicker-select-month')?.textContent?.trim()
 }
 
+/** The selected day of the open calendar, or undefined when it holds no date. */
+function selectedDay(): string | undefined {
+  return document.querySelector('.p-datepicker-day-selected')?.textContent?.trim()
+}
+
+async function closeCalendar(input: HTMLInputElement) {
+  input.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }))
+  await flushPromises()
+}
+
 /** The year in the open calendar's header. */
 function shownYear(): string | undefined {
   return document.querySelector('.p-datepicker-select-year')?.textContent?.trim()
@@ -533,38 +543,144 @@ describe('date field: years before 1000', () => {
     expect(draft()).toBe('2026-10-20')
   })
 
-  // The calendar must show and pick in the year the text says, not in the
-  // century PrimeVue would read a short year into.
-  it('keeps a typed year below 100 through a blur and a calendar pick', async () => {
+  // D53: the calendar covers years 100 to 9999. A date before year 100 is a
+  // valid answer that can be typed, and leaves the calendar without a date.
+  it('keeps a typed year below 100 as typed, with no date in the calendar', async () => {
     const { wrapper, input, draft } = mountField(undefined, [], unbounded)
     await typeKeys(input, '0050-03-04')
     await blur(input)
     expect(input.value).toBe('0050-03-04')
     expect(draft()).toBe('0050-03-04')
     await openCalendar(wrapper)
-    expect(shownMonth()).toBe('March')
-    expect(shownYear()).toBe('50')
-    dayCell('5').click()
-    await flushPromises()
-    expect(draft()).toBe('0050-03-05')
-    expect(input.value).toBe('0050-03-05')
+    expect(selectedDay()).toBeUndefined()
+    expect(Number(shownYear())).toBeGreaterThanOrEqual(100)
   })
 
-  it('shows and picks in a year below 100 handed in from outside, at mount and on a reload', async () => {
-    const { wrapper, input, draft } = mountField('0050-03-04', [], unbounded)
+  it('shows a date from year 100 on handed in from outside, at mount and after a reload', async () => {
+    const { wrapper, input, draft } = mountField('0150-03-04', [], unbounded)
+    expect(input.value).toBe('0150-03-04')
+    await openCalendar(wrapper)
+    expect([shownYear(), shownMonth(), selectedDay()]).toEqual(['150', 'March', '4'])
+    await closeCalendar(input)
+
+    await wrapper.setProps({ modelValue: '0160-07-08' })
+    await flushPromises()
+    expect(input.value).toBe('0160-07-08')
+    await openCalendar(wrapper)
+    expect([shownYear(), shownMonth(), selectedDay()]).toEqual(['160', 'July', '8'])
+    dayCell('9').click()
+    await flushPromises()
+    expect(draft()).toBe('0160-07-09')
+    expect(input.value).toBe('0160-07-09')
+  })
+
+  it('shows a date before year 100 handed in from outside in the box, with no date in the calendar, at mount and after a reload', async () => {
+    const { wrapper, input } = mountField('0050-03-04', [], unbounded)
     expect(input.value).toBe('0050-03-04')
+    await openCalendar(wrapper)
+    expect(selectedDay()).toBeUndefined()
+    await closeCalendar(input)
+
     await wrapper.setProps({ modelValue: '0060-07-08' })
     await flushPromises()
     expect(input.value).toBe('0060-07-08')
     await openCalendar(wrapper)
-    expect(shownMonth()).toBe('July')
-    expect(shownYear()).toBe('60')
-    dayCell('9').click()
-    await flushPromises()
-    expect(draft()).toBe('0060-07-09')
-    expect(input.value).toBe('0060-07-09')
+    expect(selectedDay()).toBeUndefined()
   })
 
+  it('moves the calendar to a pasted loose date the picker reads, and picks in it', async () => {
+    const { wrapper, input, draft } = mountField('2060-01-10', [], unbounded)
+    input.focus()
+    await inputEvent(input, '2050-3-4')
+    await blur(input)
+    expect(input.value).toBe('2050-03-04')
+    expect(draft()).toBe('2050-03-04')
+    await openCalendar(wrapper)
+    expect([shownYear(), shownMonth(), selectedDay()]).toEqual(['2050', 'March', '4'])
+    dayCell('5').click()
+    await flushPromises()
+    expect(draft()).toBe('2050-03-05')
+    expect(input.value).toBe('2050-03-05')
+  })
+
+  // PrimeVue refuses `50-3-4` before it reports anything, so the calendar
+  // must follow the text on its own.
+  it('empties the calendar for a pasted date before year 100 that the picker refuses', async () => {
+    const { wrapper, input, draft } = mountField('2060-01-10', [], unbounded)
+    input.focus()
+    await inputEvent(input, '50-3-4')
+    await blur(input)
+    expect(draft()).toBe('0050-03-04')
+    expect(input.value).toBe('0050-03-04')
+    await openCalendar(wrapper)
+    expect(selectedDay()).toBeUndefined()
+  })
+
+  it('keeps no date in the calendar when a date before year 100 replaces another one', async () => {
+    const { wrapper, input, draft } = mountField('0060-01-10', [], unbounded)
+    input.focus()
+    await inputEvent(input, '50-3-4')
+    await blur(input)
+    expect(draft()).toBe('0050-03-04')
+    expect(input.value).toBe('0050-03-04')
+    await openCalendar(wrapper)
+    expect(selectedDay()).toBeUndefined()
+  })
+
+  it('enables no day when the whole range is before year 100', async () => {
+    const early: DateFormField = { ...unbounded, min: '0050-03-01', max: '0050-03-31' }
+    const { wrapper } = mountField('0050-03-04', [], early)
+    await openCalendar(wrapper)
+    expect(document.querySelector('.p-datepicker-day')).not.toBeNull()
+    expect(enabledDays()).toHaveLength(0)
+  })
+
+  describe('a bounded range from year 100 on', () => {
+    const range: DateFormField = { ...unbounded, min: '0150-03-01', max: '0150-03-31' }
+
+    it('saves the day picked with the mouse', async () => {
+      const { wrapper, input, draft } = mountField('0150-03-04', [], range)
+      await openCalendar(wrapper)
+      expect([shownYear(), shownMonth(), selectedDay()]).toEqual(['150', 'March', '4'])
+      dayCell('5').click()
+      await flushPromises()
+      expect(draft()).toBe('0150-03-05')
+      expect(input.value).toBe('0150-03-05')
+    })
+
+    it('saves the day picked with Enter', async () => {
+      const { wrapper, input, draft } = mountField('0150-03-04', [], range)
+      await openCalendar(wrapper)
+      const cell = dayCell('5')
+      cell.focus()
+      cell.dispatchEvent(new KeyboardEvent('keydown', { code: 'Enter', key: 'Enter', bubbles: true, cancelable: true }))
+      await flushPromises()
+      expect(draft()).toBe('0150-03-05')
+      expect(input.value).toBe('0150-03-05')
+    })
+
+    it('saves the day picked under a max in year 999', async () => {
+      const { wrapper, input, draft } = mountField('0999-05-15', [], { ...unbounded, max: '0999-12-31' })
+      await openCalendar(wrapper)
+      dayCell('20').click()
+      await flushPromises()
+      expect(draft()).toBe('0999-05-20')
+      expect(input.value).toBe('0999-05-20')
+    })
+  })
+
+  // The read-only view removes the picker; leaving it creates a new one,
+  // which writes its own spelling into the box.
+  it.each(['0050-03-04', 'next tuesday', '0999-05-15'])('keeps %s in the box when the field is read-only and editable again', async (text) => {
+    const { wrapper, draft } = mountField(text, [], unbounded)
+    await wrapper.setProps({ readonly: true })
+    await flushPromises()
+    expect(wrapper.find('input').exists()).toBe(false)
+    await wrapper.setProps({ readonly: false })
+    await flushPromises()
+    expect((wrapper.find('input').element as HTMLInputElement).value).toBe(text)
+    expect(draft()).toBe(text)
+  })
   it('shows and picks in a year below 1000 handed in from outside', async () => {
     const { wrapper, input, draft } = mountField('0999-05-15', [], unbounded)
     expect(input.value).toBe('0999-05-15')
