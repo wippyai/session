@@ -199,8 +199,13 @@ describe('the question card with a question `constructor`', () => {
     const optional: ChoiceFormDefinition = { title: 'Build', fields: [{ ...single.fields[0], required: false }, { ...two.fields[1], required: false }] }
     const state = formState({ status: 'idle', definition: optional, data: { later: ['a'] }, submitted_at: '2026-10-01T10:00:00.000Z', delivery: 'complete' })
     const wrapper = mount(QuestionCardSummary, { props: { state }, global: { plugins: [PrimeVuePlugin] } })
+    const items = wrapper.findAll('[part~="summary-item"]')
+    expect(items).toHaveLength(2)
+    const unanswered = items.find(item => item.find('[part~="summary-question"]').text() === 'Build now?')
+    expect(unanswered, 'the row of the question `constructor`').toBeDefined()
+    expect(unanswered?.find('[part~="answer-empty"]').text()).toBe('Skipped')
+    expect(items[1].text()).toContain('Part A')
     expect(wrapper.text()).not.toContain('function')
-    expect(wrapper.text()).toContain('Part A')
   })
 })
 
