@@ -905,6 +905,38 @@ local function define_tests()
             test.eq(unknown[1].code, "unknown_key", "structure is still checked")
         end)
 
+        -- The range rules of a new definition (D32) apply to new definitions
+        -- only: a stored one keeps the ranges it holds, so a later, stricter
+        -- rule never breaks a form that was already asked.
+        it("keeps the ranges of a stored definition as stored", function()
+            local raw = form({
+                { id = "tiny", type = "number", label = "Tiny", min = 1e-7 },
+                { id = "crossed", type = "number", label = "Crossed", min = 5, max = 1 },
+                { id = "long", type = "text", label = "Long", max_length = 9999 },
+                { id = "short", type = "text", label = "Short", min_length = 10, max_length = 5 },
+                { id = "day", type = "date", label = "Day", min = "2024-02-30" },
+                { id = "span", type = "date", label = "Span", min = "2024-12-31", max = "2024-01-01" },
+            })
+            local _, strict_errors = definition.normalize(raw)
+            local found = codes(strict_errors)
+            test.eq(found["fields[0].min"], "invalid_range")
+            test.eq(found["fields[1].min"], "invalid_range")
+            test.eq(found["fields[2].max_length"], "invalid_range")
+            test.eq(found["fields[3].min_length"], "invalid_range")
+            test.eq(found["fields[4].min"], "invalid_range")
+            test.eq(found["fields[5].min"], "invalid_range")
+
+            local stored, errors = definition.normalize(raw, { stored = true })
+            test.is_nil(errors, definition.format_errors(errors))
+            test.eq(stored.fields[1].min, 1e-7)
+            test.eq(stored.fields[2].min, 5)
+            test.eq(stored.fields[2].max, 1)
+            test.eq(stored.fields[3].max_length, 9999)
+            test.eq(stored.fields[4].min_length, 10)
+            test.eq(stored.fields[5].min, "2024-02-30")
+            test.eq(stored.fields[6].max, "2024-01-01")
+        end)
+
         it("checks an answer in the order: type, size, text, control characters, blank, length, pattern", function()
             local def = normalized(form({
                 { id = "code", type = "text", label = "Code", pattern = "[a-z]+", max_length = 10 },
@@ -917,10 +949,12 @@ local function define_tests()
             test.eq(code_of(string.rep("a", 41)), "too_long", "a value longer than any valid one is refused unscanned")
             test.eq(code_of("ab\255"), "invalid_text")
             test.eq(code_of("ab\1"), "invalid_text")
-            test.eq(code_of("abcdefghijk"), "too_long")
+            -- Each value below fails two adjacent rules, so only the order
+            -- decides the code: too long and off the pattern; blank and too long.
+            test.eq(code_of("abcdefghij1"), "too_long")
             test.eq(code_of("ab1"), "pattern_mismatch")
             test.is_nil(code_of("abc"))
-            test.is_nil(code_of("   "), "blank and optional")
+            test.is_nil(code_of(string.rep(" ", 11)), "blank and optional, though longer than max_length")
         end)
 
         it("refuses invalid UTF-8 in an email as an invalid address", function()
@@ -1015,6 +1049,29 @@ local function define_tests()
             local _, number_errors = definition.normalize(form({ { id = "f", type = "number", label = "F", max = 1, default = 73310 } }))
             test.eq(codes(number_errors)["fields[0].default"], "invalid_default")
             test.is_nil((string.find(definition.format_errors(number_errors), "73310", 1, true)))
+        end)
+
+        -- The message names the answer code the default failed with, so an
+        -- agent can tell which rule to fix.
+        it("names the answer code a default fails with", function()
+            local cases = {
+                { { type = "text", max_length = 3, default = "abcd" }, "(too_long)" },
+                { { type = "text", min_length = 5, default = "abc" }, "(too_short)" },
+                { { type = "text", pattern = "[a-z]+", default = "abc1" }, "(pattern_mismatch)" },
+                { { type = "text", default = "a\nb" }, "(invalid_text)" },
+                { { type = "email", default = "nope" }, "(invalid_email)" },
+                { { type = "number", min = 5, default = 1 }, "(below_min)" },
+                { { type = "number", integer = true, default = 1.5 }, "(not_integer)" },
+                { { type = "date", default = "2024-02-30" }, "(invalid_date)" },
+                { { type = "date", max = "2024-01-01", default = "2024-05-06" }, "(above_max)" },
+            }
+            for _, case in ipairs(cases) do
+                local field = { id = "f", label = "F" }
+                for key, value in pairs(case[1]) do field[key] = value end
+                local _, errors = definition.normalize(form({ field }))
+                test.eq(codes(errors)["fields[0].default"], "invalid_default", case[2])
+                test.contains(definition.format_errors(errors), case[2])
+            end
         end)
     end)
 

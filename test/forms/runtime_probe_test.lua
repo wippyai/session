@@ -9,9 +9,9 @@ local text = require("text")
 -- upgrade changes one, the failure points at the rule that has to be looked
 -- at again.
 --
--- Pinned runtime: Wippy 0.3.66a. Session CI installs the latest stable
--- release (framework .github/actions/setup-wippy), which is 0.3.66a since
--- 2026-11-17.
+-- Observed on Wippy 0.3.66a, the latest stable release on 2026-11-17; CI
+-- installs the latest release (framework .github/actions/setup-wippy), so a
+-- runtime change shows up here first.
 -- Runtime 0.3.63a changed four of these facts (0.3.57a and 0.3.60a had the
 -- old ones; 0.3.61a and 0.3.62a were not checked):
 -- - "\xHH" and "\u{...}" are escapes. Before, the backslash was dropped and
