@@ -636,6 +636,22 @@ local function define_tests()
             test.eq(no_request, 400)
         end)
 
+        -- The request id limit counts UTF-8 bytes, so the message says bytes:
+        -- 33 emoji are 33 characters but 132 bytes.
+        it("refuses a request_id over 128 bytes and names the limit in bytes", function()
+            local ctx = new_session()
+            local artifact_id = new_form(ctx)
+            local emoji = "\240\159\152\128"
+            local status, body = post(artifact_id, answer(string.rep(emoji, 33)))
+            test.eq(status, 400)
+            test.eq(body.code, "invalid_request")
+            test.eq(body.message, "request_id must be a non-empty string of at most 128 bytes")
+            test.eq(#user_rows(ctx.session_id), 0)
+            local ok_status, ok = post(artifact_id, answer(string.rep(emoji, 32)))
+            test.eq(ok_status, 200, "32 emoji are exactly 128 bytes")
+            test.eq(ok.success, true)
+        end)
+
         it("takes expected_content_version as a positive whole number, however it is written", function()
             local ctx = new_session()
             local artifact_id = new_form(ctx)
@@ -1655,7 +1671,11 @@ local function define_tests()
                 test.eq(stored.second, text)
             end)
 
-            it("accepts the largest request a valid form can send under the 64 KiB body cap", function()
+            -- The text budget of a definition keeps the text answers, the ids
+            -- and the envelope under the body cap. It does not count number
+            -- answers, so a form that also has many number fields can need
+            -- more (the next test).
+            it("accepts the largest text-only request under the 64 KiB body cap", function()
                 local ctx = new_session()
                 local fields = {}
                 local answers = {}
@@ -1670,11 +1690,54 @@ local function define_tests()
                 local request_id = string.rep("r", 128)
                 local raw = json.encode(v2_request(answers, request_id))
                 test.gt(#raw, 64000)
-                test.lt(#raw, state_service.MAX_BODY_BYTES, "a valid form never needs more than the cap")
+                test.lt(#raw, state_service.MAX_BODY_BYTES)
                 local status, body = post(artifact_id, raw)
                 test.eq(status, 200, tostring(body and body.message))
                 local row: any = message_repo.get(body.answer_message_id)
                 test.gt(#row.data, 64000)
+            end)
+
+            -- A valid form whose valid answers, as a browser's JSON.stringify
+            -- writes them, are one byte over the cap: two full textareas of
+            -- emoji (the whole text budget), 18 numbers with long decimal
+            -- spellings, 40-character ids and a 128-byte request id. The cap
+            -- refuses it before anything is read, and nothing is stored.
+            it("refuses a valid mixed form's answers one byte over the 64 KiB body cap with 413", function()
+                local ctx = new_session()
+                local fields = {}
+                local entries = {}
+                local emoji_text = string.rep("😀", 8000)
+                for index = 1, 20 do
+                    local id = string.format("f%037d_x", index)
+                    if index <= 2 then
+                        table.insert(fields, { id = id, type = "textarea", label = "Q" .. index })
+                        table.insert(entries, '"' .. id .. '":"' .. emoji_text .. '"')
+                    else
+                        table.insert(fields, { id = id, type = "number", label = "Q" .. index })
+                        table.insert(entries, '"' .. id .. '":-0.0000010000000000000002')
+                    end
+                end
+                local def = { title = "Mixed", fields = fields }
+                local artifact_id = new_v2_form(ctx, def)
+                -- Written by hand, as the browser writes it: json.encode would
+                -- spell the numbers differently.
+                local raw = '{"form_version":2,"request_id":"' .. string.rep("r", 128)
+                    .. '","expected_content_version":1,"answers":{' .. table.concat(entries, ",") .. "}}"
+                test.eq(#raw, state_service.MAX_BODY_BYTES + 1)
+                local decoded: any = json.decode(raw)
+                local normalized_def = definition.normalize(def)
+                local accepted, field_errors = definition.validate_answers(normalized_def, decoded.answers)
+                test.not_nil(accepted, "every answer is valid")
+                test.is_nil(field_errors)
+
+                local status, body = post(artifact_id, raw)
+                test.eq(status, 413)
+                test.eq(body.code, "payload_too_large")
+                test.eq(body.message, "The submission is larger than 64 KiB.")
+                test.eq(artifact_repo.get(artifact_id).content_version, 1)
+                test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
+                test.eq(#user_rows(ctx.session_id), 0)
+                test.eq(#wakes, 0)
             end)
         end)
 

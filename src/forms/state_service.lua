@@ -303,7 +303,8 @@ local function parse_envelope(raw_body, form_version)
     local request_id = body.request_id
     if type(request_id) ~= "string" or not string.find(request_id, "%S")
         or #request_id > state_service.MAX_REQUEST_ID then
-        return nil, "request_id must be a non-empty string of at most 128 characters"
+        -- The limit counts UTF-8 bytes (#request_id), so the message says bytes.
+        return nil, "request_id must be a non-empty string of at most 128 bytes"
     end
     -- Optional: without it only the revision check is skipped.
     if body.expected_content_version ~= nil then

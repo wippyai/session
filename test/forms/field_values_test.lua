@@ -27,6 +27,17 @@ local function define_tests()
             end
         end)
 
+        -- One significant digit is tried first: with two, 5e-324 would stop at
+        -- 4.9e-324 (it reads back as the same float) and end in 49, where a
+        -- browser writes 5e-324.
+        it("writes the shortest digits of a subnormal number", function()
+            test.eq(field_values.number_text(5e-324), "0." .. string.rep("0", 323) .. "5")
+            test.eq(field_values.number_text(-5e-324), "-0." .. string.rep("0", 323) .. "5")
+            test.eq(field_values.number_text(1e-323), "0." .. string.rep("0", 322) .. "1")
+            test.eq(tonumber(field_values.number_text(5e-324)), 5e-324)
+            test.eq(tonumber(field_values.number_text(1e-323)), 1e-323)
+        end)
+
         it("reads back as the same number", function()
             for _, value in ipairs({ 0.1, 0.2, 1 / 3, 123456789.125, 1e-7, 2.5e-5, 999999999999.5 }) do
                 test.eq(tonumber(field_values.number_text(value)), value)

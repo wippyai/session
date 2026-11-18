@@ -36,9 +36,12 @@ field_values.LIMITS = {
     -- of one form. At four bytes per character (UTF-8 written as it is, as a
     -- browser's JSON.stringify writes it), those answers, the 20 field ids
     -- and the request envelope fit the 64 KiB request cap; the state service
-    -- test sends the largest such request. Not covered: the Other text and
-    -- notes of choice fields (each has its own cap, and none counts here), and
-    -- a client that writes non-ASCII text as six-byte escape sequences, which
+    -- test sends the largest such request. Not covered, so a valid form can
+    -- still send more than the cap and get a 413: number answers (a long
+    -- decimal spelling takes over 20 bytes each; the state service test sends
+    -- a valid mixed form one byte over the cap), the Other text and notes of
+    -- choice fields (each has its own cap, and none counts here), and a
+    -- client that writes non-ASCII text as six-byte escape sequences, which
     -- can take up to twelve bytes per character.
     TEXT_BUDGET = 16000,
     EMAIL_MAX = 254,
@@ -123,14 +126,16 @@ local function decimal_of(value: number): (boolean, string, integer)
     if math.type(whole) == "integer" then
         digits, power = string.format("%d", whole), 0
     else
-        -- The shortest of 2 to 17 significant digits that parses back to the
-        -- same number (precision 1 to 16 always writes a point in the mantissa).
+        -- The shortest of 1 to 17 significant digits that parses back to the
+        -- same number. Precision 0 writes one digit and no point ("5e-324");
+        -- starting at two digits would stop at 4.9e-324 for 5e-324, which
+        -- reads back as the same float too.
         local formatted
-        for precision = 1, 16 do
+        for precision = 0, 16 do
             formatted = string.format("%." .. precision .. "e", magnitude)
             if tonumber(formatted) == magnitude then break end
         end
-        local mantissa, sign, exponent = string.match(formatted, "^(%d%.%d+)e([+-])(%d+)$")
+        local mantissa, sign, exponent = string.match(formatted, "^(%d%.?%d*)e([+-])(%d+)$")
         digits = (string.gsub(mantissa :: string, "%.", ""))
         local exponent_value = math.tointeger(tonumber(exponent)) :: integer
         if sign == "-" then exponent_value = -exponent_value end
