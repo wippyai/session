@@ -1,4 +1,4 @@
-import type { ArtifactFormAnswerValue, ArtifactFormChoiceAnswer } from '@wippy-fe/proxy'
+import type { ArtifactFormAnswers, ArtifactFormChoiceAnswer } from '@wippy-fe/proxy'
 import type {
   ChoiceAnswer,
   ChoiceFormField,
@@ -223,13 +223,6 @@ export function draftSignature(definition: FormDefinition, draft: AnswerDraft): 
 // ── display ──────────────────────────────────────────────────────
 
 /**
- * A stored answer as the Host hands it over. The proxy types up to 0.0.67 name
- * only choice answers; a form with standard fields also stores numbers and
- * booleans.
- */
-export type HostFormAnswers = Record<string, ArtifactFormAnswerValue | number | boolean>
-
-/**
  * One stored choice as the internal type. The proxy types `note` as optional on
  * every `{ value }` object, but the server stores a note only when it is not
  * blank (`definition.lua`, `check_noted`), so a `{ value }` object without a
@@ -248,13 +241,13 @@ function normalizeHostChoice(item: ArtifactFormChoiceAnswer): SingleFieldAnswer 
 
 /**
  * The read boundary for stored answers: maps the proxy's looser
- * `HostFormAnswers` to the internal `FormAnswers`, where a noted answer
+ * `ArtifactFormAnswers` to the internal `FormAnswers`, where a noted answer
  * always has a non-blank `note`. A number or a boolean is a standard field's
  * answer and stays as it is, `0` and `false` included. Malformed items are
  * dropped, and a single answer that is malformed is left out like an unanswered
  * question.
  */
-export function normalizeHostAnswers(data: HostFormAnswers | null): FormAnswers | null {
+export function normalizeHostAnswers(data: ArtifactFormAnswers | null): FormAnswers | null {
   if (data === null)
     return null
   const answers: FormAnswers = {}

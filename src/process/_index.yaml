@@ -172,6 +172,7 @@ entries:
       tools: wippy.agent.discovery:tools
       lifecycle_runtime: wippy.agent:lifecycle_runtime
       output: wippy.llm:output
+      llm: wippy.llm:llm
       input_policy: wippy.session.process:input_policy
       control_handlers: wippy.session.process:control_handlers
       answer_admission: wippy.session.process:answer_admission

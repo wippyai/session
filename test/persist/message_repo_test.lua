@@ -1505,8 +1505,8 @@ local function define_tests()
                 local session_id = new_session("Anchor moved back")
                 local ahead_id = uuid.v7()
                 insert_row(session_id, ahead_id, consts.MSG_TYPE.ASSISTANT, ahead_of_clock():format(message_date.LAYOUT), nil)
-                -- What writer:update_status does: a second-resolution "now",
-                -- below the row above.
+                -- A caller can still set the date explicitly. A
+                -- second-resolution "now" sorts below the row above.
                 local _, meta_err = session_repo.update_session_meta(session_id, { last_message_date = os.time() })
                 test.is_nil(meta_err)
 

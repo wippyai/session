@@ -16,6 +16,7 @@ local answer_admission = require("answer_admission")
 local message_repo = require("message_repo")
 local turn_context = require("turn_context")
 local time = require("time")
+local llm = require("llm")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -43,6 +44,9 @@ type SessionContext = {
     activate_attention_turn: any?,
     prepare_attention_prompt: any?,
     set_attention_context: any?,
+    model_step_at: number?,
+    model_cache_ttl: string?,
+    model_cache_expires_at: number?,
 }
 
 type AttentionToolContext = {
@@ -89,6 +93,9 @@ local message_handlers = {
     _report_lifecycle_errors = report_lifecycle_errors,
 }
 message_handlers._context_staging = require('context_staging_repo')
+message_handlers._resolve_model = function(model: string): any
+    return llm.resolve_model(model)
+end
 
 message_handlers._authorize_file = function(file_uuid, actor_id, session_id)
     return prompt_builder._authorize_file(file_uuid, actor_id, session_id)
@@ -599,8 +606,108 @@ local function begin_turn(ctx: SessionContext, message_id: any): table
     -- An interrupted/cancelled turn must never render an old artifact in a
     -- later user's answer.
     state.pending_inline_artifacts = nil
+    state.idle_seconds = nil
     state.active = true
     return state
+end
+
+local CACHE_LIFETIME_SECONDS = { ["5m"] = 300, ["1h"] = 3600 }
+local CACHE_EXPIRY_MARGIN_SECONDS = 60
+
+local function seconds_since(date: any): number?
+    local at: number? = nil
+    if type(date) == "number" then
+        at = date
+    elseif type(date) == "string" and date ~= "" then
+        local ok, parsed = pcall(time.parse, time.RFC3339NANO, date)
+        if ok and parsed then at = parsed:unix() end
+    end
+    if not at then return nil end
+    return math.max(0, time.now():unix() - at)
+end
+
+local function stored_meta(ctx: SessionContext, key: string): any
+    if not ctx.reader or type(ctx.reader.state) ~= "function" then return nil end
+    local state = ctx.reader:state()
+    local meta = type(state) == "table" and state.meta or nil
+    return type(meta) == "table" and meta[key] or nil
+end
+
+local function seconds_idle(ctx: SessionContext, last_message_date: any): number?
+    local since_message = seconds_since(last_message_date)
+    if not since_message then return nil end
+    local since_step = seconds_since(ctx.model_step_at) or seconds_since(stored_meta(ctx, "model_step_at"))
+    return since_step and math.min(since_message, since_step) or since_message
+end
+
+local function longest_cache_ttl(tokens: any): string?
+    local written = type(tokens) == "table" and tokens.cache_write_by_ttl or nil
+    if type(written) ~= "table" then return nil end
+    local longest: string? = nil
+    for ttl in pairs(written) do
+        if type(ttl) == "string" then
+            local lifetime = CACHE_LIFETIME_SECONDS[ttl]
+            if not lifetime then return ttl end
+            if not longest or lifetime > CACHE_LIFETIME_SECONDS[longest] then longest = ttl end
+        end
+    end
+    return longest
+end
+
+local function model_route(model: any): table?
+    if type(model) ~= "string" or model == "" then return nil end
+    local ok, card = pcall(message_handlers._resolve_model, model)
+    if not ok or type(card) ~= "table" or type(card.providers) ~= "table" then return nil end
+    local route = card.providers[1]
+    return type(route) == "table" and route or nil
+end
+
+local function expiring_prompt_cache(agent: any): table?
+    local options = agent and type(agent.agent_options) == "table" and agent.agent_options.prompt_cache or nil
+    if type(options) == "table" and options.drop_expired_thinking == true then return options end
+    return nil
+end
+
+local function prompt_cache_expired(ctx: SessionContext, agent: any, idle_seconds: number): boolean
+    local options = expiring_prompt_cache(agent)
+    if not options then return false end
+    if idle_seconds <= CACHE_LIFETIME_SECONDS["5m"] + CACHE_EXPIRY_MARGIN_SECONDS then return false end
+    local ttl = options.ttl
+    if ttl == nil then
+        local route = model_route(agent.model)
+        if route and type(route.options) == "table" then ttl = route.options.cache_ttl end
+    end
+    local lifetime = CACHE_LIFETIME_SECONDS[ttl == nil and "5m" or ttl]
+    if not lifetime then return false end
+    local written = ctx.model_cache_ttl or stored_meta(ctx, "model_cache_ttl")
+    if written ~= nil and not CACHE_LIFETIME_SECONDS[written] then return false end
+    local expires_at = ctx.model_cache_expires_at or stored_meta(ctx, "model_cache_expires_at")
+    if expires_at and time.now():unix() <= expires_at + CACHE_EXPIRY_MARGIN_SECONDS then return false end
+    return idle_seconds > lifetime + CACHE_EXPIRY_MARGIN_SECONDS
+end
+
+local function remember_cache_activity(ctx: SessionContext, tokens: any)
+    local now = time.now():unix()
+    local ttl = ctx.model_cache_ttl or stored_meta(ctx, "model_cache_ttl")
+    local expires_at = ctx.model_cache_expires_at or stored_meta(ctx, "model_cache_expires_at")
+    local written = longest_cache_ttl(tokens)
+    local read = type(tokens) == "table" and (tokens.cache_read_tokens or tokens.cache_read_input_tokens) or nil
+    local cache_read = type(read) == "number" and read > 0
+    local lifetime = ttl and CACHE_LIFETIME_SECONDS[ttl] or nil
+    if lifetime and expires_at and expires_at <= now and not cache_read then
+        ttl, lifetime = nil, nil
+    end
+    if cache_read and lifetime then
+        expires_at = math.max(expires_at or 0, now + lifetime)
+    end
+    if written then
+        local written_lifetime = CACHE_LIFETIME_SECONDS[written]
+        if not written_lifetime or not ttl or (lifetime and written_lifetime > lifetime) then ttl = written end
+        if written_lifetime then expires_at = math.max(expires_at or 0, now + written_lifetime) end
+    end
+    ctx.model_step_at = now
+    ctx.model_cache_ttl = ttl
+    ctx.model_cache_expires_at = expires_at
 end
 
 local CONTROL_TABLE_FIELDS = { "artifacts", "forms", "context", "memory", "config" }
@@ -682,28 +789,29 @@ end
 --
 -- A form answer the session has not admitted yet is skipped: admission moves
 -- that row to the end of the history, so it cannot bound a span. The window
--- grows only past such rows.
-local function latest_message_id(ctx): (string?, boolean, boolean)
-    if not ctx.reader or type(ctx.reader.messages) ~= "function" then return nil, false, false end
+-- grows only past such rows. The fourth value is that row's date, which the
+-- prompt-cache idle time starts from.
+local function latest_message_id(ctx): (string?, boolean, boolean, any)
+    if not ctx.reader or type(ctx.reader.messages) ~= "function" then return nil, false, false, nil end
     local window = 1
     while true do
         local query = ctx.reader:messages()
         if not query or type(query.last) ~= "function" or type(query.all) ~= "function" then
-            return nil, false, false
+            return nil, false, false, nil
         end
         local messages, err = query:last(window):all()
-        if err or type(messages) ~= "table" then return nil, false, false end
-        if #messages == 0 then return nil, true, true end
+        if err or type(messages) ~= "table" then return nil, false, false, nil end
+        if #messages == 0 then return nil, true, true, nil end
         for index = #messages, 1, -1 do
             local message = messages[index]
             if not message_repo.is_pending_answer(message) then
                 if type(message.message_id) == "string" and message.message_id ~= "" then
-                    return message.message_id, true, false
+                    return message.message_id, true, false, message.date
                 end
-                return nil, false, false
+                return nil, false, false, nil
             end
         end
-        if #messages < window then return nil, true, true end
+        if #messages < window then return nil, true, true, nil end
         window = window * 4
     end
 end
@@ -823,7 +931,13 @@ function message_handlers.complete_turn(ctx)
         target_status = ctx.status ~= "finishing" and consts.STATUS.IDLE or ctx.status
     end
     local interaction = interaction_for(ctx, candidate_state, target_status, ctx.stop_requested)
-    local ok, err = ctx.writer:update_meta({ status = target_status, meta = { interaction = interaction } })
+    local meta = { interaction = interaction }
+    if expiring_prompt_cache(current_agent(ctx)) then
+        meta.model_step_at = ctx.model_step_at
+        meta.model_cache_ttl = ctx.model_cache_ttl
+        meta.model_cache_expires_at = ctx.model_cache_expires_at
+    end
+    local ok, err = ctx.writer:update_meta({ status = target_status, meta = meta })
     if not ok then
         return nil, err or "Failed to persist turn completion"
     end
@@ -1322,8 +1436,8 @@ function message_handlers.handle_message(ctx, op)
             "Session is not accepting messages right now") end
         return { completed = true }
     end
-    local prior_id, prior_known, prior_empty = nil, false, false
-    if not active then prior_id, prior_known, prior_empty = latest_message_id(ctx) end
+    local prior_id, prior_known, prior_empty, prior_date = nil, false, false, nil
+    if not active then prior_id, prior_known, prior_empty, prior_date = latest_message_id(ctx) end
 
     local answers: {any} = {}
     if not active and not op.exiting and not answer_admission.finishing(ctx) then
@@ -1357,6 +1471,7 @@ function message_handlers.handle_message(ctx, op)
             active = true, steps = 0, repeated_calls = 0,
             span_from_id = prior_id, span_anchor_known = prior_known,
             span_open_start = prior_empty,
+            idle_seconds = seconds_idle(ctx, prior_date),
         }
         local next_interaction = interaction_for(ctx, next_turn, consts.STATUS.RUNNING, false)
         message_id, err, duplicate = ctx.writer:admit_message(consts.MSG_TYPE.USER, text, metadata, {
@@ -1505,6 +1620,11 @@ function message_handlers.agent_step(ctx, op)
     -- answers the user's message, which also starts a fresh count.
     ctx.current_agent = agent
     local state = ctx.turn_state
+    local idle_seconds: number? = nil
+    if state then
+        if op.from_user and state.message_id == op.message_id then idle_seconds = state.idle_seconds end
+        state.idle_seconds = nil
+    end
     if not state or state.active == false or (op.from_user and state.message_id ~= op.message_id) then
         state = begin_turn(ctx, op.message_id)
     end
@@ -1551,6 +1671,15 @@ function message_handlers.agent_step(ctx, op)
             local stored, stored_err = ctx.reader:get_turn_note(op.message_id)
             if stored_err then return nil, stored_err end
             if not stored then turn_note = note end
+        end
+    end
+
+    if idle_seconds and prompt_cache_expired(ctx, agent, idle_seconds) then
+        local _, mark_err = ctx.writer:update_message_meta(op.message_id, { expires_thinking = true })
+        if mark_err then
+            logger:warn("earlier thinking stays: the expiry mark was not stored", {
+                session_id = ctx.session_id, error = error_text(mark_err),
+            })
         end
     end
 
@@ -1735,6 +1864,9 @@ function message_handlers.agent_step(ctx, op)
     end
 
     local result, exec_err, exec_details = agent:step(builder, runtime_options)
+    if expiring_prompt_cache(agent) then
+        remember_cache_activity(ctx, type(result) == "table" and result.tokens or nil)
+    end
     local memory_recall_error = type(result) == "table" and result.memory_recall_error or nil
     if exec_err or type(result) ~= "table" then
         local error_code = consts.ERROR_CODES.AGENT_ERROR

@@ -4,10 +4,25 @@
  * A version 1 form holds `choice` fields only; version 2 adds six standard
  * fields (`text`, `textarea`, `number`, `email`, `date`, `checkbox`). The
  * server validates; these types only describe the data. `answers.ts` repeats
- * the server's rules for the check before sending.
+ * the server's rules for the check before sending. The field and definition
+ * types are the published `@wippy-fe/proxy` ones; the answer types are
+ * stricter than the proxy's, and `normalizeHostAnswers` maps one to the other.
  */
 
-import type { ArtifactFormDelivery } from '@wippy-fe/proxy'
+import type {
+  ArtifactFormCheckboxField,
+  ArtifactFormChoiceField,
+  ArtifactFormDateField,
+  ArtifactFormDefinition,
+  ArtifactFormDelivery,
+  ArtifactFormEmailField,
+  ArtifactFormFieldOption,
+  ArtifactFormNumberField,
+  ArtifactFormSubmitEnvelope,
+  ArtifactFormSubmitResult,
+  ArtifactFormTextareaField,
+  ArtifactFormTextField,
+} from '@wippy-fe/proxy'
 
 /**
  * `form_version` values this component renders. 1 is a choice-only form, 2 is
@@ -20,72 +35,24 @@ export function isSupportedFormVersion(version: number): boolean {
   return SUPPORTED_FORM_VERSIONS.has(version)
 }
 
-export interface FormFieldOption {
-  value: string
-  label: string
-  description?: string
-}
+export type FormFieldOption = ArtifactFormFieldOption
 
-interface FormFieldBase {
-  id: string
-  label: string
-  description?: string
-  required: boolean
-}
+export type ChoiceFormField = ArtifactFormChoiceField
 
-export interface ChoiceFormField extends FormFieldBase {
-  type: 'choice'
-  options: FormFieldOption[]
-  multiple: boolean
-  allow_other: boolean
-}
+/** `min_length` and `max_length` are always set: the server fills them when it normalizes a definition. The browser never evaluates `pattern` (RE2, linear time on the server). */
+export type TextFormField = ArtifactFormTextField
 
-export interface TextFormField extends FormFieldBase {
-  type: 'text'
-  /** The server always sets both when it normalizes a definition. */
-  min_length: number
-  max_length: number
-  /** Full-match pattern the server checks (RE2, linear time). The browser never evaluates it. */
-  pattern?: string
-  placeholder?: string
-  default?: string
-}
+export type TextareaFormField = ArtifactFormTextareaField
 
-export interface TextareaFormField extends FormFieldBase {
-  type: 'textarea'
-  min_length: number
-  max_length: number
-  placeholder?: string
-  default?: string
-}
+/** `integer` is always set: the server stores `false` when the definition leaves it out. */
+export type NumberFormField = ArtifactFormNumberField
 
-export interface NumberFormField extends FormFieldBase {
-  type: 'number'
-  min?: number
-  max?: number
-  step?: number
-  integer?: boolean
-  default?: number
-}
+export type EmailFormField = ArtifactFormEmailField
 
-export interface EmailFormField extends FormFieldBase {
-  type: 'email'
-  default?: string
-}
+export type DateFormField = ArtifactFormDateField
 
-export interface DateFormField extends FormFieldBase {
-  type: 'date'
-  /** Inclusive `YYYY-MM-DD` bounds. */
-  min?: string
-  max?: string
-  default?: string
-}
-
-export interface CheckboxFormField extends FormFieldBase {
-  type: 'checkbox'
-  /** Only `false` is ever accepted: a default must never mark consent. */
-  default?: false
-}
+/** Only `false` is ever accepted as `default`: a default must never mark consent. */
+export type CheckboxFormField = ArtifactFormCheckboxField
 
 /** A V2 standard field: one control, one scalar answer. */
 export type ScalarFormField
@@ -111,13 +78,9 @@ export function isChoiceField(field: FormField): field is ChoiceFormField {
   return field.type === 'choice'
 }
 
-export interface FormDefinition<F extends FormField = FormField> {
-  title: string
-  description?: string
-  submit_label?: string
+/** The proxy's definition, with the field union narrowed where a caller knows more (see `ChoiceFormDefinition`). */
+export interface FormDefinition<F extends FormField = FormField> extends Omit<ArtifactFormDefinition, 'fields'> {
   fields: F[]
-  /** The chat message text the assistant sees once the form is answered. The component never reads it. */
-  answered_message?: string
 }
 
 /** A definition whose every field is a `choice`: the question card renders it. */
@@ -185,27 +148,14 @@ export function isChoiceFormState(state: FormState): state is ChoiceFormState {
   return isChoiceDefinition(state.definition)
 }
 
-/** POST `/artifact/{id}/state` request body. */
-export interface SubmitEnvelope {
-  form_version: number
-  request_id: string
+/** POST `/artifact/{id}/state` request body. The component always sends `expected_content_version`. */
+export interface SubmitEnvelope extends ArtifactFormSubmitEnvelope {
   expected_content_version: number
   answers: FormAnswers
 }
 
-/** 200 response body, including an exact replay. */
-export interface SubmitAccepted {
-  success: true
-  artifact_id: string
-  request_id: string
-  answer_message_id: string
-  content_version: number
-  status: 'idle'
-  late: boolean
-  /** `pending` for a new answer. An exact replay reports the current delivery, which can be any of the four values. */
-  delivery: ArtifactFormDelivery
-  replayed: boolean
-}
+/** 200 response body, including an exact replay. An exact replay reports the current delivery, which can be any of the four values. */
+export type SubmitAccepted = ArtifactFormSubmitResult
 
 /** What `artifactState(id).submit()` resolves with. Every failure, including a 422 with field errors, rejects with the Host's `ArtifactStateError`. */
 export type SubmitResult = SubmitAccepted

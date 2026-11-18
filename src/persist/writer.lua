@@ -114,8 +114,10 @@ function session_writer:update_initial_title(title)
     return updated, err
 end
 
+-- Only a stored message moves last_message_date, which orders the session
+-- list, so a status write keeps the session's place in that list.
 function session_writer:update_status(status, error_message)
-    local updates = { status = status, last_message_date = os.time() }
+    local updates = { status = status }
 
     if error_message then
         updates.meta = { error = error_message }

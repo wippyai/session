@@ -257,6 +257,15 @@ describe('normalizeHostAnswers', () => {
       .toEqual({ f2: ['a'] })
   })
 
+  it('keeps number and boolean answers next to a choice answer, 0 and false included', () => {
+    const normalized = normalizeHostAnswers({ f1: 'a', f2: 0, f3: 3, f4: false, f5: true })
+    expect(normalized).toEqual({ f1: 'a', f2: 0, f3: 3, f4: false, f5: true })
+    expect(normalized?.f2).toBe(0)
+    expect(normalized?.f3).toBe(3)
+    expect(normalized?.f4).toBe(false)
+    expect(normalized?.f5).toBe(true)
+  })
+
   it('does not mutate its input', () => {
     const input = { f1: { value: 'a' } }
     normalizeHostAnswers(input)
@@ -410,7 +419,7 @@ describe('validateAnswers — required V2 fields', () => {
 describe('draftFromAnswers — defaults and stored answers', () => {
   const withDefaults: FormDefinition = { title: 'T', fields: [
     { id: 'city', type: 'text', min_length: 0, max_length: 500, label: 'City', required: false, default: 'Berlin' },
-    { id: 'qty', type: 'number', label: 'Qty', required: false, default: 3 },
+    { id: 'qty', type: 'number', label: 'Qty', required: false, integer: false, default: 3 },
     { id: 'ok', type: 'checkbox', label: 'OK', required: false, default: false },
     { id: 'plain', type: 'text', min_length: 0, max_length: 500, label: 'Plain', required: false },
     { id: 'pick', type: 'choice', label: 'Pick', required: false, options: [{ value: 'a', label: 'A' }], multiple: true, allow_other: false },

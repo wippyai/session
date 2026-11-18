@@ -133,7 +133,7 @@ describe('number field', () => {
   }
 
   const keypad = (f: NumberFormField) => mountField(f).find('input').attributes('inputmode')
-  const fraction: NumberFormField = { id: 'w', type: 'number', label: 'Weight', required: false }
+  const fraction: NumberFormField = { id: 'w', type: 'number', label: 'Weight', required: false, integer: false }
 
   it('is a text input, not a native number input or a spinner', () => {
     const wrapper = mountField(field)
@@ -356,7 +356,7 @@ describe('read-only through the dispatcher', () => {
     const cases: Array<[FormField, FieldAnswer | undefined, string]> = [
       [{ id: 'a', type: 'text', min_length: 0, max_length: 500, label: 'A', required: true }, 'Ada', 'Ada'],
       [{ id: 'b', type: 'email', label: 'B', required: false }, 'a@b.co', 'a@b.co'],
-      [{ id: 'c', type: 'number', label: 'C', required: false }, 3, '3'],
+      [{ id: 'c', type: 'number', label: 'C', required: false, integer: false }, 3, '3'],
       [{ id: 'd', type: 'date', label: 'D', required: false }, '2026-10-01', '2026-10-01'],
       [{ id: 'e', type: 'checkbox', label: 'E', required: false }, true, 'Yes'],
       [{ id: 'f', type: 'textarea', min_length: 0, max_length: 8000, label: 'F', required: false }, 'x', 'x'],

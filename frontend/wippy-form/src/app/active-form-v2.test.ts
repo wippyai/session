@@ -217,7 +217,7 @@ describe('ActiveForm — defaults', () => {
       title: 'Defaults',
       fields: [
         { id: 'city', type: 'text', min_length: 0, max_length: 500, label: 'City', required: false, default: 'Berlin' },
-        { id: 'qty', type: 'number', label: 'Quantity', required: false, default: 3 },
+        { id: 'qty', type: 'number', label: 'Quantity', required: false, integer: false, default: 3 },
         { id: 'agree', type: 'checkbox', label: 'Agree', required: false, default: false },
       ],
     },

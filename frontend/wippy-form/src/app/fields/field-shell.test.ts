@@ -138,7 +138,7 @@ describe('FieldShell — read-only', () => {
     expect(yes.find('[part~="field-value"]').text()).toBe('Yes')
     const no = mountShell({ readonly: true, field: { id: 'c', type: 'checkbox', label: 'C', required: false }, modelValue: false })
     expect(no.find('[part~="field-value"]').text()).toBe('No')
-    const num = mountShell({ readonly: true, field: { id: 'n', type: 'number', label: 'N', required: false }, modelValue: 0.5 })
+    const num = mountShell({ readonly: true, field: { id: 'n', type: 'number', label: 'N', required: false, integer: false }, modelValue: 0.5 })
     expect(num.find('[part~="field-value"]').text()).toBe('0.5')
   })
 

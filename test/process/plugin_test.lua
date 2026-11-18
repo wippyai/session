@@ -2399,6 +2399,28 @@ local function define_tests()
             cleanup_session_fixture(session_id, context_id)
         end)
 
+        -- A client that leaves ends its sessions, and each exit stores a
+        -- status. The session list orders by last_message_date, so the exit
+        -- must not move it when no message is stored.
+        for _, case in ipairs({
+            { name = "an intentional finish", result = { status = "shutdown", intentional_exit = true },
+                status = consts.STATUS.IDLE },
+            { name = "a failed exit", result = { error = "crashed" }, status = consts.STATUS.FAILED },
+        }) do
+            it("keeps last_message_date when " .. case.name .. " stores the exit status", function()
+                local actor = security.actor()
+                local session_id, context_id = create_session_fixture(actor, "Exit recency", "running")
+                assert(session_repo.update_session_meta(session_id, { last_message_date = 946684800 }))
+                local before = assert(session_repo.get(session_id, actor:id()))
+                local run = run_plugin_lifecycle(actor, session_id, "test-hub", {}, case.result)
+                local after = assert(session_repo.get(session_id, actor:id()))
+                cleanup_session_fixture(session_id, context_id)
+                test.is_nil(run.error)
+                test.eq(after.status, case.status)
+                test.eq(after.last_message_date, before.last_message_date)
+            end)
+        end
+
         for _, scenario in ipairs({ "idle", "completed", "stop" }) do
             it("ends a gracefully shut down " .. scenario .. " session idle", function()
                 local actor = security.actor()

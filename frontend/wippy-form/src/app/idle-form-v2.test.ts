@@ -18,7 +18,7 @@ const answered: FormState = {
       { id: 'name', type: 'text', min_length: 0, max_length: 500, label: 'Full name', required: true },
       { id: 'notes', type: 'textarea', min_length: 0, max_length: 8000, label: 'Notes', required: false },
       { id: 'mail', type: 'email', label: 'Email', required: true },
-      { id: 'qty', type: 'number', label: 'Parcels', required: false },
+      { id: 'qty', type: 'number', label: 'Parcels', required: false, integer: false },
       { id: 'day', type: 'date', label: 'Delivery date', required: false },
       { id: 'consent', type: 'checkbox', label: 'I agree', required: true },
       { id: 'later', type: 'text', min_length: 0, max_length: 500, label: 'Anything else', required: false },
