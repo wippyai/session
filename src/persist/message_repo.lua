@@ -27,6 +27,7 @@ type MessageList = {
 
 local message_repo = {}
 local context_staging = require('context_staging_repo')
+local approval_repo = require('approval_repo')
 
 local function encode_metadata(metadata, encode_scalars)
     if type(metadata) == "string" then
@@ -86,8 +87,26 @@ end
 -- transaction, dated in array order. Returns true and, as the third value,
 -- each row's stored date keyed by message_id, so callers can announce the
 -- same date the history will show.
-function message_repo.create_batch(session_id, rows)
+--
+-- batch (optional): a server-owned tool approval batch descriptor
+-- { batch_id, members, turn_id } for a protected response with calls. The
+-- same transaction stamps metadata.batch_id on every member row and stores
+-- the batch record (approval_repo.create_batch_record), which is created
+-- already closed when an earlier Stop, finish or steering closure applies.
+-- The batch record is the fourth return value. Without it, nothing changes.
+function message_repo.create_batch(session_id, rows, batch)
+    local members = nil
+    if batch ~= nil then
+        local row_ids = {}
+        for _, row in ipairs(rows) do row_ids[row.message_id] = true end
+        local valid, invalid = approval_repo.validate_descriptor(batch, row_ids)
+        if not valid then return nil, invalid end
+        members = {}
+        for _, member in ipairs(batch.members) do members[member] = true end
+    end
+
     local dates = {}
+    local batch_record: any = nil
     local result, err = tx.run(function(dbtx)
         local _, lock_err = message_date.lock_session(dbtx, session_id)
         if lock_err then return nil, lock_err end
@@ -96,7 +115,17 @@ function message_repo.create_batch(session_id, rows)
         -- batch sorts in array order even inside one clock tick.
         local last_date = nil
         for _, row in ipairs(rows) do
-            local metadata, encode_err = encode_metadata(row.metadata or {}, true)
+            local row_metadata = row.metadata or {}
+            if members and members[row.message_id] then
+                -- A copy: the caller's table stays as it passed it.
+                local stamped = {}
+                if type(row_metadata) == "table" then
+                    for key, value in pairs(row_metadata) do stamped[key] = value end
+                end
+                stamped.batch_id = batch.batch_id
+                row_metadata = stamped
+            end
+            local metadata, encode_err = encode_metadata(row_metadata, true)
             if encode_err then return nil, encode_err end
             local date, date_err = message_date.next(dbtx, session_id)
             if date_err then return nil, date_err end
@@ -130,11 +159,16 @@ function message_repo.create_batch(session_id, rows)
                 break
             end
         end
+        if batch ~= nil then
+            local record, batch_err = approval_repo.create_batch_record(dbtx, session_id, batch)
+            if not record then return nil, batch_err end
+            batch_record = record
+        end
         return true
     end)
 
     if err then return nil, err end
-    return result, nil, dates
+    return result, nil, dates, batch_record
 end
 
 -- The session metadata flag gates this query; apps without behavior proposals
@@ -967,6 +1001,46 @@ function message_repo.update_metadata(message_id, metadata, expected_session_id)
         message_id = message_id,
         updated = true
     }
+end
+
+-- update_metadata for approval-bearing rows: merges `metadata` (top-level
+-- keys) into the row's metadata inside the caller's transaction, with the
+-- session row locked first, so the read and the write cannot interleave with
+-- another writer of the session (4.6). Never starts a transaction. The row
+-- must belong to `session_id`. Returns { message_id, updated, metadata }.
+function message_repo.update_metadata_tx(dbtx, session_id, message_id, metadata)
+    if not dbtx then return nil, "A transaction is required" end
+    if not session_id or session_id == "" then return nil, "Session ID is required" end
+    if not message_id or message_id == "" then return nil, "Message ID is required" end
+    if type(metadata) ~= "table" then return nil, "Metadata must be a table" end
+
+    local _, lock_err = message_date.lock_session(dbtx, session_id)
+    if lock_err then return nil, lock_err end
+    local rows, read_err = sql.builder.select("metadata"):from("messages")
+        :where("session_id = ?", session_id):where("message_id = ?", message_id)
+        :limit(1):run_with(dbtx):query()
+    if read_err then return nil, "Failed to read message metadata: " .. tostring(read_err) end
+    if not rows or #rows == 0 then return nil, "Message not found in session" end
+
+    local current = {}
+    local stored = rows[1].metadata
+    if type(stored) == "string" and stored ~= "" then
+        local decoded, decode_err = json.decode(stored)
+        if decode_err or type(decoded) ~= "table" then
+            return nil, "Stored message metadata is not a JSON object; not merging into it"
+        end
+        current = decoded
+    end
+    for key, value in pairs(metadata) do current[key] = value end
+
+    local encoded, encode_err = json.encode(current)
+    if encode_err then return nil, "Failed to encode metadata: " .. tostring(encode_err) end
+    local result, write_err = sql.builder.update("messages"):set("metadata", encoded)
+        :where("session_id = ?", session_id):where("message_id = ?", message_id)
+        :run_with(dbtx):exec()
+    if write_err then return nil, "Failed to update message metadata: " .. tostring(write_err) end
+    if not result or result.rows_affected ~= 1 then return nil, "Message not found in session" end
+    return { message_id = message_id, updated = true, metadata = current }
 end
 
 -- Checks that `message_id` is a row of the session. Returns true, or nil and

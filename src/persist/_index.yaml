@@ -114,6 +114,21 @@ entries:
     source: file://message_order.lua
     modules: [time]
 
+  # wippy.session.persist:approval_repo
+  - name: approval_repo
+    kind: library.lua
+    meta:
+      comment: Tool approval store (requests, batch fences, grants, command receipts, turn fence, session activity); every write reuses the caller's transaction with the session row locked first
+    source: file://approval_repo.lua
+    modules:
+      - sql
+      - json
+      - time
+    imports:
+      tx: wippy.session.persist:tx
+      consts: wippy.session:consts
+      message_date: wippy.session.persist:message_date
+
   # wippy.session.persist:message_repo
   - name: message_repo
     kind: library.lua
@@ -131,6 +146,7 @@ entries:
       input_metadata: wippy.session:input_metadata
       form_meta: wippy.session.forms:form_meta
       message_order: wippy.session.persist:message_order
+      approval_repo: wippy.session.persist:approval_repo
 
   # wippy.session.persist:session_contexts_repo
   - name: session_contexts_repo

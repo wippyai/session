@@ -18,3 +18,19 @@ entries:
     imports:
       test: wippy.test:test
     method: run
+
+  - name: tool_approvals_migration_test
+    kind: function.lua
+    meta:
+      name: Tool approval migration
+      type: test
+      suite: session
+      comment: Applies and reverts migration 14 on a disposable SQLite sessions table that already has rows
+    source: file://tool_approvals_migration_test.lua
+    modules:
+      - sql
+      - uuid
+      - funcs
+    imports:
+      test: wippy.test:test
+    method: run

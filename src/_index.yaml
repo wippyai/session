@@ -82,6 +82,8 @@ entries:
         path: .policy.resources
       - entry: wippy.session.migration:13_add_attention_context
         path: .meta.target_db
+      - entry: wippy.session.migration:14_add_tool_approvals
+        path: .meta.target_db
       - entry: wippy.session.env:database_resource
         path: ".default"
       - entry: wippy.session.migration:01_create_contexts_table
