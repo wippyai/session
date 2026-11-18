@@ -23,8 +23,11 @@ local text = require("text")
 --   Before, it returned nil.
 -- The rules that rely on them have their own tests: field_values_test (whole
 -- numbers, number text, repeat counts) and text_pipelines_test (bytes written
--- as hex escapes). Lua source in the form tests still writes raw bytes as
--- decimal escapes ("\240").
+-- as hex escapes). The number-text test of an exponent answer and the
+-- repeat-count refusal are regression guards that pass on runtimes before
+-- and after 0.3.63a; the infinity test of is_whole and the hex-escape
+-- pipeline tests fail on 0.3.60a. Lua source in the form tests still writes
+-- raw bytes as decimal escapes ("\240").
 
 local function compile(pattern: string): (any, any)
     return text.regexp.compile(pattern)

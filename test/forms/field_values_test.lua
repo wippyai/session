@@ -35,7 +35,11 @@ local function define_tests()
 
         -- Since runtime 0.3.63a, tonumber also reads a mantissa without a
         -- point ("2e-03"). The shortest-digits search must still produce plain
-        -- digits for a value that one significant digit writes exactly.
+        -- digits for a value that one significant digit writes exactly. This
+        -- is a regression guard: it passes on runtimes before and after
+        -- 0.3.63a, as does the repeat-count refusal below. The infinity test
+        -- of is_whole and the hex-escape tests in text_pipelines_test are the
+        -- ones that fail on 0.3.60a.
         it("writes the decimal text of an answer sent with an exponent", function()
             local cases = {
                 { "1e2", "100" }, { "1E2", "100" }, { "1.5e2", "150" }, { "2e-3", "0.002" },

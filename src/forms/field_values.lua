@@ -124,7 +124,7 @@ local function decimal_of(value: number): (boolean, string, integer)
         digits, power = string.format("%d", whole), 0
     else
         -- The shortest of 2 to 17 significant digits that parses back to the
-        -- same number (tonumber needs the point in the mantissa).
+        -- same number (precision 1 to 16 always writes a point in the mantissa).
         local formatted
         for precision = 1, 16 do
             formatted = string.format("%." .. precision .. "e", magnitude)
