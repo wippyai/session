@@ -28,7 +28,7 @@
       "title": "Lookup customer",
       "description": "Reads a customer record.",
       "agent": "Ops assistant",
-      "summary": "customer_id: \"c_1042\"",
+      "summary": "\"customer_id\": \"c_1042\"",
       "arguments": {
         "customer_id": "c_1042"
       },

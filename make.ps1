@@ -207,7 +207,8 @@ function Invoke-WippyTest([string]$Filter, [hashtable]$ExtraEnvironment = @{}) {
         '-o', "app:db:file=$testDb",
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
         '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks",
-        '-o', "app.approval:docs:directory=$repoPath/docs")
+        '-o', "app.approval:docs:directory=$repoPath/docs",
+        '-o', "app.approval:source:directory=$repoPath/src")
     $arguments += @(Get-FilterArguments $Filter)
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
 }
@@ -245,7 +246,8 @@ function Invoke-TestPostgres([string]$Filter = $postgresFilter, [string]$Overrid
         '-o', 'app:db:options.sslmode=disable',
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
         '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks",
-        '-o', "app.approval:docs:directory=$repoPath/docs")
+        '-o', "app.approval:docs:directory=$repoPath/docs",
+        '-o', "app.approval:source:directory=$repoPath/src")
     $arguments += @($Overrides -split '\s+' | Where-Object { $_ })
     $arguments += @(Get-FilterArguments $Filter)
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }

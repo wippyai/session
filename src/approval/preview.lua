@@ -15,10 +15,14 @@ local json = require("json")
 --   - Strings and object keys are shown through JSON string escaping: control,
 --     bidirectional, zero-width and other invisible format characters become
 --     \uXXXX (or \n, \t, ...), a backslash becomes \\ and a quote \". So U+202E
---     shows as the six characters ‮, while the literal text ‮ shows
+--     shows as the six characters \u202e, while the literal text \u202e shows
 --     as \\u202e. Invalid UTF-8 bytes show as \xNN.
+--     The escaped set is INVISIBLE_RANGES (Unicode 15.1 Cc, Cf, Zl, Zp and
+--     Default_Ignorable_Code_Point).
 --   - Base64 and hex runs of at least 128 characters, and data URLs, show as
---     "[binary, <decoded size>]".
+--     "[binary, <decoded size>]". A base64 run uses one alphabet and is not
+--     path-like; a data URL payload ends at the first character outside its
+--     alphabet, so trailing text stays visible.
 --   - A string longer than 1 KB of escaped text ends with "… [cut, <size>]".
 --     A container deeper than 6 levels shows as "[cut, <size>]". Members that
 --     no longer fit the 8 KB budget are replaced by one last member
@@ -26,8 +30,9 @@ local json = require("json")
 --   - Integers outside the JSON safe range (2^53 - 1) are sent as their exact
 --     decimal digits; floats at or above 2^53 as "%.17g" text.
 --   - No key is redacted.
--- Sizes: UTF-8 bytes of a string, JSON bytes of an object or array, decoded
--- bytes of binary data.
+--   - The summary quotes every key: "customer_id": "c_1042", "hard": true
+-- Sizes: the exact JSON bytes the wire encoder writes for a string, an object
+-- or an array; the decoded bytes of binary data.
 local preview = {}
 
 preview.MAX_BYTES = 8192
@@ -54,15 +59,45 @@ function preview.size_text(bytes: number): string
     return string.format("%.1f GB", bytes / (1024 * 1024 * 1024))
 end
 
+-- Code points shown escaped: the union of the general categories Cc
+-- (controls), Cf (format), Zl (line separator) and Zp (paragraph separator)
+-- and the Default_Ignorable_Code_Point property, from Unicode 15.1
+-- (UnicodeData.txt and DerivedCoreProperties.txt). Sorted, inclusive ranges.
+preview.INVISIBLE_RANGES = {
+    { 0x0000, 0x001F },   -- Cc
+    { 0x007F, 0x009F },   -- Cc (DEL, C1 controls)
+    { 0x00AD, 0x00AD },   -- Cf soft hyphen
+    { 0x034F, 0x034F },   -- DI combining grapheme joiner
+    { 0x0600, 0x0605 },   -- Cf Arabic number signs
+    { 0x061C, 0x061C },   -- Cf Arabic letter mark
+    { 0x06DD, 0x06DD },   -- Cf Arabic end of ayah
+    { 0x070F, 0x070F },   -- Cf Syriac abbreviation mark
+    { 0x0890, 0x0891 },   -- Cf Arabic pound and piastre marks above
+    { 0x08E2, 0x08E2 },   -- Cf Arabic disputed end of ayah
+    { 0x115F, 0x1160 },   -- DI Hangul fillers
+    { 0x17B4, 0x17B5 },   -- DI Khmer inherent vowels
+    { 0x180B, 0x180F },   -- DI Mongolian variation selectors, Cf vowel separator
+    { 0x200B, 0x200F },   -- Cf zero-width space, joiners, LRM, RLM
+    { 0x2028, 0x202E },   -- Zl, Zp, Cf bidirectional embeddings and overrides
+    { 0x2060, 0x206F },   -- Cf word joiner, invisible operators, isolates; DI
+    { 0x3164, 0x3164 },   -- DI Hangul filler
+    { 0xFE00, 0xFE0F },   -- DI variation selectors
+    { 0xFEFF, 0xFEFF },   -- Cf zero-width no-break space (BOM)
+    { 0xFFA0, 0xFFA0 },   -- DI halfwidth Hangul filler
+    { 0xFFF0, 0xFFFB },   -- DI unassigned, Cf interlinear annotation
+    { 0x110BD, 0x110BD }, -- Cf Kaithi number sign
+    { 0x110CD, 0x110CD }, -- Cf Kaithi number sign above
+    { 0x13430, 0x1343F }, -- Cf Egyptian hieroglyph format controls
+    { 0x1BCA0, 0x1BCA3 }, -- Cf shorthand format controls
+    { 0x1D173, 0x1D17A }, -- Cf musical symbol format controls
+    { 0xE0000, 0xE0FFF }, -- Cf tags, DI variation selectors supplement and reserved
+}
+
 local function hidden(cp: integer): boolean
-    if cp < 0x20 or cp == 0x7F or (cp >= 0x80 and cp <= 0x9F) then return true end
-    if cp == 0xAD or cp == 0x34F or cp == 0x61C or cp == 0x115F or cp == 0x1160 then return true end
-    if cp == 0x17B4 or cp == 0x17B5 or (cp >= 0x180B and cp <= 0x180F) then return true end
-    if (cp >= 0x200B and cp <= 0x200F) or (cp >= 0x2028 and cp <= 0x202E) then return true end
-    if (cp >= 0x2060 and cp <= 0x206F) or cp == 0x3164 or (cp >= 0xFE00 and cp <= 0xFE0F) then return true end
-    if cp == 0xFEFF or cp == 0xFFA0 or (cp >= 0xFFF9 and cp <= 0xFFFB) then return true end
-    if (cp >= 0x1D173 and cp <= 0x1D17A) or (cp >= 0xE0000 and cp <= 0xE007F) then return true end
-    if cp >= 0xE0100 and cp <= 0xE01EF then return true end
+    for _, range in ipairs(preview.INVISIBLE_RANGES) do
+        if cp < range[1] then return false end
+        if cp <= range[2] then return true end
+    end
     return false
 end
 
@@ -148,6 +183,21 @@ local function base64_bytes(payload: string): integer
     return math.max(0, (body * 3) // 4)
 end
 
+-- A run that reads as a file or URL path is text, not base64: it starts with
+-- "/", or it splits on "/" into three or more segments of at most 40
+-- characters each.
+local PATH_SEGMENT_MAX = 40
+
+local function path_like(run: string): boolean
+    if run:sub(1, 1) == "/" then return true end
+    local segments, longest = 0, 0
+    for segment in (run .. "/"):gmatch("([^/]*)/") do
+        segments = segments + 1
+        if #segment > longest then longest = #segment end
+    end
+    return segments >= 3 and longest <= PATH_SEGMENT_MAX
+end
+
 -- Spans { from, to, size } of binary content in s, in order, not overlapping.
 local function binary_spans(s: string): {any}
     local spans = {}
@@ -158,11 +208,18 @@ local function binary_spans(s: string): {any}
         local before = at > 1 and s:sub(at - 1, at - 1) or ""
         local header, comma_capture = s:match("^([%w%.%+%-/;=]*)(),", at + 5)
         local comma = tonumber(comma_capture)
-        if (before == "" or not before:match("[%w]")) and header and comma
-            and (header:find("/", 1, true) or header:find(";base64", 1, true)) then
-            local payload = s:match("^[^%s\"'<>]*", comma + 1) or ""
+        local is_base64 = header ~= nil and header:find(";base64", 1, true) ~= nil
+        -- The payload alphabet is narrow, so the span ends at the first
+        -- character a data URL can't hold (a shell ;, |, $ or a space): text
+        -- after it stays visible.
+        local payload = ""
+        if comma then
+            payload = s:match(is_base64 and "^[%w%+/=_%-]*" or "^[%w%%%-%._~]*", comma + 1) or ""
+        end
+        if (before == "" or not before:match("[%w]")) and header and comma and payload ~= ""
+            and (header:find("/", 1, true) or is_base64) then
             local stop = comma + #payload
-            local size = header:find(";base64", 1, true) and base64_bytes(payload) or #payload
+            local size = is_base64 and base64_bytes(payload) or #payload
             spans[#spans + 1] = { from = at, to = stop, size = size }
             search = stop + 1
         else
@@ -185,7 +242,9 @@ local function binary_spans(s: string): {any}
             local size = nil
             if run:match("^%x+$") then
                 size = #run // 2
-            elseif run:find("%d") and run:find("%u") and run:find("%l") then
+            elseif run:find("%d") and run:find("%u") and run:find("%l") and not path_like(run)
+                and not (run:find("[%+/]") and run:find("[_%-]")) then
+                -- One base64 alphabet only: standard (+ /) or URL-safe (- _).
                 size = base64_bytes(run)
             end
             if size then runs[#runs + 1] = { from = from, to = after - 1, size = size } end
@@ -219,10 +278,11 @@ local function sorted_keys(value: any): {any}
     return keys
 end
 
--- JSON size of an original value (the "full size" of a cut container).
+-- Exact JSON size of an original value as the wire encoder writes it (the
+-- "full size" of a cut value): encoded strings and keys, punctuation included.
 local function full_size(value: any, memo: any): integer
     local kind = type(value)
-    if kind == "string" then return #value + 2 end
+    if kind == "string" then return #(json.encode(value) or "") end
     if kind ~= "table" then return #(json.encode(value) or "null") end
     if memo[value] then return memo[value] end
     local total = 2
@@ -234,7 +294,7 @@ local function full_size(value: any, memo: any): integer
         end
     else
         for key, child in pairs(value) do
-            total = total + #tostring(key) + 3 + full_size(child, memo) + (first and 0 or 1)
+            total = total + #(json.encode(tostring(key)) or "") + 1 + full_size(child, memo) + (first and 0 or 1)
             first = false
         end
     end
@@ -290,10 +350,11 @@ local function render_string(s: string, path: string, budget: integer, state: an
     if fits then return table.concat(tokens), used end
 
     -- Too long: keep the tokens that fit beside the cut note.
-    local note = ELLIPSIS .. " [cut, " .. preview.size_text(#s) .. "]"
+    local size = full_size(s, state.memo)
+    local note = ELLIPSIS .. " [cut, " .. preview.size_text(size) .. "]"
     local room = limit - 2 - cost(note)
     if room < 0 then
-        local text, text_cost = marker("[cut, " .. preview.size_text(#s) .. "]")
+        local text, text_cost = marker("[cut, " .. preview.size_text(size) .. "]")
         return text, text_cost
     end
     local kept, total = {}, 0
@@ -494,8 +555,14 @@ local function build_summary(args: any, arguments: any, numbers: {string}): stri
     for index, key in ipairs(keys) do
         local key_text = texts[index]
         local path = pointer("", key_text)
-        local shown = type(arguments) == "table" and arguments[key_text] or nil
-        local part = key_text .. ": " .. summary_value(args[key], shown, path, number_paths)
+        local shown = nil
+        if type(arguments) == "table" then shown = arguments[key_text] end
+        -- A key the 8 KB budget left out has no preview value: it is not
+        -- shown here and counts in "+n more". A false value is shown.
+        if shown == nil then break end
+        -- Keys are quoted, so a key such as `dry_run: true, delete_all` reads
+        -- as one key.
+        local part = "\"" .. key_text .. "\": " .. summary_value(args[key], shown, path, number_paths)
         local candidate = shown_count == 0 and part or (line .. ", " .. part)
         if char_count(candidate) <= preview.SUMMARY_CHARS then
             line = candidate

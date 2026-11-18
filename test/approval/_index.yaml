@@ -15,6 +15,46 @@ entries:
     auto_init: true
     directory: ./approval-docs
 
+  # The repository src folder, set by the make targets the same way
+  # (-o app.approval:source:directory=<repository>/src); the text safety
+  # suite scans it and fails when the folder is empty.
+  - name: source
+    kind: fs.directory
+    meta:
+      comment: The repository src folder, set by the make targets
+    auto_init: true
+    directory: ./approval-source
+
+  - name: text_safety_test
+    kind: function.lua
+    meta:
+      name: No hidden bidirectional or zero-width characters in src and docs
+      type: test
+      suite: session
+      comment: Scans every file under src/ and docs/ for literal U+200B-200F, U+202A-202E and U+2066-2069 (Trojan Source)
+    source: file://text_safety_test.lua
+    modules:
+      - fs
+    imports:
+      test: wippy.test:test
+    method: run
+
+  - name: canonical_json_test
+    kind: function.lua
+    meta:
+      name: Tool approval canonical JSON
+      type: test
+      suite: session
+      comment: Array holes, mixed keys, non-JSON values, numbers and nesting in the digest encoder
+    source: file://canonical_json_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      canonical_json: wippy.session.approval:canonical_json
+      fingerprint: wippy.session.approval:fingerprint
+    method: run
+
   - name: protocol_fixtures
     kind: registry.entry
     meta:
@@ -105,6 +145,7 @@ entries:
       test: wippy.test:test
       freeze: wippy.session.approval:freeze
       fingerprint: wippy.session.approval:fingerprint
+      canonical_json: wippy.session.approval:canonical_json
       tool_caller: wippy.agent.tools:caller
     method: run
 

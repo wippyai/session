@@ -72,6 +72,7 @@ test: clean
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
 		-o "app.approval:docs:directory=$(CURDIR)/docs" \
+		-o "app.approval:source:directory=$(CURDIR)/src" \
 		$(if $(strip $(TEST_FILTER)),-- $(TEST_FILTER))
 
 test-runtime: TEST_FILTER = app.runtime:handoff_runtime
@@ -91,6 +92,7 @@ test-postgres:
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
 		-o "app.approval:docs:directory=$(CURDIR)/docs" \
+		-o "app.approval:source:directory=$(CURDIR)/src" \
 		$(POSTGRES_TEST_OVERRIDES) \
 		$(if $(strip $(POSTGRES_TEST_FILTER)),-- $(POSTGRES_TEST_FILTER))
 

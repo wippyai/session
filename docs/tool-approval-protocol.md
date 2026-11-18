@@ -166,26 +166,36 @@ data and must be shown escaped, never as HTML):
 client shows it as data, escaped, and never as HTML.
 
 - Strings and object keys use JSON string escaping for every control,
-  bidirectional, zero-width or other invisible format character (`‮`,
-  `​`, `\n`, ...). A literal backslash is shown as `\\` and a quote as
-  `\"`. So the character U+202E shows as the six characters `‮`, and the
-  literal text `‮` in an argument shows as `\\u202e`. An invalid UTF-8
-  byte shows as `\xNN`.
+  bidirectional, zero-width or other invisible format character (`\u202e`,
+  `\u200b`, `\n`, ...). A literal backslash is shown as `\\` and a quote as
+  `\"`. So the character U+202E shows as the six characters `\u202e`, and the
+  literal text `\u202e` in an argument shows as `\\u202e`. An invalid UTF-8
+  byte shows as `\xNN`. The escaped set is every code point in the Unicode
+  15.1 general categories Cc, Cf, Zl and Zp and with the
+  Default_Ignorable_Code_Point property.
 - Base64 and hex runs of at least 128 characters, and data URLs, are replaced
   by `[binary, <size>]` inside the string. The path of the string is in `cut`.
+  A base64 run must use one alphabet (standard or URL-safe) and must not look
+  like a path (start with `/`, or split on `/` into three or more segments of
+  at most 40 characters). A data URL payload ends at the first character
+  outside `[A-Za-z0-9+/=_-]` (base64) or `[A-Za-z0-9%._~-]` (other data
+  URLs), so text after it, such as `;curl ...|sh`, stays visible.
 - A string longer than 1 KB of escaped text ends with `… [cut, <size>]`. An
   object or array deeper than 6 levels is replaced by `[cut, <size>]`. When
   the 8 KB budget runs out, the remaining members of an array are replaced by
   one last item `[cut, <n> more, <size>]`, and those of an object by one
   member with the key `…` (or `……` if that key is taken). Every such path is
   in `cut`. Object keys longer than 128 characters end with `…`.
-- Sizes are the UTF-8 bytes of a string, the JSON bytes of an object or array,
-  and the decoded bytes of binary data: `512 B`, `1.4 KB`, `2.0 MB`.
+- Sizes are the exact JSON bytes of a string, an object or an array as the
+  server encodes them, and the decoded bytes of binary data: `512 B`,
+  `1.4 KB`, `2.0 MB`.
 - No key is redacted. The full arguments are in the REST row `data`.
 - `summary` is one line: the first keys in sorted order with their values, as
-  many as fit in about 80 characters, then ` +<n> more` for the rest. Strings
-  are quoted and escaped as above; objects show as `{<n> keys}` and arrays as
-  `[<n> items]`. A call without arguments shows `no arguments`.
+  many as fit in about 80 characters, then ` +<n> more` for the rest,
+  including keys the 8 KB budget left out. Keys and strings are quoted and
+  escaped as above (`"customer_id": "c_1042", "hard": true`); objects show as
+  `{<n> keys}` and arrays as `[<n> items]`. A call without arguments shows
+  `no arguments`.
 
 Exact numbers. Integers outside the JSON safe range (above `2^53 - 1` or
 below `-(2^53 - 1)`) are sent as strings with their exact decimal digits,

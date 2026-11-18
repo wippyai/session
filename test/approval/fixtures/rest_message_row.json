@@ -33,7 +33,7 @@
             "title": "Delete customer",
             "description": "Permanently deletes a customer and their orders.",
             "agent": "Ops assistant",
-            "summary": "customer_id: \"c_1042\", hard: true",
+            "summary": "\"customer_id\": \"c_1042\", \"hard\": true",
             "arguments": {
               "customer_id": "c_1042",
               "hard": true
