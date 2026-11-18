@@ -229,6 +229,11 @@ function shownMonth(): string | undefined {
   return document.querySelector('.p-datepicker-select-month')?.textContent?.trim()
 }
 
+/** The year in the open calendar's header. */
+function shownYear(): string | undefined {
+  return document.querySelector('.p-datepicker-select-year')?.textContent?.trim()
+}
+
 async function openCalendar(wrapper: Mounted['wrapper']) {
   await wrapper.find('button[aria-haspopup="dialog"]').trigger('click')
   await nextTick()
@@ -526,6 +531,65 @@ describe('date field: years before 1000', () => {
     dayCell('20').click()
     await flushPromises()
     expect(draft()).toBe('2026-10-20')
+  })
+
+  // The calendar must show and pick in the year the text says, not in the
+  // century PrimeVue would read a short year into.
+  it('keeps a typed year below 100 through a blur and a calendar pick', async () => {
+    const { wrapper, input, draft } = mountField(undefined, [], unbounded)
+    await typeKeys(input, '0050-03-04')
+    await blur(input)
+    expect(input.value).toBe('0050-03-04')
+    expect(draft()).toBe('0050-03-04')
+    await openCalendar(wrapper)
+    expect(shownMonth()).toBe('March')
+    expect(shownYear()).toBe('50')
+    dayCell('5').click()
+    await flushPromises()
+    expect(draft()).toBe('0050-03-05')
+    expect(input.value).toBe('0050-03-05')
+  })
+
+  it('shows and picks in a year below 100 handed in from outside, at mount and on a reload', async () => {
+    const { wrapper, input, draft } = mountField('0050-03-04', [], unbounded)
+    expect(input.value).toBe('0050-03-04')
+    await wrapper.setProps({ modelValue: '0060-07-08' })
+    await flushPromises()
+    expect(input.value).toBe('0060-07-08')
+    await openCalendar(wrapper)
+    expect(shownMonth()).toBe('July')
+    expect(shownYear()).toBe('60')
+    dayCell('9').click()
+    await flushPromises()
+    expect(draft()).toBe('0060-07-09')
+    expect(input.value).toBe('0060-07-09')
+  })
+
+  it('shows and picks in a year below 1000 handed in from outside', async () => {
+    const { wrapper, input, draft } = mountField('0999-05-15', [], unbounded)
+    expect(input.value).toBe('0999-05-15')
+    await openCalendar(wrapper)
+    expect(shownMonth()).toBe('May')
+    expect(shownYear()).toBe('999')
+    dayCell('20').click()
+    await flushPromises()
+    expect(draft()).toBe('0999-05-20')
+    expect(input.value).toBe('0999-05-20')
+  })
+
+  it('shows and picks in a typed year below 1000 after a blur', async () => {
+    const { wrapper, input, draft } = mountField(undefined, [], unbounded)
+    await typeKeys(input, '0998-02-03')
+    await blur(input)
+    expect(input.value).toBe('0998-02-03')
+    expect(draft()).toBe('0998-02-03')
+    await openCalendar(wrapper)
+    expect(shownMonth()).toBe('February')
+    expect(shownYear()).toBe('998')
+    dayCell('4').click()
+    await flushPromises()
+    expect(draft()).toBe('0998-02-04')
+    expect(input.value).toBe('0998-02-04')
   })
 })
 

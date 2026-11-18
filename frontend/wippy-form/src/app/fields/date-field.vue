@@ -2,7 +2,7 @@
 import type { ComponentPublicInstance } from 'vue'
 import type { DateFormField, FieldAnswer, FieldError } from '../../lib/definition'
 import DatePicker from 'primevue/datepicker'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, shallowRef, watch } from 'vue'
 import { partAttrs } from '../../lib/part-attrs'
 import { isValidIsoDate } from '../../lib/scalar-answers'
 import FieldShell from './field-shell.vue'
@@ -36,12 +36,18 @@ import FieldShell from './field-shell.vue'
  * `below_min`, `above_max`). The picker's own reading would differ: it reads a
  * year below 100 as a two-digit year (`0050` is 1950, `0000` is 2000) and
  * ignores trailing text (`2026-06-05 suffix`). A day picked in the calendar
- * is the picker's date, with a year it writes without padding (`999-05-15`)
- * padded to four digits.
+ * (`date-select`) is saved as picked, with a four-digit year.
  *
- * The picker also resets the box to its last accepted date when it loses
- * focus, which would lose unparseable text; the typed text is put back after
- * that reset so the user can correct it.
+ * What the calendar shows. The picker is handed a `Date` built with
+ * `setFullYear`, never text, so a year below 100 stays that year (the picker
+ * would read `0050` as 1950), and a typed real day moves the calendar to that
+ * day. A day picked in a year below 100 is put back in that year (the picker
+ * builds it as 19xx).
+ *
+ * The picker also writes its own spelling of its day into the box when it
+ * mounts, when its day changes and when the box loses focus (`999-05-15`,
+ * `50-03-04`), which would lose unparseable text; the box's own text is put
+ * back after it, so the user can correct it.
  *
  * The calendar opens in the theme plugin's overlay layer, not inline: the
  * layer is promoted out of every clipping ancestor, so the calendar is never
@@ -87,15 +93,31 @@ function textOf(value: FieldAnswer | undefined): string {
 
 // The text the box shows.
 const boxText = ref(textOf(props.modelValue))
-// True while the box holds text the picker understood (or is empty); false
-// for text it rejected, which the picker would reset to its last date.
-let boxAccepted = true
-// What the picker itself holds: only its own accepted selections move it.
-// Text it rejected changes the box and the draft but never this, because a
-// new model value makes the picker rewrite the box.
-const picked = ref<string | null>(isValidIsoDate(boxText.value) ? boxText.value : null)
-// PrimeVue's typings only list Date models; in string mode it takes and gives text.
-const pickerModel = computed(() => picked.value as unknown as Date | null)
+
+function toDate(iso: string | null | undefined): Date | undefined {
+  if (!iso || !isValidIsoDate(iso))
+    return undefined
+  const [year, month, day] = iso.split('-').map(Number)
+  const date = new Date(2000, month - 1, day)
+  // `new Date(year, ...)` maps years 0-99 to 1900-1999.
+  date.setFullYear(year)
+  return date
+}
+
+// The day the calendar holds (`YYYY-MM-DD`), or null: the last real day typed,
+// picked or handed in. Text that is no day leaves it where it was.
+let picked: string | null = isValidIsoDate(boxText.value) ? boxText.value : null
+// What the picker is given: always a `Date` built by `toDate`, never text,
+// because the picker reads text with a year below 100 as a two-digit year
+// (`0050` is 1950). Every sync hands it a fresh value, so it takes the day
+// even when the day is unchanged after it put its own reading of typed text in
+// its place; with no day, null and undefined take turns for the same reason.
+const pickerModel = shallowRef<Date | null | undefined>(toDate(picked) ?? null)
+
+function syncPicker(next: string | null) {
+  picked = next
+  pickerModel.value = toDate(next) ?? (pickerModel.value === null ? undefined : null)
+}
 
 // The last value this control reported, to tell the form handing it back from
 // the form changing the answer.
@@ -106,25 +128,36 @@ function report(text: string) {
   emit('update:modelValue', text)
 }
 
+const picker = ref<ComponentPublicInstance | null>(null)
+
+function boxInput(): HTMLInputElement | null {
+  return (picker.value?.$el as HTMLElement | undefined)?.querySelector('input') ?? null
+}
+
+// The picker writes its own spelling of its day into the box when it mounts,
+// when its model changes and when the box is left (`999-05-15`, `50-03-04`);
+// the box's own text is put back over it.
+function restoreBox() {
+  const input = boxInput()
+  if (input && input.value !== boxText.value)
+    input.value = boxText.value
+}
+
+function restoreBoxAfterPicker() {
+  void nextTick(restoreBox)
+}
+
+onMounted(restoreBox)
+
 watch(() => props.modelValue, (next) => {
   const text = textOf(next)
   if (text === lastReported)
     return
   lastReported = text
   boxText.value = text
-  boxAccepted = true
-  picked.value = isValidIsoDate(text) ? text : null
+  syncPicker(isValidIsoDate(text) ? text : null)
+  restoreBoxAfterPicker()
 })
-
-function toDate(iso: string | undefined): Date | undefined {
-  if (!iso || !isValidIsoDate(iso))
-    return undefined
-  const [year, month, day] = iso.split('-').map(Number)
-  const date = new Date(2000, month - 1, day)
-  // `new Date(year, ...)` maps years 0-99 to 1900-1999.
-  date.setFullYear(year)
-  return date
-}
 
 // The bounds are turned into dates from their text, through a computed of the
 // text itself: a state reload hands over a new field object with the same
@@ -136,14 +169,15 @@ const maxText = computed(() => props.field.max)
 const minDate = computed(() => toDate(minText.value))
 const maxDate = computed(() => toDate(maxText.value))
 
-// The picker reports an accepted selection (a calendar pick or typed text it
-// parsed) with `update:modelValue`, then fires `input` in the same tick for
-// typed text.
-let acceptedThisTick = false
+// The picker reports its reading of typed text with `update:modelValue`, then
+// fires `input` in the same tick; a day picked in the calendar comes with
+// `date-select` instead. Its reading is never the answer (`onTyped`,
+// `onDateSelect`), but it tells that the picker replaced its own day.
+let pickerReadThisTick = false
 
-// The picker writes the year of a date without padding (`999-05-15`).
-function withFourDigitYear(text: string): string {
-  return text.replace(/^(\d{1,3})(-\d{2}-\d{2})$/, (_match, year: string, rest: string) => `${year.padStart(4, '0')}${rest}`)
+function onPickerRead() {
+  pickerReadThisTick = true
+  queueMicrotask(() => { pickerReadThisTick = false })
 }
 
 // A complete date written loosely: a year of 1 to 4 digits, a month and a day
@@ -166,27 +200,48 @@ function typedValue(text: string): string {
   return isValidIsoDate(iso) ? iso : text
 }
 
-function onPicked(value: unknown) {
-  acceptedThisTick = true
-  queueMicrotask(() => { acceptedThisTick = false })
-  const text = typeof value === 'string' ? withFourDigitYear(value) : ''
-  picked.value = text === '' ? null : text
-  boxAccepted = true
-  boxText.value = text
-  report(text)
-}
-
 function onTyped(event: Event) {
   // What the user typed stays in the box, whether or not the picker understood it.
   boxText.value = (event.target as HTMLInputElement).value
   const value = typedValue(boxText.value)
-  // The picker understood this text and already reported the same date: the
-  // box shows that date once it is left.
-  if (acceptedThisTick && value === lastReported)
-    return
-  // Otherwise the picker's reading, if any, is replaced by what the text says.
-  boxAccepted = false
+  // The picker put its reading of the text in place of its day: the calendar
+  // takes the day the text says instead, none for an emptied box, and keeps
+  // its last day for text that is no day.
+  if (pickerReadThisTick) {
+    if (isValidIsoDate(value))
+      syncPicker(value)
+    else
+      syncPicker(value.trim() === '' ? null : picked)
+  }
   report(value)
+}
+
+function isoOf(date: Date): string {
+  const pad = (value: number, width: number) => String(value).padStart(width, '0')
+  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1, 2)}-${pad(date.getDate(), 2)}`
+}
+
+// The picker builds a picked day with `new Date(year, month, day)`, which
+// reads a year below 100 as 19xx, so a day picked while the calendar shows
+// year 50 arrives as 1950. The calendar's own year (`currentYear`, which it
+// sets to the picked cell's year, also for a day of the month before or
+// after) tells the two apart.
+function inShownCentury(date: Date): Date {
+  const shown = (picker.value as unknown as { currentYear?: unknown } | null)?.currentYear
+  if (typeof shown !== 'number' || shown < 0 || shown > 99 || date.getFullYear() !== shown + 1900)
+    return date
+  const fixed = new Date(date.getTime())
+  fixed.setFullYear(shown)
+  return fixed
+}
+
+// A day picked in the calendar, with the mouse or the keyboard.
+function onDateSelect(date: Date) {
+  const iso = isoOf(inShownCentury(date))
+  boxText.value = iso
+  syncPicker(iso)
+  report(iso)
+  restoreBoxAfterPicker()
 }
 
 // A tap on a touch screen. PrimeVue gives the box `inputmode="none"` (no
@@ -202,28 +257,16 @@ function onBoxClick(event: MouseEvent) {
   ;(event.currentTarget as HTMLElement).querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')?.click()
 }
 
-function onBlur(event: { originalEvent: Event, value: string }) {
-  // The picker resets the box to its last accepted date right after this
-  // handler returns. Text it accepted is shown as the full date it read.
-  if (boxAccepted) {
-    boxText.value = picked.value ?? ''
-    return
-  }
-  // Text it rejected or read differently is put back once the reset has run,
-  // as the full date when it is a loosely written one.
+function onBlur() {
+  // The picker writes its own spelling of its day into the box right after
+  // this handler returns. The typed text is put back, as the full date when it
+  // is a loosely written one, so unparseable text can still be corrected.
   boxText.value = typedValue(boxText.value)
-  const input = event.originalEvent.target as HTMLInputElement
-  void nextTick(() => {
-    if (input.value !== boxText.value)
-      input.value = boxText.value
-  })
+  restoreBoxAfterPicker()
 }
-
 // The `date` state is what the stylesheet bounds the control's width by.
 const inputPart = computed(() => partAttrs('field-input', 'date'))
 const calendarPart = computed(() => partAttrs('field-calendar'))
-
-const picker = ref<ComponentPublicInstance | null>(null)
 
 // The calendar is closing, and its panel is still in the page for this one
 // moment (the picker emits `hide` as the leave starts). A mouse click outside
@@ -315,7 +358,8 @@ defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })
         show-icon
         size="small"
         fluid
-        @update:model-value="onPicked"
+        @update:model-value="onPickerRead"
+        @date-select="onDateSelect"
         @click="onBoxClick"
         @input="onTyped"
         @blur="onBlur"
