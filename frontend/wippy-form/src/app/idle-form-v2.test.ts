@@ -75,6 +75,17 @@ describe('IdleForm — V2 read-only values', () => {
     expect(root.getAttribute('part')?.split(' ')).toEqual(expect.arrayContaining(['card', 'card-answered', 'fields']))
     expect(root.className).toContain('w-form__fields')
   })
+
+  // A read-only answer is not a disabled control, so it is not styled as one.
+  it('marks the fields read-only, never disabled', () => {
+    const wrapper = mountIdle()
+    const fields = wrapper.findAll('[part~="field"]')
+    expect(fields).toHaveLength(answered.definition.fields.length)
+    for (const field of fields)
+      expect(field.attributes('part')?.split(' ')).toContain('field-readonly')
+    expect(wrapper.find('[part~="field-disabled"]').exists()).toBe(false)
+    expect(wrapper.find('.w-form__field--disabled').exists()).toBe(false)
+  })
 })
 
 describe('IdleForm — choice answers in a fields form', () => {

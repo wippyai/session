@@ -14,6 +14,7 @@ import type {
 } from './definition'
 import type { FieldHandler, FieldOutcome } from './scalar-answers'
 import { isChoiceField, isNotedAnswer, isOtherAnswer } from './definition'
+import { ownValue } from './own'
 import { REQUIRED_MESSAGE, SCALAR_HANDLERS } from './scalar-answers'
 import { codePointLength, lengthLimitMessage, trimAnswerText } from './text'
 
@@ -185,7 +186,7 @@ export function serializeFieldAnswer(field: FormField, draft: FieldAnswer | unde
 export function serializeAnswers(definition: FormDefinition, draft: AnswerDraft): FormAnswers {
   const out: FormAnswers = {}
   for (const field of definition.fields) {
-    const value = serializeFieldAnswer(field, draft[field.id])
+    const value = serializeFieldAnswer(field, ownValue(draft, field.id))
     if (value !== undefined)
       out[field.id] = value
   }
@@ -200,7 +201,7 @@ export function serializeAnswers(definition: FormDefinition, draft: AnswerDraft)
 export function validateAnswers(definition: FormDefinition, draft: AnswerDraft): Record<string, FieldError[]> {
   const out: Record<string, FieldError[]> = {}
   for (const field of definition.fields) {
-    const { errors } = evaluateField(field, draft[field.id])
+    const { errors } = evaluateField(field, ownValue(draft, field.id))
     if (errors.length > 0)
       out[field.id] = errors
   }
@@ -214,7 +215,7 @@ export function validateAnswers(definition: FormDefinition, draft: AnswerDraft):
  */
 export function draftSignature(definition: FormDefinition, draft: AnswerDraft): string {
   return JSON.stringify(definition.fields.map((field) => {
-    const value = draft[field.id]
+    const value = ownValue(draft, field.id)
     const empty = value === undefined || value === '' || (Array.isArray(value) && value.length === 0)
     return [field.id, empty ? null : value]
   }))
@@ -331,7 +332,7 @@ export function readOnlyAnswer(field: FormField, answer: FieldAnswer | undefined
 export function draftFromAnswers(definition: FormDefinition, answers: FormAnswers | null): AnswerDraft {
   const draft: AnswerDraft = {}
   for (const field of definition.fields) {
-    const value = handlerFor(field)?.initialDraft(field, answers?.[field.id])
+    const value = handlerFor(field)?.initialDraft(field, ownValue(answers, field.id))
     if (value !== undefined)
       draft[field.id] = value
   }

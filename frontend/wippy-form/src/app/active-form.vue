@@ -7,6 +7,7 @@ import Button from 'primevue/button'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
 import { ERROR_TEXT_CLASS } from '../lib/error-text'
+import { ownValue } from '../lib/own'
 import { pageHasNoFocus } from '../lib/page-focus'
 import { partAttrs } from '../lib/part-attrs'
 import { SENDING_LABEL, SENDING_STATUS_MESSAGE, SLOW_SEND_MS } from '../lib/send-state'
@@ -62,6 +63,8 @@ const NO_ERRORS: FieldError[] = []
 const QUIET_MESSAGE_PT = { root: { 'role': undefined, 'aria-live': undefined, 'aria-atomic': undefined } }
 
 // Keyed by field id: the raw value of each control — matches AnswerDraft.
+// This map and `fieldErrors` are read with `ownValue`, because a field id
+// can be `constructor`, which a plain lookup finds on `Object.prototype`.
 const draft = reactive<Record<string, FieldAnswer | undefined>>(
   draftFromAnswers(props.state.definition, props.state.data),
 )
@@ -193,7 +196,7 @@ watch(() => props.submitting, (sending) => {
 // A changed answer drops that question's errors; the next submit re-checks it.
 function updateField(id: string, value: FieldAnswer | undefined) {
   draft[id] = value
-  if (fieldErrors.value[id]) {
+  if (ownValue(fieldErrors.value, id)) {
     const { [id]: _cleared, ...rest } = fieldErrors.value
     fieldErrors.value = rest
   }
@@ -297,8 +300,8 @@ defineExpose({
       :key="field.id"
       :ref="(el) => setFieldRef(field.id, el)"
       :field="field"
-      :model-value="draft[field.id]"
-      :errors="fieldErrors[field.id] ?? NO_ERRORS"
+      :model-value="ownValue(draft, field.id)"
+      :errors="ownValue(fieldErrors, field.id) ?? NO_ERRORS"
       :disabled="submitting"
       :readonly="false"
       @update:model-value="(v) => updateField(field.id, v)"

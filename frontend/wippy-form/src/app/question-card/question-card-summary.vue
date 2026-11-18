@@ -2,6 +2,7 @@
 import type { ChoiceFormState } from '../../lib/definition'
 import { computed, ref } from 'vue'
 import { answerDisplayItems } from '../../lib/answers'
+import { ownValue } from '../../lib/own'
 import { partAttrs } from '../../lib/part-attrs'
 import FormAnsweredStatus from '../form-answered-status.vue'
 import QuestionCardAnswerItems from './question-card-answer-items.vue'
@@ -15,7 +16,7 @@ const props = defineProps<{
 
 const rows = computed(() => props.state.definition.fields.map(field => ({
   field,
-  items: answerDisplayItems(field, props.state.data?.[field.id]),
+  items: answerDisplayItems(field, ownValue(props.state.data, field.id)),
 })))
 
 const statusRef = ref<InstanceType<typeof FormAnsweredStatus> | null>(null)

@@ -337,7 +337,7 @@ describe('useQuestionCard: hydrating from a previously loaded answer', () => {
     const c = useQuestionCard(def, { plain: 'a', noted: { value: 'a', note: 'hi' }, own: { other: 'mine' } }, vi.fn())
     expect(c.ans(def.fields[0]).chosen).toEqual(['a'])
     expect(c.ans(def.fields[1]).chosen).toEqual(['a'])
-    expect(c.ans(def.fields[1]).notes.a).toBe('hi')
+    expect(c.ans(def.fields[1]).notes.get('a')).toBe('hi')
     expect(c.ans(def.fields[2]).useOther).toBe(true)
     expect(c.ans(def.fields[2]).other).toBe('mine')
   })

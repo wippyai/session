@@ -23,7 +23,8 @@ import FieldShell from './field-shell.vue'
  * the inputs and not on the group.
  *
  * Roles: the fieldset is the group. A single choice adds a `radiogroup` (with
- * `aria-required`) around its radios; a multiple choice adds no role, since its
+ * `aria-required`, and named by the legend through `aria-labelledby`, because a
+ * legend names only its fieldset) around its radios; a multiple choice adds no role, since its
  * fieldset already is the group and `aria-required` is not allowed on one.
  */
 const props = defineProps<{
@@ -78,28 +79,21 @@ const answer = computed(() => props.modelValue as ChoiceAnswer | undefined)
 const otherTextInvalid = computed(() => props.errors.some(e => e.code === 'blank'))
 
 // ── Single choice ──────────────────────────────────────────────
-// Local sentinel value for the "Other" radio's v-model binding — never sent
-// anywhere; just distinguishes "Other is selected" from a real option value.
-const OTHER_TOKEN = 'choice-field-other-sentinel'
+// The chosen option and a chosen Other are two separate states. Other is never
+// a reserved option value: an option value is any text the agent wrote, so no
+// string is safe to reserve. The option radios read the chosen option (null
+// when Other or nothing is chosen), and the Other radio is a binary radio.
+const singleOption = computed<string | null>(() => typeof answer.value === 'string' ? answer.value : null)
+const singleOtherSelected = computed(() => isOtherAnswer(answer.value))
 
-const singleSelected = computed<string>({
-  get() {
-    const v = answer.value
-    if (typeof v === 'string')
-      return v
-    if (isOtherAnswer(v))
-      return OTHER_TOKEN
-    return ''
-  },
-  set(next) {
-    if (next === OTHER_TOKEN)
-      emit('update:modelValue', { other: singleOtherText.value })
-    else if (next === '')
-      emit('update:modelValue', undefined)
-    else
-      emit('update:modelValue', next)
-  },
-})
+function chooseOption(value: unknown) {
+  if (typeof value === 'string')
+    emit('update:modelValue', value)
+}
+
+function chooseOther() {
+  emit('update:modelValue', { other: singleOtherText.value })
+}
 
 const singleOtherText = ref(answerOtherText(answer.value))
 watch(answer, (v) => {
@@ -107,7 +101,7 @@ watch(answer, (v) => {
     singleOtherText.value = answerOtherText(v)
 })
 watch(singleOtherText, (text) => {
-  if (!props.field.multiple && singleSelected.value === OTHER_TOKEN)
+  if (!props.field.multiple && singleOtherSelected.value)
     emit('update:modelValue', { other: text })
 })
 
@@ -167,7 +161,7 @@ defineExpose({
 
 <template>
   <FieldShell
-    v-slot="{ invalid, describedBy }"
+    v-slot="{ invalid, describedBy, labelId }"
     ref="shell"
     :field="field"
     :model-value="modelValue"
@@ -181,6 +175,7 @@ defineExpose({
       :part="optionsPart.part"
       :class="optionsPart.class"
       :role="field.multiple ? undefined : 'radiogroup'"
+      :aria-labelledby="field.multiple ? undefined : labelId"
       :aria-required="!field.multiple && field.required ? 'true' : undefined"
     >
       <template v-if="!field.multiple">
@@ -191,7 +186,7 @@ defineExpose({
           :class="optionPart.class"
         >
           <RadioButton
-            v-model="singleSelected"
+            :model-value="singleOption"
             :input-id="optionId(index)"
             :name="groupId"
             :value="option.value"
@@ -200,6 +195,7 @@ defineExpose({
             :pt="inputPt(describedBy)"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
+            @update:model-value="chooseOption"
           />
           <label
             :for="optionId(index)"
@@ -220,15 +216,16 @@ defineExpose({
           :class="otherOptionPart.class"
         >
           <RadioButton
-            v-model="singleSelected"
+            :model-value="singleOtherSelected"
+            binary
             :input-id="otherControlId"
             :name="groupId"
-            :value="OTHER_TOKEN"
             :disabled="disabled"
             :invalid="invalid"
             :pt="inputPt(describedBy)"
             :part="optionInputPart.part"
             :class="optionInputPart.class"
+            @update:model-value="chooseOther"
           />
           <div
             :part="otherBodyPart.part"
@@ -248,7 +245,7 @@ defineExpose({
             <InputText
               :id="otherTextId"
               v-model="singleOtherText"
-              :disabled="disabled || singleSelected !== OTHER_TOKEN"
+              :disabled="disabled || !singleOtherSelected"
               :aria-describedby="describedBy"
               :invalid="invalid && otherTextInvalid"
               :part="otherInputPart.part"

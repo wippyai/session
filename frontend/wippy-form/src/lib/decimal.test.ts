@@ -77,6 +77,13 @@ describe('numberToPlainText — the number as stored, never in exponent form', (
     expect(numberToPlainText(1e21)).toBe('1000000000000000000000')
     expect(numberToPlainText(1.25e22)).toBe('12500000000000000000000')
   })
+
+  // The same digits as the server's number_text (field_values_test.lua).
+  it('writes the shortest digits of a subnormal number', () => {
+    expect(numberToPlainText(5e-324)).toBe(`0.${'0'.repeat(323)}5`)
+    expect(numberToPlainText(-5e-324)).toBe(`-0.${'0'.repeat(323)}5`)
+    expect(numberToPlainText(1e-323)).toBe(`0.${'0'.repeat(322)}1`)
+  })
 })
 
 describe('isOnStep — exact decimal arithmetic, no floating modulus', () => {

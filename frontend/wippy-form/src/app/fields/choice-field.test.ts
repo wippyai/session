@@ -123,6 +123,17 @@ describe('ChoiceField — group role and required', () => {
     expect(wrapper.find('[role="radiogroup"]').attributes('aria-required')).toBeUndefined()
   })
 
+  // A radiogroup needs its own accessible name: the fieldset's legend names
+  // the fieldset, not the role inside it.
+  it('names the radiogroup by the field label', () => {
+    const wrapper = mountField()
+    const labelledBy = wrapper.find('[role="radiogroup"]').attributes('aria-labelledby')
+    expect(labelledBy).toBeTruthy()
+    const legend = wrapper.find('legend')
+    expect(legend.attributes('id')).toBe(labelledBy)
+    expect(legend.text()).toBe('Pick one (required)')
+  })
+
   // The fieldset is already the group, and aria-required is not allowed on a
   // group role, so a multiple-choice field adds neither.
   it('adds no role and no aria-required to a multiple-choice field, whose fieldset is the group', () => {
@@ -238,5 +249,56 @@ describe('ChoiceField — description and error linked to the inputs', () => {
   it('links nothing in the read-only view, which has no inputs', () => {
     const wrapper = mountField({ field: described, readonly: true, disabled: true, modelValue: 'other' })
     expect(wrapper.find('input').exists()).toBe(false)
+  })
+})
+
+// Other is its own selection state, never a reserved option value: an option
+// value is any text the agent wrote, so no string is safe to reserve.
+describe('ChoiceField: an option whose value is the old Other marker', () => {
+  const MARKER = 'choice-field-other-sentinel'
+  const markerField = (multiple: boolean, allowOther: boolean): ChoiceFormField => ({
+    ...trickyField,
+    multiple,
+    allow_other: allowOther,
+    options: [{ value: MARKER, label: 'Keep original' }, { value: 'b', label: 'Option B' }],
+  })
+
+  it.each([true, false])('single choice (Other allowed: %s): choosing it answers with its value', async (allowOther) => {
+    const wrapper = mountField({ field: markerField(false, allowOther) })
+    await wrapper.findAll('input[type="radio"]')[0].setValue(true)
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([MARKER])
+  })
+
+  it.each([true, false])('single choice (Other allowed: %s): shows it chosen, and Other not chosen', async (allowOther) => {
+    const wrapper = mountField({ field: markerField(false, allowOther), modelValue: MARKER })
+    const radios = wrapper.findAll('input[type="radio"]')
+    expect((radios[0].element as HTMLInputElement).checked).toBe(true)
+    if (allowOther) {
+      expect((radios[2].element as HTMLInputElement).checked).toBe(false)
+      expect(wrapper.find('input[type="text"]').attributes('disabled')).toBeDefined()
+    }
+  })
+
+  it('single choice: Other is chosen apart from it, and the option is not', async () => {
+    const wrapper = mountField({ field: markerField(false, true), modelValue: { other: '' } })
+    const radios = wrapper.findAll('input[type="radio"]')
+    expect((radios[0].element as HTMLInputElement).checked).toBe(false)
+    expect((radios[2].element as HTMLInputElement).checked).toBe(true)
+    await wrapper.find('input[type="text"]').setValue('mine')
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{ other: 'mine' }])
+    await radios[0].setValue(true)
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([MARKER])
+  })
+
+  it('single choice: choosing Other answers with the Other text', async () => {
+    const wrapper = mountField({ field: markerField(false, true) })
+    await wrapper.findAll('input[type="radio"]')[2].setValue(true)
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{ other: '' }])
+  })
+
+  it.each([true, false])('multiple choice (Other allowed: %s): ticking it answers with its value', async (allowOther) => {
+    const wrapper = mountField({ field: markerField(true, allowOther) })
+    await wrapper.findAll('input[type="checkbox"]')[0].setValue(true)
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([[MARKER]])
   })
 })

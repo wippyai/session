@@ -13,6 +13,8 @@ defineProps<{
   tag: 'label' | 'legend' | 'span'
   /** The id of the control a `<label>` points at; ignored for the other tags. */
   controlId: string
+  /** The element's own id, so a role inside a fieldset can be named by its legend. */
+  labelId?: string
   label: string
   /** Show the "(required)" marker. */
   required: boolean
@@ -25,6 +27,7 @@ const markerPart = computed(() => partAttrs('field-marker'))
 <template>
   <component
     :is="tag"
+    :id="labelId"
     :for="tag === 'label' ? controlId : undefined"
     :part="labelPart.part"
     :class="labelPart.class"

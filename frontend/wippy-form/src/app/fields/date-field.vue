@@ -26,15 +26,18 @@ import FieldShell from './field-shell.vue'
  * leaves the caret where it is). The text in the box changes only when the
  * user types or picks a day, or when the form changes the answer.
  *
- * What the draft holds. Whatever the box holds, so unparseable or
- * out-of-range text reaches the client check as typed and is named at submit
- * (`invalid_date`, `below_min`, `above_max`). One exception: when the picker
- * understood the text (`2026-6-5`), the draft is the full date it read
- * (`2026-06-05`), which is what will be saved; the box shows that text once it
- * is left. When the typed text is itself a whole valid date, it is reported as
- * typed: the picker reads a year below 100 as a two-digit year (`0050` is
- * 1950). A year the picker writes without padding (`999-05-15`) is padded to
- * four digits.
+ * What the draft holds. Typed text is judged on its own (`typedValue`), never
+ * by the date the picker read from it. A complete date written loosely
+ * (`2026-6-5`: a year of 1 to 4 digits, a month and a day of 1 or 2) that is
+ * a real day from year 1 to 9999 becomes the full date (`2026-06-05`), which
+ * is what will be saved; the box shows it once it is left. Any other text is
+ * the draft exactly as typed, so unparseable, impossible or out-of-range text
+ * reaches the client check as typed and is named at submit (`invalid_date`,
+ * `below_min`, `above_max`). The picker's own reading would differ: it reads a
+ * year below 100 as a two-digit year (`0050` is 1950, `0000` is 2000) and
+ * ignores trailing text (`2026-06-05 suffix`). A day picked in the calendar
+ * is the picker's date, with a year it writes without padding (`999-05-15`)
+ * padded to four digits.
  *
  * The picker also resets the box to its last accepted date when it loses
  * focus, which would lose unparseable text; the typed text is put back after
@@ -143,6 +146,26 @@ function withFourDigitYear(text: string): string {
   return text.replace(/^(\d{1,3})(-\d{2}-\d{2})$/, (_match, year: string, rest: string) => `${year.padStart(4, '0')}${rest}`)
 }
 
+// A complete date written loosely: a year of 1 to 4 digits, a month and a day
+// of 1 or 2 digits, and nothing else.
+const LOOSE_DATE = /^(\d{1,4})-(\d{1,2})-(\d{1,2})$/
+
+/**
+ * What typed text reports: the full `YYYY-MM-DD` date of a loosely written
+ * real day from year 1 to 9999 (`2026-6-5` is `2026-06-05`), else the text
+ * exactly as typed, which the submit then names `invalid_date`. It is read
+ * from the text itself, never from the date the picker read from it: the
+ * picker reads a year below 100 as a two-digit year (`0050` is 1950, `0000`
+ * is 2000) and ignores trailing text (`2026-06-05 suffix`).
+ */
+function typedValue(text: string): string {
+  const match = LOOSE_DATE.exec(text)
+  if (!match)
+    return text
+  const iso = `${match[1].padStart(4, '0')}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`
+  return isValidIsoDate(iso) ? iso : text
+}
+
 function onPicked(value: unknown) {
   acceptedThisTick = true
   queueMicrotask(() => { acceptedThisTick = false })
@@ -156,19 +179,14 @@ function onPicked(value: unknown) {
 function onTyped(event: Event) {
   // What the user typed stays in the box, whether or not the picker understood it.
   boxText.value = (event.target as HTMLInputElement).value
-  if (acceptedThisTick) {
-    // The picker understood this text and already reported the date it read.
-    // When the text is itself a whole valid date, that is the date meant: the
-    // picker reads a year below 100 as a two-digit year (`0050` is 1950), so the
-    // text is reported as it stands, and the box keeps it when it is left.
-    if (isValidIsoDate(boxText.value) && boxText.value !== lastReported) {
-      boxAccepted = false
-      report(boxText.value)
-    }
+  const value = typedValue(boxText.value)
+  // The picker understood this text and already reported the same date: the
+  // box shows that date once it is left.
+  if (acceptedThisTick && value === lastReported)
     return
-  }
+  // Otherwise the picker's reading, if any, is replaced by what the text says.
   boxAccepted = false
-  report(boxText.value)
+  report(value)
 }
 
 // A tap on a touch screen. PrimeVue gives the box `inputmode="none"` (no
@@ -191,7 +209,9 @@ function onBlur(event: { originalEvent: Event, value: string }) {
     boxText.value = picked.value ?? ''
     return
   }
-  // Text it rejected is put back once the reset has run.
+  // Text it rejected or read differently is put back once the reset has run,
+  // as the full date when it is a loosely written one.
+  boxText.value = typedValue(boxText.value)
   const input = event.originalEvent.target as HTMLInputElement
   void nextTick(() => {
     if (input.value !== boxText.value)

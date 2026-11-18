@@ -8,14 +8,20 @@ import { trimAnswerText } from '../lib/text'
 import { answerHasOption, answerHasOther, answerNoteFor, answerOtherText } from '../lib/definition'
 import { noteKey, optionKey, reviewItemKey } from '../lib/focus-key'
 import { TICK_ANSWER_MESSAGE } from '../lib/messages'
+import { ownValue } from '../lib/own'
 
 /** One question's answer in progress, before it is submitted. */
 export interface QuestionAnswerState {
   chosen: string[]
   other: string
   useOther: boolean
-  /** Option value to note text, for options currently chosen. */
-  notes: Record<string, string>
+  /**
+   * Option value to note text, for options currently chosen. A `Map`, not an
+   * object: an option value is any text, and on a reactive object some keys
+   * read as something else (`constructor` and `toString` from the prototype,
+   * Vue's own `hasOwnProperty`, an untracked `__proto__`).
+   */
+  notes: Map<string, string>
   /** The option value whose note editor is open, or `null`. */
   noteOpen: string | null
   done: boolean
@@ -94,13 +100,13 @@ export function useQuestionCard(
   const answers = reactive<Record<string, QuestionAnswerState>>(
     Object.fromEntries(definition.fields.map((field) => {
       // A choice field's stored answer is always a choice answer.
-      const existing = initialDraft[field.id] as ChoiceAnswer | undefined
+      const existing = ownValue(initialDraft, field.id) as ChoiceAnswer | undefined
       const chosen = field.options.filter(o => answerHasOption(existing, o.value)).map(o => o.value)
-      const notes: Record<string, string> = {}
+      const notes = new Map<string, string>()
       for (const value of chosen) {
         const note = answerNoteFor(existing, value)
         if (note)
-          notes[value] = note
+          notes.set(value, note)
       }
       const useOther = answerHasOther(existing)
       const other = answerOtherText(existing)
@@ -168,7 +174,7 @@ export function useQuestionCard(
   /** The question's answer in progress as a draft. */
   function draftOf(q: ChoiceFormField): FieldAnswer | undefined {
     const a = ans(q)
-    const noted = (value: string): NotedAnswer => ({ value, note: a.notes[value] ?? '' })
+    const noted = (value: string): NotedAnswer => ({ value, note: a.notes.get(value) ?? '' })
     if (q.multiple)
       return [...a.chosen.map(noted), { other: a.other }]
     if (a.useOther)
@@ -277,7 +283,7 @@ export function useQuestionCard(
 
   /** Keeps the note text as the user types, for any option, chosen or not. */
   function setNote(q: ChoiceFormField, value: string, text: string) {
-    ans(q).notes[value] = text
+    ans(q).notes.set(value, text)
   }
 
   function sendNote(q: ChoiceFormField, value: string) {

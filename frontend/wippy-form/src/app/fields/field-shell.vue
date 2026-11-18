@@ -41,11 +41,15 @@ const props = defineProps<{
 }>()
 
 defineSlots<{
-  default?: (props: { id: string, describedBy: string | undefined, invalid: boolean }) => unknown
+  default?: (props: { id: string, describedBy: string | undefined, invalid: boolean, labelId: string | undefined }) => unknown
 }>()
 
 const baseId = useId()
 const controlId = `${baseId}-control`
+// The legend of a `group` field has an id, so a role inside the fieldset (a
+// single choice's radiogroup) can take the field label as its name: a legend
+// names its fieldset only.
+const labelId = computed(() => props.layout === 'group' ? `${baseId}-label` : undefined)
 const descriptionId = `${baseId}-desc`
 const errorId = `${baseId}-err`
 
@@ -118,6 +122,7 @@ defineExpose({
           :id="controlId"
           :described-by="describedBy"
           :invalid="hasErrors"
+          :label-id="labelId"
         />
       </div>
       <FieldLabel
@@ -131,6 +136,7 @@ defineExpose({
       v-else
       :tag="labelTag"
       :control-id="controlId"
+      :label-id="labelId"
       :label="field.label"
       :required="showMarker"
     />
@@ -200,6 +206,7 @@ defineExpose({
         :id="controlId"
         :described-by="describedBy"
         :invalid="hasErrors"
+        :label-id="labelId"
       />
     </div>
 

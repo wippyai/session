@@ -797,6 +797,31 @@ describe('WippyForm: form version 2', () => {
     expect(wrapper.find('form').exists()).toBe(true)
   })
 
+  // A valid form can still send more than the 64 KiB body cap (two full
+  // textareas of emoji and many long numbers). Sending the same answers again
+  // cannot succeed, so the refusal is final: the server's own message, no Retry.
+  it('shows a 413 refusal as a final error with the server message, and does not retry it', async () => {
+    const tooLarge = hostError(413, 'payload_too_large')
+    tooLarge.message = 'The submission is larger than 64 KiB.'
+    const submitFn = vi.fn().mockRejectedValue(tooLarge)
+    artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State()), submit: submitFn })
+    const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, artifactElement('artifact-1'))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    await wrapper.find('input').setValue('Ada')
+    await wrapper.find('input[type="checkbox"]').setValue(true)
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('The submission is larger than 64 KiB.')
+    expect(wrapper.findAll('button').find(b => b.text() === 'Retry'), 'no Retry for a final refusal').toBeUndefined()
+    expect(wrapper.find('[part~="send"]').text()).toBe('Submit')
+    expect(submitFn, 'never retried by itself').toHaveBeenCalledTimes(1)
+    expect(wrapper.find('form').exists()).toBe(true)
+  })
+
   it('shows a stored version 2 answer read-only once answered', async () => {
     const idle = v2State({ status: 'idle', data: { name: 'Ada', qty: 4, consent: true }, submitted_at: '2026-10-01T10:00:00.000Z', delivery: 'complete' })
     artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(idle), submit: vi.fn() })

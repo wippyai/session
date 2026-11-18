@@ -1,6 +1,6 @@
 import type { FormState } from '../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { SLOW_SEND_MS } from '../lib/send-state'
@@ -659,5 +659,54 @@ describe('ActiveForm — Submit while a send is in flight', () => {
       await wrapper.setProps({ submitting: false })
       expect(statusOf(wrapper)).toBe('')
     })
+  })
+})
+
+// The answer a typed date sends is decided from the typed text, never from
+// the date the picker read from it: the picker reads leniently (a year below
+// 100 as a two-digit year, trailing text ignored).
+describe('ActiveForm — a typed date is sent as typed', () => {
+  const dateOnly: FormState = { ...v2State, definition: { title: 'T', fields: [{ id: 'day', type: 'date', label: 'Delivery date', required: true }] } }
+
+  /** Types into the date box one key at a time, letting the form re-render between keys. */
+  async function typeDate(wrapper: ReturnType<typeof mountForm>, text: string) {
+    const input = inputOf(wrapper, 'Delivery date').element as HTMLInputElement
+    input.focus()
+    let typed = ''
+    for (const key of text) {
+      typed += key
+      input.value = typed
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: key }))
+      await flushPromises()
+    }
+    expect(input.value).toBe(text)
+  }
+
+  async function submit(wrapper: ReturnType<typeof mountForm>) {
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+  }
+
+  it.each(['0000-01-01', '2026-06-05 suffix'])('refuses %s as an invalid date instead of sending the date the picker read', async (text) => {
+    const wrapper = mountForm(dateOnly)
+    await typeDate(wrapper, text)
+    await submit(wrapper)
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(wrapper.find('ul').text()).toBe('Enter a valid date as YYYY-MM-DD.')
+    expect((inputOf(wrapper, 'Delivery date').element as HTMLInputElement).value).toBe(text)
+  })
+
+  it('sends a loosely typed date (2026-6-5) as the full date', async () => {
+    const wrapper = mountForm(dateOnly)
+    await typeDate(wrapper, '2026-6-5')
+    await submit(wrapper)
+    expect(wrapper.emitted('submit')?.[0]).toEqual([{ day: '2026-06-05' }])
+  })
+
+  it('sends a year below 100 (0050-03-04) as typed, not as 1950', async () => {
+    const wrapper = mountForm(dateOnly)
+    await typeDate(wrapper, '0050-03-04')
+    await submit(wrapper)
+    expect(wrapper.emitted('submit')?.[0]).toEqual([{ day: '0050-03-04' }])
   })
 })

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FormState } from '../lib/definition'
 import { computed, ref } from 'vue'
+import { ownValue } from '../lib/own'
 import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
 import FormAnsweredStatus from './form-answered-status.vue'
@@ -43,9 +44,9 @@ defineExpose({
       v-for="field in state.definition.fields"
       :key="field.id"
       :field="field"
-      :model-value="state.data ? state.data[field.id] : undefined"
+      :model-value="ownValue(state.data, field.id)"
       :errors="[]"
-      :disabled="true"
+      :disabled="false"
       :readonly="true"
     />
 

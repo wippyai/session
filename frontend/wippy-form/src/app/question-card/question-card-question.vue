@@ -45,6 +45,11 @@ function keyLabelFor(index: number): string | null {
 }
 const otherKeyLabel = computed(() => keyLabelFor(props.question.options.length))
 
+// The note typed for an option, or an empty text.
+function noteOf(value: string): string {
+  return answer.value.notes.get(value) ?? ''
+}
+
 const otherSelected = computed(() => props.question.multiple ? trimAnswerText(answer.value.other) !== '' : (answer.value.useOther && answer.value.done))
 const otherEnabled = computed(() => trimAnswerText(answer.value.other) !== '' || (props.question.multiple && answer.value.chosen.length > 0))
 const otherTooLong = computed(() => exceedsLength(answer.value.other, OTHER_TEXT_MAX))
@@ -134,11 +139,11 @@ function onOptionsFocusIn(event: FocusEvent) {
       :index="i"
       :multiple="question.multiple"
       :selected="question.multiple ? answer.chosen.includes(option.value) : (!answer.useOther && answer.chosen[0] === option.value)"
-      :note="trimAnswerText(answer.notes[option.value] || '')"
+      :note="trimAnswerText(noteOf(option.value))"
       :editing="answer.noteOpen === option.value"
-      :note-draft="answer.notes[option.value] || ''"
+      :note-draft="noteOf(option.value)"
       :key-label="keyLabelFor(i)"
-      :note-too-long="exceedsLength(answer.notes[option.value] || '', NOTE_TEXT_MAX)"
+      :note-too-long="exceedsLength(noteOf(option.value), NOTE_TEXT_MAX)"
       :disabled="!!disabled"
       :described-by="errorIds"
       :invalid="!!displayError"
