@@ -669,6 +669,87 @@ describe('date field: years before 1000', () => {
     })
   })
 
+  describe('the ends of the calendar', () => {
+    /** A day cell of the shown month, enabled or not. */
+    function shownDay(label: string): HTMLElement {
+      const cell = Array.from(document.querySelectorAll<HTMLElement>('.p-datepicker-day'))
+        .find(el => el.textContent?.trim() === label && !(el.getAttribute('data-p') ?? '').includes('other-month'))
+      if (!cell)
+        throw new Error(`no day cell "${label}"`)
+      return cell
+    }
+
+    function press(cell: HTMLElement, code: string) {
+      cell.focus()
+      cell.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true, cancelable: true }))
+    }
+
+    async function navigate(button: 'next' | 'prev') {
+      document.querySelector<HTMLElement>(`.p-datepicker-${button}-button`)?.click()
+      await flushPromises()
+    }
+
+    // With no field max the calendar still ends at 9999-12-31: PrimeVue would
+    // otherwise go on to year 10000, which no answer can hold.
+    it('enables no day after 9999-12-31', async () => {
+      const { wrapper } = mountField('9999-12-15', [], unbounded)
+      await openCalendar(wrapper)
+      expect([shownYear(), shownMonth()]).toEqual(['9999', 'December'])
+      await navigate('next')
+      expect([shownYear(), shownMonth()]).toEqual(['10000', 'January'])
+      expect(enabledDays()).toHaveLength(0)
+    })
+
+    it('saves the last day, 9999-12-31, picked with the mouse', async () => {
+      const { wrapper, input, draft } = mountField('9999-12-15', [], unbounded)
+      await openCalendar(wrapper)
+      expect(enabledDays().at(-1)?.textContent?.trim()).toBe('31')
+      dayCell('31').click()
+      await flushPromises()
+      expect(draft()).toBe('9999-12-31')
+      expect(input.value).toBe('9999-12-31')
+    })
+
+    it('saves the last day, 9999-12-31, picked with Enter', async () => {
+      const { wrapper, input, draft } = mountField('9999-12-15', [], unbounded)
+      await openCalendar(wrapper)
+      press(dayCell('31'), 'Enter')
+      await flushPromises()
+      expect(draft()).toBe('9999-12-31')
+      expect(input.value).toBe('9999-12-31')
+    })
+
+    // PrimeVue's navigation can show a month before year 100, but compares its
+    // plain year with the calendar's first day, so no day there is enabled,
+    // and it refuses to pick a day that is not enabled.
+    it('shows December of year 99 before 0100-01-15 with no day enabled, and picks nothing there', async () => {
+      const { wrapper, input, draft } = mountField('0100-01-15', [], unbounded)
+      await openCalendar(wrapper)
+      await navigate('prev')
+      expect([shownYear(), shownMonth()]).toEqual(['99', 'December'])
+      expect(enabledDays()).toHaveLength(0)
+      shownDay('15').click()
+      await flushPromises()
+      press(shownDay('16'), 'Enter')
+      await flushPromises()
+      expect(draft()).toBe('0100-01-15')
+      expect(input.value).toBe('0100-01-15')
+      expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    })
+
+    // Defense in depth: a picked date the answer cannot hold is ignored.
+    it.each([
+      ['year 10000', () => new Date(10000, 0, 5)],
+      ['year 99', () => { const date = new Date(2000, 0, 5); date.setFullYear(99); return date }],
+    ])('ignores a picked date in %s', async (_name, make) => {
+      const { wrapper, input, draft } = mountField('2026-06-15', [], unbounded)
+      wrapper.findComponent({ name: 'DatePicker' }).vm.$emit('date-select', make())
+      await flushPromises()
+      expect(draft()).toBe('2026-06-15')
+      expect(input.value).toBe('2026-06-15')
+      expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    })
+  })
   // The read-only view removes the picker; leaving it creates a new one,
   // which writes its own spelling into the box.
   it.each(['0050-03-04', 'next tuesday', '0999-05-15'])('keeps %s in the box when the field is read-only and editable again', async (text) => {

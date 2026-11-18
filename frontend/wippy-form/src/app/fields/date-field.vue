@@ -42,12 +42,16 @@ import FieldShell from './field-shell.vue'
  * 9999: PrimeVue builds a picked day with `new Date(year, month, day)`, which
  * reads years 0 to 99 as 1900 to 1999, and checks its bounds against that
  * wrong day. So its lower bound is the later of the field's `min` and
- * 0100-01-01, and a date before year 100 (typed or handed in) leaves the
+ * 0100-01-01, its upper bound the earlier of the field's `max` and
+ * 9999-12-31, and a date before year 100 (typed or handed in) leaves the
  * calendar without a date; such a date is still a valid answer that can be
  * typed. Any other real day the box holds is the calendar's date, handed to
  * the picker as a `Date` built with `setFullYear`, never as text (the picker
  * reads text with a short year as 19xx). A field whose whole range is before
- * year 100 has a calendar with no enabled day.
+ * year 100 has a calendar with no enabled day. The picker's month, year and
+ * decade navigation can still show a year before 100 or after 9999, but no
+ * day there is enabled, and the picker does not pick a day that is not; a
+ * picked date outside these years is ignored as well (`onDateSelect`).
  *
  * The picker also writes its own spelling of its day into the box when it
  * is created, when its day changes and when the box loses focus
@@ -112,6 +116,9 @@ function toDate(iso: string | null | undefined): Date | undefined {
 // The first day the calendar covers (D53): PrimeVue builds a picked day with
 // `new Date(year, month, day)`, which reads years 0 to 99 as 1900 to 1999.
 const FIRST_CALENDAR_DAY = '0100-01-01'
+// The last day an answer can hold. Without it as a bound, PrimeVue goes on to
+// year 10000 when no field max is set.
+const LAST_CALENDAR_DAY = '9999-12-31'
 
 // The date the calendar holds for a day, or null for none: a day before
 // FIRST_CALENDAR_DAY is a valid answer, but the calendar cannot hold it.
@@ -191,13 +198,16 @@ watch(() => props.modelValue, (next) => {
 // text itself: a state reload hands over a new field object with the same
 // min and max, and a new `Date` for the same day would make the picker reset an
 // open calendar to the month of the selection. The `Date` changes only when the
-// text does. The calendar never reaches before FIRST_CALENDAR_DAY; when that
-// is after `max`, it has no enabled day.
+// text does. No day before FIRST_CALENDAR_DAY or after LAST_CALENDAR_DAY is
+// enabled; when FIRST_CALENDAR_DAY is after `max`, no day is.
 const minText = computed(() => {
   const min = props.field.min
   return min && isValidIsoDate(min) && min > FIRST_CALENDAR_DAY ? min : FIRST_CALENDAR_DAY
 })
-const maxText = computed(() => props.field.max)
+const maxText = computed(() => {
+  const max = props.field.max
+  return max && isValidIsoDate(max) && max < LAST_CALENDAR_DAY ? max : LAST_CALENDAR_DAY
+})
 const minDate = computed(() => toDate(minText.value))
 const maxDate = computed(() => toDate(maxText.value))
 
@@ -259,6 +269,11 @@ function isoOf(date: Date): string {
 // always the day shown.
 function onDateSelect(date: Date) {
   const iso = isoOf(date)
+  // The bounds keep every enabled day within the calendar's years; a date
+  // outside them (year 10000 is written with five digits) is still ignored, so
+  // the box and the answer never take one.
+  if (!isValidIsoDate(iso) || iso < FIRST_CALENDAR_DAY)
+    return
   boxText.value = iso
   syncPicker(iso, true)
   report(iso)
