@@ -259,6 +259,25 @@ describe('QuestionCardActive: 422 field errors', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('That choice is no longer available.')
   })
+
+  // A note is part of the answer, so editing it is a change that drops the
+  // question's server error, as choosing another option does.
+  it('drops the server error of a question once its open note is edited', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    // Shift+1 opens the note of the first option.
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await wrapper.vm.$nextTick()
+    const note = wrapper.find('textarea.w-form__note-input')
+    await note.setValue('leave at the door')
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
+    vm.setServerErrors({ f1: [{ code: 'too_long', message: 'The note is too long.' }] })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('The note is too long.')
+
+    await wrapper.find('textarea.w-form__note-input').setValue('door')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('The note is too long.')
+  })
 })
 
 describe('QuestionCardActive: length-error and server-error alerts are linked to the textarea', () => {

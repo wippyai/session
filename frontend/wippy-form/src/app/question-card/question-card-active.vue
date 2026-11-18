@@ -103,9 +103,14 @@ const cardErrorIds = computed(() => joinIds(generalServerError.value && generalE
 // A changed answer clears the server error of that question, and the next
 // submit checks it again. The snapshot is per field because a deep watch on the
 // reactive answers cannot tell old from new, so only a field that changed
-// loses its error.
+// loses its error. Notes are a Map, which JSON.stringify writes as {}, so its
+// entries are spread into the snapshot; reading them also makes the watch
+// track them.
 watch(
-  () => Object.fromEntries(props.state.definition.fields.map(f => [f.id, JSON.stringify(controller.ans(f))])),
+  () => Object.fromEntries(props.state.definition.fields.map((f) => {
+    const a = controller.ans(f)
+    return [f.id, JSON.stringify({ ...a, notes: [...a.notes] })]
+  })),
   (curr, prev) => {
     if (!prev)
       return
