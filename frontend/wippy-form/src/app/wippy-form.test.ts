@@ -588,6 +588,26 @@ describe('WippyForm: form version 2', () => {
     expect(element.getAttribute('card-state')).toBe('unsupported')
   })
 
+  it('shows the "needs a newer version" notice when only the stored definition has a field type it does not know', async () => {
+    // The prop definition is a clean version 2 form; the unknown type arrives
+    // only with the loaded state, open or already answered.
+    const future = { ...v2Definition, fields: [...v2Definition.fields, { id: 'rate', type: 'slider', label: 'Rate us', required: false }] }
+    const stored = [
+      v2State({ definition: future as unknown as FormState['definition'] }),
+      v2State({ definition: future as unknown as FormState['definition'], status: 'idle', data: { name: 'Ada', consent: true, rate: 3 }, submitted_at: ANSWERED_AT }),
+    ]
+    for (const state of stored) {
+      artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(state), submit: vi.fn() })
+      const element = artifactElement('artifact-1')
+      const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, element)
+      await flushPromises()
+
+      expect(wrapper.text(), state.status).toContain('This form needs a newer version of the app.')
+      expect(wrapper.find('button[type="submit"]').exists(), state.status).toBe(false)
+      expect(element.getAttribute('card-state'), state.status).toBe('unsupported')
+    }
+  })
+
   it('renders a form with standard fields as the fields form, not the question card', async () => {
     artifactStateMock().mockReturnValue({ get: vi.fn().mockResolvedValue(v2State()), submit: vi.fn() })
     const wrapper = mountWippyForm({ formVersion: 2, definition: v2Definition, state: 'active' }, artifactElement('artifact-1'))
