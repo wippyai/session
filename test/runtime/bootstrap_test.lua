@@ -101,7 +101,7 @@ local function define_tests()
                         " " .. quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
                         " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"))
                     test.contains(output, "WIPPY_TEST_REQUIRE_CASES=1")
-                    test.contains(output, 'test -- "app.runtime:handoff_runtime"')
+                    test.contains(output, '-- app.runtime:handoff_runtime')
                 end
             end)
         end)
