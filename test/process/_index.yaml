@@ -217,6 +217,30 @@ entries:
       writer: wippy.session.persist:writer
     method: run_tests
 
+  - name: approval_surfaces_test
+    kind: function.lua
+    meta:
+      name: Approval UI surfaces
+      type: test
+      suite: session
+      comment: The surface tracker, plugin declarations on create, reopen and message, withdrawal and sender authority, the live set across a Session process restart, the Session topic sender check and the inbox wake signals (EE2-2710 AC 25 tracking, AC 44 surface part)
+    source: file://approval_surfaces_test.lua
+    modules:
+      - security
+      - uuid
+    imports:
+      approval_surfaces: wippy.session.process:approval_surfaces
+      plugin: wippy.session.process:plugin
+      session: wippy.session.process:session
+      message_handlers: wippy.session.process:message_handlers
+      wake: wippy.session.approval:wake
+      consts: wippy.session:consts
+      context_repo: wippy.session.persist:context_repo
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+      test: wippy.test:test
+    method: run_tests
+
   - name: session_handlers_test
     kind: function.lua
     meta:

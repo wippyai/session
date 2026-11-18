@@ -18,6 +18,7 @@ local answer_admission = require("answer_admission")
 local reader = require("reader")
 local writer = require("writer")
 local upstream = require("upstream")
+local approval_surfaces = require("approval_surfaces")
 
 type PluginArgs = {
     user_id: string,
@@ -316,6 +317,89 @@ local function run(args)
             return prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
         end,
     })
+
+    -- Approval UI surfaces (EE2-2710, architecture 4.8). Each declaration of a
+    -- connection for a session holds one monitor reference in the broker's
+    -- shared count; the live set of a session goes to its Session process
+    -- on every change and when a Session process for it starts.
+    local surfaces: any = approval_surfaces.new()
+
+    -- Messages, commands and opens from the user's clients reach the plugin
+    -- through the authenticated relay: the user hub that started this plugin,
+    -- which forwards only its own connected clients and names the client
+    -- connection in conn_pid. Anything else may not change approval state.
+    local function from_relay(sender: any, payload_data: any): boolean
+        return state.user_hub_pid ~= nil and sender == state.user_hub_pid
+            and type(payload_data) == "table"
+            and type(payload_data.conn_pid) == "string" and payload_data.conn_pid ~= ""
+    end
+
+    local function push_surfaces(session_id: any)
+        if not surfaces:known(session_id) then return end
+        local session_info = state.active_sessions[session_id]
+        if not session_info or not session_info.open_notified or not session_info.pid then return end
+        local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.APPROVAL_SURFACES,
+            surfaces:snapshot(session_id))
+        if send_err then
+            logger:warn("approval surface update not delivered", { session_id = session_id, error = tostring(send_err) })
+        end
+    end
+
+    local function declare_surface(session_id: any, conn_pid: any)
+        if not surfaces:declare(session_id, conn_pid) then return end
+        local monitored, monitor_err = broker:retain_monitor(conn_pid)
+        if not monitored then
+            -- An unmonitored surface could outlive its connection, so it is
+            -- not counted as live.
+            surfaces:withdraw(session_id, conn_pid)
+            logger:warn("approval surface not recorded: connection monitor failed",
+                { session_id = session_id, error = tostring(monitor_err) })
+            return
+        end
+        push_surfaces(session_id)
+    end
+
+    local function drop_surface(session_id: any, conn_pid: any)
+        if not surfaces:withdraw(session_id, conn_pid) then return end
+        broker:release_monitor(conn_pid)
+        push_surfaces(session_id)
+    end
+
+    local function drop_connection_surfaces(conn_pid: any)
+        for _, session_id in ipairs(surfaces:drop_connection(conn_pid)) do
+            broker:release_monitor(conn_pid)
+            push_surfaces(session_id)
+        end
+    end
+
+    -- The tool_approval_surface command, handled here and never forwarded:
+    -- { enabled = false } withdraws the sending connection's surface for the
+    -- session. Refused, without a reply, unless the relay sent it.
+    local function handle_surface_command(payload_data: any, relay: boolean)
+        if not relay then
+            logger:warn("approval surface command refused: not sent by the relay", { user_id = state.user_id })
+            return
+        end
+        local session_id = payload_data.session_id
+        local command = type(payload_data.data) == "table" and payload_data.data or {}
+        local response = {
+            type = consts.UPSTREAM_TYPES.COMMAND_RESPONSE,
+            session_id = session_id,
+            request_id = payload_data.request_id,
+            success = false,
+        }
+        if type(session_id) ~= "string" or session_id == "" or command.enabled ~= false then
+            response.code = "invalid_surface_command"
+            response.message = "tool_approval_surface needs a session_id and enabled: false"
+        else
+            drop_surface(session_id, payload_data.conn_pid)
+            response.success = true
+        end
+        if payload_data.request_id ~= nil then
+            process.send(payload_data.conn_pid :: string,
+                consts.TOPIC_PREFIXES.SESSION .. tostring(session_id or ""), response)
+        end
+    end
 
     local gc_ticker = time.ticker(base_config.gc_interval)
     local ui_action_ticker = time.ticker(consts.TIMEOUTS.UI_ACTION_SWEEP)
@@ -856,7 +940,7 @@ local function run(args)
 
     local action_intents: any = require('attention_action_intents').new(broker, process.pid())
 
-    local function handle_message_or_command(payload_data, topic_type)
+    local function handle_message_or_command(payload_data, topic_type, relay: boolean?)
         -- Keep pending Host identity private until the accepted message starts its agent step.
         local broker = {
             bind_turn = function(_, intent)
@@ -928,6 +1012,11 @@ local function run(args)
         if not payload_data then
             return
         end
+        if topic_type == consts.HANDLER_TYPES.COMMAND and type(payload_data.data) == "table"
+            and payload_data.data.command == consts.COMMANDS.TOOL_APPROVAL_SURFACE then
+            handle_surface_command(payload_data, relay == true)
+            return
+        end
 
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
@@ -939,6 +1028,13 @@ local function run(args)
             local routed = payload_data
             if topic_type == consts.HANDLER_TYPES.MESSAGE then
                 local message_data = type(payload_data.data) == "table" and payload_data.data or {}
+                -- The surface declaration is read before runtime_context is
+                -- stripped, and recorded before the message is forwarded.
+                local runtime_context = type(message_data.runtime_context) == "table"
+                    and message_data.runtime_context or nil
+                if relay and runtime_context and approval_surfaces.declares(runtime_context.tool_approval_ui) then
+                    declare_surface(session_id, payload_data.conn_pid)
+                end
                 local clean_data = {}
                 for key, value in pairs(message_data) do
                     if key ~= "runtime_context" then
@@ -1220,13 +1316,23 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.OPEN then
                 local payload_data = payload:data()
                 logger:debug("handling session open", { user_id = state.user_id })
-                create_session(payload_data, true)
+                local opened_id = create_session(payload_data, true)
+                -- On create and on reopen of a live session: the declaration
+                -- is recorded once the session is known to this plugin.
+                if opened_id and from_relay(msg:from(), payload_data)
+                    and approval_surfaces.declares(payload_data.tool_approval_ui) then
+                    declare_surface(opened_id, payload_data.conn_pid)
+                end
             elseif topic == consts.PLUGIN_TOPICS.CLOSE then
                 handle_session_close(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.MESSAGE then
-                handle_message_or_command(payload:data(), consts.HANDLER_TYPES.MESSAGE)
+                local payload_data = payload:data()
+                handle_message_or_command(payload_data, consts.HANDLER_TYPES.MESSAGE,
+                    from_relay(msg:from(), payload_data))
             elseif topic == consts.PLUGIN_TOPICS.COMMAND then
-                handle_message_or_command(payload:data(), consts.HANDLER_TYPES.COMMAND)
+                local payload_data = payload:data()
+                handle_message_or_command(payload_data, consts.HANDLER_TYPES.COMMAND,
+                    from_relay(msg:from(), payload_data))
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN then
                 -- The client transport is gone, so UI actions waiting on it end
                 -- now, whatever the grace period does with the sessions.
@@ -1333,6 +1439,9 @@ local function run(args)
                 local session_info = state.active_sessions[started.session_id]
                 if session_info and session_info.pid == started.from_pid and not session_info.open_notified then
                     session_info.open_notified = true
+                    -- A new Session process gets the live approval UI
+                    -- surfaces before any queued request.
+                    push_surfaces(started.session_id)
                     local pending_requests = session_info.pending_requests or {}
                     session_info.pending_requests = {}
                     for _, request in ipairs(pending_requests) do
@@ -1360,6 +1469,8 @@ local function run(args)
             local event = result.value
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
                 broker:handle_exit(event.from)
+                -- A declaring connection closed: its surfaces leave the live sets.
+                drop_connection_surfaces(event.from)
                 local exit_result = event.result and event.result.value
                 local exit_error = event.result and event.result.error
                 for session_id, session_info in pairs(state.active_sessions) do

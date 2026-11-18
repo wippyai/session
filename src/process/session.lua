@@ -16,6 +16,8 @@ local form_recovery = require("form_recovery")
 local interruption_boundary = require("interruption_boundary")
 local uuid = require("uuid")
 local input_policy = require("input_policy")
+local wake = require("wake")
+local activation = require("activation")
 
 type SessionArgs = {
     session_id: string,
@@ -299,6 +301,32 @@ local function settle_exit(bus: any, err: any)
     return bus:fail(err)
 end
 
+-- The live approval UI surfaces of this session, pushed by the parent session
+-- plugin on the dedicated topic (EE2-2710, architecture 4.8): { session_id,
+-- live, revision }. Accepted only from the plugin process that started this
+-- process and only for this session; a lower or equal revision is ignored.
+-- Wakes a waiting approval gate and, when a surface is live in a protected
+-- session, stores config.tool_approval.ui_declared_at once. Returns true when
+-- the set was accepted.
+local function accept_surfaces(ctx: any, sender: any, payload: any): boolean
+    if ctx.parent_pid == nil or sender ~= ctx.parent_pid then return false end
+    if type(payload) ~= "table" or payload.session_id ~= ctx.session_id then return false end
+    local live, revision = tonumber(payload.live), tonumber(payload.revision)
+    if not live or live < 0 or live % 1 ~= 0 or not revision then return false end
+    local current = ctx.approval_surfaces
+    if type(current) == "table" and revision <= (tonumber(current.revision) or 0) then return false end
+    ctx.approval_surfaces = { live = live, revision = revision }
+    if ctx.approval_wake then ctx.approval_wake:notify(wake.KIND.SURFACES) end
+    if live > 0 then
+        local _, note_err = activation.note_declared(ctx)
+        if note_err then
+            logger:warn("approval surface history was not stored",
+                { session_id = ctx.session_id, error = tostring(note_err) })
+        end
+    end
+    return true
+end
+
 -- Runs `work` in its own coroutine of the session process, beside the
 -- command bus (see session_handlers.generate_title).
 local function run_in_background(work: any)
@@ -346,8 +374,13 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             if id_err then return nil, id_err end
             stop_request_id = generated
         end
+        -- TODO(EE2-2710 S7b): close_batch(cancelled) inside the Stop
+        -- transaction (stop_with_input_rollback), with the turn fence.
         local committed = commit_stop(ctx, ctx.upstream, payload_data.request_id :: string?)
         if not committed then return true end
+        -- The accepted Stop closes the batch cancellation channel before
+        -- bus:request_stop returns (architecture 4.5 step 9).
+        if ctx.approval_wake then ctx.approval_wake:accept_stop(bus.turn_state and bus.turn_state.id) end
         local requested = bus:request_stop(stop_request_id)
         if ctx.parent_pid then
             process.send(ctx.parent_pid :: string,
@@ -387,6 +420,13 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
                     or consts.ERROR_CODES.STORAGE_ERROR
                 ctx.upstream:command_error(payload_data.request_id, code, admit_err or "Failed to accept input")
             else
+                -- Committed steering: a new pending input is stored. Wakes a
+                -- waiting approval gate (architecture 4.5 step 8).
+                -- TODO(EE2-2710 S7b): close_batch(superseded) inside the
+                -- message-insert transaction of the steering input.
+                if admitted.steered and ctx.approval_wake then
+                    ctx.approval_wake:notify(wake.KIND.STEERING)
+                end
                 for _, next_op in ipairs(admitted.next_ops or {}) do
                     local queued, queue_err = bus:queue_op(next_op)
                     if not queued then return nil, queue_err end
@@ -591,6 +631,10 @@ local function run(args: SessionArgs)
             and session_data.meta.interaction.revision) or 0,
         stop_requested = false,
         turn_generation = 0,
+        -- Tool approval (EE2-2710): the wake hub of this process and the live
+        -- approval UI surfaces the parent plugin last sent (nil before any).
+        approval_wake = wake.new(),
+        approval_surfaces = nil,
     }
     -- Work that must not hold up the turn (the session title).
     context.run_in_background = run_in_background
@@ -943,6 +987,12 @@ local function run(args: SessionArgs)
                     finish_generation = finish_generation + 1
                     pending_finish = false
                     finish_check_sent = false
+                    context.approval_wake:cancel_finish()
+                end
+            elseif topic == consts.TOPICS.APPROVAL_SURFACES then
+                if not accept_surfaces(context, msg:from(), msg:payload():data()) then
+                    logger:warn("approval surface update refused",
+                        { session_id = args.session_id, from = tostring(msg:from()) })
                 end
             elseif topic == consts.TOPICS.FINISH_AND_EXIT then
                 local request = msg:payload():data() or {}
@@ -955,6 +1005,11 @@ local function run(args: SessionArgs)
                     if request.finish_generation == nil then
                         finish_generation = finish_generation + 1
                     end
+                    -- Finish, idle retire or shutdown wakes a waiting approval
+                    -- gate (architecture 4.5 step 8).
+                    -- TODO(EE2-2710 S7b): commit close_batch(interrupted) in
+                    -- one explicit closure transaction, with the turn fence.
+                    context.approval_wake:notify(wake.KIND.FINISH)
                     if not bus:is_quiescent() then
                         pending_finish = true
                     else
@@ -999,6 +1054,11 @@ local function run(args: SessionArgs)
                         session_state.finishing = true
                         finish_generation = finish_generation + 1
                         finish_check_sent = false
+                        -- Deletion closes the batch cancellation channel and
+                        -- wakes a waiting approval gate; the rows are gone, so
+                        -- no batch closure is written.
+                        context.approval_wake:notify(wake.KIND.DELETED)
+                        context.approval_wake:notify(wake.KIND.FINISH)
                         if bus:is_quiescent() then
                             bus:finish()
                         else
@@ -1057,6 +1117,12 @@ local function run(args: SessionArgs)
 
     input_policy.clear_turn(context)
     context.stop_requested = true
+    -- Supervisor cancel, ingress or bus failure: wake a waiting approval gate
+    -- and close the batch cancellation channel before exit recovery runs
+    -- (architecture 4.5 step 8; exit recovery owns the batch closure).
+    if session_state.interrupted or exit_err then
+        context.approval_wake:notify(wake.KIND.EXITING)
+    end
     local _, settle_err = settle_exit(bus, exit_err)
 
     if not session_state.bus_done_received then
@@ -1106,6 +1172,7 @@ end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
     settle_exit = settle_exit, turn_boundary = turn_boundary, run_in_background = run_in_background,
+    accept_surfaces = accept_surfaces,
     write_held_before_form = write_held_before_form,
     commit_held_before_form = commit_held_before_form,
     reference_artifact = reference_artifact, _commit_stop = commit_stop }

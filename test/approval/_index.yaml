@@ -152,6 +152,19 @@ entries:
       wait_for_boot: app:wait_for_boot
     method: run
 
+  - name: wake_test
+    kind: function.lua
+    meta:
+      name: Tool approval wake hub
+      type: test
+      suite: session
+      comment: Non-blocking notify, sticky finish, deletion and exit, the batch cancellation channel registered and closed synchronously (tracking parts of AC 25)
+    source: file://wake_test.lua
+    imports:
+      test: wippy.test:test
+      wake: wippy.session.approval:wake
+    method: run
+
   - name: policy_test
     kind: function.lua
     meta:

@@ -219,6 +219,13 @@ entries:
     imports:
       context_attachments: wippy.session:context_attachments
 
+  # wippy.session.process:approval_surfaces
+  - name: approval_surfaces
+    kind: library.lua
+    meta:
+      comment: Approval UI surfaces per session, kept by the session plugin - declarations, withdrawals, closed connections, the live set sent to the Session process
+    source: file://approval_surfaces.lua
+
   # wippy.session.process:session
   - name: session
     kind: process.lua
@@ -253,6 +260,8 @@ entries:
       message_repo: wippy.session.persist:message_repo
       form_recovery: wippy.session.forms:form_recovery
       interruption_boundary: wippy.session.process:interruption_boundary
+      wake: wippy.session.approval:wake
+      activation: wippy.session.approval:activation
     method: run
 
   # wippy.session.process:plugin
@@ -290,4 +299,5 @@ entries:
       writer: wippy.session.persist:writer
       upstream: wippy.session.process:upstream
       answer_admission: wippy.session.process:answer_admission
+      approval_surfaces: wippy.session.process:approval_surfaces
     method: run

@@ -28,6 +28,13 @@ entries:
       agent_registry: wippy.agent.discovery:registry
       consts: wippy.session:consts
 
+  # wippy.session.approval:wake
+  - name: wake
+    kind: library.lua
+    meta:
+      comment: Wake hub of one session process - non-blocking signals to a waiting approval gate, sticky finish, deletion and exit, the synchronously closed batch cancellation channel
+    source: file://wake.lua
+
   # wippy.session.approval:tool_meta
   - name: tool_meta
     kind: library.lua

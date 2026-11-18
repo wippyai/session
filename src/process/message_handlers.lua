@@ -1514,6 +1514,8 @@ function message_handlers.handle_message(ctx, op)
     answer_admission.publish_admitted(answers)
     return {
         message_id = message_id, completed = active,
+        -- A new steering input is stored as pending (wakes the approval gate).
+        steered = active or nil,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
             request_id = op.request_id, from_user = true, ui_action_runtime = op.ui_action_runtime } },
     }

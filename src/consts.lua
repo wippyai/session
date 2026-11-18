@@ -131,7 +131,9 @@ local consts = {
         MODEL = "model",
         ARTIFACT = "artifact",
         CONTEXT = "context",
-        ATTENTION_CONTEXT_SET = "attention_context_set"
+        ATTENTION_CONTEXT_SET = "attention_context_set",
+        -- Handled by the session plugin, never forwarded (EE2-2710).
+        TOOL_APPROVAL_SURFACE = "tool_approval_surface"
     },
 
     -- Message Types
@@ -172,7 +174,10 @@ local consts = {
         STOP_RESOLVED = "session.stop_resolved",
         STOP_DEADLINE = "session.stop_deadline",
         -- Wake-up from the form state API: { message_id } of a committed answer
-        FORM_ANSWER = "form_answer"
+        FORM_ANSWER = "form_answer",
+        -- Plugin -> Session process only: the live approval UI surfaces of the
+        -- session, { session_id, live, revision } (EE2-2710).
+        APPROVAL_SURFACES = "session_approval_surfaces"
     },
 
     -- Upstream Update Types
