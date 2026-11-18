@@ -8,7 +8,7 @@ local trait_config = require("trait_config")
 
 local FP_A = "sha256:" .. string.rep("a", 64)
 local FP_B = "sha256:" .. string.rep("b", 64)
-local SCOPE = { session_id = "s1", owner_id = "u1", epoch = 1, denied_keys = {} }
+local SCOPE = { session_id = "s1", owner_id = "u1", epoch = "e1", denied_keys = {} }
 
 local function effective(require_value: string, mode: string, opted_in: boolean?)
     local current = nil
@@ -51,14 +51,14 @@ local function call(id: string, opts: any?)
 end
 
 local function tool_grant(id: string, overrides: any?)
-    local grant = { grant_id = id, session_id = "s1", owner_id = "u1", epoch = 1, scope = "tool",
+    local grant = { grant_id = id, session_id = "s1", owner_id = "u1", epoch = "e1", scope = "tool",
         registry_id = "app.tools:delete", fingerprint = FP_A, status = "active", revision = 1 }
     for k, v in pairs(overrides or {}) do grant[k] = v end
     return grant
 end
 
 local function session_grant(id: string, manifest: any?, overrides: any?)
-    local grant = { grant_id = id, session_id = "s1", owner_id = "u1", epoch = 1, scope = "session",
+    local grant = { grant_id = id, session_id = "s1", owner_id = "u1", epoch = "e1", scope = "session",
         manifest = manifest or { { registry_id = "app.tools:delete", fingerprint = FP_A } },
         status = "active", revision = 1 }
     for k, v in pairs(overrides or {}) do grant[k] = v end
@@ -199,13 +199,13 @@ local function define_tests()
         end)
 
         it("checks the requirement before repeated denial", function()
-            local scope = { session_id = "s1", owner_id = "u1", epoch = 1, denied_keys = { k1 = true } }
+            local scope = { session_id = "s1", owner_id = "u1", epoch = "e1", denied_keys = { k1 = true } }
             local result = one(call("c1", { denial_key = "k1" }), effective("marked", "off"), {}, scope)
             test.eq(result.reason, "not_required")
         end)
 
         it("settles a repeated denied call before it looks at grants", function()
-            local scope = { session_id = "s1", owner_id = "u1", epoch = 1, denied_keys = { k1 = true } }
+            local scope = { session_id = "s1", owner_id = "u1", epoch = "e1", denied_keys = { k1 = true } }
             local result = one(call("c9", { required = true, denial_key = "k1" }), effective("marked", "tool"),
                 { tool_grant("g1") }, scope)
             test.eq(result.decision, "settle")
@@ -225,6 +225,26 @@ local function define_tests()
             local _, err3 = policy.evaluate(call("c1", {}), effective("all", "off"), { tool_grant("g1") },
                 { denied_keys = {} })
             test.not_nil(err3, "grants need the owner, session and epoch to match against")
+        end)
+
+        it("refuses a malformed approval setting instead of treating the call as unmarked", function()
+            local malformed = {
+                "required",
+                { required = "yes" },
+                { approve_all = true },
+                { required = true, approve_all = "yes" },
+                { required = true, warnings = "none" },
+            }
+            for index, approval in ipairs(malformed) do
+                local c = call("c1", {})
+                c.approval = approval
+                local result, err = policy.evaluate(c, effective("marked", "off"), {}, SCOPE)
+                test.is_nil(result, "case " .. index)
+                test.not_nil(err, "case " .. index)
+            end
+            local good = call("c1", {})
+            good.approval = { required = true, warnings = {} }
+            test.eq(one(good, effective("marked", "off")).decision, "ask")
         end)
     end)
 
@@ -285,11 +305,44 @@ local function define_tests()
             end
         end)
 
-        it("asks again after a deployment change (new fingerprint) without suspending the grant", function()
-            local result = one(call("c1", { required = true, fingerprint = FP_B }), effective("marked", "tool"),
+        it("asks again after a deployment change and suspends the grant as deployment_changed", function()
+            local result = one(call("c1", { required = true, fingerprint = FP_B }), effective("marked", "session"),
                 { tool_grant("g1"), session_grant("g2") })
             test.eq(result.decision, "ask")
+            test.eq(#result.suspend, 2)
+            test.eq(result.suspend[1].grant_id, "g1")
+            test.eq(result.suspend[1].reason, "deployment_changed")
+            test.eq(result.suspend[2].grant_id, "g2")
+            test.eq(result.suspend[2].reason, "deployment_changed")
+            local other_tool = one(call("c2", { required = true, registry_id = "app.tools:mail", fingerprint = FP_B }),
+                effective("marked", "session"), { tool_grant("g1") })
+            test.eq(#other_tool.suspend, 0, "a grant for another tool is not touched")
+        end)
+
+        it("does not restore a deployment_changed grant when the entry returns to the old deployment", function()
+            local result = one(call("c1", { required = true, fingerprint = FP_A }), effective("marked", "session"),
+                { tool_grant("g1", { status = "suspended", suspension_reason = "deployment_changed" }) })
+            test.eq(result.decision, "ask")
             test.eq(#result.suspend, 0)
+        end)
+
+        it("matches only grants with string owner, session and epoch equal to the scope", function()
+            local cases = {
+                { "owner_id missing", function(g) g.owner_id = nil end },
+                { "owner_id empty", function(g) g.owner_id = "" end },
+                { "session_id missing", function(g) g.session_id = nil end },
+                { "numeric epoch", function(g) g.epoch = 1 end },
+                { "empty epoch", function(g) g.epoch = "" end },
+            }
+            for _, case in ipairs(cases) do
+                local grant = tool_grant("g1")
+                case[2](grant)
+                local result = one(call("c1", { required = true }), effective("marked", "tool"), { grant })
+                test.eq(result.decision, "ask", case[1])
+            end
+            local _, err = policy.evaluate(call("c1", {}), effective("all", "off"), { tool_grant("g1") },
+                { session_id = "s1", owner_id = "u1", epoch = 1, denied_keys = {} })
+            test.not_nil(err, "a numeric scope epoch is refused")
         end)
 
         it("matches a delegation grant only for its recorded target", function()
@@ -305,7 +358,7 @@ local function define_tests()
         end)
 
         it("keeps grants to their owner, session and epoch", function()
-            for _, overrides in ipairs({ { session_id = "s2" }, { owner_id = "u2" }, { epoch = 2 } }) do
+            for _, overrides in ipairs({ { session_id = "s2" }, { owner_id = "u2" }, { epoch = "e2" } }) do
                 local result = one(call("c1", { required = true }), effective("marked", "tool"),
                     { tool_grant("g1", overrides) })
                 test.eq(result.decision, "ask")

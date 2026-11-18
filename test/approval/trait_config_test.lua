@@ -82,6 +82,20 @@ local function define_tests()
             test.eq(effective.max_requests_per_turn, 7)
         end)
 
+        it("refuses a stored activation with a missing setting instead of filling the default", function()
+            for _, key in ipairs({ "require", "approve_all", "timeout_seconds", "max_requests_per_turn" }) do
+                local stored = { active = true, require = "all", approve_all = "off", timeout_seconds = 60,
+                    max_requests_per_turn = 5 }
+                stored[key] = nil
+                local effective, err = trait_config.effective(stored, nil)
+                test.is_nil(effective, key)
+                test.contains(tostring(err), "the stored activation has no " .. key)
+                local with_agent, agent_err = trait_config.effective(stored, { require = "all" })
+                test.is_nil(with_agent, key .. " with an opted-in agent")
+                test.not_nil(agent_err)
+            end
+        end)
+
         it("is not protected without a stored activation or an opted-in agent", function()
             local effective, err = trait_config.effective(nil, nil)
             test.is_nil(effective)

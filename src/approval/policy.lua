@@ -20,7 +20,7 @@
 --               built from registry_id, fingerprint, delegate_target when absent
 --   denial_key  string (repeated-denial rule)
 -- The turn scope:
---   session_id, owner_id, epoch   whose grants may match (grant isolation)
+--   session_id, owner_id, epoch   whose grants may match (grant isolation; non-empty strings)
 --   denied_keys                   { [denial_key] = true } for calls denied earlier in this turn
 local tool_meta = require("tool_meta")
 
@@ -39,6 +39,7 @@ policy.SUSPENSION = {
     AGENT_WITHOUT_TRAIT = "agent_without_trait",
     TOOL_APPROVE_ALL_FALSE = "tool_approve_all_false",
     MODE_NOT_PERMITTED = "mode_not_permitted",
+    DEPLOYMENT_CHANGED = "deployment_changed",
 }
 
 local SCOPE = policy.SCOPE
@@ -58,9 +59,21 @@ local function check_policy(effective: any): string?
     return nil
 end
 
-local function approval_of(call: any): any
-    if type(call.approval) == "table" then return call.approval end
-    return tool_meta.read(call.meta)
+-- The call's approval settings: the normalized tool_meta.read result that
+-- freeze stores, or read from `meta` when absent. A present but malformed
+-- value is an error, never "unmarked".
+local function approval_of(call: any): (any, string?)
+    local approval = call.approval
+    if approval == nil then return tool_meta.read(call.meta), nil end
+    if type(approval) ~= "table" then return nil, "call.approval must be a table" end
+    if type(approval.required) ~= "boolean" then return nil, "call.approval.required must be a boolean" end
+    if approval.approve_all ~= nil and type(approval.approve_all) ~= "boolean" then
+        return nil, "call.approval.approve_all must be a boolean or absent"
+    end
+    if approval.warnings ~= nil and type(approval.warnings) ~= "table" then
+        return nil, "call.approval.warnings must be a list"
+    end
+    return approval, nil
 end
 
 local function blank_to_nil(value: any): any
@@ -127,37 +140,65 @@ local function grant_permitted(effective: any, option: any, grant_scope: string)
     return false, policy.SUSPENSION.MODE_NOT_PERMITTED
 end
 
-local function grant_covers(grant: any, identity: any): boolean
-    if grant.scope == SCOPE.TOOL then
-        return same_identity(grant, identity)
-    end
-    if grant.scope == SCOPE.SESSION and type(grant.manifest) == "table" then
-        for _, entry in ipairs(grant.manifest) do
-            if same_identity(entry, identity) then return true end
-        end
-    end
-    return false
+-- Same tool (registry ID and delegate target), whatever the deployment.
+local function same_tool(a: any, b: any): boolean
+    return type(a) == "table" and type(b) == "table"
+        and type(a.registry_id) == "string" and a.registry_id ~= ""
+        and a.registry_id == b.registry_id
+        and blank_to_nil(a.target_agent_id) == blank_to_nil(b.target_agent_id)
 end
 
+-- "covers" when the grant names this tool at this deployment; "changed"
+-- when it names this tool at another deployment; nil otherwise.
+local function grant_relation(grant: any, identity: any): string?
+    local entries = {}
+    if grant.scope == SCOPE.TOOL then
+        entries = { grant }
+    elseif grant.scope == SCOPE.SESSION and type(grant.manifest) == "table" then
+        entries = grant.manifest
+    end
+    local changed = false
+    for _, entry in ipairs(entries) do
+        if same_identity(entry, identity) then return "covers" end
+        if same_tool(entry, identity) then changed = true end
+    end
+    if changed then return "changed" end
+    return nil
+end
+
+local function non_empty_string(value: any): boolean
+    return type(value) == "string" and value ~= ""
+end
+
+-- Grant isolation: owner, logical session and grant epoch, all non-empty
+-- strings (the epoch column is TEXT), compared directly.
 local function owned_by_scope(grant: any, scope: any): boolean
-    return tostring(grant.session_id) == tostring(scope.session_id)
-        and tostring(grant.owner_id) == tostring(scope.owner_id)
-        and tostring(grant.epoch) == tostring(scope.epoch)
+    return non_empty_string(grant.session_id) and grant.session_id == scope.session_id
+        and non_empty_string(grant.owner_id) and grant.owner_id == scope.owner_id
+        and non_empty_string(grant.epoch) and grant.epoch == scope.epoch
 end
 
 -- Row 6. Returns the matching grant, and every active grant that covers the
--- call but that the current policy no longer permits, with its reason.
+-- call but that the current policy no longer permits, with its reason. A
+-- grant for this tool at another deployment fingerprint is suspended with
+-- deployment_changed, so the entry returning to the old deployment does not
+-- restore it silently (architecture 4.3: only an authenticated user action
+-- restores a suspended grant).
 local function match_grants(effective: any, approval: any, identity: any, grants: any, scope: any)
     local matched = nil
     local suspend = {}
     for _, grant in ipairs(grants or {}) do
-        if type(grant) == "table" and grant.status == ACTIVE and owned_by_scope(grant, scope)
-            and grant_covers(grant, identity) then
-            local permitted, reason = grant_permitted(effective, approval.approve_all, grant.scope)
-            if permitted then
-                if not matched then matched = grant end
-            else
-                suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason }
+        if type(grant) == "table" and grant.status == ACTIVE and owned_by_scope(grant, scope) then
+            local relation = grant_relation(grant, identity)
+            if relation == "changed" then
+                suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = policy.SUSPENSION.DEPLOYMENT_CHANGED }
+            elseif relation == "covers" then
+                local permitted, reason = grant_permitted(effective, approval.approve_all, grant.scope)
+                if permitted then
+                    if not matched then matched = grant end
+                else
+                    suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason }
+                end
             end
         end
     end
@@ -172,7 +213,9 @@ local function check_scope(scope: any, grants: any): string?
     if grants ~= nil and type(grants) ~= "table" then return "grants must be a list" end
     if grants and #grants > 0 then
         for _, key in ipairs({ "session_id", "owner_id", "epoch" }) do
-            if scope[key] == nil or scope[key] == "" then return "scope." .. key .. " is required to match grants" end
+            if not non_empty_string(scope[key]) then
+                return "scope." .. key .. " must be a non-empty string to match grants"
+            end
         end
     end
     return nil
@@ -196,7 +239,8 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
     local scope_err = check_scope(scope, grants)
     if scope_err then return nil, scope_err end
 
-    local approval = approval_of(call)
+    local approval, approval_err = approval_of(call)
+    if not approval then return nil, approval_err end
     local result = {
         call_id = call.call_id,
         suspend = {},

@@ -100,6 +100,11 @@ local function stored_settings(stored: any): (any, string?)
     if type(stored) ~= "table" or stored.active ~= true then
         return invalid("the stored activation is not active")
     end
+    -- The activation write stores every setting; a missing one means the
+    -- record is damaged, and a default would silently change the policy.
+    for _, key in ipairs({ "require", "approve_all", "timeout_seconds", "max_requests_per_turn" }) do
+        if stored[key] == nil then return invalid("the stored activation has no " .. key) end
+    end
     return trait_config.normalize({
         require = stored.require,
         approve_all = stored.approve_all,
