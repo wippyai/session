@@ -14,6 +14,7 @@ local session_writer = {
     _artifact_repo = require("artifact_repo"),
     _context_repo = require("context_repo"),
     _session_contexts_repo = require("session_contexts_repo"),
+    _approval_repo = require("approval_repo"),
     session_id = nil :: string?,
     user_id = nil :: string?,
     actor = nil :: any,
@@ -71,14 +72,25 @@ function session_writer:update_meta(updates)
     self._meta_lock:receive()
     local prepared = {}
     for key, value in pairs(updates) do prepared[key] = value end
-    if updates.meta ~= nil then
+    local replaces_config = type(updates.config) == "table"
+    if updates.meta ~= nil or replaces_config then
         local current, read_err = session_writer._session_repo.get(self.session_id, self.user_id)
         if not current then
             self._meta_lock:send(true)
             return nil, read_err or "Failed to read current session metadata"
         end
-        prepared.meta = current.meta or {}
-        for key, value in pairs(updates.meta) do prepared.meta[key] = value end
+        if updates.meta ~= nil then
+            prepared.meta = current.meta or {}
+            for key, value in pairs(updates.meta) do prepared.meta[key] = value end
+        end
+        if replaces_config then
+            -- Only update_tool_approval writes config.tool_approval
+            -- (EE2-2710, sticky activation). A whole-config writer keeps the
+            -- stored value, also when its copy of the config is older or
+            -- names another one. The caller's table is updated too, because
+            -- callers then adopt it as ctx.config.
+            updates.config.tool_approval = (current.config or {}).tool_approval
+        end
     end
     local result, err = session_writer._session_repo.update_session_meta(self.session_id, prepared)
     self._meta_lock:send(true)
@@ -87,6 +99,19 @@ function session_writer:update_meta(updates)
     end
 
     return true
+end
+
+-- Changes config.tool_approval, the stored tool approval activation, in one
+-- transaction with the session row locked (approval_repo.update_tool_approval;
+-- mutate gets the committed value and returns the new one, or nil to keep
+-- it). Takes the metadata lock before the transaction, so it never
+-- interleaves with update_meta in this process. Returns the value in force.
+function session_writer:update_tool_approval(mutate)
+    self._meta_lock:receive()
+    local ok, value, err = pcall(session_writer._approval_repo.update_tool_approval, self.session_id, mutate)
+    self._meta_lock:send(true)
+    if not ok then return nil, "Failed to store the tool approval activation: " .. tostring(value) end
+    return value, err
 end
 
 function session_writer:update_title(title)

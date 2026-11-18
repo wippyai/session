@@ -179,6 +179,7 @@ entries:
       message_repo: wippy.session.persist:message_repo
       session_handlers: wippy.session.process:session_handlers
       turn_context: wippy.agent:turn_context
+      activation: wippy.session.approval:activation
 
   - name: input_policy
     kind: library.lua

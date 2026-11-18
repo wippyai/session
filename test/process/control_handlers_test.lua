@@ -374,6 +374,52 @@ local function define_tests()
         end)
     end)
 
+    -- EE2-2710 AC 31: `_control` payloads can't change config.tool_approval.
+    describe("control_config and the tool approval activation", function()
+        local STORED = { active = true, require = "all", approve_all = "off", timeout_seconds = 900,
+            max_requests_per_turn = 10, revision = 2 }
+
+        it("refuses a control that names tool_approval and changes nothing", function()
+            for _, changes in ipairs({
+                { tool_approval = { active = false } },
+                { tool_approval = false, agent = "agent:writer", traits = {} },
+            }) do
+                local ctx, captured = mock_ctx()
+                ctx.config = { agent_id = "agent:old", tool_approval = STORED }
+                local result, err = control_handlers.control_config(ctx, { config_changes = changes })
+                test.is_nil(err)
+                test.eq(result.rejected, "tool_approval_forbidden: Tool approval settings cannot be changed by a control")
+                test.eq(captured.persist_calls, 0, "nothing is stored")
+                test.is_false(captured.traits_set, "no overlay is applied")
+                test.is_nil(captured.switched_to, "no agent switch")
+                test.eq(ctx.config.tool_approval, STORED)
+            end
+        end)
+
+        it("keeps the activation through a control agent switch and trait overlay", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:old", tool_approval = STORED }
+            local result, err = control_handlers.control_config(ctx,
+                { config_changes = { agent = "agent:writer", traits = { "concise" } } })
+            test.is_nil(err)
+            test.is_nil(result.rejected)
+            local persisted = captured.persisted or {}
+            test.eq(persisted.tool_approval.require, "all")
+            test.eq(ctx.config.tool_approval.revision, 2)
+            test.eq(ctx.config.agent_id, "agent:writer")
+        end)
+
+        it("refuses tool_approval in a behavior control proposal", function()
+            local ctx, captured = mock_ctx()
+            ctx.config = { agent_id = "agent:old", tool_approval = STORED }
+            local _ok, _err = control_handlers.apply_behavior_controls(ctx, {
+                { config = { tool_approval = { active = false } } }
+            })
+            test.eq(captured.persist_calls, 0)
+            test.eq(ctx.config.tool_approval, STORED)
+        end)
+    end)
+
     describe("control_config trait and tool overlays", function()
         it("continues when a configuration announcement is not stored", function()
             for _, failed_type in ipairs({ consts.MSG_TYPE.SYSTEM, consts.MSG_TYPE.DEVELOPER }) do

@@ -1057,6 +1057,44 @@ end
 -- Owner-level wrapper
 ---------------------------------------------------------------------------
 
+---------------------------------------------------------------------------
+-- Stored activation (sessions.config.tool_approval, architecture 4.3)
+---------------------------------------------------------------------------
+
+-- Reads the session config inside `dbtx` with the session row locked and
+-- replaces only its `tool_approval` key with mutate(current). mutate is a pure
+-- function of the committed value (nil when the session was never
+-- protected); it returns the new value, or nil to leave the row unchanged.
+-- Every other key is written back as it was read under the lock, so a
+-- concurrent writer of another key is not undone. Returns the value in
+-- force after the call (the new one, or the committed one when unchanged).
+function approval_repo.update_tool_approval(session_id: string, mutate: any)
+    if not non_empty(session_id) then return nil, "Session ID is required" end
+    if type(mutate) ~= "function" then return nil, "mutate must be a function" end
+    return approval_repo.transact(session_id, function(dbtx)
+        local row, read_err = read_session_column(dbtx, session_id, "config")
+        if not row then return nil, read_err end
+        local config = {}
+        if type(row.config) == "string" and row.config ~= "" then
+            local decoded, decode_err = json.decode(row.config)
+            if decode_err or type(decoded) ~= "table" then
+                return nil, "Stored session config is not a JSON object"
+            end
+            config = decoded
+        end
+        local current = config.tool_approval
+        local next_value = mutate(current)
+        if next_value == nil then return current end
+        config.tool_approval = next_value
+        local encoded, encode_err = encode(config)
+        if encode_err then return nil, encode_err end
+        local _, update_err = exec(sql.builder.update("sessions"):set("config", encoded)
+            :where("session_id = ?", session_id), dbtx, "Failed to store the tool approval activation")
+        if update_err then return nil, update_err end
+        return next_value
+    end)
+end
+
 -- Runs fn(dbtx) in a new transaction with the session row locked first, for
 -- a caller that owns no transaction yet. Returns fn's result, or nil, the
 -- error and the third value fn returned with it (the committed record of a

@@ -621,6 +621,13 @@ function control_handlers.control_config(ctx, op)
     if not op.config_changes then
         return nil, "No config changes provided"
     end
+    -- Tool approval activation and grants are not agent controlled
+    -- (EE2-2710, architecture 4.3): a `_control` or behavior control that
+    -- names tool_approval is refused as a whole and changes nothing. A trait,
+    -- tool or agent change still leaves the stored activation in force.
+    if type(op.config_changes) == "table" and op.config_changes.tool_approval ~= nil then
+        return reject("tool_approval_forbidden", "Tool approval settings cannot be changed by a control")
+    end
 
     local session_data = ctx.reader:state()
     local current_config = clone(ctx.config or session_data.config or {})

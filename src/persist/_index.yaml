@@ -70,6 +70,7 @@ entries:
       artifact_repo: wippy.session.persist:artifact_repo
       context_repo: wippy.session.persist:context_repo
       session_contexts_repo: wippy.session.persist:session_contexts_repo
+      approval_repo: wippy.session.persist:approval_repo
 
   - name: checkpoint_repo
     kind: library.lua

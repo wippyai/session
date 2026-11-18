@@ -3,9 +3,10 @@ namespace: wippy.session.approval
 
 # Native tool-call approval (EE2-2710). Building blocks of the approval gate:
 # trait settings, tool meta, the policy evaluator, call freezing with digests
-# and fingerprints, and the argument preview. Nothing here turns
-# the feature on; the trait entry, the capability and the gate call come in
-# later slices.
+# and fingerprints, the argument preview, activation and the wake hub.
+# Nothing here turns the feature on: activation needs the compiled options of
+# the trait entry, and the trait entry, the capability and the gate call come
+# in later slices.
 entries:
   # wippy.session.approval:trait_config
   - name: trait_config
@@ -13,6 +14,19 @@ entries:
     meta:
       comment: Validates the tool_approval trait context and combines the sticky stored activation with the current agent into the effective policy
     source: file://trait_config.lua
+
+  # wippy.session.approval:activation
+  - name: activation
+    kind: library.lua
+    meta:
+      comment: Fail-closed, sticky activation at every agent step - reads the effective agent's raw trait list, validates the trait context and compiled options, stores config.tool_approval with the row locked
+    source: file://activation.lua
+    modules:
+      - time
+    imports:
+      trait_config: wippy.session.approval:trait_config
+      agent_registry: wippy.agent.discovery:registry
+      consts: wippy.session:consts
 
   # wippy.session.approval:tool_meta
   - name: tool_meta

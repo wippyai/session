@@ -5562,6 +5562,120 @@ local function define_tests()
             end
         end)
     end)
+
+    -- EE2-2710 AC 31: activation at every agent step, before the model call.
+    describe("tool approval activation in agent_step", function()
+        local TRAIT = "wippy.session.traits:tool_approval"
+
+        local function approval_ctx(agent: any, traits: any): (any, any, any)
+            local ctx, captured = mock_ctx(agent)
+            local store = { value = nil, writes = 0 }
+            ctx.agent_ctx.active_traits = traits
+            ctx.writer.update_tool_approval = function(_self, mutate)
+                local next_value = mutate(store.value)
+                if next_value == nil then return store.value end
+                store.value = next_value
+                store.writes = store.writes + 1
+                return next_value
+            end
+            return ctx, captured, store
+        end
+
+        local function counting_agent(options: any): (any, any)
+            local agent = fake_agent(nil)
+            local calls = { steps = 0 }
+            agent.agent_options = options
+            agent.step = function()
+                calls.steps = calls.steps + 1
+                return { result = "Done." }
+            end
+            return agent, calls
+        end
+
+        it("fails the turn with tool_approval_config_invalid and makes no model call for an invalid trait context", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx, captured, store = approval_ctx(agent, { { id = TRAIT, context = { approve_all = "always" } } })
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.not_nil(result.failed)
+            test.eq(calls.steps, 0, "no model call")
+            test.eq(captured.message_errors[1].code, "tool_approval_config_invalid")
+            local failed = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(failed[#failed].metadata.error_code, "tool_approval_config_invalid")
+            test.eq(store.writes, 0)
+            test.is_nil(ctx.config.tool_approval)
+            test.eq(#captured.response_batches, 0, "nothing is stored as a response")
+        end)
+
+        it("fails the turn when the listed trait has no compiled options", function()
+            local agent, calls = counting_agent({})
+            local ctx, captured = approval_ctx(agent, { TRAIT })
+            local result = user_step(ctx)
+            test.not_nil(result.failed)
+            test.eq(calls.steps, 0, "no model call")
+            test.eq(captured.message_errors[1].code, "tool_approval_config_invalid")
+            test.contains(captured.message_errors[1].message, "no tool_approval options")
+        end)
+
+        it("stores the activation before the model call and keeps it for an agent without the trait", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local seen_before_step = nil
+            local ctx, _captured, store = approval_ctx(agent, { { id = TRAIT, context = { require = "all" } } })
+            agent.step = function()
+                calls.steps = calls.steps + 1
+                seen_before_step = ctx.config.tool_approval
+                return { result = "Done." }
+            end
+            local _, err = user_step(ctx)
+            test.is_nil(err)
+            test.eq(calls.steps, 1)
+            test.not_nil(seen_before_step, "the activation is in ctx.config before the model call")
+            test.eq(seen_before_step.require, "all")
+            test.eq(store.writes, 1)
+            test.eq(ctx.tool_approval_policy.require, "all")
+
+            -- A trait overlay or agent switch without the trait keeps it on.
+            local plain, plain_calls = counting_agent({})
+            ctx.agent_ctx.load_agent = function() return plain, nil end
+            ctx.agent_ctx.active_traits = { "other:trait" }
+            ctx.turn_state = nil
+            local _, switch_err = user_step(ctx)
+            test.is_nil(switch_err)
+            test.eq(plain_calls.steps, 1)
+            test.eq(ctx.config.tool_approval.require, "all")
+            test.is_true(ctx.tool_approval_policy.active)
+            test.is_false(ctx.tool_approval_policy.agent_opted_in)
+            test.eq(store.writes, 1, "an agent without the trait writes nothing")
+        end)
+
+        it("keeps approvals on through a handoff to an agent without the trait", function()
+            local agent = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx, _captured, store = approval_ctx(agent, { TRAIT })
+            assert(user_step(ctx))
+            test.eq(store.writes, 1)
+            local successor, successor_calls = counting_agent({})
+            ctx.agent_ctx.load_agent = function() return successor, nil end
+            ctx.agent_ctx.active_traits = {}
+            ctx.turn_state = { active = true, steps = 1, repeated_calls = 0, message_id = "msg-user", handoff = true }
+            ctx.upstream.update_session = function() end
+            ctx.request_input_policy = function() return {}, nil end
+            local _, err = continue_step(ctx)
+            test.is_nil(err)
+            test.eq(successor_calls.steps, 1)
+            test.is_true(ctx.config.tool_approval.active)
+            test.is_true(ctx.tool_approval_policy.active)
+        end)
+
+        it("treats a failed activation write as a storage failure of the step", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx = approval_ctx(agent, { TRAIT })
+            ctx.writer.update_tool_approval = function() return nil, "database is down" end
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.contains(tostring(err), "database is down")
+            test.eq(calls.steps, 0, "no model call")
+        end)
+    end)
 end
 
 return { run_tests = test.run_cases(define_tests) }

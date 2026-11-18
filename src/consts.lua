@@ -17,6 +17,7 @@ type SessionConfig = {
     enable_agent_cache: boolean?,
     delegation_description_suffix: string?,
     ui_action_ttl_seconds: number?,
+    tool_approval_enforcement: string?,
 }
 
 local consts = {
@@ -34,6 +35,7 @@ local consts = {
         DELEGATION_FUNC_ID = "wippy.session.env:delegation_func_id",
         ON_SESSION_END_FUNC_ID = "wippy.session.env:on_session_end_func_id",
         UI_ACTION_TTL_SECONDS = "wippy.session.env:ui_action_ttl_seconds",
+        TOOL_APPROVAL_ENFORCEMENT = "wippy.session.env:tool_approval_enforcement",
         ENCRYPTION_KEY = "ENCRYPTION_KEY"
     },
 
@@ -352,8 +354,19 @@ local consts = {
         TITLE_FUNCTION_ID = "wippy.session.funcs:title",
         GC_INTERVAL = "300s",
         UI_ACTION_TTL_SECONDS = 120,
+        TOOL_APPROVAL_ENFORCEMENT = "enforce",
     }
 }
+
+-- The operator setting tool_approval_enforcement (EE2-2710, architecture
+-- 4.3): "off" turns the approval gate off for every session, a documented
+-- security downgrade for rollback. Any other value, including a missing or
+-- misspelt one, reads as "enforce", so a typo never turns enforcement off.
+function consts.tool_approval_enforcement(): string
+    local value, _ = env.get(consts.ENV_IDS.TOOL_APPROVAL_ENFORCEMENT)
+    if value == "off" then return "off" end
+    return consts.DEFAULTS.TOOL_APPROVAL_ENFORCEMENT
+end
 
 -- Get database resource only (lightweight)
 function consts.get_db_resource()
@@ -398,6 +411,7 @@ function consts.get_config()
         delegation_func_id = delegation_func_id,
         on_session_end_func_id = on_session_end_func_id,
         ui_action_ttl_seconds = parsed_ui_action_ttl,
+        tool_approval_enforcement = consts.tool_approval_enforcement(),
         encryption_key = encryption_key,
 
         -- Internal constants

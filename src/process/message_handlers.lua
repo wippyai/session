@@ -17,6 +17,7 @@ local message_repo = require("message_repo")
 local turn_context = require("turn_context")
 local time = require("time")
 local llm = require("llm")
+local activation = require("activation")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -1647,6 +1648,15 @@ function message_handlers.agent_step(ctx, op)
                 tostring(state.last_round_tools), state.repeated_calls, max_repeats)
         end
         return stop_turn(ctx, op, agent, state, "repeated_tool_calls", detail)
+    end
+
+    -- Tool approval activation (EE2-2710): before any other side effect of
+    -- the step and before the model call. It fails closed: a listed trait
+    -- that can't be activated ends the turn with no model call.
+    local _, activation_err, activation_kind = activation.apply(ctx, agent)
+    if activation_err then
+        if activation_kind == activation.FAILURE.STORAGE then return nil, activation_err end
+        return fail_turn(ctx, op, agent, response_id, activation.ERROR_CODE, activation_err)
     end
 
     if handed_off then
