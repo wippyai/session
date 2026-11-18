@@ -141,6 +141,24 @@ local function define_tests()
                 test.eq(both_message, pipeline.not_utf8)
             end)
 
+            -- Since runtime 0.3.63a, Lua source reads "\xF0" and "\u{...}" as
+            -- escapes (earlier runtimes kept them as plain characters). The
+            -- rules see bytes, so a byte is handled the same however the
+            -- source writes it.
+            it("handles a byte written as a hex escape like the same byte written in decimal", function()
+                local _, code, message = run(pipeline, "a\xF0")
+                test.eq(code, "invalid_text", "a lone byte 240 is not UTF-8")
+                test.eq(message, pipeline.not_utf8)
+                local _, decimal_code = run(pipeline, "a\240")
+                test.eq(code, decimal_code)
+                local emoji, emoji_code = run(pipeline, "\xF0\x9F\x98\x80")
+                test.is_nil(emoji_code)
+                test.eq(pipeline.stored(emoji), "\240\159\152\128")
+                local accented, accented_code = run(pipeline, "\u{E9}")
+                test.is_nil(accented_code)
+                test.eq(pipeline.stored(accented), "\195\169")
+            end)
+
             it("refuses a control character with the message of its kind", function()
                 local _, code, message = run(pipeline, "a\1b")
                 test.eq(code, "invalid_text")

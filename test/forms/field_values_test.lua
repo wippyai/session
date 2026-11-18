@@ -32,6 +32,23 @@ local function define_tests()
                 test.eq(tonumber(field_values.number_text(value)), value)
             end
         end)
+
+        -- Since runtime 0.3.63a, tonumber also reads a mantissa without a
+        -- point ("2e-03"). The shortest-digits search must still produce plain
+        -- digits for a value that one significant digit writes exactly.
+        it("writes the decimal text of an answer sent with an exponent", function()
+            local cases = {
+                { "1e2", "100" }, { "1E2", "100" }, { "1.5e2", "150" }, { "2e-3", "0.002" },
+                { "5e-7", "0.0000005" }, { "-4e-1", "-0.4" }, { "1e12", "1000000000000" },
+            }
+            for _, case in ipairs(cases) do
+                test.eq(field_values.number_text(json.decode(case[1])), case[2], case[1])
+            end
+            local stored, err = field_values.check_answer({ type = "number", integer = true }, json.decode("1e2"))
+            test.is_nil(err)
+            test.eq(stored, 100)
+            test.eq(math.type(stored), "integer", "a whole answer is stored as an integer, however it was written")
+        end)
     end)
 
     -- The one whole-number test: the answer checks, the definition keys and
@@ -51,6 +68,19 @@ local function define_tests()
                 test.is_false(field_values.is_whole(value), tostring(value))
             end
             test.is_false(field_values.is_whole(nil))
+        end)
+
+        -- Since runtime 0.3.63a, math.huge is infinity (it was the largest
+        -- finite float) and math.floor returns an integer where one fits. This
+        -- test writes infinity as 1 / 0, so it does not depend on math.huge.
+        it("is_whole refuses both infinities and NaN, and accepts the largest finite float", function()
+            local infinity = 1 / 0
+            test.is_false(field_values.is_whole(infinity), "1 / 0")
+            test.is_false(field_values.is_whole(-infinity), "-1 / 0")
+            test.is_false(field_values.is_whole(0 / 0), "0 / 0")
+            test.is_true(field_values.is_whole(1.7976931348623157e308), "the largest finite float has no fraction")
+            test.is_true(field_values.is_whole(2 ^ 63), "a whole float past the integer range")
+            test.is_true(field_values.is_whole(json.decode("3.0")), "3.0 decoded from JSON")
         end)
     end)
 
@@ -322,6 +352,20 @@ local function define_tests()
                 local _, big_order, big_message = check("a{1000,999}")
                 test.eq(big_order, "invalid_pattern")
                 test.contains(big_message, "out of order")
+            end)
+
+            -- Since runtime 0.3.63a, tonumber reads "1e2" as 100. A count is
+            -- digits only, so an exponent, a sign, a point or a hex prefix never
+            -- reaches tonumber; RE2 itself reads such a brace as text.
+            it("refuses a count written with an exponent, a sign, a point or a hex prefix", function()
+                for _, pattern in ipairs({ "a{1e2}", "a{1E2}", "a{1e+2}", "a{1,1e2}", "a{+5}", "a{-1}", "a{1.0}", "a{0x10}", "a{ 5}" }) do
+                    local ok, code = check(pattern)
+                    test.is_nil(ok, pattern)
+                    test.eq(code, "invalid_pattern", pattern)
+                end
+                local literal = form_pattern.compile("a{1e2}")
+                test.is_true(((literal :: any):match_string("a{1e2}")), "RE2 reads a{1e2} as text")
+                test.is_false(((literal :: any):match_string(string.rep("a", 100))))
             end)
 
             it("refuses a count of any length without reading it as a number", function()
