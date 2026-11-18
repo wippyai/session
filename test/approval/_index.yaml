@@ -62,3 +62,31 @@ entries:
     imports:
       test: wippy.test:test
     method: run
+
+  - name: trait_config_test
+    kind: function.lua
+    meta:
+      name: Tool approval trait settings and tool meta
+      type: test
+      suite: session
+      comment: Trait context validation and defaults, the sticky effective policy, tool meta short and object form
+    source: file://trait_config_test.lua
+    imports:
+      test: wippy.test:test
+      trait_config: wippy.session.approval:trait_config
+      tool_meta: wippy.session.approval:tool_meta
+    method: run
+
+  - name: policy_test
+    kind: function.lua
+    meta:
+      name: Tool approval policy evaluator
+      type: test
+      suite: session
+      comment: The 4.3 combination table for public, private and delegation calls, the evaluation order, grant matching and suspension
+    source: file://policy_test.lua
+    imports:
+      test: wippy.test:test
+      policy: wippy.session.approval:policy
+      trait_config: wippy.session.approval:trait_config
+    method: run
