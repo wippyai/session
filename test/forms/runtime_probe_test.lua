@@ -9,9 +9,22 @@ local text = require("text")
 -- upgrade changes one, the failure points at the rule that has to be looked
 -- at again.
 --
--- Lua source in these tests writes raw bytes as decimal escapes ("\240"):
--- this runtime has no "\xHH" or "\u{...}" escape and silently drops the
--- backslash.
+-- Pinned runtime: Wippy 0.3.66a. Session CI installs the latest stable
+-- release (framework .github/actions/setup-wippy), which is 0.3.66a since
+-- 2026-11-17.
+-- Runtime 0.3.63a changed four of these facts (0.3.57a and 0.3.60a had the
+-- old ones; 0.3.61a and 0.3.62a were not checked):
+-- - "\xHH" and "\u{...}" are escapes. Before, the backslash was dropped and
+--   the characters kept ("\xF0" was the three characters xF0).
+-- - math.huge is infinity. Before, it was the largest finite float.
+-- - math.floor returns an integer where one fits. Before, a float stayed a
+--   float.
+-- - tonumber reads an exponent after a mantissa without a point ("1e2").
+--   Before, it returned nil.
+-- The rules that rely on them have their own tests: field_values_test (whole
+-- numbers, number text, repeat counts) and text_pipelines_test (bytes written
+-- as hex escapes). Lua source in the form tests still writes raw bytes as
+-- decimal escapes ("\240").
 
 local function compile(pattern: string): (any, any)
     return text.regexp.compile(pattern)
@@ -29,11 +42,13 @@ end
 
 local function define_tests()
     describe("Lua source escapes", function()
-        it("has decimal byte escapes only", function()
+        it("has decimal, hex and Unicode escapes", function()
             test.eq(#"\240", 1)
             test.eq(string.byte("\240", 1), 240)
-            test.eq(#"\xF0", 3, "\\xF0 is read as the three characters xF0")
-            test.eq(#"\u{E9}", 5, "\\u{E9} is read as the five characters u{E9}")
+            test.eq(#"\xF0", 1, "\\xF0 is one byte")
+            test.eq("\xF0", "\240")
+            test.eq(#"\u{E9}", 2, "\\u{E9} is the two UTF-8 bytes of é")
+            test.eq("\u{E9}", "\195\169")
         end)
     end)
 
@@ -60,9 +75,11 @@ local function define_tests()
             local negative_zero = json.decode("-0.0")
             test.eq(math.type(negative_zero), "float")
             test.is_true(1 / negative_zero < -1e308, "1 / -0.0 is negative infinity")
-            -- math.huge is the largest finite float here, not infinity, so the
-            -- number rules test magnitude with a plain comparison.
-            test.eq(math.huge, 1.7976931348623157e308)
+            -- math.huge is infinity (since 0.3.63a; before, it was the largest
+            -- finite float). is_whole refuses both infinities through it.
+            test.eq(math.huge, 1 / 0)
+            test.is_true(math.huge > 1.7976931348623157e308)
+            test.eq(math.type(math.huge), "float")
         end)
 
         it("fails the whole decode on a number outside the float range", function()
@@ -87,7 +104,13 @@ local function define_tests()
             test.eq(math.type(3 % 2), "integer")
             test.eq(math.tointeger(1e18), 1000000000000000000)
             test.eq(math.type(math.tointeger(3.0)), "integer")
-            test.eq(math.type(math.floor(json.decode("3.0"))), "float")
+            -- math.floor returns an integer where one fits (since 0.3.63a;
+            -- before, a float stayed a float), and a float past the integer
+            -- range, or infinity, stays a float.
+            test.eq(math.type(math.floor(json.decode("3.0"))), "integer")
+            test.eq(math.type(math.floor(1e18)), "integer")
+            test.eq(math.type(math.floor(2 ^ 63)), "float")
+            test.eq(math.type(math.floor(1 / 0)), "float")
         end)
 
         it("encodes numbers in a position-dependent spelling", function()
@@ -109,7 +132,13 @@ local function define_tests()
             test.eq(string.format("%.3e", json.decode("5")), "5.000e+00")
             test.eq(tonumber("1.5e+02"), 150)
             test.eq(tonumber("1.0e-01"), 0.1)
-            test.is_nil(tonumber("1e2"), "an exponent needs a mantissa with a point")
+            -- An exponent no longer needs a point in the mantissa (since
+            -- 0.3.63a; before, tonumber("1e2") was nil). A repeat count never
+            -- reaches tonumber with one: form_pattern reads digits only.
+            test.eq(tonumber("1e2"), 100)
+            test.eq(tonumber("2e-03"), 0.002)
+            test.is_nil(tonumber("inf"))
+            test.is_nil(tonumber("nan"))
             test.eq(tostring(0.30000000000000004), "0.30000000000000004")
             test.eq(tostring(1e-7), "1e-07")
             test.eq(tostring(123456789.125), "1.23456789125e+08")
