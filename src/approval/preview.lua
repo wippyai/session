@@ -1,0 +1,531 @@
+local json = require("json")
+
+-- Server-built argument preview for the approval card (EE2-2710,
+-- architecture 4.6, "Argument preview, built by the server").
+--
+-- preview.build(args) returns
+--   arguments  the preview value (decoded JSON, at most 8 KB as JSON text, depth 6)
+--   cut        JSON Pointer paths (into `arguments`) of every value the
+--              preview shortened or replaced; each such value states its full size
+--   numbers    JSON Pointer paths of numbers sent as strings so their digits
+--              stay exact (the type marker)
+--   summary    one line of about 80 characters for the compact card
+--
+-- Rules:
+--   - Strings and object keys are shown through JSON string escaping: control,
+--     bidirectional, zero-width and other invisible format characters become
+--     \uXXXX (or \n, \t, ...), a backslash becomes \\ and a quote \". So U+202E
+--     shows as the six characters ‮, while the literal text ‮ shows
+--     as \\u202e. Invalid UTF-8 bytes show as \xNN.
+--   - Base64 and hex runs of at least 128 characters, and data URLs, show as
+--     "[binary, <decoded size>]".
+--   - A string longer than 1 KB of escaped text ends with "… [cut, <size>]".
+--     A container deeper than 6 levels shows as "[cut, <size>]". Members that
+--     no longer fit the 8 KB budget are replaced by one last member
+--     "[cut, <n> more, <size>]" (key "…" in an object).
+--   - Integers outside the JSON safe range (2^53 - 1) are sent as their exact
+--     decimal digits; floats at or above 2^53 as "%.17g" text.
+--   - No key is redacted.
+-- Sizes: UTF-8 bytes of a string, JSON bytes of an object or array, decoded
+-- bytes of binary data.
+local preview = {}
+
+preview.MAX_BYTES = 8192
+preview.MAX_DEPTH = 6
+preview.STRING_MAX = 1024
+preview.KEY_MAX = 128
+preview.SUMMARY_CHARS = 80
+preview.BINARY_RUN = 128
+
+local SAFE_INTEGER = 9007199254740991
+local TWO_53 = 9007199254740992.0
+local OMIT_RESERVE = 64
+local MIN_CHILD = 48
+local ELLIPSIS = "\u{2026}"
+
+---------------------------------------------------------------------------
+-- Sizes and escaping
+---------------------------------------------------------------------------
+
+function preview.size_text(bytes: number): string
+    if bytes < 1024 then return string.format("%d B", bytes) end
+    if bytes < 1024 * 1024 then return string.format("%.1f KB", bytes / 1024) end
+    if bytes < 1024 * 1024 * 1024 then return string.format("%.1f MB", bytes / (1024 * 1024)) end
+    return string.format("%.1f GB", bytes / (1024 * 1024 * 1024))
+end
+
+local function hidden(cp: integer): boolean
+    if cp < 0x20 or cp == 0x7F or (cp >= 0x80 and cp <= 0x9F) then return true end
+    if cp == 0xAD or cp == 0x34F or cp == 0x61C or cp == 0x115F or cp == 0x1160 then return true end
+    if cp == 0x17B4 or cp == 0x17B5 or (cp >= 0x180B and cp <= 0x180F) then return true end
+    if (cp >= 0x200B and cp <= 0x200F) or (cp >= 0x2028 and cp <= 0x202E) then return true end
+    if (cp >= 0x2060 and cp <= 0x206F) or cp == 0x3164 or (cp >= 0xFE00 and cp <= 0xFE0F) then return true end
+    if cp == 0xFEFF or cp == 0xFFA0 or (cp >= 0xFFF9 and cp <= 0xFFFB) then return true end
+    if (cp >= 0x1D173 and cp <= 0x1D17A) or (cp >= 0xE0000 and cp <= 0xE007F) then return true end
+    if cp >= 0xE0100 and cp <= 0xE01EF then return true end
+    return false
+end
+
+local SHORT_ESCAPES = { [0x08] = "\\b", [0x09] = "\\t", [0x0A] = "\\n", [0x0C] = "\\f", [0x0D] = "\\r" }
+
+local function escape_codepoint(cp: integer): string
+    if SHORT_ESCAPES[cp] then return SHORT_ESCAPES[cp] end
+    if cp < 0x10000 then return string.format("\\u%04x", cp) end
+    local v = cp - 0x10000
+    return string.format("\\u%04x\\u%04x", 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF))
+end
+
+-- Decodes one UTF-8 sequence at byte i. Returns the code point and its
+-- length, or nil for an invalid byte.
+local function decode_at(s: string, i: integer): (integer?, integer)
+    local c = s:byte(i)
+    if c < 0x80 then return c, 1 end
+    local len, cp, min
+    if c >= 0xC2 and c <= 0xDF then len, cp, min = 2, c & 0x1F, 0x80
+    elseif c >= 0xE0 and c <= 0xEF then len, cp, min = 3, c & 0x0F, 0x800
+    elseif c >= 0xF0 and c <= 0xF4 then len, cp, min = 4, c & 0x07, 0x10000
+    else return nil, 1 end
+    if i + len - 1 > #s then return nil, 1 end
+    for k = 1, len - 1 do
+        local b = s:byte(i + k)
+        if b < 0x80 or b > 0xBF then return nil, 1 end
+        cp = (cp << 6) | (b & 0x3F)
+    end
+    if cp < min or cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF) then return nil, 1 end
+    return cp, len
+end
+
+-- Appends the display tokens of raw text s[from..to] to `tokens`. Each
+-- token is one character or one escape, so a cut never splits either.
+local function tokenize(s: string, from: integer, to: integer, tokens: {string}, limit: integer?)
+    local i = from
+    while i <= to do
+        if limit and #tokens >= limit then return end
+        local cp, len = decode_at(s, i)
+        local token
+        if cp == nil then
+            token = string.format("\\x%02x", s:byte(i))
+        elseif cp == 0x5C then
+            token = "\\\\"
+        elseif cp == 0x22 then
+            token = "\\\""
+        elseif hidden(cp) then
+            token = escape_codepoint(cp)
+        else
+            token = s:sub(i, i + len - 1)
+        end
+        tokens[#tokens + 1] = token
+        i = i + len
+    end
+end
+
+-- The escaped display form of a whole string.
+function preview.escape(s: string): string
+    local tokens = {}
+    tokenize(s, 1, #s, tokens)
+    return table.concat(tokens)
+end
+
+local cost_cache: {[string]: integer} = {}
+
+-- Bytes a display string adds to the JSON text of the preview.
+local function cost(text: string): integer
+    local cached = cost_cache[text]
+    if cached then return cached end
+    local encoded = json.encode(text) or ""
+    local value = #encoded - 2
+    if #text <= 8 then cost_cache[text] = value end
+    return value
+end
+
+---------------------------------------------------------------------------
+-- Binary detection
+---------------------------------------------------------------------------
+
+local function base64_bytes(payload: string): integer
+    local padding = #(payload:match("(=*)$") or "")
+    local body = #payload - padding
+    return math.max(0, (body * 3) // 4)
+end
+
+-- Spans { from, to, size } of binary content in s, in order, not overlapping.
+local function binary_spans(s: string): {any}
+    local spans = {}
+    local search = 1
+    while true do
+        local at = s:find("data:", search, true)
+        if not at then break end
+        local before = at > 1 and s:sub(at - 1, at - 1) or ""
+        local header, comma_capture = s:match("^([%w%.%+%-/;=]*)(),", at + 5)
+        local comma = tonumber(comma_capture)
+        if (before == "" or not before:match("[%w]")) and header and comma
+            and (header:find("/", 1, true) or header:find(";base64", 1, true)) then
+            local payload = s:match("^[^%s\"'<>]*", comma + 1) or ""
+            local stop = comma + #payload
+            local size = header:find(";base64", 1, true) and base64_bytes(payload) or #payload
+            spans[#spans + 1] = { from = at, to = stop, size = size }
+            search = stop + 1
+        else
+            search = at + 5
+        end
+    end
+
+    local function inside(from: integer): boolean
+        for _, span in ipairs(spans) do
+            if from >= span.from and from <= span.to then return true end
+        end
+        return false
+    end
+
+    local runs = {}
+    for from_capture, run, after_capture in s:gmatch("()([%w%+/=_%-]+)()") do
+        local from = tonumber(from_capture) or 0
+        local after = tonumber(after_capture) or 0
+        if #run >= preview.BINARY_RUN and not inside(from) then
+            local size = nil
+            if run:match("^%x+$") then
+                size = #run // 2
+            elseif run:find("%d") and run:find("%u") and run:find("%l") then
+                size = base64_bytes(run)
+            end
+            if size then runs[#runs + 1] = { from = from, to = after - 1, size = size } end
+        end
+    end
+    for _, run in ipairs(runs) do spans[#spans + 1] = run end
+    table.sort(spans, function(a, b) return a.from < b.from end)
+    return spans
+end
+
+---------------------------------------------------------------------------
+-- Rendering
+---------------------------------------------------------------------------
+
+local function pointer(path: string, key: string): string
+    local escaped = key:gsub("~", "~0")
+    escaped = escaped:gsub("/", "~1")
+    return path .. "/" .. escaped
+end
+
+local function is_array(value: any): boolean
+    local count = 0
+    for _ in pairs(value) do count = count + 1 end
+    return count > 0 and count == #value
+end
+
+local function sorted_keys(value: any): {any}
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    return keys
+end
+
+-- JSON size of an original value (the "full size" of a cut container).
+local function full_size(value: any, memo: any): integer
+    local kind = type(value)
+    if kind == "string" then return #value + 2 end
+    if kind ~= "table" then return #(json.encode(value) or "null") end
+    if memo[value] then return memo[value] end
+    local total = 2
+    local first = true
+    if is_array(value) then
+        for _, child in ipairs(value) do
+            total = total + full_size(child, memo) + (first and 0 or 1)
+            first = false
+        end
+    else
+        for key, child in pairs(value) do
+            total = total + #tostring(key) + 3 + full_size(child, memo) + (first and 0 or 1)
+            first = false
+        end
+    end
+    memo[value] = total
+    return total
+end
+
+local function marker(text: string): (string, integer)
+    return text, cost(text) + 2
+end
+
+-- Renders a string within `budget` JSON bytes (quotes included).
+local function render_string(s: string, path: string, budget: integer, state: any): (string, integer)
+    local limit = math.min(budget, preview.STRING_MAX + 2)
+    local spans = binary_spans(s)
+    local tokens, costs = {}, {}
+    local used = 2
+    local position = 1
+    local function add(token: string): boolean
+        local c = cost(token)
+        tokens[#tokens + 1] = token
+        costs[#costs + 1] = c
+        used = used + c
+        return used <= limit
+    end
+    local function add_text(to: integer): boolean
+        local piece = {}
+        local start = position
+        while start <= to do
+            piece = {}
+            tokenize(s, start, to, piece, 256)
+            local consumed = 0
+            for _, token in ipairs(piece) do
+                if not add(token) then return false end
+                local cp, len = decode_at(s, start + consumed)
+                consumed = consumed + (cp and len or 1)
+            end
+            start = start + consumed
+        end
+        return true
+    end
+    local fits = true
+    for _, span in ipairs(spans) do
+        if fits then fits = add_text(span.from - 1) end
+        if fits then
+            state.cut[#state.cut + 1] = path
+            fits = add("[binary, " .. preview.size_text(span.size) .. "]")
+        end
+        position = span.to + 1
+        if not fits then break end
+    end
+    if fits then fits = add_text(#s) end
+    if fits then return table.concat(tokens), used end
+
+    -- Too long: keep the tokens that fit beside the cut note.
+    local note = ELLIPSIS .. " [cut, " .. preview.size_text(#s) .. "]"
+    local room = limit - 2 - cost(note)
+    if room < 0 then
+        local text, text_cost = marker("[cut, " .. preview.size_text(#s) .. "]")
+        return text, text_cost
+    end
+    local kept, total = {}, 0
+    for index, token in ipairs(tokens) do
+        if total + costs[index] > room then break end
+        kept[#kept + 1] = token
+        total = total + costs[index]
+    end
+    if state.cut[#state.cut] ~= path then state.cut[#state.cut + 1] = path end
+    return table.concat(kept) .. note, total + cost(note) + 2
+end
+
+local function render_number(value: number, path: string, state: any): (any, integer)
+    if math.type(value) == "integer" then
+        if value > SAFE_INTEGER or value < -SAFE_INTEGER then
+            state.numbers[#state.numbers + 1] = path
+            local text, text_cost = marker(string.format("%d", value))
+            return text, text_cost
+        end
+    elseif value >= TWO_53 or value <= -TWO_53 then
+        state.numbers[#state.numbers + 1] = path
+        local text, text_cost = marker(string.format("%.17g", value))
+        return text, text_cost
+    end
+    return value, #(json.encode(value) or "0")
+end
+
+local render_value
+
+-- The display form of an object key: escaped, and at most KEY_MAX bytes of
+-- escaped text plus "…". Returns the text and whether it was shortened.
+local function key_text_of(key: any): (string, boolean)
+    local raw = tostring(key)
+    local tokens = {}
+    tokenize(raw, 1, #raw, tokens, preview.KEY_MAX + 1)
+    local short, length = {}, 0
+    for _, token in ipairs(tokens) do
+        if length + #token > preview.KEY_MAX then
+            return table.concat(short) .. ELLIPSIS, true
+        end
+        short[#short + 1] = token
+        length = length + #token
+    end
+    return table.concat(short), false
+end
+
+-- Keys of one object, in canonical order, made unique after shortening.
+local function display_keys(keys: {any}): ({string}, {boolean})
+    local texts, shortened, taken = {}, {}, {}
+    for index, key in ipairs(keys) do
+        local text, was_cut = key_text_of(key)
+        local unique, n = text, 1
+        while taken[unique] do
+            n = n + 1
+            unique = text .. ELLIPSIS .. n
+        end
+        taken[unique] = true
+        texts[index] = unique
+        shortened[index] = was_cut
+    end
+    return texts, shortened
+end
+
+local function unused_key(base: string, out: any): string
+    local key = base
+    while out[key] ~= nil do key = key .. ELLIPSIS end
+    return key
+end
+
+local function render_container(value: any, depth: integer, path: string, budget: integer, state: any): (any, integer)
+    local size = full_size(value, state.memo)
+    if depth > preview.MAX_DEPTH or budget < MIN_CHILD then
+        state.cut[#state.cut + 1] = path
+        local text, text_cost = marker("[cut, " .. preview.size_text(size) .. "]")
+        return text, text_cost
+    end
+    local array = is_array(value)
+    local members = {}
+    if array then
+        for index, child in ipairs(value) do members[#members + 1] = { value = child } end
+    else
+        local keys = sorted_keys(value)
+        local texts, shortened = display_keys(keys)
+        for index, key in ipairs(keys) do
+            members[#members + 1] = { value = value[key], key_text = texts[index], key_cut = shortened[index] }
+        end
+    end
+
+    local out = {}
+    local used = 2
+    for index, member in ipairs(members) do
+        local separator = index > 1 and 1 or 0
+        local key_cost = array and 0 or (cost(member.key_text) + 3)
+        local reserve = index < #members and OMIT_RESERVE or 0
+        local room = budget - used - separator - key_cost - reserve
+        if room < MIN_CHILD then
+            local omitted, omitted_size = 0, 0
+            for rest = index, #members do
+                omitted = omitted + 1
+                omitted_size = omitted_size + full_size(members[rest].value, state.memo)
+            end
+            local text, text_cost = marker("[cut, " .. omitted .. " more, " .. preview.size_text(omitted_size) .. "]")
+            if array then
+                out[#out + 1] = text
+                state.cut[#state.cut + 1] = pointer(path, tostring(index - 1))
+                used = used + separator + text_cost
+            else
+                local omit_key = unused_key(ELLIPSIS, out)
+                out[omit_key] = text
+                state.cut[#state.cut + 1] = pointer(path, omit_key)
+                used = used + separator + cost(omit_key) + 3 + text_cost
+            end
+            break
+        end
+        local child_path = pointer(path, array and tostring(index - 1) or tostring(member.key_text))
+        if member.key_cut then state.cut[#state.cut + 1] = child_path end
+        local rendered, rendered_cost = render_value(member.value, depth + 1, child_path, room, state)
+        if array then out[#out + 1] = rendered else out[member.key_text] = rendered end
+        used = used + separator + key_cost + rendered_cost
+    end
+    return out, used
+end
+
+render_value = function(value: any, depth: integer, path: string, budget: integer, state: any): (any, integer)
+    local kind = type(value)
+    local out, out_cost
+    if kind == "string" then
+        out, out_cost = render_string(value, path, budget, state)
+        return out, out_cost
+    end
+    if kind == "number" then
+        out, out_cost = render_number(value, path, state)
+        return out, out_cost
+    end
+    if kind == "table" then
+        out, out_cost = render_container(value, depth, path, budget, state)
+        return out, out_cost
+    end
+    if kind == "boolean" or kind == "nil" then return value, #(json.encode(value) or "null") end
+    local encoded = json.encode(value)
+    if encoded then return value, #encoded end
+    local text, text_cost = marker("[" .. kind .. "]")
+    return text, text_cost
+end
+
+---------------------------------------------------------------------------
+-- Summary
+---------------------------------------------------------------------------
+
+local function char_count(text: string): integer
+    local _, count = text:gsub("[^\128-\191]", "")
+    return count
+end
+
+local function truncate_chars(text: string, chars: integer): string
+    local out, count, i = {}, 0, 1
+    while i <= #text and count < chars do
+        local _, len = decode_at(text, i)
+        out[#out + 1] = text:sub(i, i + len - 1)
+        count = count + 1
+        i = i + len
+    end
+    local result = table.concat(out)
+    -- Never end on half of an escaped backslash.
+    local trailing = #(result:match("(\\*)$") or "")
+    if trailing % 2 == 1 then result = result:sub(1, -2) end
+    return result
+end
+
+local function summary_value(original: any, shown: any, path: string, numbers: any): string
+    if type(original) == "table" then
+        if is_array(original) then return "[" .. #original .. " items]" end
+        local count = 0
+        for _ in pairs(original) do count = count + 1 end
+        if count == 0 then return "{}" end
+        return "{" .. count .. " keys}"
+    end
+    if numbers[path] then return tostring(shown) end
+    if type(shown) == "string" then return "\"" .. shown .. "\"" end
+    if shown == nil then return "null" end
+    return tostring(json.encode(shown) or shown)
+end
+
+local function build_summary(args: any, arguments: any, numbers: {string}): string
+    local number_paths = {}
+    for _, path in ipairs(numbers) do number_paths[path] = true end
+    if type(args) ~= "table" or is_array(args) then
+        local text = summary_value(args, arguments, "", number_paths)
+        if char_count(text) > preview.SUMMARY_CHARS then
+            text = truncate_chars(text, preview.SUMMARY_CHARS - 1) .. ELLIPSIS
+        end
+        return text
+    end
+    local keys = sorted_keys(args)
+    if #keys == 0 then return "no arguments" end
+    local texts = display_keys(keys)
+    local line, shown_count = "", 0
+    for index, key in ipairs(keys) do
+        local key_text = texts[index]
+        local path = pointer("", key_text)
+        local shown = type(arguments) == "table" and arguments[key_text] or nil
+        local part = key_text .. ": " .. summary_value(args[key], shown, path, number_paths)
+        local candidate = shown_count == 0 and part or (line .. ", " .. part)
+        if char_count(candidate) <= preview.SUMMARY_CHARS then
+            line = candidate
+            shown_count = shown_count + 1
+        else
+            if shown_count == 0 then
+                line = truncate_chars(part, preview.SUMMARY_CHARS - 1) .. ELLIPSIS
+                shown_count = 1
+            end
+            break
+        end
+    end
+    local rest = #keys - shown_count
+    if rest > 0 then line = line .. " +" .. rest .. " more" end
+    return line
+end
+
+---------------------------------------------------------------------------
+-- Entry point
+---------------------------------------------------------------------------
+
+function preview.build(args: any)
+    local state = { cut = {}, numbers = {}, memo = {} }
+    local arguments = render_value(args, 1, "", preview.MAX_BYTES, state)
+    return {
+        arguments = arguments,
+        cut = state.cut,
+        numbers = state.numbers,
+        summary = build_summary(args, arguments, state.numbers),
+    }
+end
+
+return preview

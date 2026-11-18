@@ -149,8 +149,9 @@ data and must be shown escaped, never as HTML):
 | `description` | string | Tool description from the registry. |
 | `agent` | string | Title of the agent that asked. |
 | `summary` | string | One-line argument summary for the compact card (about 80 characters). |
-| `arguments` | object | Argument preview: at most 8 KB and depth 6. Cut values state their full size. |
-| `cut` | array of string | Paths of values that were cut. |
+| `arguments` | object | Argument preview: at most 8 KB and depth 6. Cut values state their full size. See "Argument preview" below. |
+| `cut` | array of string | JSON Pointer paths (into `arguments`) of values that were cut or replaced. |
+| `numbers` | array of string | JSON Pointer paths of numbers sent as strings to keep their exact value. |
 | `batch_peers` | array of string | Tool names of the other calls in the batch. |
 | `target_agent` | string | Delegation calls only: the target agent title. |
 | `approve_all_scope` | object | Present when `approve_all` is offered: the disclosure for the Details view. |
@@ -158,6 +159,44 @@ data and must be shown escaped, never as HTML):
 | `approve_all_scope.tools` | array of object | Every tool in the grant scope: `{ "registry_id", "title" }`, plus `target_agent_id` for delegation. |
 | `approve_all_scope.covered` | array of object | Every covered pending call: `{ "approval_id", "title" }`. |
 | `approve_all_scope.covered_count` | integer | Number of covered calls. |
+
+### Argument preview
+
+`display.arguments` is built by the server from the decoded arguments. A
+client shows it as data, escaped, and never as HTML.
+
+- Strings and object keys use JSON string escaping for every control,
+  bidirectional, zero-width or other invisible format character (`‮`,
+  `​`, `\n`, ...). A literal backslash is shown as `\\` and a quote as
+  `\"`. So the character U+202E shows as the six characters `‮`, and the
+  literal text `‮` in an argument shows as `\\u202e`. An invalid UTF-8
+  byte shows as `\xNN`.
+- Base64 and hex runs of at least 128 characters, and data URLs, are replaced
+  by `[binary, <size>]` inside the string. The path of the string is in `cut`.
+- A string longer than 1 KB of escaped text ends with `… [cut, <size>]`. An
+  object or array deeper than 6 levels is replaced by `[cut, <size>]`. When
+  the 8 KB budget runs out, the remaining members of an array are replaced by
+  one last item `[cut, <n> more, <size>]`, and those of an object by one
+  member with the key `…` (or `……` if that key is taken). Every such path is
+  in `cut`. Object keys longer than 128 characters end with `…`.
+- Sizes are the UTF-8 bytes of a string, the JSON bytes of an object or array,
+  and the decoded bytes of binary data: `512 B`, `1.4 KB`, `2.0 MB`.
+- No key is redacted. The full arguments are in the REST row `data`.
+- `summary` is one line: the first keys in sorted order with their values, as
+  many as fit in about 80 characters, then ` +<n> more` for the rest. Strings
+  are quoted and escaped as above; objects show as `{<n> keys}` and arrays as
+  `[<n> items]`. A call without arguments shows `no arguments`.
+
+Exact numbers. Integers outside the JSON safe range (above `2^53 - 1` or
+below `-(2^53 - 1)`) are sent as strings with their exact decimal digits,
+and their paths are listed in `numbers`. This holds for every 64-bit integer
+(`-9223372036854775808` to `9223372036854775807`). **Limit:** the runtime JSON
+decoder turns an integer outside the 64-bit range (for example
+`12345678901234567890`) into a floating-point number before the Session sees
+the call, so its exact digits are already gone. The preview then shows that
+number as `%.17g` text (`"1.2345678901234567e+19"`), also listed in `numbers`,
+and never shows digits that the runtime no longer has. The intent digest
+covers the same decoded value.
 
 State events never carry a client `request_id`. Event order for an approved
 public call: `tool_approval` (pending), `tool_approval` (approved),
@@ -414,7 +453,7 @@ dotted; a number selects an array item (1-based).
 | `session_open.json` | Surface declaration on open | `type=session_open session_id:string tool_approval_ui:integer` |
 | `session_message_runtime_context.json` | Surface declaration on a message | `type=session_message session_id:string data.text:string data.runtime_context.tool_approval_ui:integer` |
 | `tool_approval_surface.json` | Surface withdrawal | `type=session_command session_id:string data.command=tool_approval_surface data.enabled=false` |
-| `tool_approval_event_pending.json` | Pending request event | `type=tool_approval session_id:string message_id:string call_id:string function_name:string row_type:string server_now:string approval.approval_id:string approval.batch_id:string approval.state=pending approval.revision:integer approval.intent_digest:string approval.requested_at:string approval.expires_at:string approval.offered.decisions:array approval.offered.approve_all.scope:string approval.offered.approve_all.covers:array approval.display.title:string approval.display.description:string approval.display.agent:string approval.display.summary:string approval.display.arguments:object approval.display.cut:array approval.display.batch_peers:array approval.display.approve_all_scope.scope:string approval.display.approve_all_scope.tools:array approval.display.approve_all_scope.covered:array approval.display.approve_all_scope.covered_count:integer` |
+| `tool_approval_event_pending.json` | Pending request event | `type=tool_approval session_id:string message_id:string call_id:string function_name:string row_type:string server_now:string approval.approval_id:string approval.batch_id:string approval.state=pending approval.revision:integer approval.intent_digest:string approval.requested_at:string approval.expires_at:string approval.offered.decisions:array approval.offered.approve_all.scope:string approval.offered.approve_all.covers:array approval.display.title:string approval.display.description:string approval.display.agent:string approval.display.summary:string approval.display.arguments:object approval.display.cut:array approval.display.numbers:array approval.display.batch_peers:array approval.display.approve_all_scope.scope:string approval.display.approve_all_scope.tools:array approval.display.approve_all_scope.covered:array approval.display.approve_all_scope.covered_count:integer` |
 | `tool_approval_event_decided.json` | State change event | `type=tool_approval session_id:string message_id:string call_id:string server_now:string approval.approval_id:string approval.state=approved approval.revision:integer approval.decided_via=user approval.decided_at:string` |
 | `tool_approval_event_grant.json` | Grant audit event | `type=tool_approval row_type=private_function approval.state=approved approval.decided_via=grant approval.grant_id:string` |
 | `decision_approve.json` | Approve | `type=session_command session_id:string request_id:string data.command=tool_approval data.approval_id:string data.decision=approve data.intent_digest:string data.expected_revision:integer` |

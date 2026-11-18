@@ -1,8 +1,9 @@
 version: "1.0"
 namespace: wippy.session.approval
 
-# Native tool-call approval (EE2-2710). Pure building blocks of the approval
-# gate: trait settings, tool meta, the policy evaluator. Nothing here turns
+# Native tool-call approval (EE2-2710). Building blocks of the approval gate:
+# trait settings, tool meta, the policy evaluator, call freezing with digests
+# and fingerprints, and the argument preview. Nothing here turns
 # the feature on; the trait entry, the capability and the gate call come in
 # later slices.
 entries:
@@ -28,3 +29,36 @@ entries:
     source: file://policy.lua
     imports:
       tool_meta: wippy.session.approval:tool_meta
+
+  # wippy.session.approval:fingerprint
+  - name: fingerprint
+    kind: library.lua
+    meta:
+      comment: sha256 of canonical JSON - registry entry deployment fingerprints, delegation grant fingerprints, digests
+    source: file://fingerprint.lua
+    modules:
+      - hash
+      - registry
+    imports:
+      canonical: wippy.agent:canonical
+
+  # wippy.session.approval:freeze
+  - name: freeze
+    kind: library.lua
+    meta:
+      comment: Freezes a validated tool call (decoded arguments, effective context, entry, delegate target, browser binding) with its intent digest and denial key
+    source: file://freeze.lua
+    modules:
+      - json
+    imports:
+      fingerprint: wippy.session.approval:fingerprint
+      tool_meta: wippy.session.approval:tool_meta
+
+  # wippy.session.approval:preview
+  - name: preview
+    kind: library.lua
+    meta:
+      comment: Server-built argument preview for the approval card - escaped text, binary markers, size and depth limits, exact numbers, one-line summary
+    source: file://preview.lua
+    modules:
+      - json

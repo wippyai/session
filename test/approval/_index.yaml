@@ -90,3 +90,35 @@ entries:
       policy: wippy.session.approval:policy
       trait_config: wippy.session.approval:trait_config
     method: run
+
+  - name: freeze_test
+    kind: function.lua
+    meta:
+      name: Tool approval freeze, digest and fingerprints
+      type: test
+      suite: session
+      comment: Frozen calls, intent digest stability, denial key, the caller's argument error text, the delegation target check, entry fingerprints
+    source: file://freeze_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      freeze: wippy.session.approval:freeze
+      fingerprint: wippy.session.approval:fingerprint
+      tool_caller: wippy.agent.tools:caller
+    method: run
+
+  - name: preview_test
+    kind: function.lua
+    meta:
+      name: Tool approval argument preview
+      type: test
+      suite: session
+      comment: Escaping, binary markers, exact numbers, string, depth and 8 KB limits, one-line summary
+    source: file://preview_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      preview: wippy.session.approval:preview
+    method: run

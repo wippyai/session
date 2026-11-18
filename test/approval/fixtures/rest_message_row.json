@@ -39,6 +39,7 @@
               "hard": true
             },
             "cut": [],
+            "numbers": [],
             "batch_peers": []
           },
           "requested_at": "2026-10-21T12:15:00Z",
