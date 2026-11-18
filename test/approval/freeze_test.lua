@@ -3,6 +3,7 @@ local json = require("json")
 local freeze = require("freeze")
 local fingerprint = require("fingerprint")
 local tool_caller = require("tool_caller")
+local canonical_json = require("canonical_json")
 
 -- Freeze, intent digest, denial key and fingerprints (architecture 4.3 and
 -- 4.5 step 3; AC 15, 16, 28, 36, 43).
@@ -138,7 +139,83 @@ local function define_tests()
             end
             test.neq(changes.argument.denial_key, base.denial_key)
             test.neq(changes.session_context.denial_key, base.denial_key, "stable context is part of the denial key")
-            test.eq(changes.binding.denial_key, base.denial_key, "the browser binding is not part of the denial key")
+            test.neq(changes.binding.denial_key, base.denial_key, "the browser binding is part of the denial key")
+            test.neq(changes.entry_data.denial_key, base.denial_key, "the deployment fingerprint is part of the denial key")
+            local token = frozen_of(validated({ call_id = "call_7" }), env({ session_context = { session_id = "s1",
+                user_id = "u1", ui_action_runtime = { capability = "launch-token" } } }))
+            test.eq(token.denial_key, base.denial_key, "call IDs and per-launch tokens are not part of the denial key")
+        end)
+
+        it("returns freeze_failed, never invalid, when a valid call can't be frozen", function()
+            local deep: any = "leaf"
+            for _ = 1, 65 do deep = { deep } end
+            local _, nested = freeze.call(validated({ args = { payload = deep } }), env())
+            test.eq(nested.outcome, "freeze_failed", tostring(nested.error))
+            local _, func = freeze.call(validated({ args = { callback = function() end } }), env())
+            test.eq(func.outcome, "freeze_failed", tostring(func.error))
+            local _, mixed = freeze.call(validated({ args = { [1] = "a", x = "b" } }), env())
+            test.eq(mixed.outcome, "freeze_failed", tostring(mixed.error))
+            local _, deep_context = freeze.call(validated({ context = { nested = deep } }), env())
+            test.eq(deep_context.outcome, "freeze_failed", tostring(deep_context.error))
+            local _, no_id = freeze.call(validated({ call_id = "" }), env())
+            test.eq(no_id.outcome, "freeze_failed")
+            local _, not_table = freeze.call("call_1", env())
+            test.eq(not_table.outcome, "freeze_failed")
+        end)
+
+        it("treats only a call without valid = true as invalid, as the caller does", function()
+            local without_flag = validated({ error = "no schema" })
+            without_flag.valid = nil
+            local _, missing = freeze.call(without_flag, env())
+            test.eq(missing.outcome, "invalid")
+            test.eq(missing.error, "no schema")
+            local _, truthy = freeze.call(validated({ valid = "yes" }), env())
+            test.eq(truthy.outcome, "invalid")
+        end)
+
+        it("reads the approval settings from the same entry as the fingerprint", function()
+            local unmarked_entry = entry({ meta = { type = "tool", title = "Delete customer" } })
+            local from_entry = frozen_of(validated({ meta = { type = "tool", approval = "required" } }),
+                env({ entry = unmarked_entry }))
+            test.is_false(from_entry.approval.required, "validate-time meta is ignored")
+            local marked = frozen_of(validated({ meta = { type = "tool" } }), env())
+            test.is_true(marked.approval.required, "the entry marks the tool")
+            test.eq(marked.meta.approval, "required")
+        end)
+
+        it("settles as changed_before_run when the entry is not the called tool", function()
+            local _, wrong = freeze.call(validated(), env({ entry = entry({ id = "app.tools:other" }) }))
+            test.eq(wrong.outcome, "changed_before_run")
+            local _, no_id = freeze.call(validated(), env({ entry = entry({ id = false }) }))
+            test.eq(no_id.outcome, "changed_before_run")
+        end)
+
+        it("gives the tool the same context as freeze (parity with the real caller)", function()
+            local tool_context = { tenant = "acme", shared = "tool", ui_action_runtime = { token = "t" } }
+            local session_context = { session_id = "s1", shared = "session", nested = { a = { 1, 2 } },
+                attention_context_runtime = { token = "s" }, call_id = "forged" }
+            local call = validated({ context = tool_context })
+            local frozen = frozen_of(call, env({ session_context = session_context }))
+
+            local received = nil
+            local caller = tool_caller.new()
+            caller.executor = {
+                with_context = function(_, context)
+                    return {
+                        call = function(_, registry_id, args)
+                            received = { context = context, registry_id = registry_id, args = args }
+                            return { ok = true }, nil
+                        end,
+                    }
+                end,
+            }
+            local results, err = caller:execute(session_context, { call_1 = validated({ context = tool_context }) })
+            test.is_nil(err)
+            test.is_nil(results.call_1.error)
+            test.not_nil(received, "the capturing executor ran")
+            test.eq(canonical_json.encode(received.context), canonical_json.encode(frozen.effective_context))
+            test.eq(received.registry_id, frozen.registry_id)
+            test.eq(canonical_json.encode(received.args), canonical_json.encode(frozen.args))
         end)
 
         it("keeps exact int64 digits in the digest", function()
@@ -224,6 +301,19 @@ local function define_tests()
             test.neq(redeployed.identity.fingerprint, a.identity.fingerprint)
         end)
 
+        it("settles as changed_before_run when the target entry is another agent", function()
+            local _, wrong = freeze.call(delegation_call("app.agents:worker"),
+                delegation_env("app.agents:worker", { target_entry = agent_entry("app.agents:admin") }))
+            test.eq(wrong.outcome, "changed_before_run")
+        end)
+
+        it("puts the full delegate target into the denial key", function()
+            local a = frozen_of(delegation_call("app.agents:worker"), delegation_env("app.agents:worker"))
+            local redeployed = frozen_of(delegation_call("app.agents:worker"), delegation_env("app.agents:worker",
+                { target_entry = agent_entry("app.agents:worker", "Changed prompt.") }))
+            test.neq(a.denial_key, redeployed.denial_key)
+        end)
+
         it("settles a delegation call without a target or a resolvable target agent", function()
             local _, no_target = freeze.call(delegation_call("app.agents:worker", { context = {} }),
                 delegation_env("app.agents:worker"))
@@ -249,6 +339,7 @@ local function define_tests()
         it("reads a live registry entry", function()
             local value, read_entry = fingerprint.for_id("app.approval:freeze_test")
             test.matches(value, "^sha256:%x+$")
+            test.eq(read_entry.id, "app.approval:freeze_test", "registry.get gives the id freeze compares")
             test.eq(value, fingerprint.of_entry(read_entry))
             local missing = fingerprint.for_id("app.approval:no_such_entry")
             test.is_nil(missing)

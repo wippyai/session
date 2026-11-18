@@ -14,16 +14,31 @@ local tool_meta = require("tool_meta")
 --   session_context     the context the gate passes to caller:execute
 --   row_type            "function" | "private_function" | "delegation"
 --   delegation_func_id  ctx.config.delegation_func_id
---   entry               registry entry of validated.registry_id
---   target_entry        registry entry of the delegate target (delegation calls)
---   browser_binding     the Attention UI action binding, or nil
--- It returns the frozen call, or nil and a failure:
---   { outcome = "invalid", error }             validate marked the call invalid; it keeps its error
+--   entry               registry entry of validated.registry_id (its id must match)
+--   target_entry        registry entry of the delegate target (delegation calls; its id must match)
+--   browser_binding     the stable Attention UI action binding, or nil
+-- The approval settings (meta.approval), the title, the description and the
+-- fingerprint all come from `entry`, so they describe the same deployment.
+--
+-- It returns the frozen call, or nil and a failure. Only `invalid` passes
+-- the gate without a request; every other failure must settle as not run:
+--   { outcome = "invalid", error }             validate marked the call invalid (valid ~= true,
+--                                              as the caller's `not tool_call.valid`); the caller
+--                                              never runs it and reports this error
 --   { outcome = "arguments", error }           arguments did not decode; error is the caller's text
 --   { outcome = "changed_before_run", error }  the call does not name what would run
+--   { outcome = "freeze_failed", error }       the Session could not freeze a valid call
+--                                              (malformed call, nesting, a value that is not
+--                                              JSON-shaped); the gate settles it as not run,
+--                                              never runs it and never asks
 local freeze = {}
 
-freeze.OUTCOME = { INVALID = "invalid", ARGUMENTS = "arguments", CHANGED = "changed_before_run" }
+freeze.OUTCOME = {
+    INVALID = "invalid",
+    ARGUMENTS = "arguments",
+    CHANGED = "changed_before_run",
+    FREEZE_FAILED = "freeze_failed",
+}
 
 -- The caller's merge_execution_context (wippy.agent.tools:caller) drops these
 -- keys from both contexts; only the call's runtime resolver supplies them.
@@ -47,7 +62,7 @@ local MAX_COPY_DEPTH = 64
 
 local function deep_copy(value: any, depth: integer): any
     if type(value) ~= "table" then return value end
-    if depth > MAX_COPY_DEPTH then error("value nests deeper than " .. MAX_COPY_DEPTH .. " levels") end
+    if depth > MAX_COPY_DEPTH then error("value nests deeper than " .. MAX_COPY_DEPTH .. " levels", 0) end
     local out = {}
     for k, v in pairs(value) do out[k] = deep_copy(v, depth + 1) end
     return out
@@ -58,10 +73,10 @@ end
 function freeze.merge_context(tool_context: any, session_context: any, call_id: string): table
     local merged = {}
     for k, v in pairs(type(tool_context) == "table" and tool_context or {}) do
-        if not freeze.RUNTIME_CONTEXT_FIELDS[k] then merged[k] = deep_copy(v, 1) end
+        if not freeze.RUNTIME_CONTEXT_FIELDS[k] then merged[k] = deep_copy(v, 2) end
     end
     for k, v in pairs(type(session_context) == "table" and session_context or {}) do
-        if not freeze.RUNTIME_CONTEXT_FIELDS[k] then merged[k] = deep_copy(v, 1) end
+        if not freeze.RUNTIME_CONTEXT_FIELDS[k] then merged[k] = deep_copy(v, 2) end
     end
     merged.call_id = call_id
     return merged
@@ -75,8 +90,16 @@ local function stable_context(context: any): table
     return out
 end
 
+local function failure(outcome: string, message: any)
+    return nil, { outcome = outcome, error = tostring(message) }
+end
+
 local function changed(message: string)
-    return nil, { outcome = freeze.OUTCOME.CHANGED, error = message }
+    return failure(freeze.OUTCOME.CHANGED, message)
+end
+
+local function freeze_failed(message: any)
+    return failure(freeze.OUTCOME.FREEZE_FAILED, message)
 end
 
 -- The fields the intent digest covers (architecture 4.5 step 3).
@@ -99,13 +122,16 @@ function freeze.digest(frozen: any): (string?, string?)
     return fingerprint.digest(digest_input(frozen))
 end
 
--- The repeated-denial key: tool identity, delegate target, canonical
--- arguments and stable semantic context; no call IDs, timestamps or
--- capability tokens.
+-- The repeated-denial key: tool identity and deployment fingerprint, the
+-- full delegate target (agent and fingerprint), the stable browser binding,
+-- canonical arguments and stable semantic context. Call IDs and per-launch
+-- capability tokens are left out; the frozen call holds no timestamps.
 function freeze.denial_key(frozen: any): (string?, string?)
     return fingerprint.digest({
         registry_id = frozen.registry_id,
-        target_agent_id = frozen.delegate_target and frozen.delegate_target.agent_id or nil,
+        fingerprint = frozen.fingerprint,
+        delegate_target = frozen.delegate_target,
+        browser_binding = frozen.browser_binding,
         args = frozen.args,
         context = stable_context(frozen.effective_context),
     })
@@ -119,11 +145,11 @@ local function entry_text(entry: any, key: string): string?
 end
 
 function freeze.call(validated: any, env: any): (any, any)
-    if type(validated) ~= "table" or type(validated.call_id) ~= "string" then
-        return nil, { outcome = freeze.OUTCOME.INVALID, error = "Tool call is malformed" }
+    if type(validated) ~= "table" or type(validated.call_id) ~= "string" or validated.call_id == "" then
+        return freeze_failed("The tool call has no call ID")
     end
     env = env or {}
-    if validated.valid == false then
+    if validated.valid ~= true then
         return nil, { outcome = freeze.OUTCOME.INVALID, error = validated.error }
     end
 
@@ -132,24 +158,30 @@ function freeze.call(validated: any, env: any): (any, any)
     if type(args) == "string" then
         local parsed, err = json.decode(args)
         if err then
-            return nil, { outcome = freeze.OUTCOME.ARGUMENTS, error = "Failed to parse arguments: " .. tostring(err) }
+            return failure(freeze.OUTCOME.ARGUMENTS, "Failed to parse arguments: " .. tostring(err))
         end
         args = parsed
     end
     local copy_ok, copy_value = pcall(deep_copy, args, 1)
-    if not copy_ok then return nil, { outcome = freeze.OUTCOME.INVALID, error = tostring(copy_value) } end
+    if not copy_ok then return freeze_failed("The arguments can't be frozen: " .. tostring(copy_value)) end
     args = copy_value
 
     local context_ok, merged = pcall(freeze.merge_context, validated.context, env.session_context, validated.call_id)
-    if not context_ok then return nil, { outcome = freeze.OUTCOME.INVALID, error = tostring(merged) } end
+    if not context_ok then return freeze_failed("The execution context can't be frozen: " .. tostring(merged)) end
+
+    local binding_ok, binding = pcall(deep_copy, env.browser_binding, 1)
+    if not binding_ok then return freeze_failed("The browser binding can't be frozen: " .. tostring(binding)) end
 
     local registry_id = validated.registry_id
     local entry = env.entry
     if type(entry) ~= "table" then
         return changed("The tool entry " .. tostring(registry_id) .. " is no longer in the registry")
     end
+    if entry.id ~= registry_id then
+        return changed("The registry entry " .. tostring(entry.id) .. " is not the called tool " .. tostring(registry_id))
+    end
     local tool_fingerprint, fp_err = fingerprint.of_entry(entry)
-    if not tool_fingerprint then return changed("The tool entry can't be fingerprinted: " .. tostring(fp_err)) end
+    if not tool_fingerprint then return freeze_failed("The tool entry can't be fingerprinted: " .. tostring(fp_err)) end
 
     local row_type = env.row_type or "function"
     local is_delegation = row_type == "delegation"
@@ -171,17 +203,24 @@ function freeze.call(validated: any, env: any): (any, any)
             return changed("The execution context delegates to " .. tostring(merged.to_agent_id)
                 .. ", not to the requested agent " .. target)
         end
-        local target_fingerprint, target_err = fingerprint.of_entry(env.target_entry)
+        local target_entry = env.target_entry
+        if type(target_entry) ~= "table" then
+            return changed("The target agent " .. target .. " is not in the registry")
+        end
+        if target_entry.id ~= target then
+            return changed("The registry entry " .. tostring(target_entry.id) .. " is not the target agent " .. target)
+        end
+        local target_fingerprint, target_err = fingerprint.of_entry(target_entry)
         if not target_fingerprint then
-            return changed("The target agent " .. target .. " can't be resolved: " .. tostring(target_err))
+            return freeze_failed("The target agent " .. target .. " can't be fingerprinted: " .. tostring(target_err))
         end
         delegate_target = { agent_id = target, fingerprint = target_fingerprint }
         local grant_fingerprint, grant_err = fingerprint.delegation(tool_fingerprint, target_fingerprint)
-        if not grant_fingerprint then return changed(tostring(grant_err)) end
+        if not grant_fingerprint then return freeze_failed(grant_err) end
         identity = { registry_id = registry_id, fingerprint = grant_fingerprint, target_agent_id = target }
     end
 
-    local meta = type(validated.meta) == "table" and validated.meta or (entry.meta or {})
+    local meta = type(entry.meta) == "table" and entry.meta or {}
     local frozen = {
         call_id = validated.call_id,
         row_type = row_type,
@@ -193,16 +232,16 @@ function freeze.call(validated: any, env: any): (any, any)
         effective_context = merged,
         fingerprint = tool_fingerprint,
         delegate_target = delegate_target,
-        browser_binding = deep_copy(env.browser_binding, 1),
+        browser_binding = binding,
         meta = meta,
         approval = tool_meta.read(meta),
         identity = identity,
     }
     local digest, digest_err = freeze.digest(frozen)
-    if not digest then return nil, { outcome = freeze.OUTCOME.INVALID, error = digest_err } end
+    if not digest then return freeze_failed("The intent digest failed: " .. tostring(digest_err)) end
     frozen.intent_digest = digest
     local denial_key, key_err = freeze.denial_key(frozen)
-    if not denial_key then return nil, { outcome = freeze.OUTCOME.INVALID, error = key_err } end
+    if not denial_key then return freeze_failed("The denial key failed: " .. tostring(key_err)) end
     frozen.denial_key = denial_key
     return frozen, nil
 end

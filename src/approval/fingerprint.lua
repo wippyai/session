@@ -1,22 +1,25 @@
 local hash = require("hash")
 local registry = require("registry")
-local canonical = require("canonical")
+local canonical_json = require("canonical_json")
 
 -- Deployment fingerprints and digests for tool approval (EE2-2710,
 -- architecture 4.3 and 4.5 step 3). A fingerprint is `sha256:` of the
--- canonical JSON (wippy.agent:canonical) of a registry entry's kind, meta and
--- data. Registry entries have no version, so this is what a grant pins. An
--- edit that changes only code the entry points to, and not the entry itself,
--- does not change the fingerprint.
+-- canonical JSON of a registry entry's kind, meta and data. Registry entries
+-- have no version, so this is what a grant pins. An edit that changes only
+-- code the entry points to, and not the entry itself, does not change the
+-- fingerprint.
 --
--- Canonical JSON keeps every 64-bit integer exactly; numbers above the int64
--- range reach the Session as floats already (docs/tool-approval-protocol.md,
--- "Exact numbers").
+-- The canonical JSON is canonical_json.lua, not wippy.agent:canonical: see
+-- that file for the shapes the framework encoder can't tell apart. It keeps
+-- every 64-bit integer exactly; numbers above the int64 range reach the
+-- Session as floats already (docs/tool-approval-protocol.md, "Exact
+-- numbers"). A value that is not JSON-shaped is refused, never hashed.
 local fingerprint = {}
 
 -- `sha256:<64 hex>` of the canonical JSON of a value.
 function fingerprint.digest(value: any): (string?, string?)
-    local text = canonical.encode(value)
+    local text, encode_err = canonical_json.encode(value)
+    if not text then return nil, "not JSON-shaped: " .. tostring(encode_err) end
     local digest, err = hash.sha256(text)
     if err or type(digest) ~= "string" then return nil, "sha256 failed: " .. tostring(err) end
     return "sha256:" .. digest, nil
