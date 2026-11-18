@@ -275,7 +275,12 @@ function Invoke-Bench {
         }
         else { $frameworkRevision = 'locked' }
     }
-    $runtime = (& $wippy version)
+    # Like the Makefile's $(wippy version): the banner's lines stay separate
+    # lines (not one space-joined string), read as UTF-8, trailing newlines cut.
+    $savedEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    try { $runtime = ((& $wippy version) -join "`n").TrimEnd("`r", "`n") }
+    finally { [Console]::OutputEncoding = $savedEncoding }
     if ($LASTEXITCODE -ne 0) { throw "$wippy version failed" }
     $exact = Get-Setting 'BENCH_EXACT_ALLOCATIONS' '1'
     New-Item -ItemType Directory -Force -Path "$testArtifacts/benchmarks" | Out-Null
