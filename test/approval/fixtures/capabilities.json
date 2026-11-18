@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "capabilities": {
+    "schema": "wippy.session.capabilities.v1",
+    "message_receipt": 1,
+    "steering": 1,
+    "tool_approval": 1
+  }
+}

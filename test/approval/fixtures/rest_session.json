@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "server_now": "2026-10-21T12:15:30Z",
+  "session": {
+    "session_id": "01990a2b-0000-7000-8000-000000000001",
+    "user_id": "user-1",
+    "status": "running",
+    "title": "Customer cleanup",
+    "kind": "default",
+    "activity": {
+      "kind": "awaiting_tool_approval",
+      "approval_ids": ["01990a2b-0000-7000-8000-0000000000a1"]
+    },
+    "activity_revision": 7,
+    "tool_approval": {
+      "active": true,
+      "revision": 3,
+      "grants": []
+    }
+  }
+}

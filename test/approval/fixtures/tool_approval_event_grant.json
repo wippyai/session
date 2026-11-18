@@ -1,0 +1,39 @@
+{
+  "type": "tool_approval",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "message_id": "01990a2b-0000-7000-8000-0000000000c3",
+  "call_id": "call_def",
+  "function_name": "lookup_customer",
+  "row_type": "private_function",
+  "server_now": "2026-10-21T12:40:00Z",
+  "approval": {
+    "approval_id": "01990a2b-0000-7000-8000-0000000000a3",
+    "batch_id": "01990a2b-0000-7000-8000-0000000000b2",
+    "state": "approved",
+    "revision": 1,
+    "intent_digest": "sha256:1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+    "requested_at": "2026-10-21T12:40:00Z",
+    "expires_at": "2026-10-21T12:40:00Z",
+    "decided_at": "2026-10-21T12:40:00Z",
+    "decided_via": "grant",
+    "then": null,
+    "reason": null,
+    "grant_id": "01990a2b-0000-7000-8000-0000000000d1",
+    "disposition": null,
+    "offered": {
+      "decisions": [],
+      "approve_all": null
+    },
+    "display": {
+      "title": "Lookup customer",
+      "description": "Reads a customer record.",
+      "agent": "Ops assistant",
+      "summary": "customer_id: \"c_1042\"",
+      "arguments": {
+        "customer_id": "c_1042"
+      },
+      "cut": [],
+      "batch_peers": []
+    }
+  }
+}

@@ -32,6 +32,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
+# The repository path with forward slashes, as the Makefile's $(CURDIR).
+$repoPath = $repo.Replace('\', '/')
 
 function Get-Setting([string]$Name, [string]$Default = '') {
     $value = [Environment]::GetEnvironmentVariable($Name)
@@ -204,7 +206,8 @@ function Invoke-WippyTest([string]$Filter, [hashtable]$ExtraEnvironment = @{}) {
     $arguments += @('--config', $testConfig,
         '-o', "app:db:file=$testDb",
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
-        '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks")
+        '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks",
+        '-o', "app.approval:docs:directory=$repoPath/docs")
     $arguments += @(Get-FilterArguments $Filter)
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
 }
@@ -241,7 +244,8 @@ function Invoke-TestPostgres([string]$Filter = $postgresFilter, [string]$Overrid
         '-o', "app:db:password=$(Get-Setting 'PGPASSWORD' 'kickside')",
         '-o', 'app:db:options.sslmode=disable',
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
-        '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks")
+        '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks",
+        '-o', "app.approval:docs:directory=$repoPath/docs")
     $arguments += @($Overrides -split '\s+' | Where-Object { $_ })
     $arguments += @(Get-FilterArguments $Filter)
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }

@@ -1,0 +1,64 @@
+version: "1.0"
+namespace: app.approval
+
+# Tool approval suites. The fixtures are the machine-readable examples of
+# docs/tool-approval-protocol.md; the loader inlines each file:// value. The
+# loader refuses file:// paths outside this folder, so the document is read
+# through a volume on the repository's docs folder instead. The make targets
+# point it there (-o app.approval:docs:directory=<repository>/docs); without
+# that override it is an empty folder in the workspace and the suite fails.
+entries:
+  - name: docs
+    kind: fs.directory
+    meta:
+      comment: The repository docs folder, set by the make targets
+    auto_init: true
+    directory: ./approval-docs
+
+  - name: protocol_fixtures
+    kind: registry.entry
+    meta:
+      test_only: true
+      comment: The JSON fixtures of docs/tool-approval-protocol.md, inlined at load time
+    data:
+      fixtures:
+        capabilities.json: file://fixtures/capabilities.json
+        session_open.json: file://fixtures/session_open.json
+        session_message_runtime_context.json: file://fixtures/session_message_runtime_context.json
+        tool_approval_surface.json: file://fixtures/tool_approval_surface.json
+        tool_approval_event_pending.json: file://fixtures/tool_approval_event_pending.json
+        tool_approval_event_decided.json: file://fixtures/tool_approval_event_decided.json
+        tool_approval_event_grant.json: file://fixtures/tool_approval_event_grant.json
+        decision_approve.json: file://fixtures/decision_approve.json
+        decision_approve_all.json: file://fixtures/decision_approve_all.json
+        decision_deny_stop.json: file://fixtures/decision_deny_stop.json
+        decision_deny_continue.json: file://fixtures/decision_deny_continue.json
+        grant_revoke.json: file://fixtures/grant_revoke.json
+        command_response_decision.json: file://fixtures/command_response_decision.json
+        command_response_revoke.json: file://fixtures/command_response_revoke.json
+        command_error_not_pending.json: file://fixtures/command_error_not_pending.json
+        command_error_stale.json: file://fixtures/command_error_stale.json
+        function_error_not_approved.json: file://fixtures/function_error_not_approved.json
+        function_call_approved.json: file://fixtures/function_call_approved.json
+        session_update_activity.json: file://fixtures/session_update_activity.json
+        session_update_activity_cleared.json: file://fixtures/session_update_activity_cleared.json
+        session_error_unavailable.json: file://fixtures/session_error_unavailable.json
+        rest_session.json: file://fixtures/rest_session.json
+        rest_message_row.json: file://fixtures/rest_message_row.json
+        model_result_not_run.json: file://fixtures/model_result_not_run.json
+
+  - name: protocol_fixtures_test
+    kind: function.lua
+    meta:
+      name: Tool approval protocol fixtures
+      type: test
+      suite: session
+      comment: Checks every fixture against the required keys in the protocol document's fixture index
+    source: file://protocol_fixtures_test.lua
+    modules:
+      - json
+      - registry
+      - fs
+    imports:
+      test: wippy.test:test
+    method: run

@@ -1,0 +1,19 @@
+{
+  "type": "error",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "request_id": "req_47",
+  "code": "approval_not_pending",
+  "message": "This approval was already decided.",
+  "approval": {
+    "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+    "call_id": "call_abc",
+    "state": "approved",
+    "decided_via": "user",
+    "revision": 2,
+    "decided_at": "2026-10-21T12:16:10Z",
+    "then": null,
+    "reason": null,
+    "grant_id": null,
+    "disposition": null
+  }
+}

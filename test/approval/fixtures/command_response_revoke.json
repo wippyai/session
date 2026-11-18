@@ -1,0 +1,16 @@
+{
+  "type": "command_response",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "request_id": "req_43",
+  "success": true,
+  "grant": {
+    "grant_id": "01990a2b-0000-7000-8000-0000000000d1",
+    "revision": 2,
+    "scope": "tool",
+    "status": "revoked",
+    "suspension_reason": null,
+    "registry_id": "app.tools:delete_customer",
+    "title": "Delete customer",
+    "created_at": "2026-10-21T12:16:10Z"
+  }
+}
