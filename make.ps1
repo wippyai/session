@@ -6,7 +6,9 @@
 # TEST_BACKUP_DIR, TEST_FILTER, TEST_TIMEZONE, FRAMEWORK_DIR, PGHOST, PGPORT,
 # PGDATABASE, PGUSER, PGPASSWORD, POSTGRES_TEST_FILTER, POSTGRES_TEST_OVERRIDES,
 # the BENCH_* sizes, UI_DIR, UI_ANSWERS_DIR). Set WIPPY_BIN
-# (or WIPPY) to a runtime binary path when wippy is not on PATH.
+# (or WIPPY) to a runtime binary path when wippy is not on PATH. TEST_FILTER and
+# POSTGRES_TEST_FILTER hold space-separated filters and need Wippy runtime
+# v0.3.63a or later (see Get-FilterArguments).
 #
 # prepare and clean do what scripts/test-workspace.sh and
 # scripts/prepare-test-db.sh do, without bash, jq or awk. Like the shell
@@ -181,6 +183,18 @@ function Invoke-Clean {
     Invoke-Native $repo 'sqlite3' @($testDb, 'PRAGMA user_version = 0;')
 }
 
+# The filter words of `wippy test`: one or more space-separated filters, passed
+# as separate arguments after `--` (the Makefile's unquoted
+# `-- $(TEST_FILTER)`). Needs Wippy runtime v0.3.63a or later. From that
+# release every word after `--` is a filter, so the older `test -- <filter>`
+# form adds a second filter named `test` and runs every suite whose name
+# contains "test". An empty filter adds no arguments.
+function Get-FilterArguments([string]$Filter) {
+    $suites = @($Filter -split '\s+' | Where-Object { $_ })
+    if ($suites.Count -eq 0) { return @() }
+    return @('--') + $suites
+}
+
 function Invoke-WippyTest([string]$Filter, [hashtable]$ExtraEnvironment = @{}) {
     New-Item -ItemType Directory -Force -Path "$testArtifacts/benchmarks" | Out-Null
     $environment = @{ TZ = $testTimezone; WIPPY_TEST_REPOSITORY = $repo.Replace('\', '/'); WIPPY_TEST_ARTIFACTS = $testArtifacts }
@@ -191,7 +205,7 @@ function Invoke-WippyTest([string]$Filter, [hashtable]$ExtraEnvironment = @{}) {
         '-o', "app:db:file=$testDb",
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
         '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks")
-    if ($Filter.Trim()) { $arguments += @('test', '--', $Filter) }
+    $arguments += @(Get-FilterArguments $Filter)
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
 }
 
@@ -229,8 +243,7 @@ function Invoke-TestPostgres([string]$Filter = $postgresFilter, [string]$Overrid
         '-o', "app:env_storage:file_path=$testArtifacts/test.env",
         '-o', "app.runtime:benchmark_output:directory=$testArtifacts/benchmarks")
     $arguments += @($Overrides -split '\s+' | Where-Object { $_ })
-    $suites = @($Filter -split '\s+' | Where-Object { $_ })
-    if ($suites.Count -gt 0) { $arguments += @('test', '--') + $suites }
+    $arguments += @(Get-FilterArguments $Filter)
     Invoke-WithEnvironment $environment { Invoke-Native $testDir (Resolve-Wippy) $arguments }
 }
 
