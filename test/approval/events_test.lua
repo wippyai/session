@@ -3,6 +3,7 @@ local json = require("json")
 local registry = require("registry")
 local time = require("time")
 local approval_events = require("approval_events")
+local approval_repo = require("approval_repo")
 
 -- Model-facing results and event payloads of the approval gate
 -- (docs/tool-approval-protocol.md sections 4, 8, 9 and 11).
@@ -17,7 +18,6 @@ local function define_tests()
     describe("Tool approval events and model results", function()
         it("defines a fixed result for every reason of the protocol table and nothing names an approval", function()
             for _, reason in ipairs(REASONS) do
-                test.is_true(approval_events.is_reason(reason), reason)
                 local result = approval_events.model_result(reason)
                 test.is_false(result.executed, reason)
                 test.eq(result.reason, reason)
@@ -30,15 +30,11 @@ local function define_tests()
                     test.is_nil(encoded:find(word, 1, true), reason .. " names " .. word)
                 end
             end
-            test.is_false(approval_events.is_reason("stale"))
             test.is_false(pcall(approval_events.model_result, "stale"), "an unknown reason is an error")
-        end)
-
-        it("defines approval_check_failed for the freeze_failed outcome", function()
-            local result = approval_events.model_result("approval_check_failed")
-            test.eq(result.instruction, "The tool did not run. Do not call it again with the same arguments."
+            -- The reason of the freeze outcome freeze_failed.
+            test.eq(approval_events.model_result("approval_check_failed").instruction,
+                "The tool did not run. Do not call it again with the same arguments."
                 .. " The call could not be prepared for the approval check.")
-            test.is_nil(result.user_feedback)
             test.eq(approval_events.not_run_text("approval_check_failed"),
                 "Not run: the call could not be checked for approval.")
         end)
@@ -75,6 +71,12 @@ local function define_tests()
             test.is_true(approval_events.CLOSE.stop.skip_checkpoint)
             test.is_nil(approval_events.CLOSE.limit.skip_checkpoint)
             test.is_false(pcall(approval_events.closed_reason, "nope", nil))
+            local keys = {}
+            for reason in pairs(approval_events.CLOSE) do
+                keys[reason] = true
+                test.is_true(approval_repo.CLOSE_REASONS[reason] == true, "stored close reason: " .. reason)
+            end
+            for reason in pairs(approval_repo.CLOSE_REASONS) do test.is_true(keys[reason], "event closure: " .. reason) end
         end)
 
         it("builds the tool_approval payload without a client request_id", function()

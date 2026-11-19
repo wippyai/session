@@ -1,4 +1,3 @@
-local registry = require("registry")
 local uuid = require("uuid")
 local time = require("time")
 local consts = require("consts")
@@ -53,44 +52,13 @@ local logger = require("logger"):named("session.approval.gate")
 -- that needs no decision goes straight to the release.
 local gate = {}
 
-gate.KIND = {
+local KIND = {
     RUN = "run",          -- no approval needed; runs as before
     ERROR = "error",      -- invalid in validate or arguments that don't decode; the caller's error text
     NOT_RUN = "not_run",  -- settled by the gate with its own reason (changed, check failed, repeated denial)
     GRANT = "grant",      -- a grant satisfies the requirement (audit record)
     ASK = "ask",          -- needs a decision
 }
-local KIND = gate.KIND
-
--- Test seams.
-gate._registry_get = nil :: any
-gate._now = nil :: any
-
-local function now_unix(): number
-    if gate._now then return gate._now() end
-    return time.now():unix()
-end
-
-local function rfc3339(unix: number): string
-    return time.unix(math.floor(unix), 0):utc():format(time.RFC3339)
-end
-
-local function registry_get(id: any): any
-    if type(id) ~= "string" or id == "" then return nil end
-    local getter = gate._registry_get or registry.get
-    local ok, entry = pcall(getter, id)
-    if ok and type(entry) == "table" then return entry end
-    return nil
-end
-
-local function entry_title(entry: any, fallback: any): string
-    local meta = type(entry) == "table" and entry.meta or nil
-    for _, key in ipairs({ "title", "name" }) do
-        local value = type(meta) == "table" and meta[key] or nil
-        if type(value) == "string" and value ~= "" then return value end
-    end
-    return tostring(fallback or "")
-end
 
 -- The turn a tool round belongs to: the id control_forms and the batch
 -- descriptor use.
@@ -128,7 +96,7 @@ end
 -- Whose grants may match: the session owner, the logical session and the
 -- grant epoch. The epoch is the session ID: a copied or forked session has a
 -- new ID and so inherits no grants.
-function gate.grant_scope(ctx: any): any
+local function grant_scope(ctx: any): any
     return { session_id = ctx.session_id, owner_id = ctx.user_id, epoch = ctx.session_id }
 end
 
@@ -157,8 +125,8 @@ local function freeze_env(ctx: any, op: any, item: any, session_context: any): a
         session_context = session_context,
         row_type = item.row_type,
         delegation_func_id = ctx.config and ctx.config.delegation_func_id,
-        entry = registry_get(item.registry_id),
-        target_entry = target_id and registry_get(target_id) or nil,
+        entry = tool_meta.entry(item.registry_id),
+        target_entry = target_id and tool_meta.entry(target_id) or nil,
         browser_binding = browser_binding(op, item.registry_id),
     }
 end
@@ -252,10 +220,9 @@ local function evaluate(ctx: any, items: {any}, effective: any, history: any): (
     if #frozen_calls == 0 then return { suspend = {} }, nil end
     local grants, grants_err = approval_repo.list_grants(nil, ctx.session_id)
     if not grants then return nil, tostring(grants_err) end
-    local scope = gate.grant_scope(ctx)
+    local scope = grant_scope(ctx)
     scope.denied_keys = history.denied_keys
-    local evaluated, eval_err = policy.evaluate_batch(frozen_calls, effective, grants, scope)
-    if not evaluated then return nil, "Tool approval policy failed: " .. tostring(eval_err) end
+    local evaluated = policy.evaluate_batch(frozen_calls, effective, grants, scope)
     for index, result in ipairs(evaluated.results) do
         local item = frozen_items[index]
         item.evaluation = result
@@ -301,9 +268,9 @@ local function approve_all_disclosure(ctx: any, offered: any, covered_items: {an
         local agent = ctx.current_agent
         for _, tool in ipairs(type(agent) == "table" and type(agent.tools) == "table" and agent.tools or {}) do
             local registry_id = type(tool) == "table" and tool.registry_id or nil
-            local entry = registry_get(registry_id)
-            if entry and tool_meta.read(entry.meta).approve_all ~= false then
-                add_tool(registry_id, entry_title(entry, registry_id), nil)
+            local entry = tool_meta.entry(registry_id)
+            if entry and tool_meta.approve_all(entry) ~= false then
+                add_tool(registry_id, tool_meta.title(entry, registry_id), nil)
             end
         end
     end
@@ -329,7 +296,7 @@ local function display_for(item: any, items: {any}, agent_title: string): any
         batch_peers = peers,
     }
     if frozen.delegate_target then
-        display.target_agent = entry_title(item.target_entry, frozen.delegate_target.agent_id)
+        display.target_agent = tool_meta.title(item.target_entry, frozen.delegate_target.agent_id)
     end
     return display
 end
@@ -340,7 +307,7 @@ end
 local function build_records(ctx: any, op: any, binding: any, items: {any}, ask_state: string,
                              now: number, deadline: number): ({any}?, string?)
     local agent_id = type(op.agent) == "table" and op.agent.id or (ctx.config and ctx.config.agent_id)
-    local agent_title = entry_title(registry_get(agent_id), agent_id)
+    local agent_title = tool_meta.title(tool_meta.entry(agent_id), agent_id)
     local by_call = {}
     for _, item in ipairs(items) do
         if item.kind == KIND.ASK or item.kind == KIND.GRANT then
@@ -366,7 +333,7 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, ask_
                 target_agent_id = frozen.delegate_target and frozen.delegate_target.agent_id or nil,
                 intent_digest = frozen.intent_digest,
                 denial_key = frozen.denial_key,
-                requested_at = rfc3339(now),
+                requested_at = activation.timestamp(now),
                 display = display_for(item, items, agent_title),
             }
             if item.kind == KIND.GRANT then
@@ -389,7 +356,7 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, ask_
                 end
                 request.offered = offered
                 request.state = ask_state
-                if ask_state == approval_repo.STATE.PENDING then request.expires_at = rfc3339(deadline) end
+                if ask_state == approval_repo.STATE.PENDING then request.expires_at = activation.timestamp(deadline) end
             end
             records[#records + 1] = request
         end
@@ -410,8 +377,8 @@ local function store_records(dbtx: any, ctx: any, binding: any, requests: {any})
     for _, request in ipairs(requests) do
         local record, create_err = approval_repo.create_request(dbtx, request)
         if not record then return nil, create_err end
-        local _, projection_err = message_repo.update_metadata_tx(dbtx, ctx.session_id, record.tool_message_id,
-            { approval = approval_repo.projection(record) })
+        local _, projection_err = message_repo.update_metadata(record.tool_message_id,
+            { approval = approval_repo.projection(record) }, ctx.session_id, { tx = dbtx })
         if projection_err then return nil, projection_err end
         stored[#stored + 1] = record
         if record.state == approval_repo.STATE.PENDING then pending_ids[#pending_ids + 1] = record.approval_id end
@@ -509,7 +476,7 @@ end
 
 local function session_gone(err: any): boolean
     local code = approval_repo.conflict_code(err)
-    return approval_repo.is_not_found(err) and (code == "session" or code == "batch")
+    return errors.is(err, errors.NOT_FOUND) and (code == "session" or code == "batch")
 end
 
 -- Closes the batch with `reason`, settles every call row of the batch in one
@@ -551,7 +518,7 @@ local function close_and_settle(ctx: any, run: any, reason: string, requests: {a
                 cancelled = close.cancelled == true
             end
             local metadata = settlement(item, call_reason, feedback, record, cancelled)
-            local _, row_err = message_repo.update_metadata_tx(dbtx, ctx.session_id, item.message_id, metadata)
+            local _, row_err = message_repo.update_metadata(item.message_id, metadata, ctx.session_id, { tx = dbtx })
             if row_err then return nil, row_err end
             settled[#settled + 1] = { item = item, reason = call_reason, record = record, cancelled = cancelled }
         end
@@ -595,10 +562,7 @@ local function signalled(ctx: any): string?
     local hub = ctx.approval_wake
     if hub:is_set("deleted") then return "deleted" end
     if hub:is_set("exiting") then return "exit" end
-    local coordinator = ctx.coordinator
-    if ctx.stop_requested == true or (type(coordinator) == "table" and coordinator.state == "draining_stop") then
-        return "stop"
-    end
+    if ctx.stop_requested == true then return "stop" end
     if hub:is_set("finish") then return "finish" end
     return nil
 end
@@ -652,7 +616,7 @@ function gate._wait(ctx: any, run: any, waiting: any): (any, string?)
         local outcome, err = committed_outcome(ctx, run)
         if err then return nil, err end
         if outcome then return outcome, nil end
-        local now = now_unix()
+        local now = activation.now()
         if now >= waiting.deadline then return { close_reason = "deadline" }, nil end
         local cases = { waiting.waiter.channel:case_receive(), after(waiting.deadline - now):case_receive() }
         if activation.live_surfaces(ctx) == 0 then
@@ -722,7 +686,7 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
         if session_gone(batch_err) then return deleted_result(items), nil end
         return nil, "Failed to read the session context for the release: " .. tostring(context_err)
     end
-    local now = now_unix()
+    local now = activation.now()
     local outcome, err = approval_repo.transact(ctx.session_id, function(dbtx)
         local suspended, suspend_err = approval_repo.suspend_grants(dbtx, ctx.session_id, run.suspend)
         if not suspended then return nil, suspend_err end
@@ -788,7 +752,7 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
                 metadata = { approval = approval_repo.projection(record) }
             end
             if metadata then
-                local _, row_err = message_repo.update_metadata_tx(dbtx, ctx.session_id, item.message_id, metadata)
+                local _, row_err = message_repo.update_metadata(item.message_id, metadata, ctx.session_id, { tx = dbtx })
                 if row_err then return nil, row_err end
             end
         end
@@ -895,7 +859,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
         return release(ctx, op, env, run)
     end
 
-    local now = now_unix()
+    local now = activation.now()
     local deadline = now + effective.timeout_seconds
     if asks > 0 and history.requested + asks > effective.max_requests_per_turn then
         -- Per-turn cap: only new pending requests count. Every member settles

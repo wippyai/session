@@ -23,8 +23,8 @@ local message_date = require("message_date")
 -- Errors. A conflict is returned as (nil, err, current): err is an
 -- errors.CONFLICT error whose code (approval_repo.conflict_code) names the
 -- conflict, and current is the committed record. A missing row is an
--- errors.NOT_FOUND error. Test with is_conflict / is_not_found, as for
--- artifact_repo.
+-- errors.NOT_FOUND error. Test with errors.is(err, errors.CONFLICT) or
+-- errors.is(err, errors.NOT_FOUND).
 local approval_repo = {}
 
 approval_repo.STATE = {
@@ -62,6 +62,8 @@ local STATE = approval_repo.STATE
 local BATCH = approval_repo.BATCH_STATE
 local CONFLICT = approval_repo.CONFLICT
 
+local STATES = {}
+for _, state in pairs(STATE) do STATES[state] = true end
 local DECIDED_VIA = { user = true, approve_all = true, grant = true, system = true }
 local THEN = { stop = true, continue = true }
 local ROW_TYPES = { [consts.MSG_TYPE.FUNCTION] = true, [consts.MSG_TYPE.PRIVATE_FUNCTION] = true,
@@ -115,20 +117,6 @@ local function not_found(what: string, id: any)
         message = what .. " not found: " .. tostring(id),
         details = { code = what },
     })
-end
-
-local function has_kind(err: any, kind: string): boolean
-    if err == nil or type(err) == "string" then return false end
-    local ok, actual = pcall(function() return err:kind() end)
-    return ok and actual == kind
-end
-
-function approval_repo.is_conflict(err: any): boolean
-    return has_kind(err, errors.CONFLICT)
-end
-
-function approval_repo.is_not_found(err: any): boolean
-    return has_kind(err, errors.NOT_FOUND)
 end
 
 -- The code of a conflict or not-found error ("not_pending", "revision", ...;
@@ -349,6 +337,23 @@ function approval_repo.list_by_batch(conn: any, session_id: string, batch_id: st
     end)
 end
 
+-- The batches of the turn `turn_id` on `conn`, optionally only those in
+-- `states`, in creation order.
+local function turn_batches(conn: any, session_id: string, turn_id: string, states: {string}?): ({any}?, string?)
+    local query = sql.builder.select(table.unpack(BATCH_COLUMNS)):from("session_tool_approval_batches")
+        :where("session_id = ?", session_id):where("turn_id = ?", turn_id)
+    if states then
+        local marks = {}
+        for _ in ipairs(states) do marks[#marks + 1] = "?" end
+        query = query:where("state IN (" .. table.concat(marks, ", ") .. ")", table.unpack(states))
+    end
+    local rows, err = select_rows(conn, query:order_by("created_at ASC, batch_id ASC"), "Failed to list turn batches")
+    if not rows then return nil, err end
+    local batches = {}
+    for _, row in ipairs(rows) do batches[#batches + 1] = batch_from_row(row) end
+    return batches, nil
+end
+
 -- The approval records of every batch of the turn `turn_id` (the batch
 -- record's turn_id), in creation order. The gate reads them for the
 -- repeated-denial rule and the per-turn request cap.
@@ -356,9 +361,7 @@ function approval_repo.list_by_turn(conn: any, session_id: string, turn_id: stri
     if not non_empty(session_id) then return nil, "Session ID is required" end
     if not non_empty(turn_id) then return nil, "Turn ID is required" end
     return with_connection(conn, function(c)
-        local batches, batch_err = select_rows(c, sql.builder.select("batch_id")
-            :from("session_tool_approval_batches")
-            :where("session_id = ?", session_id):where("turn_id = ?", turn_id), "Failed to list turn batches")
+        local batches, batch_err = turn_batches(c, session_id, turn_id)
         if not batches then return nil, batch_err end
         if #batches == 0 then return {} end
         local marks, ids = {}, {}
@@ -445,7 +448,7 @@ function approval_repo.decide(dbtx: any, session_id: string, approval_id: string
     if type(decision) ~= "table" then return nil, "Decision is required" end
     if type(expected_revision) ~= "number" then return nil, "Expected revision is required" end
     local state = decision.state
-    if state == STATE.PENDING or not approval_repo.is_state(state) then
+    if state == STATE.PENDING or not STATES[state] then
         return nil, "Decision state must be a terminal state"
     end
     if not DECIDED_VIA[decision.decided_via] then return nil, "Decision decided_via is invalid" end
@@ -519,13 +522,6 @@ function approval_repo.set_disposition(dbtx: any, session_id: string, approval_i
         return nil, conflict(CONFLICT.REVISION, "Approval changed during the disposition write"), latest
     end
     return read_approval(dbtx, session_id, approval_id)
-end
-
-function approval_repo.is_state(value: any): boolean
-    for _, state in pairs(STATE) do
-        if state == value then return true end
-    end
-    return false
 end
 
 ---------------------------------------------------------------------------
@@ -704,7 +700,7 @@ end
 function approval_repo.suspend_grants(dbtx: any, session_id: string, list: {any}?)
     for _, item in ipairs(list or {}) do
         local _, err = approval_repo.suspend_grant(dbtx, session_id, item.grant_id, nil, item.reason)
-        if err and not approval_repo.is_conflict(err) then return nil, err end
+        if err and not errors.is(err, errors.CONFLICT) then return nil, err end
     end
     return true
 end
@@ -779,7 +775,7 @@ end
 ---------------------------------------------------------------------------
 
 -- Returns (activity or nil, revision).
-function approval_repo.read_activity(conn: any, session_id: string)
+local function read_activity(conn: any, session_id: string)
     return with_connection(conn, function(c)
         local rows, err = select_rows(c, sql.builder.select("activity", "activity_revision"):from("sessions")
             :where("session_id = ?", session_id):limit(1), "Failed to read session activity")
@@ -798,7 +794,7 @@ function approval_repo.write_activity(dbtx: any, session_id: string, activity: a
     end
     local encoded, encode_err = encode(activity)
     if encode_err then return nil, encode_err end
-    local current, read_err = approval_repo.read_activity(dbtx, session_id)
+    local current, read_err = read_activity(dbtx, session_id)
     if not current then return nil, read_err end
     if expected_revision ~= nil and current.revision ~= expected_revision then
         return nil, conflict(CONFLICT.REVISION, "Activity revision changed"), current
@@ -864,8 +860,6 @@ end
 -- earlier closure applies (approval_repo.close_reason). Returns the stored
 -- batch.
 function approval_repo.create_batch_record(dbtx: any, session_id: string, descriptor: any, pending_input: any)
-    local valid, invalid = approval_repo.validate_descriptor(descriptor)
-    if not valid then return nil, invalid end
     local close_reason, reason_err = approval_repo.close_reason(dbtx, session_id, descriptor.turn_id, pending_input)
     if reason_err then return nil, reason_err end
     local now = approval_repo.now()
@@ -892,13 +886,11 @@ end
 function approval_repo.fence_turn(dbtx: any, session_id: string, turn_id: string, reason: string)
     local _, fence_err = approval_repo.write_turn_fence(dbtx, session_id, turn_id, reason)
     if fence_err then return nil, fence_err end
-    local batches, list_err = approval_repo.list_batches(dbtx, session_id, { BATCH.OPEN, BATCH.RELEASED })
+    local batches, list_err = turn_batches(dbtx, session_id, turn_id, { BATCH.OPEN, BATCH.RELEASED })
     if not batches then return nil, list_err end
     for _, batch in ipairs(batches) do
-        if batch.turn_id == turn_id then
-            local closed, close_err = approval_repo.close_batch(dbtx, batch.batch_id, reason)
-            if not closed then return nil, close_err end
-        end
+        local closed, close_err = approval_repo.close_batch(dbtx, batch.batch_id, reason)
+        if not closed then return nil, close_err end
     end
     return true
 end
@@ -909,24 +901,6 @@ function approval_repo.get_batch(conn: any, batch_id: string)
         if err then return nil, err end
         if not batch then return nil, not_found("batch", batch_id) end
         return batch
-    end)
-end
-
--- The session's batches in creation order, optionally only those in `states`.
-function approval_repo.list_batches(conn: any, session_id: string, states: {string}?)
-    return with_connection(conn, function(c)
-        local query = sql.builder.select(table.unpack(BATCH_COLUMNS))
-            :from("session_tool_approval_batches"):where("session_id = ?", session_id)
-        if states and #states > 0 then
-            local marks = {}
-            for _ in ipairs(states) do marks[#marks + 1] = "?" end
-            query = query:where("state IN (" .. table.concat(marks, ", ") .. ")", table.unpack(states))
-        end
-        local rows, err = select_rows(c, query:order_by("created_at ASC, batch_id ASC"), "Failed to list batches")
-        if not rows then return nil, err end
-        local batches = {}
-        for _, row in ipairs(rows) do batches[#batches + 1] = batch_from_row(row) end
-        return batches
     end)
 end
 
@@ -943,9 +917,7 @@ local function update_batch(dbtx: any, batch: any, changes: {[string]: any})
     return read_batch(dbtx, batch.batch_id)
 end
 
--- Closes a batch. Returns the batch record; its `changed` field (not
--- stored) lists the approval records this closure wrote. A single return
--- value, because tx.run reads a second one as an error.
+-- Closes a batch. Returns the batch record.
 --
 -- Open batch: the batch becomes closed with `reason` and controls
 -- "cancelled", even when no request is still pending. Pending requests take
@@ -962,20 +934,15 @@ function approval_repo.close_batch(dbtx: any, batch_id: string, reason: string)
     if not close then return nil, "Unknown batch close reason: " .. tostring(reason) end
     local batch, batch_err = approval_repo.get_batch(dbtx, batch_id)
     if not batch then return nil, batch_err end
-    batch.changed = {}
 
     if batch.state == BATCH.CLOSED then return batch end
     if batch.state == BATCH.RELEASED then
         if reason == "steering" or reason == "finish" or reason == "deleted" then return batch end
         if reason ~= "stop" and reason ~= "exit" then
-            batch.changed = nil
             return nil, conflict(CONFLICT.BATCH_RELEASED, "Batch was already released"), batch
         end
         if batch.controls == approval_repo.CONTROLS.CANCELLED then return batch end
-        local updated, update_err, latest = update_batch(dbtx, batch, { controls = approval_repo.CONTROLS.CANCELLED })
-        if not updated then return nil, update_err, latest end
-        updated.changed = {}
-        return updated
+        return update_batch(dbtx, batch, { controls = approval_repo.CONTROLS.CANCELLED })
     end
 
     local now = approval_repo.now()
@@ -984,7 +951,6 @@ function approval_repo.close_batch(dbtx: any, batch_id: string, reason: string)
         sql.builder.expr("batch_id = ?", batch_id),
     })
     if not records then return nil, list_err end
-    local changed = {}
     for _, record in ipairs(records) do
         local update = nil
         if record.state == STATE.PENDING then
@@ -1007,19 +973,15 @@ function approval_repo.close_batch(dbtx: any, batch_id: string, reason: string)
                 return nil, conflict(CONFLICT.REVISION, "Approval changed during the batch closure"),
                     read_approval(dbtx, batch.session_id, record.approval_id)
             end
-            changed[#changed + 1] = read_approval(dbtx, batch.session_id, record.approval_id)
         end
     end
 
-    local updated, update_err, latest = update_batch(dbtx, batch, {
+    return update_batch(dbtx, batch, {
         state = BATCH.CLOSED,
         close_reason = reason,
         controls = approval_repo.CONTROLS.CANCELLED,
         closed_at = now,
     })
-    if not updated then return nil, update_err, latest end
-    updated.changed = changed
-    return updated
 end
 
 -- Releases an open batch: succeeds at most once, and never for a

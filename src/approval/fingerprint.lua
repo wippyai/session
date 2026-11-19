@@ -1,5 +1,4 @@
 local hash = require("hash")
-local registry = require("registry")
 local canonical_json = require("canonical_json")
 
 -- Deployment fingerprints and digests for tool approval. A fingerprint is `sha256:` of the
@@ -30,17 +29,6 @@ function fingerprint.of_entry(entry: any): (string?, string?)
         return nil, "a registry entry with a kind is required"
     end
     return fingerprint.digest({ kind = entry.kind, meta = entry.meta or {}, data = entry.data or {} })
-end
-
--- Reads an entry from the registry and fingerprints it. Returns the
--- fingerprint and the entry.
-function fingerprint.for_id(registry_id: string): (string?, any)
-    if type(registry_id) ~= "string" or registry_id == "" then return nil, "registry_id is required" end
-    local entry, err = registry.get(registry_id)
-    if not entry then return nil, "registry entry " .. registry_id .. " not found: " .. tostring(err) end
-    local value, fp_err = fingerprint.of_entry(entry)
-    if not value then return nil, fp_err end
-    return value, entry
 end
 
 -- The grant fingerprint of a delegation call: the delegation function's

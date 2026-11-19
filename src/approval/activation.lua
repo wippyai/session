@@ -30,8 +30,8 @@ local agent_registry = require("agent_registry")
 local policy = require("policy")
 local tool_meta = require("tool_meta")
 local approval_repo = require("approval_repo")
-local registry = require("registry")
 local consts = require("consts")
+local time = require("time")
 
 local activation = {}
 
@@ -53,9 +53,16 @@ local function invalid(detail: string): string
     return activation.ERROR_CODE .. ": " .. detail
 end
 
-local function now(): string
+-- The clock of activation and the approval gate, in unix seconds (the test
+-- seam activation._now replaces it).
+function activation.now(): number
     if activation._now then return activation._now() end
-    return approval_repo.now()
+    return time.now():unix()
+end
+
+-- The RFC 3339 UTC text of a unix time.
+function activation.timestamp(unix: number): string
+    return time.unix(math.floor(unix), 0):utc():format(time.RFC3339)
 end
 
 -- The operator setting tool_approval_enforcement, "enforce" or "off".
@@ -192,7 +199,7 @@ end
 function activation.note_declared(ctx: any): (any, string?)
     local stored = ctx.config and ctx.config.tool_approval
     if type(stored) ~= "table" or stored.ui_declared_at ~= nil then return stored, nil end
-    return activation.persist(ctx, nil, now())
+    return activation.persist(ctx, nil, activation.timestamp(activation.now()))
 end
 
 -- The number of live approval UI surfaces the parent plugin last sent.
@@ -212,9 +219,9 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
     for _, grant in ipairs(grants) do
         local option, readable = nil, true
         if grant.scope == policy.SCOPE.TOOL then
-            local ok, entry = pcall(registry.get, grant.registry_id)
-            readable = ok and type(entry) == "table"
-            if readable then option = tool_meta.read(entry.meta).approve_all end
+            local entry = tool_meta.entry(grant.registry_id)
+            readable = entry ~= nil
+            option = tool_meta.approve_all(entry)
         end
         -- A tool whose entry can't be read is left alone: a call to it does
         -- not run, and a changed deployment suspends the grant at call time.
@@ -229,14 +236,13 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
     return true, nil
 end
 
--- Runs at every agent step, before the model call. Returns
---   { protected = false }                         the session is not protected
---   { protected = true, policy, opted_in }        policy is trait_config.effective
--- or nil, detail, kind: kind "invalid" fails the turn with
+-- Runs at every agent step, before the model call. Returns true, or nil,
+-- detail, kind: kind "invalid" fails the turn with
 -- tool_approval_config_invalid and no model call; kind "storage" is a
 -- storage failure the caller treats as fatal. Sets ctx.tool_approval_policy
--- (nil when not protected) for the approval gate.
-function activation.apply(ctx: any, agent: any): (any, string?, string?)
+-- (trait_config.effective; nil when the session is not protected) for the
+-- approval gate.
+function activation.apply(ctx: any, agent: any): (boolean?, string?, string?)
     ctx.tool_approval_policy = nil
     local stored = ctx.config and ctx.config.tool_approval
     if stored ~= nil then
@@ -244,25 +250,25 @@ function activation.apply(ctx: any, agent: any): (any, string?, string?)
         if stored_err then return nil, stored_err, activation.FAILURE.INVALID end
     end
 
-    local settings, opted_in, check_err = activation.check(activation.raw_traits(ctx),
+    local settings, _, check_err = activation.check(activation.raw_traits(ctx),
         agent and agent.agent_options)
     if check_err then return nil, check_err, activation.FAILURE.INVALID end
 
-    local declared_at = activation.live_surfaces(ctx) > 0 and now() or nil
+    local declared_at = activation.live_surfaces(ctx) > 0 and activation.timestamp(activation.now()) or nil
     local pending_declaration = type(stored) == "table" and declared_at ~= nil and stored.ui_declared_at == nil
     if settings ~= nil or pending_declaration then
         local committed, write_err = activation.persist(ctx, settings, declared_at)
         if write_err then return nil, write_err, activation.FAILURE.STORAGE end
         stored = committed
     end
-    if stored == nil then return { protected = false }, nil, nil end
+    if stored == nil then return true, nil, nil end
 
     local effective, policy_err = trait_config.effective(stored, settings, activation.enforcement())
     if not effective then return nil, policy_err, activation.FAILURE.INVALID end
     local suspended, suspend_err = suspend_unpermitted_grants(ctx, effective)
     if not suspended then return nil, suspend_err, activation.FAILURE.STORAGE end
     ctx.tool_approval_policy = effective
-    return { protected = true, policy = effective, opted_in = opted_in }, nil, nil
+    return true, nil, nil
 end
 
 return activation

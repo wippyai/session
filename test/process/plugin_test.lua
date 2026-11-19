@@ -840,30 +840,56 @@ end
 -- Runs the plugin through a script of inbox messages ({ topic, data }) and
 -- exits ({ exit = session_id }: that session's process fails), then cancels
 -- it. Every spawn gets its own pid.
-local function run_plugin_script(actor, hub_pid, script)
-    local sent = {} :: {any}
-    local spawned = {} :: {any}
+-- Runs the session plugin over `script`, then cancels it. Items:
+--   { topic, data, from }   an inbox message; data and from may be functions
+--                           of the run, for pids known only at run time
+--   { exit = session_id }   the session's process failed to start
+--   { event = { ... } }     a process event; values may be functions of the run
+-- opts.confirm_starts confirms every spawn with SESSION_OPENED from the new
+-- pid; opts.monitor_error makes process.monitor fail.
+local function run_plugin_script(actor, hub_pid, script, opts)
+    opts = opts or {}
+    local run = { sent = {} :: {any}, spawned = {} :: {any}, monitors = {}, unmonitors = {} }
     local pids = {} :: {[string]: string}
-    local step = 0
+    local queue = {}
+    for _, item in ipairs(script) do table.insert(queue, item) end
+    local function value(item)
+        if type(item) == "function" then return item(run) end
+        return item
+    end
     mock("process.with_context", function()
         return { spawn_linked_monitored = function(_self, _id, _host, init)
-            local pid = "script-pid-" .. tostring(#spawned + 1)
-            table.insert(spawned, { session_id = init.session_id, pid = pid })
+            local pid = "script-pid-" .. tostring(#run.spawned + 1)
+            table.insert(run.spawned, { session_id = init.session_id, pid = pid })
             pids[init.session_id] = pid
+            if opts.confirm_starts then
+                table.insert(queue, 1, { topic = consts.TOPICS.SESSION_OPENED,
+                    data = { session_id = init.session_id, from_pid = pid }, from = pid })
+            end
             return pid, nil
         end }
     end)
     mock("process.send", function(pid, topic, payload)
-        table.insert(sent, { pid = pid, topic = topic, payload = payload })
+        table.insert(run.sent, { pid = pid, topic = topic, payload = payload })
         return true, nil
     end)
+    mock("process.monitor", function(pid)
+        if opts.monitor_error then return false, opts.monitor_error end
+        run.monitors[pid] = (run.monitors[pid] or 0) + 1
+        return true, nil
+    end)
+    mock("process.unmonitor", function(pid)
+        run.unmonitors[pid] = (run.unmonitors[pid] or 0) + 1
+        return true, nil
+    end)
+    mock("process.cancel", function() return true, nil end)
+    mock("process.terminate", function() return true, nil end)
     mock("coroutine.spawn", function() end)
     local inbox = process.inbox()
     local events = process.events()
     mock("channel.select", function(cases)
         if cases.default then return { ok = true, default = true } end
-        step = step + 1
-        local item = script[step]
+        local item = table.remove(queue, 1)
         if not item then
             return { ok = true, channel = events, value = { kind = process.event.CANCEL } }
         end
@@ -871,14 +897,86 @@ local function run_plugin_script(actor, hub_pid, script)
             return { ok = true, channel = events, value = { kind = process.event.EXIT,
                 from = pids[item.exit], result = { error = "start failed" } } }
         end
-        return { ok = true, channel = inbox, value = plugin_message(item.topic, item.data) }
+        if item.event then
+            local event = {}
+            for key, field in pairs(item.event) do event[key] = value(field) end
+            return { ok = true, channel = events, value = event }
+        end
+        return { ok = true, channel = inbox, value = plugin_message(item.topic, value(item.data), value(item.from)) }
     end)
-    local result, run_err = plugin.run({ user_id = actor:id(), user_hub_pid = hub_pid })
+    run.result, run.error = plugin.run({ user_id = actor:id(), user_hub_pid = hub_pid })
     restore_mock("channel.select")
     restore_mock("coroutine.spawn")
+    restore_mock("process.terminate")
+    restore_mock("process.cancel")
+    restore_mock("process.unmonitor")
+    restore_mock("process.monitor")
     restore_mock("process.send")
     restore_mock("process.with_context")
-    return { result = result, error = run_err, sent = sent, spawned = spawned }
+    return run
+end
+-- Approval UI surface helpers: the relay hub, the live sets the plugin sent and
+-- the messages a client sends.
+local SURFACE_HUB = "relay-hub-1"
+local SURFACES = consts.TOPICS.APPROVAL_SURFACES
+
+-- The live sets the plugin sent, in order, as "pid:live".
+local function pushes(run: any, session_id: string?): {string}
+    local out = {}
+    for _, item in ipairs(run.sent) do
+        if item.topic == SURFACES and (session_id == nil or item.payload.session_id == session_id) then
+            table.insert(out, tostring(item.pid) .. ":" .. tostring(item.payload.live))
+        end
+    end
+    return out
+end
+
+local function sent_to(run: any, pid: string, topic: string): {any}
+    local out = {}
+    for _, item in ipairs(run.sent) do
+        if item.pid == pid and item.topic == topic then table.insert(out, item.payload) end
+    end
+    return out
+end
+
+-- `legacy_declare` puts the pre-v4 field tool_approval_ui on session_open,
+-- which the relay never forwards; the plugin must ignore it.
+local function open(session_id: string, conn: string, legacy_declare: boolean?, from: any?): any
+    return { topic = consts.PLUGIN_TOPICS.OPEN, from = from or SURFACE_HUB,
+        data = { session_id = session_id, conn_pid = conn, tool_approval_ui = legacy_declare and 1 or nil } }
+end
+
+local function surface_command(session_id: string, conn: string, enabled: any, from: any?, request_id: string?): any
+    return { topic = consts.PLUGIN_TOPICS.COMMAND, from = from or SURFACE_HUB,
+        data = { session_id = session_id, conn_pid = conn, request_id = request_id,
+            data = { command = "tool_approval_surface", enabled = enabled } } }
+end
+
+local function declare(session_id: string, conn: string, from: any?): any
+    return surface_command(session_id, conn, true, from, "req-declare")
+end
+
+local function withdraw(session_id: string, conn: string, from: any?): any
+    return surface_command(session_id, conn, false, from, "req-withdraw")
+end
+
+local function message_with(session_id: string, conn: string, runtime_context: any): any
+    return { topic = consts.PLUGIN_TOPICS.MESSAGE, from = SURFACE_HUB,
+        data = { session_id = session_id, conn_pid = conn, request_id = "req-msg",
+            data = { text = "hello", runtime_context = runtime_context } } }
+end
+
+local function session_exit(index: number): any
+    return { event = { kind = process.event.EXIT,
+        from = function(run) return run.spawned[index].pid end,
+        result = { value = { status = "shutdown", intentional_exit = true } } } }
+end
+
+
+-- The plugin over a surface script, with every start confirmed.
+local function run_surfaces(script: {any}, monitor_error: string?): any
+    return run_plugin_script(security.actor(), SURFACE_HUB, script,
+        { confirm_starts = true, monitor_error = monitor_error })
 end
 
 local function add_pending_answer(session_id)
@@ -2782,6 +2880,187 @@ local function define_tests()
             test.eq(message_repo.get(call_id).metadata.status, consts.FUNC_STATUS.ERROR)
             test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.FAILED)
             cleanup_session_fixture(session_id, context_id)
+        end)
+    end)
+
+    describe("Approval UI surfaces in the session plugin", function()
+        local first, second
+        local fixtures = {}
+        before_all(function()
+            wait_for_boot.run()
+            first, second = uuid.v7(), uuid.v7()
+            for _, session_id in ipairs({ first, second }) do
+                local context_id = uuid.v7()
+                assert(context_repo.create(context_id, "primary", "{}"))
+                assert(session_repo.create(session_id, security.actor():id(), context_id, "Surfaces", "test", {}, {}))
+                table.insert(fixtures, { session_id = session_id, context_id = context_id })
+            end
+        end)
+        after_all(function()
+            for _, fixture in ipairs(fixtures) do
+                session_repo.delete(fixture.session_id)
+                context_repo.delete(fixture.context_id)
+            end
+        end)
+
+        it("records an enabled: true declaration after the open and replies on the session topic", function()
+            local run = run_surfaces({ open(first, "conn-1"), declare(first, "conn-1") })
+            local list = pushes(run, first)
+            test.eq(#list, 1)
+            test.eq(list[1], "script-pid-1:1")
+            test.eq(run.monitors["conn-1"], 1)
+            test.eq(#sent_to(run, "script-pid-1", consts.TOPICS.COMMAND), 0, "not forwarded")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 1)
+            test.eq(replies[1].type, consts.UPSTREAM_TYPES.COMMAND_RESPONSE)
+            test.eq(replies[1].request_id, "req-declare")
+            test.is_true(replies[1].success)
+        end)
+
+        it("answers a declaration whose connection can't be monitored as failed and records nothing", function()
+            local run = run_surfaces({ open(first, "conn-1"), declare(first, "conn-1") }, "monitor failed")
+            test.eq(#pushes(run, first), 0, "no surface is counted as live")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 1)
+            test.is_false(replies[1].success)
+            test.eq(replies[1].code, "surface_unavailable")
+        end)
+
+        it("records a declaration sent after a reopen of a live session", function()
+            local run = run_surfaces({ open(first, "conn-1"), open(first, "conn-2"), declare(first, "conn-2") })
+            test.eq(#run.spawned, 1, "the live session is reopened, not started again")
+            local list = pushes(run, first)
+            test.eq(#list, 1)
+            test.eq(list[1], "script-pid-1:1")
+        end)
+
+        it("ignores tool_approval_ui on session_open, which the relay never forwards", function()
+            local run = run_surfaces({ open(first, "conn-1", true), open(first, "conn-2", true) })
+            test.eq(#pushes(run, first), 0, "no surface is declared by an open")
+            test.is_nil(run.monitors["conn-1"])
+            test.is_nil(run.monitors["conn-2"])
+        end)
+
+        it("refuses a surface command whose enabled is not a boolean and changes nothing", function()
+            local run = run_surfaces({ open(first, "conn-1"), declare(first, "conn-1"),
+                surface_command(first, "conn-1", 1, nil, "req-bad"),
+                surface_command(first, "conn-1", "false", nil, "req-bad-2"),
+                surface_command(first, "conn-1", nil, nil, "req-bad-3") })
+            local list = pushes(run, first)
+            test.eq(#list, 1, "only the valid declaration changed the set")
+            test.eq(list[1], "script-pid-1:1")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 4)
+            for index = 2, 4 do
+                test.is_false(replies[index].success)
+                test.eq(replies[index].code, "invalid_surface_command")
+            end
+            test.is_nil(run.unmonitors["conn-1"])
+        end)
+
+        it("records a declaration from session_message runtime_context before stripping it", function()
+            local run = run_surfaces({ open(first, "conn-1"),
+                message_with(first, "conn-3", { tool_approval_ui = 1 }) })
+            local list = pushes(run, first)
+            test.eq(#list, 1)
+            test.eq(list[1], "script-pid-1:1")
+            local forwarded = sent_to(run, "script-pid-1", consts.TOPICS.MESSAGE)
+            test.eq(#forwarded, 1)
+            test.is_nil(forwarded[1].data.runtime_context, "runtime_context is still stripped")
+            local order = {}
+            for _, item in ipairs(run.sent) do
+                if item.pid == "script-pid-1" then table.insert(order, item.topic) end
+            end
+            test.eq(order[1], SURFACES, "the set reaches the session before the message")
+            test.eq(order[2], consts.TOPICS.MESSAGE)
+        end)
+
+        it("handles the withdrawal in the plugin and never forwards it", function()
+            local run = run_surfaces({ open(first, "conn-1"), declare(first, "conn-1"), withdraw(first, "conn-1") })
+            local list = pushes(run, first)
+            test.eq(#list, 2)
+            test.eq(list[2], "script-pid-1:0")
+            test.eq(#sent_to(run, "script-pid-1", consts.TOPICS.COMMAND), 0, "not forwarded")
+            test.eq(run.unmonitors["conn-1"], 1, "the monitor reference is released")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 2)
+            test.eq(replies[2].type, consts.UPSTREAM_TYPES.COMMAND_RESPONSE)
+            test.eq(replies[2].request_id, "req-withdraw")
+            test.is_true(replies[2].success)
+        end)
+
+        it("does not restore a withdrawn declaration on reopen, a later message or a process restart", function()
+            local run = run_surfaces({
+                open(second, "conn-keep"),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
+                withdraw(first, "conn-1"),
+                open(first, "conn-1"),
+                message_with(first, "conn-1", { attention = { host_instance_id = "h" } }),
+                session_exit(2),
+                open(first, "conn-1"),
+            })
+            local list = pushes(run, first)
+            test.eq(list[1], "script-pid-2:1")
+            test.eq(list[2], "script-pid-2:0")
+            test.eq(list[3], "script-pid-3:0", "the restarted process gets the set without it")
+            test.eq(#list, 3, "the reopen and the message change nothing")
+        end)
+
+        it("restores a surface only through a new declaration", function()
+            local run = run_surfaces({ open(first, "conn-1"), declare(first, "conn-1"), withdraw(first, "conn-1"),
+                open(first, "conn-1"), declare(first, "conn-1") })
+            local list = pushes(run, first)
+            test.eq(list[#list], "script-pid-1:1")
+        end)
+
+        it("refuses a surface command and declarations from a process that is not the relay", function()
+            local run = run_surfaces({
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
+                withdraw(first, "conn-1", "intruder-pid"),
+                declare(first, "conn-2", "intruder-pid"),
+                message_with(first, "conn-3", { tool_approval_ui = 1 }),
+            })
+            -- conn-3 came from the relay; the two intruder messages changed nothing.
+            local list = pushes(run, first)
+            test.eq(#list, 2)
+            test.eq(list[1], "script-pid-1:1")
+            test.eq(list[2], "script-pid-1:2")
+            test.is_nil(run.unmonitors["conn-1"], "nothing was released")
+            test.is_nil(run.monitors["conn-2"], "the intruder's connection is not tracked")
+            test.eq(#sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first), 1,
+                "only the relay's declaration is answered; no reply to the intruder")
+            test.eq(#sent_to(run, "conn-2", consts.TOPIC_PREFIXES.SESSION .. first), 0)
+            test.eq(#sent_to(run, "script-pid-1", consts.TOPICS.COMMAND), 0)
+        end)
+
+        it("keeps the live set across a Session process restart while the connection stays open", function()
+            local run = run_surfaces({
+                open(second, "conn-keep"),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
+                session_exit(2),
+                open(first, "conn-other"),
+            })
+            local list = pushes(run, first)
+            test.eq(list[1], "script-pid-2:1")
+            test.eq(list[#list], "script-pid-3:1", "the new process gets the open connection's surface")
+        end)
+
+        it("drops the surfaces of a closed connection and shares its monitor with the broker count", function()
+            local run = run_surfaces({
+                open(second, "conn-keep"),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
+                message_with(second, "conn-1", { tool_approval_ui = 1 }),
+                withdraw(second, "conn-1"),
+                { event = { kind = process.event.EXIT, from = "conn-1" } },
+            })
+            test.eq(run.monitors["conn-1"], 1, "one monitor for two declarations")
+            test.eq(run.unmonitors["conn-1"], 1, "released once, when the last reference goes")
+            local list = pushes(run, first)
+            test.eq(list[#list], "script-pid-2:0")
         end)
     end)
 end

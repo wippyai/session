@@ -14,7 +14,12 @@
 --     still asks on this Session.
 -- `approval: true` marks the tool and `approval: false` does not.
 -- The field does nothing unless the session is protected (the gate decides).
+local registry = require("registry")
+
 local tool_meta = {}
+
+-- Test seam: replaces registry.get.
+tool_meta._registry_get = nil :: any
 
 tool_meta.SHORT_REQUIRED = "required"
 
@@ -73,6 +78,33 @@ function tool_meta.read(meta: any)
         out.warnings[#out.warnings + 1] = "meta.approval.approve_all must be a boolean; Approve all is not offered for this tool"
     end
     return out
+end
+
+-- The registry entry of `id`, or nil when it is missing or can't be read.
+function tool_meta.entry(id: any): any
+    if type(id) ~= "string" or id == "" then return nil end
+    local ok, entry = pcall(tool_meta._registry_get or registry.get, id)
+    if ok and type(entry) == "table" then return entry end
+    return nil
+end
+
+-- The tool option approve_all (true, false or nil for absent) of an entry.
+function tool_meta.approve_all(entry: any): boolean?
+    return tool_meta.read(type(entry) == "table" and entry.meta or nil).approve_all
+end
+
+-- A non-empty text field of an entry's meta, or nil.
+function tool_meta.text(entry: any, key: string): string?
+    local meta = type(entry) == "table" and entry.meta or nil
+    local value = type(meta) == "table" and meta[key] or nil
+    if type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+-- The title people see for an entry: meta.title, else meta.name, else
+-- `fallback`.
+function tool_meta.title(entry: any, fallback: any): string
+    return tool_meta.text(entry, "title") or tool_meta.text(entry, "name") or tostring(fallback or "")
 end
 
 return tool_meta

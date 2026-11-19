@@ -107,10 +107,6 @@ local TEXT = {
     },
 }
 
-function events.is_reason(reason: any): boolean
-    return TEXT[reason] ~= nil
-end
-
 -- The structured result the model sees for a call that did not run.
 -- feedback is the user's text of a `continue` denial.
 function events.model_result(reason: string, feedback: string?): any
@@ -169,7 +165,7 @@ end
 
 -- The `approval` object of a tool_approval event: the committed record as
 -- the protocol names it (section 4).
-function events.approval_object(record: any): any
+local function approval_object(record: any): any
     return {
         approval_id = record.approval_id,
         batch_id = record.batch_id,
@@ -198,7 +194,7 @@ function events.tool_approval_payload(record: any, function_name: any, server_no
         function_name = function_name,
         row_type = record.row_type,
         server_now = server_now,
-        approval = events.approval_object(record),
+        approval = approval_object(record),
     }
 end
 

@@ -964,107 +964,76 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
     end)
 end
 
-function message_repo.update_metadata(message_id, metadata, expected_session_id)
-    if not message_id or message_id == "" then
-        return nil, "Message ID is required"
-    end
-
-    if not metadata then
-        return nil, "Metadata is required"
-    end
-
-    local message, err = message_repo.get(message_id)
-    if not message or err then
+-- Reads the row with `read` (message_repo.get, or a read on the caller's
+-- transaction), merges `metadata` (top-level keys) into a stored object (any
+-- other value is replaced), and writes it back with `exec` (the update query
+-- on a pooled connection or on the transaction). With
+-- expected_session_id the row must belong to that session; the third return
+-- value then names a failure: "read" or "ownership".
+local function merge_metadata(read, exec, message_id, metadata, expected_session_id)
+    local row, read_err = read(message_id)
+    if not row or read_err then
         if expected_session_id ~= nil then
-            return nil, err and ("Failed to get message: " .. err) or "Message not found", "read"
+            return nil, read_err and ("Failed to get message: " .. read_err) or "Message not found", "read"
         end
         return nil, "Message not found"
     end
-    if expected_session_id ~= nil and message.session_id ~= expected_session_id then
+    if expected_session_id ~= nil and row.session_id ~= expected_session_id then
         return nil, "Message belongs to different session", "ownership"
     end
 
-    if type(message.metadata) == "table" and type(metadata) == "table" then
-        for k, v in pairs(metadata) do
-            message.metadata[k] = v
-        end
-        metadata = message.metadata
+    if type(row.metadata) == "table" and type(metadata) == "table" then
+        for k, v in pairs(metadata) do row.metadata[k] = v end
+        metadata = row.metadata
     end
-
     local metadata_json, encode_err = encode_metadata(metadata)
-    if encode_err then
-        return nil, "Failed to encode metadata: " .. encode_err
-    end
+    if encode_err then return nil, "Failed to encode metadata: " .. encode_err end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
-
-    local update_query = sql.builder.update("messages")
-        :set("metadata", metadata_json)
+    local update_query = sql.builder.update("messages"):set("metadata", metadata_json)
         :where("message_id = ?", message_id)
     if expected_session_id ~= nil then
         update_query = update_query:where("session_id = ?", expected_session_id)
     end
-
-    local update_executor = update_query:run_with(db)
-    local result, err = update_executor:exec()
-
-    db:release()
-
-    if err then
-        return nil, "Failed to update message metadata: " .. err
-    end
+    local result, err = exec(update_query)
+    if err then return nil, "Failed to update message metadata: " .. err end
     if not result or result.rows_affected == 0 then
         if expected_session_id ~= nil then
             return nil, "Message not found or belongs to different session", "ownership"
         end
         return nil, "Message not found"
     end
-
-    return {
-        message_id = message_id,
-        updated = true
-    }
+    return { message_id = message_id, updated = true }
 end
 
--- update_metadata for approval-bearing rows: merges `metadata` (top-level
--- keys) into the row's metadata inside the caller's transaction, which holds
--- the session row lock, so the read and the write cannot interleave with
--- another writer of the session. Never starts a transaction. The row
--- must belong to `session_id`. Returns { message_id, updated, metadata }.
-function message_repo.update_metadata_tx(dbtx, session_id, message_id, metadata)
-    if not dbtx then return nil, "A transaction is required" end
-    if not session_id or session_id == "" then return nil, "Session ID is required" end
-    if not message_id or message_id == "" then return nil, "Message ID is required" end
-    if type(metadata) ~= "table" then return nil, "Metadata must be a table" end
-
-    local rows, read_err = sql.builder.select("metadata"):from("messages")
-        :where("session_id = ?", session_id):where("message_id = ?", message_id)
-        :limit(1):run_with(dbtx):query()
-    if read_err then return nil, "Failed to read message metadata: " .. tostring(read_err) end
-    if not rows or #rows == 0 then return nil, "Message not found in session" end
-
-    local current = {}
-    local stored = rows[1].metadata
-    if type(stored) == "string" and stored ~= "" then
-        local decoded, decode_err = json.decode(stored)
-        if decode_err or type(decoded) ~= "table" then
-            return nil, "Stored message metadata is not a JSON object; not merging into it"
-        end
-        current = decoded
+-- Merges `metadata` into the row's metadata. opts.tx (optional): run on this
+-- caller-supplied transaction, whose session row lock keeps the read and the
+-- write together; otherwise on a pooled connection.
+function message_repo.update_metadata(message_id, metadata, expected_session_id, opts)
+    if not message_id or message_id == "" then
+        return nil, "Message ID is required"
     end
-    for key, value in pairs(metadata) do current[key] = value end
-
-    local encoded, encode_err = json.encode(current)
-    if encode_err then return nil, "Failed to encode metadata: " .. tostring(encode_err) end
-    local result, write_err = sql.builder.update("messages"):set("metadata", encoded)
-        :where("session_id = ?", session_id):where("message_id = ?", message_id)
-        :run_with(dbtx):exec()
-    if write_err then return nil, "Failed to update message metadata: " .. tostring(write_err) end
-    if not result or result.rows_affected ~= 1 then return nil, "Message not found in session" end
-    return { message_id = message_id, updated = true, metadata = current }
+    if not metadata then
+        return nil, "Metadata is required"
+    end
+    if opts and opts.tx then
+        local function read_in_tx(id)
+            local rows, read_err = sql.builder.select("session_id", "metadata"):from("messages")
+                :where("message_id = ?", id):limit(1):run_with(opts.tx):query()
+            if read_err then return nil, tostring(read_err) end
+            if not rows or not rows[1] then return nil, "Message not found" end
+            return decode_json_metadata(rows[1]), nil
+        end
+        local function exec_in_tx(query) return query:run_with(opts.tx):exec() end
+        return merge_metadata(read_in_tx, exec_in_tx, message_id, metadata, expected_session_id)
+    end
+    local function exec_pooled(query)
+        local db, err = get_db()
+        if err then return nil, err end
+        local result, exec_err = query:run_with(db):exec()
+        db:release()
+        return result, exec_err
+    end
+    return merge_metadata(message_repo.get, exec_pooled, message_id, metadata, expected_session_id)
 end
 
 -- Checks that `message_id` is a row of the session. Returns true, or nil and

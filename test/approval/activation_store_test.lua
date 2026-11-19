@@ -38,7 +38,7 @@ local function define_tests()
             local result, err = activation.apply(ctx, { id = "app:approval_agent",
                 agent_options = { tool_approval = { schema = 1 } } })
             test.is_nil(err)
-            test.is_true(result.protected)
+            test.is_true(result)
             return ctx
         end
 

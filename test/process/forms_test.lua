@@ -12,6 +12,7 @@ local answer_admission = require("answer_admission")
 local control_handlers = require("control_handlers")
 local session_handlers = require("session_handlers")
 local session = require("session")
+local wake = require("wake")
 local state_service = require("state_service")
 local prompt_builder = require("prompt_builder")
 local artifact_repo = require("artifact_repo")
@@ -94,6 +95,7 @@ local function define_tests()
                 config = {},
                 status = consts.STATUS.IDLE,
                 held = {},
+                approval_wake = wake.new(),
                 turn_state = { id = "turn-" .. uuid.v7(), steps = 0, repeated_calls = 0 },
                 upstream = {
                     send_message_update = function(_self, id, kind, payload)

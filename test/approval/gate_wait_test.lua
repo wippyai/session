@@ -13,6 +13,8 @@ local context_repo = require("context_repo")
 local reader = require("reader")
 local registry = require("registry")
 local tool_caller = require("tool_caller")
+local activation = require("activation")
+local tool_meta = require("tool_meta")
 local wait_for_boot = require("wait_for_boot")
 local fx = require("gate_fixtures")
 
@@ -157,14 +159,14 @@ local function define_tests()
         local saved = {}
         before_all(function()
             wait_for_boot.run()
-            saved.now = approval_gate._now
+            saved.now = activation._now
             saved.grace = approval_gate.GRACE_SECONDS
-            saved.registry_get = approval_gate._registry_get
+            saved.registry_get = tool_meta._registry_get
         end)
         after_each(function()
-            approval_gate._now = saved.now
+            activation._now = saved.now
             approval_gate.GRACE_SECONDS = saved.grace
-            approval_gate._registry_get = saved.registry_get
+            tool_meta._registry_get = saved.registry_get
         end)
         after_all(function() fx.cleanup() end)
 
@@ -235,7 +237,7 @@ local function define_tests()
             local ctx, captured = new_ctx({ live = 1, policy = { timeout_seconds = 30 } })
             local base = time.now():unix()
             local calls = 0
-            approval_gate._now = function()
+            activation._now = function()
                 calls = calls + 1
                 if calls == 1 then return base end
                 return base + 31
@@ -311,7 +313,6 @@ local function define_tests()
                 else
                     assert(session_repo.delete(ctx.session_id))
                     ctx.approval_wake:notify("deleted")
-                    ctx.approval_wake:notify("finish")
                 end
                 local result, err, seconds = finish(handle)
                 test.is_nil(err, case)
@@ -473,7 +474,7 @@ local function define_tests()
                 if case == "context" then
                     assert(context_repo.update(ctx.reader:primary_context_id(), '{"project":"other"}'))
                 else
-                    approval_gate._registry_get = function(id)
+                    tool_meta._registry_get = function(id)
                         local entry = require("registry").get(id)
                         if id == MARKED and entry then
                             local changed = { id = entry.id, kind = entry.kind, data = entry.data, meta = {} }
@@ -496,7 +497,7 @@ local function define_tests()
                 test.eq(record.disposition, "not_run", case)
                 test.eq(record.disposition_reason, "intent_changed", case)
                 test.is_true(has_continue(result), case .. ": the turn continues")
-                approval_gate._registry_get = saved.registry_get
+                tool_meta._registry_get = saved.registry_get
             end
         end)
 
@@ -508,7 +509,7 @@ local function define_tests()
                     context = { to_agent_id = fx.TARGET } } })
                 local handle = start(ctx, op)
                 pending(ctx, batch.batch_id, 1)
-                approval_gate._registry_get = function(id)
+                tool_meta._registry_get = function(id)
                     local entry = registry.get(id)
                     if id ~= fx.TARGET then return entry end
                     if case == "removed" then return nil end
@@ -516,7 +517,7 @@ local function define_tests()
                 end
                 approve(ctx, batch.batch_id, "call-d")
                 finish(handle)
-                approval_gate._registry_get = saved.registry_get
+                tool_meta._registry_get = saved.registry_get
                 test.is_nil(op.caller.launches["call-d"], case .. ": the call never runs")
                 local record = records_by_call(ctx.session_id, batch.batch_id)["call-d"]
                 test.eq(record.disposition, "not_run", case)
@@ -632,7 +633,7 @@ local function define_tests()
                 local handle
                 if case.signal == "deadline" then
                     local base, calls = time.now():unix(), 0
-                    approval_gate._now = function()
+                    activation._now = function()
                         calls = calls + 1
                         return calls == 1 and base or base + 31
                     end
@@ -646,7 +647,7 @@ local function define_tests()
                 end
                 local result, err = finish(handle)
                 test.is_nil(err)
-                approval_gate._now = saved.now
+                activation._now = saved.now
                 test.eq(op.caller.runs, 0)
                 for _, call_id in ipairs({ "call-a", "call-c" }) do
                     test.is_true(row(op.call_message_ids[call_id]).metadata.status ~= consts.FUNC_STATUS.PENDING,

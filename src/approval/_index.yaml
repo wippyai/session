@@ -22,7 +22,7 @@ entries:
       comment: Fail-closed, sticky activation at every agent step - reads the effective agent's raw trait list, validates the trait context and compiled options, stores config.tool_approval with the row locked
     source: file://activation.lua
     modules:
-      - registry
+      - time
     imports:
       trait_config: wippy.session.approval:trait_config
       agent_registry: wippy.agent.discovery:registry
@@ -44,6 +44,8 @@ entries:
     meta:
       comment: Reads a tool's meta.approval (short and object form), failing closed with warnings
     source: file://tool_meta.lua
+    modules:
+      - registry
 
   # wippy.session.approval:policy
   - name: policy
@@ -51,6 +53,9 @@ entries:
     meta:
       comment: Pure policy evaluator - requirement, repeated denial, grant matching and suspension, Approve-all offers per batch
     source: file://policy.lua
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
 
   # wippy.session.approval:canonical_json
   - name: canonical_json
@@ -69,7 +74,6 @@ entries:
     source: file://fingerprint.lua
     modules:
       - hash
-      - registry
     imports:
       canonical_json: wippy.session.approval:canonical_json
 
@@ -84,6 +88,7 @@ entries:
     imports:
       fingerprint: wippy.session.approval:fingerprint
       tool_meta: wippy.session.approval:tool_meta
+      consts: wippy.session:consts
 
   # wippy.session.approval:preview
   - name: preview
@@ -112,7 +117,6 @@ entries:
       comment: The approval gate in process_tools - freezes the batch, evaluates the policy, grant audit, per-turn request cap, no approval UI, request creation in the batch record, settlement of calls that do not run
     source: file://gate.lua
     modules:
-      - registry
       - uuid
       - time
       - logger

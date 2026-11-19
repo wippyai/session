@@ -313,6 +313,8 @@ entries:
       context_repo: wippy.session.persist:context_repo
       reader: wippy.session.persist:reader
       tool_caller: wippy.agent.tools:caller
+      activation: wippy.session.approval:activation
+      tool_meta: wippy.session.approval:tool_meta
       wait_for_boot: app:wait_for_boot
       gate_fixtures: app.approval:gate_fixtures
     modules:
@@ -335,4 +337,5 @@ entries:
     imports:
       test: wippy.test:test
       approval_events: wippy.session.approval:events
+      approval_repo: wippy.session.persist:approval_repo
     method: run

@@ -1,5 +1,6 @@
 local test = require("test")
 local command_bus = require("command_bus")
+local wake = require("wake")
 local consts = require("consts")
 local message_handlers = require("message_handlers")
 local message_repo = require("message_repo")
@@ -133,7 +134,7 @@ local function define_tests()
             local command_errors = {} :: {any}
             local steps = 0
             local function context(current_writer)
-                local ctx = { session_id = session_id, writer = current_writer, held = {},
+                local ctx = { session_id = session_id, writer = current_writer, held = {}, approval_wake = wake.new(),
                     reader = {
                         list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
                         list_pending_answers = function(_, limit)

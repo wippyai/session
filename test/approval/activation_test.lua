@@ -5,6 +5,7 @@ local trait_config = require("trait_config")
 local TRAIT = "wippy.session.traits:tool_approval"
 local MARKER = { tool_approval = { schema = 1 } }
 local NOW = "2026-11-18T12:00:00Z"
+local NOW_UNIX = 1795003200
 
 -- A session context with a fake writer that keeps config.tool_approval the
 -- way writer:update_tool_approval does: mutate gets the committed value.
@@ -38,7 +39,7 @@ end
 local function define_tests()
     describe("Tool approval activation: reading the agent", function()
         before_each(function()
-            activation._now = function() return NOW end
+            activation._now = function() return NOW_UNIX end
             activation._enforcement = nil
             activation._agent_registry = nil
         end)
@@ -173,7 +174,7 @@ local function define_tests()
 
     describe("Tool approval activation: one agent step", function()
         before_each(function()
-            activation._now = function() return NOW end
+            activation._now = function() return NOW_UNIX end
             activation._enforcement = nil
         end)
         after_each(function()
@@ -185,7 +186,7 @@ local function define_tests()
             local ctx, writes = fake_ctx({ traits = { { id = TRAIT, context = { require = "all" } } } })
             local result, err = activation.apply(ctx, agent(MARKER))
             test.is_nil(err)
-            test.is_true(result.protected)
+            test.is_true(result)
             test.eq(#writes, 1)
             test.eq(ctx.config.tool_approval.require, "all")
             test.eq(ctx.config.tool_approval.revision, 1)
@@ -197,7 +198,7 @@ local function define_tests()
             local ctx, writes = fake_ctx({ traits = {} })
             local result, err = activation.apply(ctx, agent({}))
             test.is_nil(err)
-            test.is_false(result.protected)
+            test.is_true(result)
             test.eq(#writes, 0)
             test.is_nil(ctx.config.tool_approval)
             test.is_nil(ctx.tool_approval_policy)
@@ -209,7 +210,7 @@ local function define_tests()
             ctx.agent_ctx.active_traits = { "other:trait" }
             local result, err = activation.apply(ctx, agent({}))
             test.is_nil(err)
-            test.is_true(result.protected)
+            test.is_true(result)
             test.eq(#writes, 1, "no write for the agent without the trait")
             test.is_false(ctx.tool_approval_policy.agent_opted_in)
             test.eq(ctx.tool_approval_policy.require, "marked")
@@ -255,8 +256,8 @@ local function define_tests()
             activation._enforcement = function() return "off" end
             local ctx, writes = fake_ctx({ traits = { TRAIT } })
             local result = assert(activation.apply(ctx, agent(MARKER)))
-            test.is_true(result.protected)
-            test.eq(result.policy.enforcement, "off")
+            test.is_true(result)
+            test.eq(ctx.tool_approval_policy.enforcement, "off")
             test.eq(#writes, 1, "the activation stays sticky for when enforcement returns")
         end)
 
@@ -275,7 +276,7 @@ local function define_tests()
             assert(activation.apply(ctx, agent(MARKER)))
             assert(activation.note_declared(ctx))
             test.eq(ctx.config.tool_approval.ui_declared_at, NOW)
-            activation._now = function() return "2026-11-18T14:00:00Z" end
+            activation._now = function() return NOW_UNIX + 7200 end
             assert(activation.note_declared(ctx))
             test.eq(ctx.config.tool_approval.ui_declared_at, NOW)
             test.eq(#writes, 2)

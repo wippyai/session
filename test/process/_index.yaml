@@ -112,6 +112,7 @@ entries:
       suite: session
     source: file://session_test.lua
     imports:
+      wake: wippy.session.approval:wake
       consts: wippy.session:consts
       session: wippy.session.process:session
       message_handlers: wippy.session.process:message_handlers
@@ -159,6 +160,7 @@ entries:
       - security
       - time
     imports:
+      wake: wippy.session.approval:wake
       consts: wippy.session:consts
       command_bus: wippy.session.process:command_bus
       message_handlers: wippy.session.process:message_handlers
@@ -223,24 +225,16 @@ entries:
       name: Approval UI surfaces
       type: test
       suite: session
-      comment: The surface tracker, plugin declarations (tool_approval_surface enabled true, message runtime_context; session_open ignored), withdrawal and sender authority, the live set across a Session process restart, the Session topic sender check and the inbox wake signals
+      comment: The surface tracker, the Session topic sender check and the inbox wake signals (the plugin cases are in plugin_test)
     source: file://approval_surfaces_test.lua
-    modules:
-      - security
-      - uuid
     imports:
       approval_surfaces: wippy.session.process:approval_surfaces
-      plugin: wippy.session.process:plugin
       session: wippy.session.process:session
       message_handlers: wippy.session.process:message_handlers
       wake: wippy.session.approval:wake
       consts: wippy.session:consts
-      context_repo: wippy.session.persist:context_repo
-      session_repo: wippy.session.persist:session_repo
-      wait_for_boot: app:wait_for_boot
       test: wippy.test:test
     method: run_tests
-
   - name: session_handlers_test
     kind: function.lua
     meta:
@@ -310,6 +304,7 @@ entries:
       - uuid
       - security
     imports:
+      wake: wippy.session.approval:wake
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo

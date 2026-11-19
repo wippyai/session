@@ -308,7 +308,7 @@ local function define_tests()
             test.eq(errors[#errors].payload.outcome, "not_approved")
         end)
 
-        it("settles every member as limit, publishes one notice per turn and ends the turn", function()
+        it("settles every member as limit, publishes one notice and ends the turn", function()
             local ctx, captured = new_ctx({ live = 1, policy = { max_requests_per_turn = 2 } })
             local op, batch = round(ctx, {
                 { id = "call-1", registry_id = MARKED, args = { n = 1 } },
@@ -514,7 +514,7 @@ local function define_tests()
             test.is_true(has_continue(result))
             test.eq(count("session_tool_approvals", ctx.session_id), 0)
             local errors = updates_of(captured, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
-            test.eq(errors[1].payload.error, "Not run: the call could not be checked for approval.")
+            test.eq(errors[1].payload.error, approval_events.not_run_text("approval_check_failed"))
         end)
 
         it("suspends a grant that an agent switch no longer permits, before any call is evaluated", function()

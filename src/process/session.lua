@@ -361,7 +361,7 @@ local function accept_surfaces(ctx: any, sender: any, payload: any): boolean
     local current = ctx.approval_surfaces
     if type(current) == "table" and revision <= (tonumber(current.revision) or 0) then return false end
     ctx.approval_surfaces = { live = live, revision = revision }
-    if ctx.approval_wake then ctx.approval_wake:notify(wake.KIND.SURFACES) end
+    ctx.approval_wake:notify(wake.KIND.SURFACES)
     if live > 0 then
         local _, note_err = activation.note_declared(ctx)
         if note_err then
@@ -423,7 +423,7 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
         -- transaction; bus:request_stop closes the turn's cancellation channel.
         local committed = commit_stop(ctx, ctx.upstream, payload_data.request_id :: string?)
         if not committed then return true end
-        if ctx.approval_wake then ctx.approval_wake:notify(wake.KIND.STOP) end
+        ctx.approval_wake:notify(wake.KIND.STOP)
         local requested = bus:request_stop(stop_request_id)
         if ctx.parent_pid then
             process.send(ctx.parent_pid :: string,
@@ -467,7 +467,7 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
                 -- waiting approval gate. The pending input itself is the
                 -- durable closure: the gate's release transaction refuses a
                 -- batch while one is stored and closes it as superseded.
-                if admitted.steered and ctx.approval_wake then
+                if admitted.steered then
                     ctx.approval_wake:notify(wake.KIND.STEERING)
                 end
                 for _, next_op in ipairs(admitted.next_ops or {}) do
@@ -1097,11 +1097,11 @@ local function run(args: SessionArgs)
                         finish_generation = finish_generation + 1
                         finish_check_sent = false
                         -- Deletion cancels the turn's in-flight calls and
-                        -- wakes a waiting approval gate; the rows are gone, so
-                        -- no batch closure is written.
+                        -- wakes a waiting approval gate, which puts deletion
+                        -- first; the rows are gone, so no batch closure is
+                        -- written.
                         bus:cancel_turn()
                         context.approval_wake:notify(wake.KIND.DELETED)
-                        context.approval_wake:notify(wake.KIND.FINISH)
                         if bus:is_quiescent() then
                             bus:finish()
                         else

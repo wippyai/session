@@ -1,6 +1,7 @@
 local json = require("json")
 local fingerprint = require("fingerprint")
 local tool_meta = require("tool_meta")
+local consts = require("consts")
 
 -- Freezes one validated tool call for approval: decoded arguments, the effective execution context, the tool
 -- entry's identity, title, description and deployment fingerprint, the
@@ -146,13 +147,6 @@ function freeze.delegate_target_id(validated: any): string?
     return target
 end
 
-local function entry_text(entry: any, key: string): string?
-    local meta = type(entry) == "table" and entry.meta or nil
-    local value = type(meta) == "table" and meta[key] or nil
-    if type(value) == "string" and value ~= "" then return value end
-    return nil
-end
-
 function freeze.call(validated: any, env: any): (any, any)
     if type(validated) ~= "table" or type(validated.call_id) ~= "string" or validated.call_id == "" then
         return freeze_failed("The tool call has no call ID")
@@ -192,13 +186,13 @@ function freeze.call(validated: any, env: any): (any, any)
     local tool_fingerprint, fp_err = fingerprint.of_entry(entry)
     if not tool_fingerprint then return freeze_failed("The tool entry can't be fingerprinted: " .. tostring(fp_err)) end
 
-    local row_type = env.row_type or "function"
-    local is_delegation = row_type == "delegation"
+    local row_type = env.row_type or consts.MSG_TYPE.FUNCTION
+    local is_delegation = row_type == consts.MSG_TYPE.DELEGATION
         or (env.delegation_func_id ~= nil and registry_id == env.delegation_func_id)
     local delegate_target = nil
     local identity = { registry_id = registry_id, fingerprint = tool_fingerprint }
     if is_delegation then
-        row_type = "delegation"
+        row_type = consts.MSG_TYPE.DELEGATION
         local target = freeze.delegate_target_id(validated)
         if not target then return changed("The delegation call names no target agent") end
         if merged.to_agent_id ~= target then
@@ -222,21 +216,19 @@ function freeze.call(validated: any, env: any): (any, any)
         identity = { registry_id = registry_id, fingerprint = grant_fingerprint, target_agent_id = target }
     end
 
-    local meta = type(entry.meta) == "table" and entry.meta or {}
     local frozen = {
         call_id = validated.call_id,
         row_type = row_type,
         registry_id = registry_id,
         name = validated.name,
-        title = entry_text(entry, "title") or validated.name,
-        description = entry_text(entry, "description") or "",
+        title = tool_meta.text(entry, "title") or validated.name,
+        description = tool_meta.text(entry, "description") or "",
         args = args,
         effective_context = merged,
         fingerprint = tool_fingerprint,
         delegate_target = delegate_target,
         browser_binding = binding,
-        meta = meta,
-        approval = tool_meta.read(meta),
+        approval = tool_meta.read(entry.meta),
         identity = identity,
     }
     local digest, digest_err = freeze.digest(frozen)

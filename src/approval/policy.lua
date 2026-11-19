@@ -19,6 +19,9 @@
 -- The turn scope:
 --   session_id, owner_id, epoch   whose grants may match (grant isolation; non-empty strings)
 --   denied_keys                   { [denial_key] = true } for calls denied earlier in this turn
+local consts = require("consts")
+local approval_repo = require("approval_repo")
+
 local policy = {}
 
 policy.DECISION = { ALLOW = "allow", ASK = "ask", SETTLE = "settle" }
@@ -37,9 +40,6 @@ policy.SUSPENSION = {
 }
 
 local SCOPE = policy.SCOPE
-local ROW_TYPES = { ["function"] = true, private_function = true, delegation = true }
-local DELEGATION = "delegation"
-local ACTIVE = "active"
 
 local function blank_to_nil(value: any): any
     if value == "" then return nil end
@@ -148,7 +148,7 @@ local function match_grants(effective: any, approval: any, identity: any, grants
     local matched = nil
     local suspend = {}
     for _, grant in ipairs(grants or {}) do
-        if type(grant) == "table" and grant.status == ACTIVE and owned_by_scope(grant, scope) then
+        if type(grant) == "table" and grant.status == approval_repo.GRANT_STATUS.ACTIVE and owned_by_scope(grant, scope) then
             local relation = grant_relation(grant, identity)
             if relation == "changed" then
                 suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = policy.SUSPENSION.DEPLOYMENT_CHANGED }
@@ -165,38 +165,15 @@ local function match_grants(effective: any, approval: any, identity: any, grants
     return matched, suspend
 end
 
-local function check_scope(scope: any, grants: any): string?
-    if type(scope) ~= "table" then return "the turn scope is required" end
-    if scope.denied_keys ~= nil and type(scope.denied_keys) ~= "table" then
-        return "scope.denied_keys must be a table"
-    end
-    if grants ~= nil and type(grants) ~= "table" then return "grants must be a list" end
-    if grants and #grants > 0 then
-        for _, key in ipairs({ "session_id", "owner_id", "epoch" }) do
-            if not non_empty_string(scope[key]) then
-                return "scope." .. key .. " must be a non-empty string to match grants"
-            end
-        end
-    end
-    return nil
-end
-
--- Evaluates one call. Returns a result table, or nil and an error when the
--- call or the scope is malformed (the gate then fails closed).
+-- Evaluates one call (built by freeze, with a scope built by the gate).
+-- Returns a result table:
 --   decision   allow | ask | settle
 --   reason     not_required | grant | repeated_denied_call | approval_required
---   grant_id, grant_scope   for reason grant
+--   grant_id   for reason grant
 --   max_scope  for ask: the table's scope before the per-batch rule
 --   suspend    { { grant_id, reason } } grants the caller must suspend
 --   warnings   tool meta warnings
-function policy.evaluate(call: any, effective: any, grants: any, scope: any): (any, string?)
-    if type(call) ~= "table" or type(call.call_id) ~= "string" or call.call_id == "" then
-        return nil, "the call needs a call_id"
-    end
-    if not ROW_TYPES[call.row_type] then return nil, "call.row_type must be function, private_function or delegation" end
-    local scope_err = check_scope(scope, grants)
-    if scope_err then return nil, scope_err end
-
+function policy.evaluate(call: any, effective: any, grants: any, scope: any): any
     local approval = call.approval
     local result = {
         call_id = call.call_id,
@@ -213,12 +190,12 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
     if effective.require == "all" then
         required = true
     else
-        required = approval.required == true and call.row_type ~= DELEGATION
+        required = approval.required == true and call.row_type ~= consts.MSG_TYPE.DELEGATION
     end
     if not required then
         result.decision = policy.DECISION.ALLOW
         result.reason = policy.REASON.NOT_REQUIRED
-        return result, nil
+        return result
     end
 
     -- Repeated denial, before any grant.
@@ -226,7 +203,7 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
     if type(call.denial_key) == "string" and call.denial_key ~= "" and denied[call.denial_key] then
         result.decision = policy.DECISION.SETTLE
         result.reason = policy.REASON.REPEATED_DENIED_CALL
-        return result, nil
+        return result
     end
 
     -- A valid, matching grant. approve_all: false blocks every grant.
@@ -237,15 +214,14 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
         result.decision = policy.DECISION.ALLOW
         result.reason = policy.REASON.GRANT
         result.grant_id = grant.grant_id
-        result.grant_scope = grant.scope
-        return result, nil
+        return result
     end
 
     -- A request.
     result.decision = policy.DECISION.ASK
     result.reason = policy.REASON.APPROVAL_REQUIRED
     result.max_scope = policy.max_scope(effective, approval.approve_all)
-    return result, nil
+    return result
 end
 
 local function covers_for(scope_name: string, own: any, eligible: {any}): {string}
@@ -268,14 +244,12 @@ end
 -- session. Scope tool covers the eligible requests with the same grant key.
 -- The gate maps the call IDs in `covers` to approval IDs when it creates the
 -- requests. Returns { results = { ... }, suspend = { { grant_id, reason } } }.
-function policy.evaluate_batch(calls: any, effective: any, grants: any, scope: any): (any, string?)
-    if type(calls) ~= "table" then return nil, "calls must be a list" end
+function policy.evaluate_batch(calls: any, effective: any, grants: any, scope: any): any
     local results = {}
     local eligible = {}
     local suspend, suspended = {}, {}
     for index, call in ipairs(calls) do
-        local result, err = policy.evaluate(call, effective, grants, scope)
-        if not result then return nil, "call " .. index .. ": " .. tostring(err) end
+        local result = policy.evaluate(call, effective, grants, scope)
         results[index] = result
         for _, item in ipairs(result.suspend) do
             if item.grant_id and not suspended[item.grant_id] then
@@ -292,7 +266,6 @@ function policy.evaluate_batch(calls: any, effective: any, grants: any, scope: a
         if result.decision == policy.DECISION.ASK then
             local scope_name = result.max_scope
             if scope_name == SCOPE.BATCH and #eligible < 2 then scope_name = SCOPE.NONE end
-            result.offered_scope = scope_name
             if scope_name == SCOPE.NONE then
                 result.offered = { decisions = { "approve", "deny" } }
             else
@@ -303,7 +276,7 @@ function policy.evaluate_batch(calls: any, effective: any, grants: any, scope: a
             end
         end
     end
-    return { results = results, suspend = suspend }, nil
+    return { results = results, suspend = suspend }
 end
 
 return policy
