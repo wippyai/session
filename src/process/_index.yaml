@@ -263,6 +263,7 @@ entries:
       interruption_boundary: wippy.session.process:interruption_boundary
       wake: wippy.session.approval:wake
       activation: wippy.session.approval:activation
+      approval_repo: wippy.session.persist:approval_repo
     method: run
 
   # wippy.session.process:plugin

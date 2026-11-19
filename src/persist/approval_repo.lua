@@ -924,6 +924,40 @@ function approval_repo.create_batch_record(dbtx: any, session_id: string, descri
     return read_batch(dbtx, descriptor.batch_id)
 end
 
+-- Whether a steering input is stored as pending in the session. The release
+-- transaction checks it under the session lock (4.5 step 9): steering that
+-- committed first closes the batch instead of letting it run.
+function approval_repo.has_pending_input(conn: any, session_id: string)
+    return with_connection(conn, function(c) return has_pending_input(c, session_id) end)
+end
+
+-- Closes the batches of the turn `turn_id` that are still open, and applies
+-- `reason` to its released batches (close_batch: stop and exit cancel their
+-- controls; steering, finish and deleted change nothing). Runs in the
+-- caller's transaction. Returns the list of batch records after the closure.
+function approval_repo.close_turn_batches(dbtx: any, session_id: string, turn_id: string, reason: string)
+    if not non_empty(turn_id) then return nil, "Turn ID is required" end
+    if not CLOSE[reason] then return nil, "Unknown batch close reason: " .. tostring(reason) end
+    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
+    if lock_err then return nil, lock_err end
+    local rows, err = select_rows(dbtx, sql.builder.select("batch_id"):from("session_tool_approval_batches")
+        :where("session_id = ?", session_id):where("turn_id = ?", turn_id)
+        :where("state IN (?, ?)", BATCH.OPEN, BATCH.RELEASED), "Failed to list turn batches")
+    if not rows then return nil, err end
+    local closed = {}
+    for _, row in ipairs(rows) do
+        local batch, close_err = approval_repo.close_batch(dbtx, row.batch_id, reason)
+        if not batch then
+            -- A released batch refuses reasons other than stop and exit,
+            -- steering, finish and deleted: nothing to do for it.
+            if not approval_repo.is_conflict(close_err) then return nil, close_err end
+        else
+            closed[#closed + 1] = batch
+        end
+    end
+    return closed
+end
+
 function approval_repo.get_batch(conn: any, batch_id: string)
     return with_connection(conn, function(c)
         local batch, err = read_batch(c, batch_id)

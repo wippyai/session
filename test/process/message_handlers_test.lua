@@ -5811,6 +5811,28 @@ local function define_tests()
             end
         end)
 
+        it("does not continue a turn the approval gate ended, and keeps pending steering for the next turn", function()
+            for _, case in ipairs({
+                { marker = "msg-user", continues = false },
+                { marker = "msg-earlier-turn", continues = true },
+                { marker = nil, continues = true },
+            }) do
+                local ctx = mock_ctx(fake_agent(nil))
+                ctx.turn_state = { active = true, message_id = "msg-user", steps = 1, repeated_calls = 0 }
+                ctx.reader.list_pending_inputs = function()
+                    return { { message_id = "steer-1", date = "2026-11-19T10:00:00Z",
+                        metadata = { input = { state = "pending" } } } }, nil
+                end
+                ctx.reader.newest_non_input_id = function() return "msg-user", nil end
+                if case.marker then ctx.approval_turn_end = { turn_id = case.marker, reason = "deadline" } end
+                test.eq(message_handlers.ended_by_approval(ctx), not case.continues, tostring(case.marker))
+                local finished, err = message_handlers.finish_turn(ctx)
+                test.is_nil(err)
+                test.eq(find_op(finished.next_ops, consts.OP_TYPE.AGENT_STEP) ~= nil, case.continues,
+                    tostring(case.marker))
+            end
+        end)
+
         it("fails closed and runs nothing when the gate fails", function()
             local ctx, captured, gate = protected_ctx(fake_agent(nil))
             local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {

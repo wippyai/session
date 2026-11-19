@@ -158,6 +158,8 @@ function events.closed_reason(close_reason: string, record: any): (string, strin
         end
         if record.state == "limited" then return REASON.LIMIT, nil end
         if record.state == "unavailable" then return REASON.UNAVAILABLE, nil end
+        -- An approved call that the closure kept from running is a peer.
+        if record.state == "approved" then return close.peer, nil end
         if record.decided_via ~= "grant" and record.expires_at ~= nil then return close.own, nil end
     end
     return close.peer, nil

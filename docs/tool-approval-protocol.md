@@ -365,6 +365,11 @@ an error chip.
 `outcome` is `not_approved` for every not-run approval outcome, and `cancelled`
 when Stop ended the call.
 
+When a call with an approval record does not run, the Session publishes its
+`tool_approval` state event before the `function_error`. `function_error`
+carries no `row_type`, so a client learns from the earlier event that a
+private or delegation row is not a public tool call.
+
 `function_call` keeps its meaning "execution starts" and gains an `approval`
 object that old clients ignore:
 

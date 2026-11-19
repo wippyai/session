@@ -277,19 +277,38 @@ entries:
       test_only: true
     data: {}
 
+  - name: gate_fixtures
+    kind: library.lua
+    meta:
+      comment: Shared fixtures of the gate suites - a protected session context, a fake caller that records launches, a stored response with its PROCESS_TOOLS op
+    source: file://gate_fixtures.lua
+    modules:
+      - sql
+      - uuid
+      - registry
+      - security
+    imports:
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      approval_gate: wippy.session.approval:gate
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      fingerprint: wippy.session.approval:fingerprint
+      wake: wippy.session.approval:wake
+      writer: wippy.session.persist:writer
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+
   - name: gate_test
     kind: function.lua
     meta:
       name: Tool approval gate up to the wait
       type: test
       suite: session
-      comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, fail closed (EE2-2710 S7a, AC 1, 2, 3, 19, 26, 32)
+      comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit and release, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, fail closed (EE2-2710 S7a, AC 1, 2, 3, 19, 26, 32, 42)
     source: file://gate_test.lua
     modules:
-      - sql
       - uuid
-      - registry
-      - security
     imports:
       test: wippy.test:test
       consts: wippy.session:consts
@@ -297,18 +316,38 @@ entries:
       approval_gate: wippy.session.approval:gate
       approval_events: wippy.session.approval:events
       approval_repo: wippy.session.persist:approval_repo
-      message_repo: wippy.session.persist:message_repo
       message_handlers: wippy.session.process:message_handlers
       policy: wippy.session.approval:policy
-      fingerprint: wippy.session.approval:fingerprint
       tool_caller: wippy.agent.tools:caller
-      wake: wippy.session.approval:wake
-      writer: wippy.session.persist:writer
-      session_repo: wippy.session.persist:session_repo
-      context_repo: wippy.session.persist:context_repo
       wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
     method: run
 
+  - name: gate_wait_test
+    kind: function.lua
+    meta:
+      name: Tool approval gate wait, release and end of turn
+      type: test
+      suite: session
+      comment: The wait on the wake hub, fence closures by Stop, finish, steering, exit and deletion, the release recheck, Stop after release, precomputed results, the approval turn end (EE2-2710 S7b, AC 5, 6, 20, 21, 22, 23, 28, 33, 34, 35, 41)
+    source: file://gate_wait_test.lua
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_gate: wippy.session.approval:gate
+      approval_events: wippy.session.approval:events
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
+      session: wippy.session.process:session
+      session_repo: wippy.session.persist:session_repo
+      tool_caller: wippy.agent.tools:caller
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    modules:
+      - time
+      - registry
+    method: run
   - name: events_test
     kind: function.lua
     meta:

@@ -17,6 +17,7 @@ local interruption_boundary = require("interruption_boundary")
 local uuid = require("uuid")
 local input_policy = require("input_policy")
 local wake = require("wake")
+local approval_repo = require("approval_repo")
 local activation = require("activation")
 
 type SessionArgs = {
@@ -62,6 +63,36 @@ local function clone(value)
     return result
 end
 
+-- The turn whose tool approval batches a Stop or finish closes: the active
+-- turn of a protected session, as the approval gate names it
+-- (approval_gate.turn_id). nil when the session is not protected.
+local function approval_turn(context: any): any
+    if type(context.config) ~= "table" or context.config.tool_approval == nil then return nil end
+    local turn = context.turn_state
+    if type(turn) ~= "table" then return nil end
+    local turn_id = turn.id or turn.message_id
+    if type(turn_id) ~= "string" or turn_id == "" then return nil end
+    return { turn_id = turn_id }
+end
+
+-- Finish, idle retire or shutdown of a protected session while a turn runs:
+-- one closure transaction writes the turn fence and closes the turn's open
+-- approval batches as interrupted (architecture 4.5 step 9). A failure is
+-- logged; the gate still closes the batch when the finish wakes it.
+local function close_approvals_for_finish(context: any)
+    local turn = approval_turn(context)
+    if not turn or not (context.turn_state and context.turn_state.active) then return end
+    local _, err = approval_repo.transact(context.session_id, function(dbtx)
+        local _, fence_err = approval_repo.write_turn_fence(dbtx, context.session_id, turn.turn_id, "finish")
+        if fence_err then return nil, fence_err end
+        return approval_repo.close_turn_batches(dbtx, context.session_id, turn.turn_id, "finish")
+    end)
+    if err then
+        logger:warn("tool approval finish closure was not stored",
+            { session_id = context.session_id, error = tostring(err) })
+    end
+end
+
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -100,6 +131,9 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
         stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch or {}, {
             status = context.status,
             meta = { interaction = interaction },
+            -- A protected session closes the turn's approval batches and
+            -- writes the turn fence in the Stop transaction (EE2-2710).
+            approval_fence = running and approval_turn(context) or nil,
         }, boundary)
     else
         stop_err = boundary_err
@@ -374,8 +408,8 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             if id_err then return nil, id_err end
             stop_request_id = generated
         end
-        -- TODO(EE2-2710 S7b): close_batch(cancelled) inside the Stop
-        -- transaction (stop_with_input_rollback), with the turn fence.
+        -- commit_stop closes the turn's approval batches in the Stop
+        -- transaction (stop_with_input_rollback, approval_fence).
         local committed = commit_stop(ctx, ctx.upstream, payload_data.request_id :: string?)
         if not committed then return true end
         -- The accepted Stop closes the batch cancellation channel before
@@ -421,9 +455,10 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
                 ctx.upstream:command_error(payload_data.request_id, code, admit_err or "Failed to accept input")
             else
                 -- Committed steering: a new pending input is stored. Wakes a
-                -- waiting approval gate (architecture 4.5 step 8).
-                -- TODO(EE2-2710 S7b): close_batch(superseded) inside the
-                -- message-insert transaction of the steering input.
+                -- waiting approval gate (architecture 4.5 step 8). The pending
+                -- input itself is the durable closure: the gate's release
+                -- transaction refuses a batch while one is stored and closes
+                -- it as superseded.
                 if admitted.steered and ctx.approval_wake then
                     ctx.approval_wake:notify(wake.KIND.STEERING)
                 end
@@ -1005,10 +1040,10 @@ local function run(args: SessionArgs)
                     if request.finish_generation == nil then
                         finish_generation = finish_generation + 1
                     end
-                    -- Finish, idle retire or shutdown wakes a waiting approval
-                    -- gate (architecture 4.5 step 8).
-                    -- TODO(EE2-2710 S7b): commit close_batch(interrupted) in
-                    -- one explicit closure transaction, with the turn fence.
+                    -- Finish, idle retire or shutdown closes the turn's
+                    -- approval batches, then wakes a waiting approval gate
+                    -- (architecture 4.5 steps 8 and 9).
+                    close_approvals_for_finish(context)
                     context.approval_wake:notify(wake.KIND.FINISH)
                     if not bus:is_quiescent() then
                         pending_finish = true
@@ -1175,4 +1210,5 @@ return { run = run, route_input = route_input, flush_held = flush_held,
     accept_surfaces = accept_surfaces,
     write_held_before_form = write_held_before_form,
     commit_held_before_form = commit_held_before_form,
-    reference_artifact = reference_artifact, _commit_stop = commit_stop }
+    reference_artifact = reference_artifact, _commit_stop = commit_stop,
+    _close_approvals_for_finish = close_approvals_for_finish }

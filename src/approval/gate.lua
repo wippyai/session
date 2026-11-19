@@ -26,21 +26,30 @@ local logger = require("logger"):named("session.approval.gate")
 --                      call row, and process_tools dispatches nothing.
 --     settled          { [call_id] = true } of the calls the gate settled
 --                      itself, with their results and events.
---     released         { [call_id] = true } of the calls process_tools may
---                      give to caller:execute (not fenced only): calls that
---                      need no approval, and calls the caller reports as
---                      failed without running them. Nothing else runs.
 --     end_turn         no further model step for this turn.
 --     end_reason       the batch close reason, when fenced.
 --     skip_checkpoint  a requested checkpoint does not run (Stop, finish,
 --                      exit, deletion).
+--     deleted          the session was deleted: nothing was written.
+--   and, after a release (not fenced):
+--     released         { [call_id] = true } of the calls process_tools gives
+--                      to caller:execute: calls that need no approval, calls
+--                      the caller reports as failed without running them, and
+--                      approved calls the release marked `dispatched`.
+--                      Nothing else runs.
+--     precomputed      { [call_id] = result } for the settled calls, for
+--                      options.precomputed_results of caller:execute.
+--     approvals        { [call_id] = { state, decided_via, grant_id } } of the
+--                      released approved calls, for their function_call event.
+--     cancel           the batch cancellation channel (wake hub) to pass to
+--                      caller:execute; only Stop, exit and deletion close it.
+--     session_context  the context the release rechecked; dispatch uses it.
+--     batch_id         the released batch.
 --
--- Slice S7a builds the gate up to the wait: freezing, the evaluator, grant
--- audit records, the per-turn request cap, the "no approval UI" path and
--- request creation in the batch record. The wait, the release transaction and
--- the end-of-turn marker are slice S7b. Until then gate._await_release closes
--- every batch that needs a decision or a grant as interrupted, so a call that
--- needs approval never runs.
+-- Flow: freeze, evaluate, then the limit and "no approval UI" paths, or the
+-- requests and the wait (gate._wait), then one release transaction
+-- (architecture 4.5 steps 3 to 9). A batch that needs no decision goes
+-- straight to the release.
 local gate = {}
 
 gate.KIND = {
@@ -146,6 +155,19 @@ local function delegate_target_id(validated: any): any
     return nil
 end
 
+-- The freeze environment of one call (freeze.lua): the registry entries are
+-- read now, so a release recheck sees the deployment that would run.
+local function freeze_env(ctx: any, op: any, item: any, session_context: any): any
+    return {
+        session_context = session_context,
+        row_type = item.row_type,
+        delegation_func_id = ctx.config and ctx.config.delegation_func_id,
+        entry = registry_get(item.registry_id),
+        target_entry = item.target_entry,
+        browser_binding = browser_binding(op, item.registry_id),
+    }
+end
+
 -- Freezes every call in model order. Returns the items, or nil and an error
 -- when a call has no stored row.
 local function freeze_calls(ctx: any, op: any, env: any): ({any}?, string?)
@@ -170,14 +192,7 @@ local function freeze_calls(ctx: any, op: any, env: any): ({any}?, string?)
         else
             local target_id = row_type == consts.MSG_TYPE.DELEGATION and delegate_target_id(validated) or nil
             item.target_entry = target_id and registry_get(target_id) or nil
-            frozen, failure = freeze.call(validated, {
-                session_context = env.session_context,
-                row_type = row_type,
-                delegation_func_id = ctx.config and ctx.config.delegation_func_id,
-                entry = registry_get(item.registry_id),
-                target_entry = item.target_entry,
-                browser_binding = browser_binding(op, item.registry_id),
-            })
+            frozen, failure = freeze.call(validated, freeze_env(ctx, op, item, env.session_context))
         end
         if frozen then
             item.frozen = frozen
@@ -327,7 +342,7 @@ end
 -- Assigns approval IDs and builds the record of every call that gets one:
 -- asks (state `ask_state`), and grant audit records.
 local function build_records(ctx: any, op: any, binding: any, items: {any}, effective: any,
-                             ask_state: string): ({any}?, string?)
+                             ask_state: string, now: number): ({any}?, string?)
     local agent_id = type(op.agent) == "table" and op.agent.id or (ctx.config and ctx.config.agent_id)
     local agent_title = entry_title(registry_get(agent_id), agent_id)
     local by_call = {}
@@ -339,7 +354,6 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, effe
             by_call[item.call_id] = item
         end
     end
-    local now = now_unix()
     local records = {}
     for _, item in ipairs(items) do
         if item.approval_id then
@@ -476,33 +490,61 @@ local function publish_settlements(ctx: any, settled: {any})
     end
 end
 
-local function publish_records(ctx: any, items: {any}, records: {any}, server_now: string)
+-- Publishes the tool_approval event of every record whose committed revision
+-- is newer than the last one published for it (run.published), in the order
+-- given. A public call that a grant allows gets no tool_approval event; its
+-- function_call or function_error carries the audit (4.8). Callers publish
+-- these events before any settlement of the same calls, so a client knows a
+-- private or delegation row's type before its function_error arrives.
+local function publish_records(ctx: any, run: any, records: {any}?)
     local names = {}
-    for _, item in ipairs(items) do names[item.message_id] = item.name end
-    for _, record in ipairs(records) do
-        local public_grant = record.decided_via == "grant" and record.row_type == consts.MSG_TYPE.FUNCTION
-        -- A public call a grant allows has no tool_approval event; its
-        -- function_call carries the audit (4.8).
-        if not public_grant then
-            events.publish_record(ctx.upstream, record, names[record.tool_message_id], server_now)
+    for _, item in ipairs(run.items) do names[item.message_id] = item.name end
+    local server_now = approval_repo.now()
+    for _, record in ipairs(records or {}) do
+        local seen = run.published[record.approval_id]
+        if seen == nil or (tonumber(record.revision) or 0) > seen then
+            run.published[record.approval_id] = tonumber(record.revision) or 0
+            local public_grant = record.decided_via == "grant" and record.row_type == consts.MSG_TYPE.FUNCTION
+            if not public_grant then
+                events.publish_record(ctx.upstream, record, names[record.tool_message_id], server_now)
+            end
         end
     end
 end
 
+local function all_calls(items: {any}): {[string]: boolean}
+    local all = {}
+    for _, item in ipairs(items) do all[item.call_id] = true end
+    return all
+end
+
+-- The result for a batch whose session (and so its rows) is gone: nothing is
+-- written, nothing runs, and the turn ends.
+local function deleted_result(items: {any}): any
+    return { fenced = true, end_turn = true, end_reason = "deleted", skip_checkpoint = true,
+        settled = all_calls(items), deleted = true }
+end
+
+local function session_gone(err: any): boolean
+    local code = approval_repo.conflict_code(err)
+    return approval_repo.is_not_found(err) and (code == "session" or code == "batch")
+end
+
 -- Closes the batch with `reason`, settles every call row of the batch in one
 -- transaction (session row locked first), clears the activity, then
--- publishes. `requests` are records to create in the same transaction (the
--- limit and unavailable paths); nil when they exist already.
-local function close_and_settle(ctx: any, binding: any, items: {any}, reason: string, requests: {any}?,
-                                suspend: any, had_activity: boolean): (any, string?)
+-- publishes the record events and then the settlements. `requests` are
+-- records to create in the same transaction (the limit and unavailable
+-- paths). A closure that an earlier writer (Stop, finish, a stop denial)
+-- committed keeps its reason.
+local function close_and_settle(ctx: any, run: any, reason: string, requests: {any}?, suspend: any): (any, string?)
+    local items = run.items
+    if reason == "deleted" then return deleted_result(items), nil end
     local outcome, err = approval_repo.transact(ctx.session_id, function(dbtx)
-        local created = {}
         if requests and #requests > 0 then
-            local stored, store_err = store_records(dbtx, ctx, binding, requests, suspend)
+            local stored, store_err = store_records(dbtx, ctx, run.binding, requests, suspend)
             if not stored then return nil, store_err end
-            created = stored.records or {}
         end
-        local closed, close_err, latest = approval_repo.close_batch(dbtx, binding.batch_id, reason)
+        local closed, close_err, latest = approval_repo.close_batch(dbtx, run.binding.batch_id, reason)
         if not closed then return nil, close_err, latest end
         if closed.state ~= approval_repo.BATCH_STATE.CLOSED then
             return nil, "The approval batch was released; its calls are not settled here"
@@ -510,7 +552,7 @@ local function close_and_settle(ctx: any, binding: any, items: {any}, reason: st
         local close_reason = closed.close_reason or reason
         local close = events.CLOSE[close_reason]
         if not close then return nil, "Unknown batch close reason: " .. tostring(close_reason) end
-        local records, list_err = approval_repo.list_by_batch(dbtx, ctx.session_id, binding.batch_id)
+        local records, list_err = approval_repo.list_by_batch(dbtx, ctx.session_id, run.binding.batch_id)
         if not records then return nil, list_err end
         local by_message = {}
         for _, record in ipairs(records) do by_message[record.tool_message_id] = record end
@@ -529,74 +571,30 @@ local function close_and_settle(ctx: any, binding: any, items: {any}, reason: st
             settled[#settled + 1] = { item = item, reason = call_reason, record = record, cancelled = cancelled }
         end
         local activity = nil
-        if had_activity then
+        if run.had_activity then
             local cleared, activity_err = approval_repo.write_activity(dbtx, ctx.session_id, nil)
             if not cleared then return nil, activity_err end
             activity = cleared
         end
-        -- Records to announce: the ones this closure changed, and the ones it
-        -- created (their first event shows the final state).
-        local changed, seen = {}, {}
-        for _, record in ipairs(closed.changed or {}) do seen[record.approval_id] = true end
-        for _, record in ipairs(records) do
-            if seen[record.approval_id] then changed[#changed + 1] = record end
-        end
-        for _, record in ipairs(created) do
-            if not seen[record.approval_id] then changed[#changed + 1] = by_message[record.tool_message_id] end
-        end
-        return { close_reason = close_reason, close = close, settled = settled, changed = changed, activity = activity }
+        return { close_reason = close_reason, close = close, settled = settled, records = records, activity = activity }
     end)
-    if not outcome then return nil, tostring(err) end
+    if not outcome then
+        if session_gone(err) then return deleted_result(items), nil end
+        return nil, tostring(err)
+    end
+    run.had_activity = false
 
-    publish_records(ctx, items, outcome.changed, approval_repo.now())
+    publish_records(ctx, run, outcome.records)
     publish_settlements(ctx, outcome.settled)
     events.publish_activity(ctx.upstream, outcome.activity)
 
-    local all = {}
-    for _, item in ipairs(items) do all[item.call_id] = true end
     return {
         fenced = true,
         end_turn = outcome.close.end_turn == true,
         end_reason = outcome.close_reason,
         skip_checkpoint = outcome.close.skip_checkpoint == true,
-        settled = all,
+        settled = all_calls(items),
     }, nil
-end
-
--- Waits for the decisions of a batch that needs them and releases it
--- (architecture 4.5 steps 8 and 9). Returns { close_reason } when the batch
--- must close instead.
---
--- Slice S7b builds the wait and the release transaction. Until then no
--- batch that needs a decision or a grant is released: it closes as
--- interrupted (model reason `interrupted`), so no gated call runs.
-function gate._await_release(ctx: any, _pending: any): any
-    logger:warn("tool approval wait is not available in this build; the batch is closed and no call runs", {
-        session_id = ctx.session_id, batch_id = _pending and _pending.batch_id,
-    })
-    return { close_reason = "finish" }
-end
-
--- Settles the given NOT_RUN items of a batch that otherwise runs: one
--- transaction, then their events.
-local function settle_some(ctx: any, items: {any}, suspend: any): (boolean?, string?)
-    local settled = {}
-    local _, err = approval_repo.transact(ctx.session_id, function(dbtx)
-        local suspended, suspend_err = apply_suspensions(dbtx, ctx.session_id, suspend)
-        if not suspended then return nil, suspend_err end
-        for _, item in ipairs(items) do
-            if item.kind == KIND.NOT_RUN then
-                local _, row_err = message_repo.update_metadata_tx(dbtx, ctx.session_id, item.message_id,
-                    settlement(item, item.reason, nil, nil, false))
-                if row_err then return nil, row_err end
-                settled[#settled + 1] = { item = item, reason = item.reason }
-            end
-        end
-        return true
-    end)
-    if err then return nil, tostring(err) end
-    publish_settlements(ctx, settled)
-    return true, nil
 end
 
 local function live_surfaces(ctx: any): number
@@ -607,6 +605,328 @@ end
 local function ever_declared(ctx: any): boolean
     local stored = ctx.config and ctx.config.tool_approval
     return type(stored) == "table" and stored.ui_declared_at ~= nil
+end
+
+-- A Stop accepted for this turn: the inbox committed it (stop_requested), the
+-- wake hub recorded it for the turn, or the command bus is draining a Stop.
+local function stop_accepted(ctx: any, turn_id: any): boolean
+    if ctx.stop_requested == true then return true end
+    local hub = ctx.approval_wake
+    if hub and turn_id ~= nil and hub.stopped_turn == turn_id then return true end
+    local coordinator = ctx.coordinator
+    return type(coordinator) == "table" and coordinator.state == "draining_stop"
+end
+
+-- Signals the inbox accepted that end the wait or forbid a release, in the
+-- order they win: deletion, exit, Stop, finish. Returns a close reason or nil.
+local function signalled(ctx: any, turn_id: any): string?
+    local hub = ctx.approval_wake
+    if hub and hub:is_set("deleted") then return "deleted" end
+    if hub and hub:is_set("exiting") then return "exit" end
+    if stop_accepted(ctx, turn_id) then return "stop" end
+    if hub and hub:is_set("finish") then return "finish" end
+    return nil
+end
+
+-- The committed state of a waiting batch: { close_reason } when it must
+-- close, { release = true } when every request is decided, nil while a
+-- request is still pending.
+local function committed_outcome(ctx: any, run: any): (any, string?)
+    local batch, err = approval_repo.get_batch(nil, run.binding.batch_id)
+    if not batch then
+        if session_gone(err) then return { close_reason = "deleted" }, nil end
+        return nil, tostring(err)
+    end
+    if batch.state == approval_repo.BATCH_STATE.CLOSED then
+        return { close_reason = batch.close_reason or "finish" }, nil
+    end
+    if batch.state ~= approval_repo.BATCH_STATE.OPEN then
+        return nil, "The approval batch was released while its requests waited"
+    end
+    local fence, fence_err = approval_repo.read_turn_fence(nil, ctx.session_id)
+    if fence_err then
+        if session_gone(fence_err) then return { close_reason = "deleted" }, nil end
+        return nil, tostring(fence_err)
+    end
+    if type(fence) == "table" and batch.turn_id ~= nil and fence.turn_id == batch.turn_id then
+        return { close_reason = fence.reason }, nil
+    end
+    local steering, steering_err = approval_repo.has_pending_input(nil, ctx.session_id)
+    if steering_err then return nil, tostring(steering_err) end
+    if steering then return { close_reason = "steering" }, nil end
+    local records, list_err = approval_repo.list_by_batch(nil, ctx.session_id, run.binding.batch_id)
+    if not records then return nil, tostring(list_err) end
+    local pending = false
+    for _, record in ipairs(records) do
+        if record.state == approval_repo.STATE.DENIED and record["then"] == "stop" then
+            return { close_reason = "stop_denial" }, nil
+        end
+        if record.state == approval_repo.STATE.PENDING then pending = true end
+    end
+    if pending then return nil, nil end
+    return { release = true }, nil
+end
+
+local function after(seconds: number): any
+    local ms = math.max(1, math.floor(seconds * 1000))
+    return time.after(tostring(ms) .. "ms")
+end
+
+-- The wait of a batch whose requests need decisions (architecture 4.5 step
+-- 8). The waiter was armed before the requests were written. After every
+-- wake the gate rereads the committed state; no transaction or lock is held
+-- while it waits. It selects on the waiter (decision, revocation, steering,
+-- finish, deletion, exit, surface changes, Stop), the command bus Stop
+-- channel, the deadline and, while no approval UI surface is live, the grace
+-- period. Returns { close_reason } or { release = true }.
+gate.GRACE_SECONDS = 120
+
+function gate._wait(ctx: any, run: any, waiting: any): (any, string?)
+    local grace_from = nil
+    while true do
+        local reason = signalled(ctx, run.turn_id)
+        if reason then return { close_reason = reason }, nil end
+        local outcome, err = committed_outcome(ctx, run)
+        if err then return nil, err end
+        if outcome then return outcome, nil end
+        local now = now_unix()
+        if now >= waiting.deadline then return { close_reason = "deadline" }, nil end
+        local cases = {}
+        if waiting.waiter then cases[#cases + 1] = waiting.waiter.channel:case_receive() end
+        local coordinator = ctx.coordinator
+        if type(coordinator) == "table" and coordinator.cancel and coordinator.state ~= "draining_stop" then
+            cases[#cases + 1] = coordinator.cancel:case_receive()
+        end
+        cases[#cases + 1] = after(waiting.deadline - now):case_receive()
+        if live_surfaces(ctx) == 0 then
+            grace_from = grace_from or now
+            local left = grace_from + gate.GRACE_SECONDS - now
+            if left <= 0 then return { close_reason = "grace" }, nil end
+            cases[#cases + 1] = after(left):case_receive()
+        else
+            grace_from = nil
+        end
+        channel.select(cases)
+        if waiting.waiter then waiting.waiter.flags = {} end
+    end
+end
+
+-- The Attention browser binding lasts 120 s from the turn's binding
+-- (ui_action_broker); a call released later would reach a Host the person
+-- did not review (architecture 4.10). bound_at is stamped by agent_step; a
+-- binding without it can't be shown fresh.
+gate.BINDING_TTL_SECONDS = 120
+gate.BINDING_MARGIN_SECONDS = 5
+
+local function binding_fresh(op: any, now: number): boolean
+    local runtime = op.ui_action_runtime
+    local bound_at = type(runtime) == "table" and tonumber(runtime.bound_at) or nil
+    if not bound_at then return false end
+    return now < bound_at + gate.BINDING_TTL_SECONDS - gate.BINDING_MARGIN_SECONDS
+end
+
+-- The release recheck of one approved call (4.5 step 9). Returns nil when
+-- the call may run, else the disposition reason: `revoked` when the grant
+-- that allowed it is no longer active, `intent_changed` when the tool entry,
+-- the effective context, the delegate target or the browser binding differ
+-- from what was approved.
+local function recheck(dbtx: any, ctx: any, op: any, item: any, record: any, session_context: any, now: number): string?
+    if record.decided_via == "grant" then
+        local grant = approval_repo.get_grant(dbtx, record.grant_id)
+        if type(grant) ~= "table" or grant.session_id ~= ctx.session_id
+            or grant.status ~= approval_repo.GRANT_STATUS.ACTIVE then
+            return "revoked"
+        end
+    end
+    local frozen = freeze.call(item.validated, freeze_env(ctx, op, item, session_context))
+    if not frozen or frozen.intent_digest ~= record.intent_digest then return "intent_changed" end
+    local fingerprint = frozen.identity and frozen.identity.fingerprint or frozen.fingerprint
+    if fingerprint ~= record.fingerprint then return "intent_changed" end
+    if frozen.browser_binding ~= nil then
+        if frozen.browser_binding.bound ~= true or not binding_fresh(op, now) then return "intent_changed" end
+    end
+    return nil
+end
+
+local DISPOSITION_REASON = {
+    revoked = events.REASON.REVOKED,
+    intent_changed = events.REASON.CHANGED_BEFORE_RUN,
+}
+
+-- The release transaction of a batch (4.5 step 9): with the session row
+-- locked, it refuses a closed batch, a turn fenced by Stop or finish and a
+-- batch with a pending steering input (closing it), rechecks every approved
+-- call, writes `dispatched` or `not_run` for each record, marks the batch
+-- released and settles the calls that do not run. The batch cancellation
+-- channel is registered on the wake hub before it begins. Returns the gate
+-- result for process_tools.
+local function release(ctx: any, op: any, env: any, run: any, suspend: any): (any, string?)
+    local binding, items = run.binding, run.items
+    local hub = ctx.approval_wake
+    local cancel = nil
+    if hub then
+        cancel = hub:register_batch_cancel(binding.batch_id, run.turn_id)
+    elseif type(ctx.coordinator) == "table" then
+        cancel = ctx.coordinator.cancel
+    end
+    local function unregister()
+        if hub then hub:unregister_batch_cancel(binding.batch_id) end
+    end
+    local reason = signalled(ctx, run.turn_id)
+    if not reason and hub and hub:batch_cancelled(binding.batch_id) then reason = "stop" end
+    if reason then
+        unregister()
+        return close_and_settle(ctx, run, reason, nil, suspend)
+    end
+
+    local session_context = env.session_context
+    if type(env.read_session_context) == "function" then
+        local fresh, context_err = env.read_session_context()
+        if context_err then
+            unregister()
+            return nil, "Failed to read the session context for the release: " .. tostring(context_err)
+        end
+        session_context = fresh
+    end
+    local now = now_unix()
+    local outcome, err = approval_repo.transact(ctx.session_id, function(dbtx)
+        local batch, batch_err = approval_repo.get_batch(dbtx, binding.batch_id)
+        if not batch then return nil, batch_err end
+        if batch.state == approval_repo.BATCH_STATE.CLOSED then
+            return { close_reason = batch.close_reason or "finish" }
+        end
+        if batch.state ~= approval_repo.BATCH_STATE.OPEN then return nil, "The approval batch was already released" end
+        local fence, fence_err = approval_repo.read_turn_fence(dbtx, ctx.session_id)
+        if fence_err then return nil, fence_err end
+        local close_reason = nil
+        if type(fence) == "table" and batch.turn_id ~= nil and fence.turn_id == batch.turn_id then
+            close_reason = fence.reason
+        else
+            local steering, steering_err = approval_repo.has_pending_input(dbtx, ctx.session_id)
+            if steering_err then return nil, steering_err end
+            if steering then close_reason = "steering" end
+        end
+        local records, list_err = approval_repo.list_by_batch(dbtx, ctx.session_id, binding.batch_id)
+        if not records then return nil, list_err end
+        for _, record in ipairs(records) do
+            if record.state == approval_repo.STATE.PENDING then
+                return nil, "A request of the batch is still pending at release"
+            end
+            if not close_reason and record.state == approval_repo.STATE.DENIED and record["then"] == "stop" then
+                close_reason = "stop_denial"
+            end
+        end
+        if close_reason then
+            local closed, close_err, latest = approval_repo.close_batch(dbtx, binding.batch_id, close_reason)
+            if not closed then return nil, close_err, latest end
+            return { close_reason = closed.close_reason or close_reason }
+        end
+        local suspended, suspend_err = apply_suspensions(dbtx, ctx.session_id, suspend)
+        if not suspended then return nil, suspend_err end
+
+        local by_message = {}
+        for _, record in ipairs(records) do by_message[record.tool_message_id] = record end
+        local decisions = {}
+        for _, item in ipairs(items) do
+            local record = by_message[item.message_id]
+            if record then
+                local disposition, why = approval_repo.DISPOSITION.NOT_RUN, nil
+                if record.state == approval_repo.STATE.APPROVED then
+                    why = recheck(dbtx, ctx, op, item, record, session_context, now)
+                    if not why then disposition = approval_repo.DISPOSITION.DISPATCHED end
+                elseif record.state == approval_repo.STATE.DENIED then
+                    why = "denied"
+                else
+                    return nil, "Approval " .. tostring(record.approval_id) .. " is " .. tostring(record.state)
+                        .. " at release"
+                end
+                local written, write_err, latest = approval_repo.set_disposition(dbtx, ctx.session_id,
+                    record.approval_id, disposition, why, record.revision)
+                if not written then return nil, write_err, latest end
+                by_message[item.message_id] = written
+                decisions[item.message_id] = why
+            end
+        end
+        local released, release_err, latest = approval_repo.release_batch(dbtx, binding.batch_id)
+        if not released then return nil, release_err, latest end
+
+        local settled, changed = {}, {}
+        for _, item in ipairs(items) do
+            local record = by_message[item.message_id]
+            if record then changed[#changed + 1] = record end
+            local why = decisions[item.message_id]
+            local call_reason, feedback = nil, nil
+            if item.kind == KIND.NOT_RUN then
+                call_reason = item.reason
+            elseif record and record.disposition == approval_repo.DISPOSITION.NOT_RUN then
+                if why == "denied" then
+                    call_reason, feedback = events.REASON.DENIED_BY_USER, record.reason
+                else
+                    call_reason = DISPOSITION_REASON[why] or events.REASON.CHANGED_BEFORE_RUN
+                end
+            end
+            local metadata
+            if call_reason then
+                metadata = settlement(item, call_reason, feedback, record, false)
+                settled[#settled + 1] = { item = item, reason = call_reason, record = record }
+            elseif record then
+                metadata = { approval = approval_repo.projection(record) }
+            end
+            if metadata then
+                local _, row_err = message_repo.update_metadata_tx(dbtx, ctx.session_id, item.message_id, metadata)
+                if row_err then return nil, row_err end
+            end
+        end
+        local activity = nil
+        if run.had_activity then
+            local cleared, activity_err = approval_repo.write_activity(dbtx, ctx.session_id, nil)
+            if not cleared then return nil, activity_err end
+            activity = cleared
+        end
+        return { released = true, settled = settled, changed = changed, records = by_message, activity = activity }
+    end)
+    if not outcome then
+        unregister()
+        if session_gone(err) then return deleted_result(items), nil end
+        return nil, tostring(err)
+    end
+    if outcome.close_reason then
+        unregister()
+        return close_and_settle(ctx, run, outcome.close_reason, nil, nil)
+    end
+    run.had_activity = false
+
+    publish_records(ctx, run, outcome.changed)
+    publish_settlements(ctx, outcome.settled)
+    events.publish_activity(ctx.upstream, outcome.activity)
+
+    local result: any = {
+        fenced = false, end_turn = false, skip_checkpoint = false,
+        settled = {}, released = {}, precomputed = {}, approvals = {},
+        cancel = cancel, session_context = session_context, batch_id = binding.batch_id,
+    }
+    for _, entry in ipairs(outcome.settled) do
+        result.settled[entry.item.call_id] = true
+        -- The caller hands these to the result listener and after-execute
+        -- wrappers like real results (options.precomputed_results); the call
+        -- row is already settled with the structured result.
+        result.precomputed[entry.item.call_id] = {
+            error = events.not_run_text(entry.reason),
+            not_run = entry.reason,
+        }
+    end
+    for _, item in ipairs(items) do
+        local record = outcome.records[item.message_id]
+        if item.kind == KIND.RUN or item.kind == KIND.ERROR then
+            result.released[item.call_id] = true
+        elseif record and record.disposition == approval_repo.DISPOSITION.DISPATCHED then
+            result.released[item.call_id] = true
+            result.approvals[item.call_id] = {
+                state = record.state, decided_via = record.decided_via, grant_id = record.grant_id,
+            }
+        end
+    end
+    return result, nil
 end
 
 function gate.run(ctx: any, op: any, env: any): (any, string?)
@@ -638,6 +958,8 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
 
     local items, freeze_err = freeze_calls(ctx, op, env)
     if not items then return nil, freeze_err end
+    local run = { binding = binding, items = items, published = {}, had_activity = false,
+        turn_id = binding.turn_id or gate.turn_id(ctx, op) }
     local history, history_err = turn_history(ctx, binding.turn_id)
     if not history then return nil, history_err end
     local evaluated, eval_err = evaluate(ctx, items, effective, history)
@@ -650,46 +972,33 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
     end
 
     local batch, batch_err = approval_repo.get_batch(nil, binding.batch_id)
-    if not batch then return nil, tostring(batch_err) end
+    if not batch then
+        if session_gone(batch_err) then return deleted_result(items), nil end
+        return nil, tostring(batch_err)
+    end
     if batch.state == approval_repo.BATCH_STATE.CLOSED then
         -- Closed before the gate (Stop, finish or steering committed first):
         -- nothing of the batch runs and no request is created.
-        return close_and_settle(ctx, binding, items, batch.close_reason or "finish", nil, nil, false)
+        return close_and_settle(ctx, run, batch.close_reason or "finish", nil, nil)
     end
     if batch.state ~= approval_repo.BATCH_STATE.OPEN then
         return nil, "The approval batch is " .. tostring(batch.state) .. " before the gate"
     end
 
     if asks == 0 and grants == 0 then
-        -- Nothing needs a decision: the round runs as before, except the calls
-        -- the gate settled itself.
-        local settled, released = {}, {}
-        local any_settled = false
-        for _, item in ipairs(items) do
-            if item.kind == KIND.NOT_RUN then
-                settled[item.call_id] = true
-                any_settled = true
-            elseif item.kind == KIND.RUN or item.kind == KIND.ERROR then
-                released[item.call_id] = true
-            else
-                return nil, "Unexpected tool approval outcome for " .. tostring(item.call_id)
-            end
-        end
-        if any_settled or #(evaluated.suspend or {}) > 0 then
-            local ok, settle_err = settle_some(ctx, items, evaluated.suspend)
-            if not ok then return nil, settle_err end
-        end
-        return { fenced = false, end_turn = false, skip_checkpoint = false, settled = settled,
-            released = released }, nil
+        -- Nothing needs a decision: the batch goes straight to the release
+        -- transaction, which also settles the calls the gate refused itself.
+        return release(ctx, op, env, run, evaluated.suspend)
     end
 
+    local now = now_unix()
     local limit = tonumber(effective.max_requests_per_turn) or 0
     if asks > 0 and history.requested + asks > limit then
         -- Per-turn cap (4.5 step 5): only new pending requests count. Every
         -- member settles as not run with reason limit; the turn ends.
-        local requests, build_err = build_records(ctx, op, binding, items, effective, approval_repo.STATE.LIMITED)
+        local requests, build_err = build_records(ctx, op, binding, items, effective, approval_repo.STATE.LIMITED, now)
         if not requests then return nil, build_err end
-        local result, close_err = close_and_settle(ctx, binding, items, "limit", requests, evaluated.suspend, false)
+        local result, close_err = close_and_settle(ctx, run, "limit", requests, evaluated.suspend)
         if not result then return nil, close_err end
         if result.end_reason == "limit" then
             events.publish_notice(ctx.upstream, ctx.turn_state, gate.turn_id(ctx, op), events.NOTICE.LIMIT)
@@ -700,10 +1009,10 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
     if asks > 0 and live_surfaces(ctx) == 0 and not ever_declared(ctx) then
         -- No client ever declared an approval UI for this session (4.5 step 6):
         -- the calls that ask settle at once; one notice per turn; the turn ends.
-        -- A session that declared before waits for the grace period (S7b).
-        local requests, build_err = build_records(ctx, op, binding, items, effective, approval_repo.STATE.UNAVAILABLE)
+        local requests, build_err = build_records(ctx, op, binding, items, effective,
+            approval_repo.STATE.UNAVAILABLE, now)
         if not requests then return nil, build_err end
-        local result, close_err = close_and_settle(ctx, binding, items, "unavailable", requests, evaluated.suspend, false)
+        local result, close_err = close_and_settle(ctx, run, "unavailable", requests, evaluated.suspend)
         if not result then return nil, close_err end
         if result.end_reason == "unavailable" then
             events.publish_notice(ctx.upstream, ctx.turn_state, gate.turn_id(ctx, op), events.NOTICE.UNAVAILABLE)
@@ -714,32 +1023,48 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
     -- Requests (4.5 step 7): the waiter is armed before anything is written,
     -- then all requests, grant audit records, row projections and the
     -- activity commit in one transaction, then the events are published.
-    local requests, build_err = build_records(ctx, op, binding, items, effective, approval_repo.STATE.PENDING)
+    local requests, build_err = build_records(ctx, op, binding, items, effective, approval_repo.STATE.PENDING, now)
     if not requests then return nil, build_err end
     local hub = ctx.approval_wake
-    local waiter = hub and hub:arm(binding.batch_id) or nil
+    local waiter = (asks > 0 and hub) and hub:arm(binding.batch_id) or nil
+    local function disarm()
+        if hub and waiter then hub:disarm(waiter) end
+    end
     local stored, store_err = approval_repo.transact(ctx.session_id, function(dbtx)
         return store_records(dbtx, ctx, binding, requests, evaluated.suspend)
     end)
     if not stored then
-        if hub then hub:disarm(waiter) end
+        disarm()
+        if session_gone(store_err) then return deleted_result(items), nil end
         return nil, tostring(store_err)
     end
     if stored.closed then
         -- A closure committed between the read above and the write.
-        if hub then hub:disarm(waiter) end
-        return close_and_settle(ctx, binding, items, stored.closed.close_reason or "finish", nil, nil, false)
+        disarm()
+        return close_and_settle(ctx, run, stored.closed.close_reason or "finish", nil, nil)
     end
-    publish_records(ctx, items, stored.records, approval_repo.now())
+    run.had_activity = stored.activity ~= nil
+    publish_records(ctx, run, stored.records)
     events.publish_activity(ctx.upstream, stored.activity)
 
-    local outcome = gate._await_release(ctx, { batch_id = binding.batch_id, waiter = waiter,
-        records = stored.records, items = items, policy = effective })
-    if hub then hub:disarm(waiter) end
-    if type(outcome) ~= "table" or type(outcome.close_reason) ~= "string" then
-        return nil, "The approval wait returned no outcome"
+    if asks > 0 then
+        local outcome, wait_err = gate._wait(ctx, run, {
+            waiter = waiter,
+            deadline = now + (tonumber(effective.timeout_seconds) or 900),
+        })
+        disarm()
+        if not outcome then return nil, wait_err end
+        if outcome.close_reason then
+            local result, close_err = close_and_settle(ctx, run, outcome.close_reason, nil, nil)
+            -- No surface came back within the grace period: the same notice
+            -- as a session that never declared one (4.5 step 6).
+            if result and result.end_reason == "grace" then
+                events.publish_notice(ctx.upstream, ctx.turn_state, gate.turn_id(ctx, op), events.NOTICE.UNAVAILABLE)
+            end
+            return result, close_err
+        end
     end
-    return close_and_settle(ctx, binding, items, outcome.close_reason, nil, nil, stored.activity ~= nil)
+    return release(ctx, op, env, run, nil)
 end
 
 return gate

@@ -49,6 +49,7 @@ type SessionContext = {
     model_step_at: number?,
     model_cache_ttl: string?,
     model_cache_expires_at: number?,
+    approval_turn_end: any?,
 }
 
 type AttentionToolContext = {
@@ -895,6 +896,17 @@ function message_handlers.ended_by_form(ctx): boolean
     return ctx.form_turn_id == (state.id or state.message_id)
 end
 
+-- Whether the approval gate ended the current turn (EE2-2710, architecture
+-- 4.5 step 12): a stop denial, expiry, finish, deletion, exit, no approval UI
+-- or the request cap. Such a turn takes no further step; pending steering
+-- joins the next user turn (flush_held is unchanged).
+function message_handlers.ended_by_approval(ctx): boolean
+    local state = ctx.turn_state
+    local marker = ctx.approval_turn_end
+    if type(state) ~= "table" or type(marker) ~= "table" or marker.turn_id == nil then return false end
+    return marker.turn_id == (state.id or state.message_id)
+end
+
 -- The interaction a turn start or end persists, resolved against the state
 -- it is about to commit.
 local function interaction_for(ctx: any, turn_state: any, status: any, stop_requested: any)
@@ -963,7 +975,7 @@ end
 function message_handlers.finish_turn(ctx, opts)
     local state = ctx.turn_state
     local ends_normally = state and state.active and not is_turn_blocked(ctx)
-    if ends_normally and not message_handlers.ended_by_form(ctx) then
+    if ends_normally and not message_handlers.ended_by_form(ctx) and not message_handlers.ended_by_approval(ctx) then
         local updates, err = answer_admission.prepare_pending_inputs(ctx, nil)
         if not updates then return nil, err or "Failed to read pending input" end
         if #updates > 0 then
@@ -1601,6 +1613,11 @@ function message_handlers.agent_step(ctx, op)
     end
     if op.from_user and type(ctx.activate_attention_turn) == "function" then
         op.ui_action_runtime = ctx.activate_attention_turn(op)
+        -- When the browser binding started (it lasts 120 s): the approval
+        -- release refuses a gated UI action whose binding has expired.
+        if type(op.ui_action_runtime) == "table" and op.ui_action_runtime.bound_at == nil then
+            op.ui_action_runtime.bound_at = time.now():unix()
+        end
     end
     local input_updates, input_err = answer_admission.prepare_pending_inputs(ctx,
         op.from_user and op.message_id or nil)
@@ -2532,13 +2549,28 @@ function message_handlers.process_tools(ctx, op)
     local gated, gate_err = message_handlers._approval_gate(ctx, op, {
         validated_tools = validated_tools,
         session_context = session_context,
+        -- The release rereads the context, and dispatch uses what it rechecked.
+        read_session_context = function()
+            local fresh, read_err = ctx.reader:get_full_context()
+            if read_err then return nil, read_err end
+            return with_agent_run_context(ctx :: SessionContext, fresh or {}, active_agent), nil
+        end,
     })
     if gate_err then return fail_remaining(1, "Tool approval check failed: " .. tostring(gate_err)) end
     gated = gated or {}
     if gated.fenced then
-        -- The gate settled every call of the batch; none runs.
-        local cancelled, cancel_err = settle_behavior_round(ctx, op, true)
-        if not cancelled then return nil, cancel_err end
+        -- The gate settled every call of the batch; none runs. A turn the gate
+        -- ended takes no further step, and pending steering waits for the
+        -- next user turn (ended_by_approval in finish_turn).
+        if gated.end_turn then
+            local marker: any = { turn_id = approval_gate.turn_id(ctx, op), reason = gated.end_reason }
+            ctx.approval_turn_end = marker
+        end
+        -- A deleted session has no rows left to mark.
+        if not gated.deleted then
+            local cancelled, cancel_err = settle_behavior_round(ctx, op, true)
+            if not cancelled then return nil, cancel_err end
+        end
         local next_ops = {}
         local queued, queue_err = queue_round_end(ctx, op, next_ops, gated.end_turn == true,
             gated.skip_checkpoint == true)
@@ -2562,14 +2594,34 @@ function message_handlers.process_tools(ctx, op)
             and not (tool_call.meta and tool_call.meta.private) then
             ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
                 message_id = op.call_message_ids[call_id],
-                function_name = tool_call.name
+                function_name = tool_call.name,
+                approval = gated.approvals and gated.approvals[call_id] or nil,
             })
             end
     end
 
+    -- After an approval release: the context the release rechecked, the
+    -- batch cancellation channel (only Stop, exit and deletion close it), and
+    -- the settled calls as precomputed results when the caller supports them,
+    -- so the result listener and after-execute wrappers see every call.
+    -- Without the feature the caller gets only the released calls.
+    if gated.session_context ~= nil then session_context = gated.session_context end
+    local cancel = gated.cancel or (ctx.coordinator and ctx.coordinator.cancel)
+    local execute_options = nil
+    local features = caller.FEATURES
+    if gated.precomputed and next(gated.precomputed) ~= nil
+        and type(features) == "table" and features.precomputed_results then
+        run_tools = run_tools or {}
+        for call_id in pairs(gated.precomputed) do
+            if validated_tools and validated_tools[call_id] then run_tools[call_id] = validated_tools[call_id] end
+        end
+        execute_options = { precomputed_results = gated.precomputed }
+    end
+
     local executed, results, execute_err = pcall(function()
-        return caller:execute(session_context, run_tools, ctx.coordinator and ctx.coordinator.cancel)
+        return caller:execute(session_context, run_tools, cancel, execute_options)
     end)
+    if gated.batch_id and ctx.approval_wake then ctx.approval_wake:unregister_batch_cancel(gated.batch_id) end
     if not executed then
         execute_err = tostring(results)
         results = nil
@@ -2577,7 +2629,7 @@ function message_handlers.process_tools(ctx, op)
     local reported_results = type(results) == "table" and results or {}
     results = {}
     for call_id, result_data in pairs(reported_results) do
-        if op.call_message_ids[call_id] and type(result_data) == "table"
+        if op.call_message_ids[call_id] and not settled_by_gate[call_id] and type(result_data) == "table"
             and type(result_data.tool_call) == "table" then
             result_data.tool_call.message_id = op.call_message_ids[call_id]
             results[call_id] = result_data

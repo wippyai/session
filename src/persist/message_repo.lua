@@ -482,6 +482,17 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
             return nil, "Failed to create message: " .. tostring(insert_err)
         end
 
+        -- A protected session's Stop (EE2-2710, architecture 4.5 step 9):
+        -- the turn fence and the closure of the turn's approval batches
+        -- commit with the Stop itself, so no batch of the turn is released
+        -- or created open after it.
+        local fence = session_updates.approval_fence
+        if type(fence) == "table" and type(fence.turn_id) == "string" and fence.turn_id ~= "" then
+            local _, fence_err = approval_repo.write_turn_fence(dbtx, session_id, fence.turn_id, "stop")
+            if fence_err then return nil, fence_err end
+            local _, close_err = approval_repo.close_turn_batches(dbtx, session_id, fence.turn_id, "stop")
+            if close_err then return nil, close_err end
+        end
         local current_meta, meta_err = session_meta_of(dbtx, session_id)
         if not current_meta then return nil, meta_err end
         for key, value in pairs(session_updates.meta or {}) do current_meta[key] = value end
@@ -923,6 +934,17 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
                 if insert_err then return nil, insert_err end
                 boundary_date = date
             end
+        end
+        -- A protected session's Stop (EE2-2710, architecture 4.5 step 9):
+        -- the turn fence and the closure of the turn's approval batches
+        -- commit with the Stop itself, so no batch of the turn is released
+        -- or created open after it.
+        local fence = session_updates.approval_fence
+        if type(fence) == "table" and type(fence.turn_id) == "string" and fence.turn_id ~= "" then
+            local _, fence_err = approval_repo.write_turn_fence(dbtx, session_id, fence.turn_id, "stop")
+            if fence_err then return nil, fence_err end
+            local _, close_err = approval_repo.close_turn_batches(dbtx, session_id, fence.turn_id, "stop")
+            if close_err then return nil, close_err end
         end
         local current_meta, meta_err = session_meta_of(dbtx, session_id)
         if not current_meta then return nil, meta_err end
