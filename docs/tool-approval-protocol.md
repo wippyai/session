@@ -404,8 +404,7 @@ session `update` events:
   revision.
 - `activity.kind` is `awaiting_tool_approval`; `activity.approval_ids` lists the
   pending requests.
-- `tool_approval.active` is `true` once the session is protected. The Host also
-  uses it to isolate model-authored content.
+- `tool_approval.active` is `true` once the session is protected.
 - Each grant carries `grant_id`, `revision`, `scope` (`tool` or `session`),
   `status` (`active` or `suspended`), `suspension_reason`, `registry_id` and
   `title` (both `null` for scope `session`, which covers every tool in its
