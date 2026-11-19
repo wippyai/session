@@ -4,7 +4,6 @@ local api = {
     _session_writer = require("session_writer"),
     _upstream = require("upstream"),
 }
-local owner_events = require("owner_events")
 
 type RenameSessionResponse = {
     success: boolean,
@@ -99,7 +98,14 @@ local function handler()
     end
 
     local published, publish_err = api._upstream.notify_external(session_id, { title = title }, actor:id())
-    if not published then owner_events.warn("session:" .. session_id, publish_err) end
+    if not published then
+        res:set_status(api._http.STATUS.INTERNAL_ERROR)
+        res:write_json({
+            success = false,
+            error = publish_err,
+        })
+        return
+    end
 
     res:set_status(api._http.STATUS.OK)
     res:write_json({ success = true })

@@ -1,4 +1,3 @@
-local owner_events = require("owner_events")
 local api = {
     _http = require("http"),
     _security = require("security"),
@@ -87,7 +86,14 @@ local function handler()
     end
 
     local published, publish_err = api._upstream.notify_external(session_id, { deleted = true }, user_id)
-    if not published then owner_events.warn("session:" .. session_id, publish_err) end
+    if not published then
+        res:set_status(api._http.STATUS.INTERNAL_ERROR)
+        res:write_json({
+            success = false,
+            error = publish_err,
+        })
+        return
+    end
 
     -- Return success response
     res:set_content_type(api._http.CONTENT.JSON)

@@ -272,7 +272,10 @@ function M.update(args: UpdateSessionArgs)
         return nil, update_err
     end
 
-    notify_committed(session_id, updated, current.user_id)
+    local published, publish_err = M._upstream.notify_external(session_id, updated, current.user_id)
+    if not published then
+        return nil, publish_err
+    end
 
     return updated
 end
@@ -317,7 +320,10 @@ function M.delete(args: DeleteSessionArgs)
         end
     end
 
-    notify_committed(session_id, { deleted = true }, session.user_id)
+    local published, publish_err = M._upstream.notify_external(session_id, { deleted = true }, session.user_id)
+    if not published then
+        return nil, publish_err
+    end
 
     return result, nil
 end

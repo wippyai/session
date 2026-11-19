@@ -103,7 +103,6 @@ entries:
       - http
       - security
     imports:
-      owner_events: wippy.session.process:owner_events
       session_repo: wippy.session.persist:session_repo
       upstream: wippy.session.process:upstream
     method: handler
@@ -348,7 +347,6 @@ entries:
       - http
       - security
     imports:
-      owner_events: wippy.session.process:owner_events
       session_writer: wippy.session.persist:writer
       upstream: wippy.session.process:upstream
     method: handler
