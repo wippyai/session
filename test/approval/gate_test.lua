@@ -11,6 +11,7 @@ local message_handlers = require("message_handlers")
 local policy = require("policy")
 local tool_caller = require("tool_caller")
 local activation = require("activation")
+local tool_meta = require("tool_meta")
 local wait_for_boot = require("wait_for_boot")
 local fx = require("gate_fixtures")
 
@@ -537,6 +538,22 @@ local function define_tests()
             test.eq(records_by_call(ctx.session_id, batch.batch_id)["call-1"].state, "interrupted")
         end)
 
+        it("suspends a grant for an agent switch also while its tool's registry entry can't be read", function()
+            local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z" })
+            local grant = create_tool_grant(ctx, GRANTED)
+            local saved_get = tool_meta._registry_get
+            tool_meta._registry_get = function() error("registry unavailable") end
+            ctx.agent_ctx = { active_traits = { "other:trait" } }
+            local switched, switch_err = pcall(activation.apply, ctx, { id = fx.AGENT, agent_options = {} })
+            tool_meta._registry_get = saved_get
+            if not switched then error(switch_err) end
+            ctx.agent_ctx = { active_traits = { activation.TRAIT_ID } }
+            assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
+            local stored = assert(approval_repo.get_grant(nil, grant.grant_id))
+            test.eq(stored.status, "suspended")
+            test.eq(stored.suspension_reason, "agent_without_trait")
+        end)
+
         it("stores the grant suspensions of the evaluation when the batch was already closed", function()
             local ctx = new_ctx({ live = 1, policy = { agent_opted_in = false } })
             local grant = create_tool_grant(ctx, GRANTED)
@@ -552,16 +569,22 @@ local function define_tests()
 
         it("runs a grant-backed UI action released before its binding expires, also with a short lifetime", function()
             local ui_action = "wippy.agent.tools:ui_action_highlight"
-            for _, ttl in ipairs({ 1, 5 }) do
-                local ctx = new_ctx({ live = 1, policy = { require = "all", approve_all = "tool" } })
-                create_tool_grant(ctx, ui_action)
-                local op = round(ctx, { { id = "call-ui", registry_id = ui_action, args = { selector = "#x" } } })
-                op.ui_action_runtime = { session_id = ctx.session_id, host_instance_id = "host-1",
-                    delivery_handle = "handle-1", agent_actions_authorized = true,
-                    expires_at = time.now():unix() + ttl }
-                assert(message_handlers.process_tools(ctx, op))
-                test.is_true(op.caller.launches["call-ui"], "TTL " .. ttl .. ": the call runs")
-            end
+            local base = time.now():unix()
+            local saved_now = activation._now
+            activation._now = function() return base end
+            local ok, failure = pcall(function()
+                for _, ttl in ipairs({ 1, 5 }) do
+                    local ctx = new_ctx({ live = 1, policy = { require = "all", approve_all = "tool" } })
+                    create_tool_grant(ctx, ui_action)
+                    local op = round(ctx, { { id = "call-ui", registry_id = ui_action, args = { selector = "#x" } } })
+                    op.ui_action_runtime = { session_id = ctx.session_id, host_instance_id = "host-1",
+                        delivery_handle = "handle-1", agent_actions_authorized = true, expires_at = base + ttl }
+                    assert(message_handlers.process_tools(ctx, op))
+                    test.is_true(op.caller.launches["call-ui"], "TTL " .. ttl .. ": the call runs")
+                end
+            end)
+            activation._now = saved_now
+            if not ok then error(failure) end
         end)
 
         it("keeps a tool grant whose tool is not in the registry active across agent steps", function()
@@ -591,6 +614,20 @@ local function define_tests()
             assert(message_handlers.process_tools(ctx, op))
             test.eq(launches(op.caller), 0)
             test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).close_reason, "finish")
+        end)
+
+        it("runs and releases nothing when the policy evaluator raises", function()
+            local ctx = new_ctx({ live = 1 })
+            local op, batch = round(ctx, { { id = "call-1", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-2", registry_id = PLAIN, args = {} } })
+            local saved = policy.evaluate
+            policy.evaluate = function() error("evaluator failed") end
+            local ok, err = pcall(message_handlers.process_tools, ctx, op)
+            policy.evaluate = saved
+            test.is_false(ok)
+            test.contains(tostring(err), "evaluator failed")
+            test.eq(op.caller.runs, 0, "caller:execute is never called")
+            test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).state, "open", "the batch is not released")
         end)
 
         it("fails closed when a protected round has no approval binding", function()

@@ -55,7 +55,6 @@ entries:
     source: file://policy.lua
     imports:
       consts: wippy.session:consts
-      approval_repo: wippy.session.persist:approval_repo
 
   # wippy.session.approval:canonical_json
   - name: canonical_json

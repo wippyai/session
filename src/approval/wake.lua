@@ -6,7 +6,7 @@
 --
 --   decision, revoked   after the decision or revocation commit
 --   steering            route_input, after a new pending steering input is stored
---   finish              FINISH_AND_EXIT and deletion, where the finish is accepted
+--   finish              FINISH_AND_EXIT, where the finish is accepted
 --   deleted             SESSION_UPDATED with the row gone
 --   exiting             supervisor cancel, ingress or bus failure, before settle_exit
 --   surfaces            the parent plugin sent a new live set of approval UI surfaces

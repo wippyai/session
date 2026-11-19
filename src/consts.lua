@@ -135,6 +135,9 @@ local consts = {
         TOOL_APPROVAL_SURFACE = "tool_approval_surface"
     },
 
+    -- Tool approval grant states.
+    GRANT_STATUS = { ACTIVE = "active", SUSPENDED = "suspended", REVOKED = "revoked" },
+
     -- Message Types
     MSG_TYPE = {
         USER = "user",

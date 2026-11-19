@@ -20,7 +20,6 @@
 --   session_id, owner_id, epoch   whose grants may match (grant isolation; non-empty strings)
 --   denied_keys                   { [denial_key] = true } for calls denied earlier in this turn
 local consts = require("consts")
-local approval_repo = require("approval_repo")
 
 local policy = {}
 
@@ -148,7 +147,7 @@ local function match_grants(effective: any, approval: any, identity: any, grants
     local matched = nil
     local suspend = {}
     for _, grant in ipairs(grants or {}) do
-        if type(grant) == "table" and grant.status == approval_repo.GRANT_STATUS.ACTIVE and owned_by_scope(grant, scope) then
+        if type(grant) == "table" and grant.status == consts.GRANT_STATUS.ACTIVE and owned_by_scope(grant, scope) then
             local relation = grant_relation(grant, identity)
             if relation == "changed" then
                 suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = policy.SUSPENSION.DEPLOYMENT_CHANGED }

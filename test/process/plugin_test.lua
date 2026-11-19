@@ -837,9 +837,6 @@ local function scan_for_stale_session(actor, session_id)
     test.is_nil(run.error)
 end
 
--- Runs the plugin through a script of inbox messages ({ topic, data }) and
--- exits ({ exit = session_id }: that session's process fails), then cancels
--- it. Every spawn gets its own pid.
 -- Runs the session plugin over `script`, then cancels it. Items:
 --   { topic, data, from }   an inbox message; data and from may be functions
 --                           of the run, for pids known only at run time
@@ -915,6 +912,7 @@ local function run_plugin_script(actor, hub_pid, script, opts)
     restore_mock("process.with_context")
     return run
 end
+
 -- Approval UI surface helpers: the relay hub, the live sets the plugin sent and
 -- the messages a client sends.
 local SURFACE_HUB = "relay-hub-1"
@@ -971,7 +969,6 @@ local function session_exit(index: number): any
         from = function(run) return run.spawned[index].pid end,
         result = { value = { status = "shutdown", intentional_exit = true } } } }
 end
-
 
 -- The plugin over a surface script, with every start confirmed.
 local function run_surfaces(script: {any}, monitor_error: string?): any

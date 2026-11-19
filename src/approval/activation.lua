@@ -60,11 +60,6 @@ function activation.now(): number
     return time.now():unix()
 end
 
--- The RFC 3339 UTC text of a unix time.
-function activation.timestamp(unix: number): string
-    return time.unix(math.floor(unix), 0):utc():format(time.RFC3339)
-end
-
 -- The operator setting tool_approval_enforcement, "enforce" or "off".
 function activation.enforcement(): string
     if activation._enforcement then return activation._enforcement() end
@@ -199,7 +194,7 @@ end
 function activation.note_declared(ctx: any): (any, string?)
     local stored = ctx.config and ctx.config.tool_approval
     if type(stored) ~= "table" or stored.ui_declared_at ~= nil then return stored, nil end
-    return activation.persist(ctx, nil, activation.timestamp(activation.now()))
+    return activation.persist(ctx, nil, approval_repo.timestamp(activation.now()))
 end
 
 -- The number of live approval UI surfaces the parent plugin last sent.
@@ -213,19 +208,21 @@ end
 -- before the model step. Only an authenticated user action restores a
 -- suspended grant, so a later switch back does not bring it back.
 local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, string?)
-    local grants, err = approval_repo.list_grants(nil, ctx.session_id, { approval_repo.GRANT_STATUS.ACTIVE })
+    local grants, err = approval_repo.list_grants(nil, ctx.session_id, { consts.GRANT_STATUS.ACTIVE })
     if not grants then return nil, tostring(err) end
     local suspend = {}
     for _, grant in ipairs(grants) do
-        local option, readable = nil, true
-        if grant.scope == policy.SCOPE.TOOL then
+        local reason = nil
+        if grant.scope == policy.SCOPE.TOOL and effective.agent_opted_in then
+            -- Only the Approve-all mode check needs the tool option. A tool
+            -- whose entry can't be read is left alone for it: a call to it
+            -- does not run, and a changed deployment suspends the grant at
+            -- call time.
             local entry = tool_meta.entry(grant.registry_id)
-            readable = entry ~= nil
-            option = tool_meta.approve_all(entry)
+            if entry then reason = policy.grant_suspension(effective, grant, tool_meta.approve_all(entry)) end
+        else
+            reason = policy.grant_suspension(effective, grant, nil)
         end
-        -- A tool whose entry can't be read is left alone: a call to it does
-        -- not run, and a changed deployment suspends the grant at call time.
-        local reason = readable and policy.grant_suspension(effective, grant, option) or nil
         if reason then suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason } end
     end
     if #suspend == 0 then return true, nil end
@@ -254,7 +251,7 @@ function activation.apply(ctx: any, agent: any): (boolean?, string?, string?)
         agent and agent.agent_options)
     if check_err then return nil, check_err, activation.FAILURE.INVALID end
 
-    local declared_at = activation.live_surfaces(ctx) > 0 and activation.timestamp(activation.now()) or nil
+    local declared_at = activation.live_surfaces(ctx) > 0 and approval_repo.timestamp(activation.now()) or nil
     local pending_declaration = type(stored) == "table" and declared_at ~= nil and stored.ui_declared_at == nil
     if settings ~= nil or pending_declaration then
         local committed, write_err = activation.persist(ctx, settings, declared_at)

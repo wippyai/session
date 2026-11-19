@@ -288,6 +288,7 @@ entries:
       policy: wippy.session.approval:policy
       tool_caller: wippy.agent.tools:caller
       activation: wippy.session.approval:activation
+      tool_meta: wippy.session.approval:tool_meta
       wait_for_boot: app:wait_for_boot
       gate_fixtures: app.approval:gate_fixtures
     method: run

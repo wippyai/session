@@ -333,7 +333,7 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, ask_
                 target_agent_id = frozen.delegate_target and frozen.delegate_target.agent_id or nil,
                 intent_digest = frozen.intent_digest,
                 denial_key = frozen.denial_key,
-                requested_at = activation.timestamp(now),
+                requested_at = approval_repo.timestamp(now),
                 display = display_for(item, items, agent_title),
             }
             if item.kind == KIND.GRANT then
@@ -356,7 +356,7 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, ask_
                 end
                 request.offered = offered
                 request.state = ask_state
-                if ask_state == approval_repo.STATE.PENDING then request.expires_at = activation.timestamp(deadline) end
+                if ask_state == approval_repo.STATE.PENDING then request.expires_at = approval_repo.timestamp(deadline) end
             end
             records[#records + 1] = request
         end
@@ -556,8 +556,8 @@ local function ever_declared(ctx: any): boolean
 end
 
 -- Signals the inbox accepted that end the wait or forbid a release, in the
--- order they win: deletion, exit, Stop (committed by the inbox, or drained by
--- the command bus), finish. Returns a close reason or nil.
+-- order they win: deletion, exit, Stop (ctx.stop_requested, which commit_stop
+-- sets and the session sets at exit), finish. Returns a close reason or nil.
 local function signalled(ctx: any): string?
     local hub = ctx.approval_wake
     if hub:is_set("deleted") then return "deleted" end
@@ -650,7 +650,7 @@ local function recheck(dbtx: any, ctx: any, op: any, item: any, record: any, ses
     if record.decided_via == "grant" then
         local grant = approval_repo.get_grant(dbtx, record.grant_id)
         if type(grant) ~= "table" or grant.session_id ~= ctx.session_id
-            or grant.status ~= approval_repo.GRANT_STATUS.ACTIVE then
+            or grant.status ~= consts.GRANT_STATUS.ACTIVE then
             return "revoked"
         end
     end

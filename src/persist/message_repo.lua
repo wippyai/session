@@ -994,8 +994,12 @@ local function merge_metadata(read, exec, message_id, metadata, expected_session
     if expected_session_id ~= nil then
         update_query = update_query:where("session_id = ?", expected_session_id)
     end
-    local result, err = exec(update_query)
-    if err then return nil, "Failed to update message metadata: " .. err end
+    -- A third value from `exec` marks a connection failure, returned as it is.
+    local result, err, connection_failed = exec(update_query)
+    if err then
+        if connection_failed then return nil, err end
+        return nil, "Failed to update message metadata: " .. err
+    end
     if not result or result.rows_affected == 0 then
         if expected_session_id ~= nil then
             return nil, "Message not found or belongs to different session", "ownership"
@@ -1028,7 +1032,7 @@ function message_repo.update_metadata(message_id, metadata, expected_session_id,
     end
     local function exec_pooled(query)
         local db, err = get_db()
-        if err then return nil, err end
+        if err then return nil, err, true end
         local result, exec_err = query:run_with(db):exec()
         db:release()
         return result, exec_err

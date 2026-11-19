@@ -41,7 +41,6 @@ approval_repo.STATE = {
 
 approval_repo.BATCH_STATE = { OPEN = "open", CLOSED = "closed", RELEASED = "released" }
 approval_repo.DISPOSITION = { DISPATCHED = "dispatched", NOT_RUN = "not_run" }
-approval_repo.GRANT_STATUS = { ACTIVE = "active", SUSPENDED = "suspended", REVOKED = "revoked" }
 approval_repo.CONTROLS = { KEPT = "kept", CANCELLED = "cancelled" }
 
 -- Conflict codes (approval_repo.conflict_code).
@@ -132,8 +131,13 @@ end
 -- Helpers
 ---------------------------------------------------------------------------
 
+-- The RFC 3339 UTC text of a unix time (whole seconds).
+function approval_repo.timestamp(unix: number): string
+    return time.unix(math.floor(unix), 0):utc():format(time.RFC3339)
+end
+
 function approval_repo.now(): string
-    return time.now():utc():format(time.RFC3339)
+    return approval_repo.timestamp(time.now():unix())
 end
 
 local function with_connection(conn: any, fn: any): (any, any, any)
@@ -607,7 +611,7 @@ end
 -- The session's grants in creation order. statuses defaults to active and
 -- suspended (revoked grants never match again).
 function approval_repo.list_grants(conn: any, session_id: string, statuses: {string}?)
-    statuses = statuses or { approval_repo.GRANT_STATUS.ACTIVE, approval_repo.GRANT_STATUS.SUSPENDED }
+    statuses = statuses or { consts.GRANT_STATUS.ACTIVE, consts.GRANT_STATUS.SUSPENDED }
     return with_connection(conn, function(c)
         local marks = {}
         for _ in ipairs(statuses) do marks[#marks + 1] = "?" end
@@ -654,7 +658,7 @@ function approval_repo.create_grant(dbtx: any, grant: any)
         fingerprint = grant.fingerprint,
         target_agent_id = grant.target_agent_id,
         manifest = manifest,
-        status = approval_repo.GRANT_STATUS.ACTIVE,
+        status = consts.GRANT_STATUS.ACTIVE,
         source_approval_id = grant.source_approval_id,
         created_by = grant.created_by,
         created_at = grant.created_at or approval_repo.now(),
@@ -692,7 +696,7 @@ function approval_repo.suspend_grant(dbtx: any, session_id: string, grant_id: st
     if not non_empty(reason) then return nil, "Suspension reason is required" end
     return change_grant(dbtx, session_id, grant_id, expected_revision,
         { active = true }, CONFLICT.GRANT_NOT_ACTIVE,
-        { status = approval_repo.GRANT_STATUS.SUSPENDED, suspension_reason = reason })
+        { status = consts.GRANT_STATUS.SUSPENDED, suspension_reason = reason })
 end
 
 -- Suspends every { grant_id, reason } of `list` that is still active; a grant
@@ -710,7 +714,7 @@ function approval_repo.revoke_grant(dbtx: any, session_id: string, grant_id: str
     if not non_empty(revoked_by) then return nil, "revoked_by is required" end
     return change_grant(dbtx, session_id, grant_id, expected_revision,
         { active = true, suspended = true }, CONFLICT.GRANT_REVOKED,
-        { status = approval_repo.GRANT_STATUS.REVOKED, revoked_by = revoked_by, revoked_at = approval_repo.now() })
+        { status = consts.GRANT_STATUS.REVOKED, revoked_by = revoked_by, revoked_at = approval_repo.now() })
 end
 
 ---------------------------------------------------------------------------
@@ -878,8 +882,9 @@ function approval_repo.create_batch_record(dbtx: any, session_id: string, descri
     return read_batch(dbtx, descriptor.batch_id)
 end
 
--- A Stop or finish of the turn `turn_id`: writes the turn fence (the first
--- reason of the turn stays) and closes the turn's batches with `reason`
+-- A Stop or finish of the turn `turn_id`: writes the turn fence (a Stop
+-- replaces a finish of the same turn; otherwise the first reason stays) and
+-- closes the turn's batches with `reason`
 -- (close_batch: an open batch closes; a released one has its controls
 -- cancelled by a Stop and keeps them for a finish). Runs in the caller's
 -- transaction. Returns true.
