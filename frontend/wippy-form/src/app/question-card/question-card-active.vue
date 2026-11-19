@@ -6,7 +6,7 @@ import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf, optionKey } from '../../lib/focus-key'
-import { TICK_ANSWER_MESSAGE } from '../../lib/messages'
+import { OFFLINE_MESSAGE, SENDING_MESSAGE, TICK_ANSWER_MESSAGE } from '../../lib/messages'
 import { ownValue } from '../../lib/own'
 import { pageHasNoFocus } from '../../lib/page-focus'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
@@ -35,9 +35,6 @@ const emit = defineEmits<{
   'step-change': [step: 'active' | 'review']
   'collapsed-change': [collapsed: boolean]
 }>()
-
-const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
-const SUBMITTING_MESSAGE = 'Sending your answer…'
 
 // A submit while offline can only fail, and a second one while the first is in
 // flight gets a 409. A single question submits straight from a row click or a
@@ -193,7 +190,6 @@ watch(controller.focusSeq, () => {
   })
 })
 
-/** True when nothing on the page has focus, because it is on <body> or the root element, as after a focused control is removed. */
 /**
  * After a failed send, keeps the reader inside the card. The send buttons stay
  * focusable while a send is in flight, so usually the one pressed still has
@@ -332,7 +328,7 @@ function onKeydown(event: KeyboardEvent) {
       role="status"
       class="text-xs text-muted-color m-0 mb-2"
     >
-      {{ SUBMITTING_MESSAGE }}
+      {{ SENDING_MESSAGE }}
     </p>
 
     <FormMessage

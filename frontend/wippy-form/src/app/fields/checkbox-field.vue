@@ -23,7 +23,7 @@ const emit = defineEmits<{
 }>()
 
 const checked = computed(() => props.modelValue === true)
-const inputPart = computed(() => partAttrs('field-input'))
+const inputPart = partAttrs('field-input')
 
 // A PrimeVue Checkbox puts `$attrs` on its wrapper div, so the description
 // and error links go to the real `<input>` through its pass-through instead.

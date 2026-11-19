@@ -81,11 +81,11 @@ describe('FieldShell — styling API of the row and the stored answer items', ()
     expect(row.attributes('part')).toBe('field-row')
   })
 
-  it('names each item of a stored choice', () => {
+  it('names each item of a stored choice as the answered card does', () => {
     const field: FormField = { id: 'pick', type: 'choice', label: 'Pick', required: false, multiple: false, allow_other: false, options: [{ value: 'a', label: 'A' }] }
     const wrapper = mountShell({ layout: 'group', readonly: true, field, modelValue: 'a' })
-    const item = wrapper.find('.w-form__field-item')
-    expect(item.attributes('part')).toBe('field-item')
+    const item = wrapper.find('.w-form__answer-item')
+    expect(item.attributes('part')).toBe('answer-item')
   })
 })
 
@@ -148,7 +148,7 @@ describe('FieldShell — read-only', () => {
     const text = wrapper.find('[part~="field-value"]').text()
     expect(text).toContain('Alpha')
     expect(text).toContain('because')
-    expect(text).toContain('Other: mine')
+    expect(text).toContain('Own answer: mine')
   })
 })
 

@@ -198,6 +198,11 @@ describe('ChoiceField — invalid state for assistive technology', () => {
     expect(required.find('input[type="text"]').attributes('aria-invalid')).toBeUndefined()
   })
 
+  it('marks the Other text box invalid when that text is too long', () => {
+    const tooLong = mountField({ errors: [{ code: 'too_long', message: 'Use at most 2,000 characters.' }], modelValue: { other: 'x'.repeat(2001) } })
+    expect(tooLong.find('input[type="text"]').attributes('aria-invalid')).toBe('true')
+  })
+
   it('keeps the error linked to the group as before', () => {
     const wrapper = mountField({ errors: REQUIRED })
     expect(wrapper.find('fieldset').attributes('aria-describedby')).toBe(wrapper.find('ul').attributes('id'))

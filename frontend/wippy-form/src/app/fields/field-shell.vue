@@ -2,9 +2,11 @@
 import type { FieldAnswer, FieldError, FormField } from '../../lib/definition'
 import { computed, ref, useId } from 'vue'
 import { readOnlyAnswer } from '../../lib/answers'
+import { joinIds } from '../../lib/aria'
 import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partAttrs } from '../../lib/part-attrs'
 import { textLines } from '../../lib/rich-text'
+import QuestionCardAnswerItems from '../question-card/question-card-answer-items.vue'
 import FieldLabel from './field-label.vue'
 
 /**
@@ -57,14 +59,7 @@ const rootEl = ref<HTMLElement | null>(null)
 
 const hasErrors = computed(() => !props.readonly && props.errors.length > 0)
 
-const describedBy = computed(() => {
-  const ids: string[] = []
-  if (props.field.description)
-    ids.push(descriptionId)
-  if (hasErrors.value)
-    ids.push(errorId)
-  return ids.length > 0 ? ids.join(' ') : undefined
-})
+const describedBy = computed(() => joinIds(!!props.field.description && descriptionId, hasErrors.value && errorId))
 
 const rootTag = computed(() => props.layout === 'group' ? 'fieldset' : 'div')
 const labelTag = computed(() => {
@@ -82,16 +77,14 @@ const rootPart = computed(() => partAttrs(
   props.readonly && 'readonly',
   props.disabled && 'disabled',
 ))
-const descriptionPart = computed(() => partAttrs('field-description'))
-const controlPart = computed(() => partAttrs('field-control'))
-const errorPart = computed(() => partAttrs('field-error'))
-const rowPart = computed(() => partAttrs('field-row'))
-const itemPart = computed(() => partAttrs('field-item'))
+const descriptionPart = partAttrs('field-description')
+const controlPart = partAttrs('field-control')
+const errorPart = partAttrs('field-error')
+const rowPart = partAttrs('field-row')
 const showMarker = computed(() => !!props.field.required && !props.readonly)
 
 const value = computed(() => readOnlyAnswer(props.field, props.modelValue))
 const valuePart = computed(() => partAttrs('field-value', value.value.kind === 'empty' && 'empty'))
-const notePart = computed(() => partAttrs('field-note'))
 
 defineExpose({
   /** Focuses the first focusable control, e.g. the first invalid field after a failed submit. */
@@ -181,19 +174,7 @@ defineExpose({
         :part="valuePart.part"
         :class="valuePart.class"
       >
-        <p
-          v-for="(item, i) in value.items"
-          :key="i"
-          :part="itemPart.part"
-          :class="itemPart.class"
-        >
-          {{ item.own ? `Other: ${item.label}` : item.label }}
-          <span
-            v-if="item.note"
-            :part="notePart.part"
-            :class="notePart.class"
-          >{{ item.note }}</span>
-        </p>
+        <QuestionCardAnswerItems :items="value.items" />
       </div>
     </template>
 

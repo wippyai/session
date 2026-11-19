@@ -1,6 +1,7 @@
 import type { FieldAnswer, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
 import { evaluateField } from './answers'
+import { isKnownFieldType } from './definition'
 import { numberToPlainText } from './decimal'
 
 /**
@@ -24,27 +25,20 @@ import { numberToPlainText } from './decimal'
  *                    { normalized } about the definition itself
  *
  * What the client checks: every answer case for a choice and the six standard
- * fields (expect `ok`, `same`, `unanswered`, `error`), and, for definition cases
- * that state a normalized `max_length`, that the raw field normalized here
- * has the same limit. The server fills in `min_length` and `max_length`, so the
- * checker reads them as they are and this runner does the same for a raw field.
+ * fields (expect `ok`, `same`, `unanswered`, `error`). The server fills in
+ * `min_length` and `max_length`, so this runner does the same for a raw field.
  *
- * Skipped, counted and named by reason (`SkipReason`): definition validation
- * (the server vets definitions before a form exists); a value of the wrong JSON
+ * Skipped, counted and named by reason (`SkipReason`): definition cases (the
+ * server vets definitions before a form exists); a value of the wrong JSON
  * type for its field (a control always hands the checker the right kind of
  * draft); an unanswered optional checkbox (the UI always sends an explicit
  * boolean); a carriage return in a textarea value (the client turns every
  * line break into LF before sending); and every case about a text field's
- * `pattern`. The pattern is agent-authored and a browser regex engine
- * backtracks without bound (`(a|a)*b`, `a*a*a*a*b` on a long value can freeze
- * the tab), so the client never evaluates it: the server (RE2, linear time)
- * checks it on submit and its 422 `pattern_mismatch` shows on the field. Any
- * other shape fails loudly.
+ * `pattern`, which only the server evaluates (`form_pattern.lua`). Any other
+ * shape fails loudly.
  */
 
-const FIELD_TYPES = new Set(['choice', 'text', 'textarea', 'number', 'email', 'date', 'checkbox'])
-
-export interface RawCase {
+interface RawCase {
   name?: string
   field?: Record<string, unknown>
   fields?: unknown[]
@@ -54,8 +48,8 @@ export interface RawCase {
   expect?: Record<string, unknown>
 }
 
-export type SkipReason = 'definition' | 'pattern' | 'wrong-type' | 'checkbox-absent' | 'textarea-cr'
-export type Verdict = 'checked' | `skipped:${SkipReason}`
+type SkipReason = 'definition' | 'pattern' | 'wrong-type' | 'checkbox-absent' | 'textarea-cr'
+type Verdict = 'checked' | `skipped:${SkipReason}`
 
 function skip(reason: SkipReason): Verdict {
   return `skipped:${reason}`
@@ -71,7 +65,7 @@ function expandValue(raw: RawCase): unknown {
   return raw.field?.multiple ? [item] : item
 }
 
-/** The lengths the server fills in, checked against the fixture's own `normalized` cases. */
+/** The lengths the server fills in when a definition leaves them out. */
 const TEXT_LENGTHS: Record<string, { min_length: number, max_length: number }> = {
   text: { min_length: 0, max_length: 500 },
   textarea: { min_length: 0, max_length: 8000 },
@@ -103,7 +97,7 @@ function draftFor(field: FormField, value: unknown): FieldAnswer | undefined | n
   }
 }
 
-export function runCase(raw: unknown, index: number): Verdict {
+function runCase(raw: unknown, index: number): Verdict {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw))
     throw new Error(`conformance case ${index}: not an object`)
   const entry = raw as RawCase
@@ -119,22 +113,11 @@ export function runCase(raw: unknown, index: number): Verdict {
   if (!rawField || typeof rawField.type !== 'string')
     throw new Error(`conformance case ${index} (${name}): no field`)
 
-  const isDefinitionCase = 'definition_ok' in expected || 'definition_error' in expected || 'normalized' in expected
-  if (!FIELD_TYPES.has(rawField.type)) {
-    if (isDefinitionCase)
-      return skip('definition')
-    throw new Error(`conformance case ${index} (${name}): unknown field type ${rawField.type}`)
-  }
-  const field = normalizedField(rawField)
-
-  if (isDefinitionCase) {
-    const normalized = expected.normalized as Record<string, unknown> | undefined
-    if (normalized && 'max_length' in normalized && (field.type === 'text' || field.type === 'textarea')) {
-      expect(field.max_length, name).toBe(normalized.max_length)
-      return 'checked'
-    }
+  if ('definition_ok' in expected || 'definition_error' in expected || 'normalized' in expected)
     return skip('definition')
-  }
+  if (!isKnownFieldType(rawField.type))
+    throw new Error(`conformance case ${index} (${name}): unknown field type ${rawField.type}`)
+  const field = normalizedField(rawField)
 
   const knownExpectation = 'ok' in expected || 'same' in expected || 'unanswered' in expected || 'error' in expected
   if (!knownExpectation)
@@ -205,12 +188,6 @@ describe('conformance runner (inline cases)', () => {
     expect(runCase({ name: 'other', field: choice, value_concat: ['x'], value_as: 'other', expect: { same: true } }, 1)).toBe('checked')
     expect(runCase({ name: 'note', field: { ...choice, multiple: true }, value_concat: ['x'], value_as: 'note', expect: { ok: [{ value: 'a', note: 'x' }] } }, 2)).toBe('checked')
     expect(() => runCase({ name: 'wrong', field: choice, value: 'a', expect: { error: 'required' } }, 3)).toThrow()
-  })
-
-  it('compares the effective max_length of a normalized definition', () => {
-    expect(runCase({ name: 'defaults', field: { type: 'text' }, expect: { normalized: { max_length: 500 } } }, 0)).toBe('checked')
-    expect(runCase({ name: 'cap', field: { type: 'textarea' }, expect: { normalized: { max_length: 8000 } } }, 1)).toBe('checked')
-    expect(() => runCase({ name: 'wrong', field: { type: 'text' }, expect: { normalized: { max_length: 400 } } }, 2)).toThrow()
   })
 
   it('skips what the UI cannot produce or the server alone decides, naming the reason', () => {

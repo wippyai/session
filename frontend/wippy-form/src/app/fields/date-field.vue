@@ -8,81 +8,35 @@ import { isValidIsoDate } from '../../lib/scalar-answers'
 import FieldShell from './field-shell.vue'
 
 /**
- * The date field: a PrimeVue `DatePicker` in string mode, so its value is the
- * `YYYY-MM-DD` wire text itself, with no `Date` object and no timezone
- * conversion. Typing is allowed; the calendar opens from its button (not on
- * focus), so a keyboard user can just type. On a touch screen (a coarse
- * pointer) a tap on the box opens it too, because PrimeVue gives the box
- * `inputmode="none"` and there is no keyboard to type with.
+ * The date field: a PrimeVue `DatePicker` that reports text
+ * (`update-model-type="string"`) and is handed a `Date` (`pickerModel`).
+ * Typing is allowed; the calendar opens from its button, not on focus, so a
+ * keyboard user can just type. On a touch screen a tap on the box opens it
+ * (`onBoxClick`).
  *
- * What the box shows. A `DatePicker`'s box is uncontrolled: it only follows
- * the last date the picker itself accepted, and every time the box is
- * re-rendered (any change to the form, an error appearing, the field being
- * disabled during a submit) Vue writes that accepted date back over whatever
- * is in the box. Left alone, that erased each key as it was typed and put a
- * stale date back next to an error. So this control owns the box's text: it
- * is handed to the box as its `value` through the picker's own pass-through,
- * and every render writes exactly what the user typed (a no-op for Vue, which
- * leaves the caret where it is). The text in the box changes only when the
- * user types or picks a day, or when the form changes the answer.
+ * This control owns the box's text. A `DatePicker`'s box only follows the
+ * last date the picker accepted, and every re-render writes that date back over
+ * what is typed, so the text is handed to the box as its `value` through the
+ * picker's pass-through (`pickerPt`) and put back after the picker writes its
+ * own spelling (`restoreBox`).
  *
- * What the draft holds. Typed text is judged on its own (`typedValue`), never
- * by the date the picker read from it. A complete date written loosely
- * (`2026-6-5`: a year of 1 to 4 digits, a month and a day of 1 or 2) that is
- * a real day from year 1 to 9999 becomes the full date (`2026-06-05`), which
- * is what will be saved; the box shows it once it is left. Any other text is
- * the draft exactly as typed, so unparseable, impossible or out-of-range text
- * reaches the client check as typed and is named at submit (`invalid_date`,
- * `below_min`, `above_max`). The picker's own reading would differ: it reads a
- * year below 100 as a two-digit year (`0050` is 1950, `0000` is 2000) and
- * ignores trailing text (`2026-06-05 suffix`). A day picked in the calendar
- * (`date-select`) is saved as picked, with a four-digit year.
+ * The draft is the typed text, judged on its own (`typedValue`), never the
+ * picker's reading of it; a day picked in the calendar is saved as picked.
  *
- * What the calendar shows (decision D53). The calendar covers years 100 to
- * 9999: PrimeVue builds a picked day with `new Date(year, month, day)`, which
- * reads years 0 to 99 as 1900 to 1999, and checks its bounds against that
- * wrong day. So its lower bound is the later of the field's `min` and
- * 0100-01-01, its upper bound the earlier of the field's `max` and
- * 9999-12-31, and a date before year 100 (typed or handed in) leaves the
- * calendar without a date; such a date is still a valid answer that can be
- * typed. Any other real day the box holds is the calendar's date, handed to
- * the picker as a `Date` built with `setFullYear`, never as text (the picker
- * reads text with a short year as 19xx). A field whose whole range is before
- * year 100 has a calendar with no enabled day. The picker's month, year and
- * decade navigation can still show a year before 100 or after 9999, but no
- * day there is enabled, and the picker does not pick a day that is not; a
- * picked date outside these years is ignored as well (`onDateSelect`).
+ * The calendar covers years 100 to 9999 within the field's own range
+ * (`FIRST_CALENDAR_DAY`, `LAST_CALENDAR_DAY`). A date before year 100 is
+ * still a valid answer that can be typed; the calendar shows no date for it.
  *
- * The picker also writes its own spelling of its day into the box when it
- * is created, when its day changes and when the box loses focus
- * (`999-05-15`), which would lose unparseable text; the box's own text is put
- * back after it, so the user can correct it.
+ * The calendar opens in the theme plugin's overlay layer, not inline
+ * (`appendTo="self"` left a one-question form with a quarter of its calendar
+ * visible), and takes the theme of its trigger. Its width follows the control,
+ * which the `date` state of the `field-input` part bounds to
+ * `--wippy-form-date-width`.
  *
- * The calendar opens in the theme plugin's overlay layer, not inline: the
- * layer is promoted out of every clipping ancestor, so the calendar is never
- * cut off by the message bubble around a short form (`appendTo="self"` was
- * tried and left a one-question form with a quarter of its calendar visible).
- * The layer follows the theme class of the calendar's trigger, so the calendar
- * takes a forced Light or Dark theme from the plugin.
- *
- * The theme opens the calendar at least as wide as the date control, so the
- * control is not left as wide as the whole form: the picker carries the `date`
- * state of the `field-input` part, which the stylesheet bounds to
- * `--wippy-form-date-width` (full width only on a narrower form). The calendar
- * is not overridden; it follows the control.
- *
- * Where focus goes when the calendar closes: to the box, when it is still in the
- * calendar (`onCalendarHide`). A pick or Escape from a day hands focus to the
- * box, but the picker's own delayed re-focus of its day cells can run after that
- * and take it back (inside a shadow root its "focus is already in the calendar"
- * check reads `document.activeElement`, which is the shadow host), and when the
- * calendar then closes the browser drops focus to the page. Focus that has
- * already moved on (a click elsewhere, Tab) is left where it is.
- *
- * Tab inside the calendar: the picker keeps Tab in the panel, but it finds the
- * focused control through `document.activeElement`, which inside a shadow root
- * is the shadow host, so every Tab lands on the same day. In a shadow root the
- * panel moves focus itself, before the picker sees the key (`onCalendarTab`).
+ * Inside a shadow root the picker reads `document.activeElement`, which is
+ * the shadow host, so this control keeps focus in the box when the calendar
+ * closes (`onCalendarHide`) and moves Tab through the panel itself
+ * (`onCalendarTab`).
  */
 const props = defineProps<{
   field: DateFormField
@@ -113,7 +67,7 @@ function toDate(iso: string | null | undefined): Date | undefined {
   return date
 }
 
-// The first day the calendar covers (D53): PrimeVue builds a picked day with
+// The first day the calendar covers: PrimeVue builds a picked day with
 // `new Date(year, month, day)`, which reads years 0 to 99 as 1900 to 1999.
 const FIRST_CALENDAR_DAY = '0100-01-01'
 // The last day an answer can hold. Without it as a bound, PrimeVue goes on to
@@ -177,13 +131,7 @@ function restoreBoxAfterPicker() {
   void nextTick(restoreBox)
 }
 
-// The picker is created again whenever the field leaves the read-only view,
-// so the box is put back for every new picker, not only on this mount.
 onMounted(restoreBox)
-watch(picker, (instance) => {
-  if (instance)
-    restoreBoxAfterPicker()
-})
 
 watch(() => props.modelValue, (next) => {
   const text = textOf(next)
@@ -277,7 +225,6 @@ function onDateSelect(date: Date) {
   boxText.value = iso
   syncPicker(iso, true)
   report(iso)
-  restoreBoxAfterPicker()
 }
 // A tap on a touch screen. PrimeVue gives the box `inputmode="none"` (no
 // keyboard) and this field does not open the calendar on focus, so the tap
@@ -285,7 +232,7 @@ function onDateSelect(date: Date) {
 // click with a mouse, and focus from the keyboard, are left as they were.
 function onBoxClick(event: MouseEvent) {
   const box = event.target
-  if (!(box instanceof HTMLInputElement) || props.disabled || props.readonly)
+  if (!(box instanceof HTMLInputElement) || props.disabled)
     return
   if (box.getAttribute('aria-expanded') === 'true' || !window.matchMedia('(pointer: coarse)').matches)
     return
@@ -300,8 +247,8 @@ function onBlur() {
   restoreBoxAfterPicker()
 }
 // The `date` state is what the stylesheet bounds the control's width by.
-const inputPart = computed(() => partAttrs('field-input', 'date'))
-const calendarPart = computed(() => partAttrs('field-calendar'))
+const inputPart = partAttrs('field-input', 'date')
+const calendarPart = partAttrs('field-calendar')
 
 // The calendar is closing, and its panel is still in the page for this one
 // moment (the picker emits `hide` as the leave starts). A mouse click outside
@@ -312,11 +259,11 @@ const calendarPart = computed(() => partAttrs('field-calendar'))
 // `preventScroll`: a page scrolled away closes the calendar too, and focusing
 // the box must not scroll it back.
 function onCalendarHide() {
-  const box = (picker.value?.$el as HTMLElement | undefined)?.querySelector('input')
+  const box = boxInput()
   if (!box)
     return
   const focused = (box.getRootNode() as Document | ShadowRoot).activeElement
-  if (focused?.closest(`.${calendarPart.value.class}`))
+  if (focused?.closest(`.${calendarPart.class}`))
     box.focus({ preventScroll: true })
 }
 
@@ -354,8 +301,8 @@ function pickerPt(describedBy: string | undefined) {
       },
     },
     panel: {
-      part: calendarPart.value.part,
-      class: calendarPart.value.class,
+      part: calendarPart.part,
+      class: calendarPart.class,
       onKeydownCapture: onCalendarTab,
     },
   }
@@ -387,8 +334,7 @@ defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })
         :disabled="disabled"
         :invalid="invalid"
         :pt="pickerPt(describedBy)"
-        :part="inputPart.part"
-        :class="inputPart.class"
+        v-bind="inputPart"
         :show-on-focus="false"
         show-icon
         size="small"

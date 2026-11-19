@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isOnStep, NUMBER_ABS_MAX, numberToPlainText, parseNumberText } from './decimal'
+import { isOnStep, numberToPlainText, parseNumberText } from './decimal'
 
 describe('parseNumberText — digits a JSON number cannot hold', () => {
   it('refuses a value that does not read back from a JSON number as written', () => {
@@ -54,12 +54,6 @@ describe('parseNumberText — strict: dot decimal, optional minus, no separators
 
   it('rejects text too long to be a finite number', () => {
     expect(parseNumberText('9'.repeat(400))).toEqual({ kind: 'invalid' })
-  })
-})
-
-describe('NUMBER_ABS_MAX', () => {
-  it('is 1e12', () => {
-    expect(NUMBER_ABS_MAX).toBe(1e12)
   })
 })
 

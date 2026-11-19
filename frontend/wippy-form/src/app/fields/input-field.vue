@@ -69,7 +69,7 @@ const attrs = computed(() => {
 })
 const placeholder = computed(() => props.field.type === 'text' ? props.field.placeholder : undefined)
 const text = computed(() => typeof props.modelValue === 'string' ? props.modelValue : '')
-const inputPart = computed(() => partAttrs('field-input'))
+const inputPart = partAttrs('field-input')
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import type { FormState } from '../lib/definition'
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { ownValue } from '../lib/own'
 import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
 import FormAnsweredStatus from './form-answered-status.vue'
-import FormHeader from './form-header.vue'
+import QuestionCardHeading from './question-card/question-card-heading.vue'
 
 /**
  * The read-only, post-submit view of a fields form — the counterpart of
@@ -19,8 +19,8 @@ defineProps<{
 
 const statusRef = ref<InstanceType<typeof FormAnsweredStatus> | null>(null)
 
-const rootPart = computed(() => partAttrs('card', 'answered'))
-const fieldsPart = computed(() => partAttrs('fields'))
+const rootPart = partAttrs('card', 'answered')
+const fieldsPart = partAttrs('fields')
 
 defineExpose({
   /** Moves focus to the status text after a successful submit, so focus isn't lost when the form swaps to this read-only view. */
@@ -35,9 +35,9 @@ defineExpose({
     :part="`${rootPart.part} ${fieldsPart.part}`"
     :class="`w-form ${rootPart.class} ${fieldsPart.class}`"
   >
-    <FormHeader
-      :title="state.definition.title"
-      :description="state.definition.description"
+    <QuestionCardHeading
+      :definition="state.definition"
+      icon="tabler:circle-check"
     />
 
     <FormFieldControl

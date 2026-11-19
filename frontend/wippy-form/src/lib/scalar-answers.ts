@@ -4,24 +4,19 @@ import type {
   EmailFormField,
   FieldAnswer,
   FieldError,
-  FormField,
   NumberFormField,
   ScalarFormField,
   TextareaFormField,
   TextFormField,
 } from './definition'
 import { isOnStep, NUMBER_ABS_MAX, numberToPlainText, parseNumberText } from './decimal'
+import { REQUIRED_MESSAGE } from './messages'
 import { codePointLength, hasControlCharacters, isWhitespaceOnly, lengthLimitMessage, normalizeNewlines, trimAnswerText } from './text'
 
 /**
- * Client-side rules and serialization for the six V2 standard fields,
- * mirroring the server contract. This is a convenience mirror
- * for the UI: it catches an obvious mistake before a round trip and shapes
- * the value exactly as the server will accept it. The Session state API
- * stays the authority and its 422 errors are what the form ultimately shows.
- * Error codes are the server's stable codes; messages never echo the value.
- *
- * Never evaluated in the browser: a text field's `pattern` (see `evaluateText`).
+ * Client-side rules and serialization for the six V2 standard fields (see
+ * `answers.ts`). Error codes are the server's stable codes; messages never
+ * echo the value.
  */
 
 /** What judging one field's draft gives: the wire answer (undefined = omitted) and any findings. */
@@ -30,20 +25,8 @@ export interface FieldOutcome {
   errors: FieldError[]
 }
 
-/** The three things every field type provides, for the dispatch table in `answers.ts`. */
-export interface FieldHandler<F extends FormField> {
-  /** Judges the draft the control holds and shapes the wire answer. */
-  evaluate: (field: F, draft: FieldAnswer | undefined) => FieldOutcome
-  /** The draft a control starts from: the stored answer, else the definition's default. */
-  initialDraft: (field: F, wire: FieldAnswer | undefined) => FieldAnswer | undefined
-  /** The answer as read-only text, or `null` when the field was left unanswered. */
-  display: (field: F, wire: FieldAnswer | undefined) => string | null
-}
-
 const EMAIL_MAX = 254
 const EMAIL_LOCAL_MAX = 64
-
-export const REQUIRED_MESSAGE = 'This question is required.'
 
 const OMITTED: FieldOutcome = { answer: undefined, errors: [] }
 
@@ -125,7 +108,7 @@ function evaluateNumber(field: NumberFormField, draft: FieldAnswer | undefined):
     return fail('below_min', `Enter ${numberToPlainText(field.min)} or more.`)
   if (field.max !== undefined && value > field.max)
     return fail('above_max', `Enter ${numberToPlainText(field.max)} or less.`)
-  if (field.step !== undefined && field.step > 0 && !isOnStep(value, field.min ?? 0, field.step)) {
+  if (field.step !== undefined && !isOnStep(value, field.min ?? 0, field.step)) {
     const from = field.min !== undefined ? ` starting at ${numberToPlainText(field.min)}` : ''
     return fail('not_on_step', `Enter a value in steps of ${numberToPlainText(field.step)}${from}.`)
   }
@@ -161,9 +144,9 @@ function evaluateDate(field: DateFormField, draft: FieldAnswer | undefined): Fie
   if (!isValidIsoDate(text))
     return fail('invalid_date', 'Enter a valid date as YYYY-MM-DD.')
   // Both sides are fixed-width ISO text, so a plain string compare is a date compare.
-  if (field.min && isValidIsoDate(field.min) && text < field.min)
+  if (field.min && text < field.min)
     return fail('below_min', `Choose ${field.min} or later.`)
-  if (field.max && isValidIsoDate(field.max) && text > field.max)
+  if (field.max && text > field.max)
     return fail('above_max', `Choose ${field.max} or earlier.`)
   return { answer: text, errors: [] }
 }
@@ -178,47 +161,51 @@ function evaluateCheckbox(field: CheckboxFormField, draft: FieldAnswer | undefin
   return { answer: checked, errors: [] }
 }
 
-// ── the table ────────────────────────────────────────────────────
+// ── dispatch on the field type ───────────────────────────────────
 
-function textInitialDraft(field: { default?: string }, wire: FieldAnswer | undefined): FieldAnswer | undefined {
-  if (typeof wire === 'string')
-    return wire
-  return typeof field.default === 'string' ? field.default : undefined
+/** Judges the draft a standard field's control holds and shapes the wire answer. */
+export function evaluateScalar(field: ScalarFormField, draft: FieldAnswer | undefined): FieldOutcome {
+  switch (field.type) {
+    case 'text':
+    case 'textarea':
+      return evaluateText(field, draft)
+    case 'email':
+      return evaluateEmail(field, draft)
+    case 'number':
+      return evaluateNumber(field, draft)
+    case 'date':
+      return evaluateDate(field, draft)
+    case 'checkbox':
+      return evaluateCheckbox(field, draft)
+  }
 }
 
-function textDisplay(_field: ScalarFormField, wire: FieldAnswer | undefined): string | null {
-  return typeof wire === 'string' && !isWhitespaceOnly(wire) ? wire : null
+/** The draft a standard field's control starts from: the stored answer, else the definition's default. */
+export function scalarInitialDraft(field: ScalarFormField, wire: FieldAnswer | undefined): FieldAnswer | undefined {
+  switch (field.type) {
+    // The draft of a number field is the typed text, so the strict parser sees what the user wrote.
+    case 'number':
+      if (typeof wire === 'number')
+        return numberToPlainText(wire)
+      return typeof field.default === 'number' ? numberToPlainText(field.default) : undefined
+    // Only `false` can be a default, so an unchecked start is always right.
+    case 'checkbox':
+      return typeof wire === 'boolean' ? wire : false
+    default:
+      if (typeof wire === 'string')
+        return wire
+      return typeof field.default === 'string' ? field.default : undefined
+  }
 }
 
-const textHandler: FieldHandler<TextFormField> = { evaluate: evaluateText, initialDraft: textInitialDraft, display: textDisplay }
-const textareaHandler: FieldHandler<TextareaFormField> = { evaluate: evaluateText, initialDraft: textInitialDraft, display: textDisplay }
-const emailHandler: FieldHandler<EmailFormField> = { evaluate: evaluateEmail, initialDraft: textInitialDraft, display: textDisplay }
-const dateHandler: FieldHandler<DateFormField> = { evaluate: evaluateDate, initialDraft: textInitialDraft, display: textDisplay }
-
-const numberHandler: FieldHandler<NumberFormField> = {
-  evaluate: evaluateNumber,
-  // The draft of a number field is the typed text, so the strict parser sees what the user wrote.
-  initialDraft: (field, wire) => {
-    if (typeof wire === 'number')
-      return numberToPlainText(wire)
-    return typeof field.default === 'number' ? numberToPlainText(field.default) : undefined
-  },
-  display: (_field, wire) => typeof wire === 'number' ? numberToPlainText(wire) : null,
-}
-
-const checkboxHandler: FieldHandler<CheckboxFormField> = {
-  evaluate: evaluateCheckbox,
-  // Only `false` can be a default, so an unchecked start is always right.
-  initialDraft: (_field, wire) => typeof wire === 'boolean' ? wire : false,
-  display: (_field, wire) => typeof wire === 'boolean' ? (wire ? 'Yes' : 'No') : null,
-}
-
-/** One handler per V2 field type. `answers.ts` adds `choice` and dispatches on `field.type`. */
-export const SCALAR_HANDLERS: { [T in ScalarFormField['type']]: FieldHandler<Extract<ScalarFormField, { type: T }>> } = {
-  text: textHandler,
-  textarea: textareaHandler,
-  email: emailHandler,
-  number: numberHandler,
-  date: dateHandler,
-  checkbox: checkboxHandler,
+/** A standard field's answer as read-only text, or `null` when it was left unanswered. */
+export function scalarDisplay(field: ScalarFormField, wire: FieldAnswer | undefined): string | null {
+  switch (field.type) {
+    case 'number':
+      return typeof wire === 'number' ? numberToPlainText(wire) : null
+    case 'checkbox':
+      return typeof wire === 'boolean' ? (wire ? 'Yes' : 'No') : null
+    default:
+      return typeof wire === 'string' && !isWhitespaceOnly(wire) ? wire : null
+  }
 }

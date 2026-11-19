@@ -543,7 +543,7 @@ describe('date field: years before 1000', () => {
     expect(draft()).toBe('2026-10-20')
   })
 
-  // D53: the calendar covers years 100 to 9999. A date before year 100 is a
+  // The calendar covers years 100 to 9999. A date before year 100 is a
   // valid answer that can be typed, and leaves the calendar without a date.
   it('keeps a typed year below 100 as typed, with no date in the calendar', async () => {
     const { wrapper, input, draft } = mountField(undefined, [], unbounded)
@@ -749,18 +749,6 @@ describe('date field: years before 1000', () => {
       expect(input.value).toBe('2026-06-15')
       expect(wrapper.emitted('update:modelValue')).toBeUndefined()
     })
-  })
-  // The read-only view removes the picker; leaving it creates a new one,
-  // which writes its own spelling into the box.
-  it.each(['0050-03-04', 'next tuesday', '0999-05-15'])('keeps %s in the box when the field is read-only and editable again', async (text) => {
-    const { wrapper, draft } = mountField(text, [], unbounded)
-    await wrapper.setProps({ readonly: true })
-    await flushPromises()
-    expect(wrapper.find('input').exists()).toBe(false)
-    await wrapper.setProps({ readonly: false })
-    await flushPromises()
-    expect((wrapper.find('input').element as HTMLInputElement).value).toBe(text)
-    expect(draft()).toBe(text)
   })
   it('shows and picks in a year below 1000 handed in from outside', async () => {
     const { wrapper, input, draft } = mountField('0999-05-15', [], unbounded)

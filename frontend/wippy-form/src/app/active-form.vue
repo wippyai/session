@@ -2,18 +2,18 @@
 import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/definition'
 import type { ComponentPublicInstance } from 'vue'
 import type { SubmitBanner } from '../lib/submit-error'
-import { Icon } from '@iconify/vue'
-import Button from 'primevue/button'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
 import { ERROR_TEXT_CLASS } from '../lib/error-text'
+import { OFFLINE_MESSAGE, SENDING_MESSAGE, STALE_MESSAGE } from '../lib/messages'
 import { ownValue } from '../lib/own'
 import { pageHasNoFocus } from '../lib/page-focus'
 import { partAttrs } from '../lib/part-attrs'
-import { SENDING_LABEL, SENDING_STATUS_MESSAGE, SLOW_SEND_MS } from '../lib/send-state'
+import { SENDING_LABEL, SLOW_SEND_MS } from '../lib/send-state'
 import FormFieldControl from './fields/form-field.vue'
-import FormHeader from './form-header.vue'
 import FormMessage from './form-message.vue'
+import QuestionCardHeading from './question-card/question-card-heading.vue'
+import QuestionCardSendButton from './question-card/question-card-send-button.vue'
 
 /**
  * The fields form: every field of the definition as its own control (choice
@@ -33,10 +33,9 @@ import FormMessage from './form-message.vue'
  * a failed send then gives focus to Submit (`restoreFocusAfterFailure`).
  *
  * A send in flight also shows on the button itself: its label becomes
- * "Sending…" and a spinner turns beside it (it stands still under reduced
- * motion). The label change is what a screen reader hears from the focused
- * button; the status region adds "Sending your answers." only when a send runs
- * long.
+ * "Sending…" and a spinner turns beside it. The label change is what a screen
+ * reader hears from the focused button; the status region adds a line only
+ * when a send runs long.
  */
 const props = defineProps<{
   state: FormState
@@ -51,7 +50,6 @@ const emit = defineEmits<{
   retry: []
 }>()
 
-const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
 // One shared empty list: a fresh `[]` per render would hand every field a new
 // prop on each parent render and re-render all of them.
 const NO_ERRORS: FieldError[] = []
@@ -73,16 +71,14 @@ const initialSignature = draftSignature(props.state.definition, draft)
 
 const fieldErrors = ref<Record<string, FieldError[]>>({})
 const formErrors = ref<FieldError[]>([])
-type FieldHandle = { focusFirstControl: () => void, focusOtherText: () => void }
+type FieldHandle = InstanceType<typeof FormFieldControl>
 const fieldRefs: Record<string, FieldHandle | null> = {}
 const formEl = ref<HTMLFormElement | null>(null)
 const submitButton = ref<ComponentPublicInstance | null>(null)
 
 // Single polite live region for the form: submission-result banners and the
 // validation error summary both funnel through here instead of each having
-// their own role="alert" (which double-announces and can't be dismissed). The
-// banner's own PrimeVue `Message` is made a plain element for that reason
-// (`QUIET_MESSAGE_PT`), so a failure is announced once, here.
+// their own role="alert" (which double-announces and can't be dismissed).
 const statusMessage = ref('')
 // True while the region holds the validation summary, which is kept in step
 // with the errors still showing; false once a submit-failure message took it.
@@ -148,9 +144,19 @@ function restoreFocusAfterFailure() {
     (submitButton.value?.$el as HTMLElement | undefined)?.focus()
 }
 
+// An error for a field id this definition does not know has no field to show
+// on, so it joins the form-level errors.
 function setServerErrors(errors: Record<string, FieldError[]> | undefined, formLevel: FieldError[] | undefined) {
-  fieldErrors.value = errors ?? {}
-  formErrors.value = formLevel ?? []
+  const known: Record<string, FieldError[]> = {}
+  const unknown: FieldError[] = []
+  for (const [id, list] of Object.entries(errors ?? {})) {
+    if (props.state.definition.fields.some(f => f.id === id))
+      known[id] = list
+    else
+      unknown.push(...list)
+  }
+  fieldErrors.value = known
+  formErrors.value = [...(formLevel ?? []), ...unknown]
   const invalidIds = Object.keys(fieldErrors.value)
   focusFirstInvalid(invalidIds)
   if (invalidIds.length === 0)
@@ -179,7 +185,7 @@ onBeforeUnmount(clearSlowSendTimer)
 watch(() => props.submitting, (sending) => {
   clearSlowSendTimer()
   if (!sending) {
-    if (statusMessage.value === SENDING_STATUS_MESSAGE)
+    if (statusMessage.value === SENDING_MESSAGE)
       statusMessage.value = ''
     return
   }
@@ -189,7 +195,7 @@ watch(() => props.submitting, (sending) => {
   statusMessage.value = ''
   slowSendTimer = setTimeout(() => {
     slowSendTimer = null
-    statusMessage.value = SENDING_STATUS_MESSAGE
+    statusMessage.value = SENDING_MESSAGE
   }, SLOW_SEND_MS)
 })
 
@@ -237,11 +243,10 @@ watch(() => props.banner, (banner) => {
   void nextTick(restoreFocusAfterFailure)
 })
 
-const rootPart = computed(() => partAttrs('card'))
-const fieldsPart = computed(() => partAttrs('fields'))
-const noticePart = computed(() => partAttrs('notice'))
-const formErrorPart = computed(() => partAttrs('fields-error'))
-const sendPart = computed(() => partAttrs('send', props.submitting && 'sending'))
+const rootPart = partAttrs('card')
+const fieldsPart = partAttrs('fields')
+const noticePart = partAttrs('notice')
+const formErrorPart = partAttrs('fields-error')
 // Only a send in flight changes the label; an offline form is blocked, not sending.
 const submitLabel = computed(() => props.submitting ? SENDING_LABEL : props.state.definition.submit_label || 'Submit')
 
@@ -281,19 +286,16 @@ defineExpose({
       {{ OFFLINE_MESSAGE }}
     </p>
 
-    <FormHeader
-      :title="state.definition.title"
-      :description="state.definition.description"
+    <QuestionCardHeading
+      :definition="state.definition"
+      icon="tabler:messages"
+    />
+    <p
+      v-if="state.stale"
+      v-bind="noticePart"
     >
-      <p
-        v-if="state.stale"
-        :part="noticePart.part"
-        :class="noticePart.class"
-      >
-        Asked earlier — the conversation has moved on. You can still answer; the assistant will use it as
-        context and confirm before acting on the earlier request.
-      </p>
-    </FormHeader>
+      {{ STALE_MESSAGE }}
+    </p>
 
     <FormFieldControl
       v-for="field in state.definition.fields"
@@ -331,23 +333,14 @@ defineExpose({
     </FormMessage>
 
     <div>
-      <Button
+      <QuestionCardSendButton
         ref="submitButton"
+        name="send"
         type="submit"
         :label="submitLabel"
-        :aria-disabled="sendBlocked ? 'true' : undefined"
-        :part="sendPart.part"
-        :class="[sendPart.class, sendBlocked && 'p-disabled']"
-      >
-        <template #icon="iconProps">
-          <Icon
-            v-if="submitting"
-            icon="tabler:loader-2"
-            aria-hidden="true"
-            :class="[iconProps.class, 'animate-spin motion-reduce:animate-none']"
-          />
-        </template>
-      </Button>
+        :blocked="sendBlocked"
+        :sending="submitting"
+      />
     </div>
   </form>
 </template>

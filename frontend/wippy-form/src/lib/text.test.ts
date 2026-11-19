@@ -55,10 +55,10 @@ describe('hasControlCharacters', () => {
 
   it('rejects C1, bidi override and isolate controls, and the line and paragraph separators', () => {
     expect(hasControlCharacters('a\u0085b', true)).toBe(true)
-    expect(hasControlCharacters('a‮b', true)).toBe(true)
-    expect(hasControlCharacters('a⁦b', true)).toBe(true)
-    expect(hasControlCharacters('a b', true)).toBe(true)
-    expect(hasControlCharacters('a b', true)).toBe(true)
+    expect(hasControlCharacters('a\u202Eb', true)).toBe(true)
+    expect(hasControlCharacters('a\u2066b', true)).toBe(true)
+    expect(hasControlCharacters('a\u2028b', true)).toBe(true)
+    expect(hasControlCharacters('a\u2029b', true)).toBe(true)
   })
 
   it('rejects a lone surrogate, which is not valid UTF-8 once encoded', () => {

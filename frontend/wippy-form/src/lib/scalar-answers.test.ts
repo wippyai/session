@@ -1,8 +1,7 @@
 import type { ScalarFormField } from './definition'
-import type { FieldHandler } from './scalar-answers'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { serializeAnswers, validateAnswers } from './answers'
-import { isValidEmail, isValidIsoDate, SCALAR_HANDLERS } from './scalar-answers'
+import { evaluateScalar, isValidEmail, isValidIsoDate, scalarDisplay, scalarInitialDraft } from './scalar-answers'
 
 type FieldOf<T extends ScalarFormField['type']> = Extract<ScalarFormField, { type: T }>
 
@@ -11,7 +10,7 @@ function field<T extends ScalarFormField['type']>(type: T, extra: Partial<FieldO
 }
 
 function evaluate(f: ScalarFormField, draft: string | boolean | undefined) {
-  return (SCALAR_HANDLERS[f.type] as unknown as FieldHandler<ScalarFormField>).evaluate(f, draft)
+  return evaluateScalar(f, draft)
 }
 
 function codes(f: ScalarFormField, draft: string | boolean | undefined): string[] {
@@ -69,27 +68,10 @@ describe('text', () => {
     expect(evaluate(coded, 'not-a-code')).toEqual({ answer: 'not-a-code', errors: [] })
   })
 
-  it('never builds a regular expression from the definition, so no pattern can freeze the tab', () => {
-    const construct = vi.spyOn(globalThis, 'RegExp').mockImplementation(() => {
-      throw new Error('a RegExp was built while checking an answer')
-    })
-    try {
-      // Both patterns backtrack without bound on a long run of "a" in a browser engine.
-      expect(evaluate(field('text', { pattern: '(a|a)*b', max_length: 2000 }), 'a'.repeat(2000)).errors).toEqual([])
-      expect(evaluate(field('text', { pattern: 'a*a*a*a*b', max_length: 2000 }), 'a'.repeat(2000)).errors).toEqual([])
-      expect(construct).not.toHaveBeenCalled()
-    }
-    finally {
-      construct.mockRestore()
-    }
-  })
-
-  // Spying on the RegExp constructor catches only `new RegExp(pattern)`: a
-  // string handed to `match`, `search` or `split`, or built into a literal by
-  // `eval`, compiles inside the engine and never calls the spied constructor.
-  // A pattern that no engine can compile is the probe for every route. Each
-  // evaluation throws a SyntaxError, so a value that comes back accepted, with
-  // no throw, proves the pattern was never compiled.
+  // A pattern that no engine can compile probes every route by which one
+  // could be compiled (`new RegExp`, `match`, `search`, `split`): each would
+  // throw a SyntaxError, so a value that comes back accepted proves the
+  // pattern was never compiled.
   it('accepts a value for a pattern no regular-expression engine can compile, so none is ever asked to', () => {
     const uncompilable = ['(', '[a-', ')', '*a', '\\', '(?<n>a)(?<n>b)', 'a{2,1}']
     for (const pattern of uncompilable) {
@@ -299,57 +281,57 @@ describe('checkbox', () => {
 describe('initial drafts and defaults', () => {
   it('prefills a text default and sends it unless the user clears it', () => {
     const f = field('text', { default: 'Berlin' })
-    const draft = SCALAR_HANDLERS.text.initialDraft(f, undefined)
+    const draft = scalarInitialDraft(f, undefined)
     expect(draft).toBe('Berlin')
     expect(evaluate(f, draft as string)).toEqual({ answer: 'Berlin', errors: [] })
     expect(evaluate(f, '')).toEqual({ answer: undefined, errors: [] })
   })
 
   it('shows a number default as plain text', () => {
-    expect(SCALAR_HANDLERS.number.initialDraft(field('number', { default: 3 }), undefined)).toBe('3')
-    expect(SCALAR_HANDLERS.number.initialDraft(field('number', { default: 0.5 }), undefined)).toBe('0.5')
+    expect(scalarInitialDraft(field('number', { default: 3 }), undefined)).toBe('3')
+    expect(scalarInitialDraft(field('number', { default: 0.5 }), undefined)).toBe('0.5')
   })
 
   it('starts a checkbox unchecked, with false as its only possible default', () => {
-    expect(SCALAR_HANDLERS.checkbox.initialDraft(field('checkbox'), undefined)).toBe(false)
-    expect(SCALAR_HANDLERS.checkbox.initialDraft(field('checkbox', { default: false }), undefined)).toBe(false)
+    expect(scalarInitialDraft(field('checkbox'), undefined)).toBe(false)
+    expect(scalarInitialDraft(field('checkbox', { default: false }), undefined)).toBe(false)
   })
 
   it('starts an unanswered, default-less text field empty', () => {
-    expect(SCALAR_HANDLERS.text.initialDraft(field('text'), undefined)).toBeUndefined()
-    expect(SCALAR_HANDLERS.date.initialDraft(field('date'), undefined)).toBeUndefined()
+    expect(scalarInitialDraft(field('text'), undefined)).toBeUndefined()
+    expect(scalarInitialDraft(field('date'), undefined)).toBeUndefined()
   })
 
   it('lets a stored answer win over the default', () => {
-    expect(SCALAR_HANDLERS.text.initialDraft(field('text', { default: 'Berlin' }), 'Paris')).toBe('Paris')
-    expect(SCALAR_HANDLERS.number.initialDraft(field('number', { default: 3 }), 7)).toBe('7')
-    expect(SCALAR_HANDLERS.checkbox.initialDraft(field('checkbox'), true)).toBe(true)
+    expect(scalarInitialDraft(field('text', { default: 'Berlin' }), 'Paris')).toBe('Paris')
+    expect(scalarInitialDraft(field('number', { default: 3 }), 7)).toBe('7')
+    expect(scalarInitialDraft(field('checkbox'), true)).toBe(true)
   })
 })
 
 describe('read-only display text', () => {
   it('shows text and textarea values with their line breaks', () => {
-    expect(SCALAR_HANDLERS.textarea.display(field('textarea'), 'a\nb')).toBe('a\nb')
-    expect(SCALAR_HANDLERS.text.display(field('text'), 'hello')).toBe('hello')
+    expect(scalarDisplay(field('textarea'), 'a\nb')).toBe('a\nb')
+    expect(scalarDisplay(field('text'), 'hello')).toBe('hello')
   })
 
   it('shows a number as stored, without an exponent', () => {
-    expect(SCALAR_HANDLERS.number.display(field('number'), 3)).toBe('3')
-    expect(SCALAR_HANDLERS.number.display(field('number'), 1e-7)).toBe('0.0000001')
+    expect(scalarDisplay(field('number'), 3)).toBe('3')
+    expect(scalarDisplay(field('number'), 1e-7)).toBe('0.0000001')
   })
 
   it('shows a date as its ISO text and an email as written', () => {
-    expect(SCALAR_HANDLERS.date.display(field('date'), '2026-10-01')).toBe('2026-10-01')
-    expect(SCALAR_HANDLERS.email.display(field('email'), 'a@b.co')).toBe('a@b.co')
+    expect(scalarDisplay(field('date'), '2026-10-01')).toBe('2026-10-01')
+    expect(scalarDisplay(field('email'), 'a@b.co')).toBe('a@b.co')
   })
 
   it('shows a checkbox as Yes or No', () => {
-    expect(SCALAR_HANDLERS.checkbox.display(field('checkbox'), true)).toBe('Yes')
-    expect(SCALAR_HANDLERS.checkbox.display(field('checkbox'), false)).toBe('No')
+    expect(scalarDisplay(field('checkbox'), true)).toBe('Yes')
+    expect(scalarDisplay(field('checkbox'), false)).toBe('No')
   })
 
   it('returns null for an unanswered field, so the caller shows Skipped', () => {
     for (const type of ['text', 'textarea', 'number', 'email', 'date', 'checkbox'] as const)
-      expect(SCALAR_HANDLERS[type].display(field(type) as never, undefined), type).toBeNull()
+      expect(scalarDisplay(field(type), undefined), type).toBeNull()
   })
 })

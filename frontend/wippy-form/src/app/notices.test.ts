@@ -70,7 +70,7 @@ describe.each(['warn', 'secondary'] as const)('FormNotice (%s): standard fields'
     expect(root.getAttribute('part')?.split(' ')).toEqual(expect.arrayContaining(['card', 'card-unsupported', 'fields']))
     for (const name of ['w-form', 'w-form__card', 'w-form__card--unsupported', 'w-form__fields'])
       expect(root.classList.contains(name), name).toBe(true)
-    expect(root.querySelector('[part~="fields-title"]')?.textContent?.trim()).toBe('Delivery details')
+    expect(root.querySelector('[part~="title"]')?.textContent?.trim()).toBe('Delivery details')
     expect(root.querySelector('[part~="form-description"]')?.textContent?.trim()).toBe('Where should it go?')
   })
 

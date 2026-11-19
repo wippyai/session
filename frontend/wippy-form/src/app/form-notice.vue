@@ -3,8 +3,8 @@ import type { FormDefinition } from '../lib/definition'
 import type { MessageSeverity } from '../lib/error-text'
 import { partAttrs } from '../lib/part-attrs'
 import FormFieldControl from './fields/form-field.vue'
-import FormHeader from './form-header.vue'
 import FormMessage from './form-message.vue'
+import QuestionCardHeading from './question-card/question-card-heading.vue'
 
 /**
  * A form that cannot be answered here, under a message saying why. The
@@ -29,9 +29,9 @@ const fields = partAttrs('fields')
     :part="`${root.part} ${fields.part}`"
     :class="`w-form ${root.class} ${fields.class}`"
   >
-    <FormHeader
-      :title="definition.title"
-      :description="definition.description"
+    <QuestionCardHeading
+      :definition="definition"
+      icon="tabler:messages"
     />
 
     <FormFieldControl

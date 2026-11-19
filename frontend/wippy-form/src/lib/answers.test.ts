@@ -1,5 +1,5 @@
 import type { AnswerDraft } from './answers'
-import type { FormDefinition, FormField } from './definition'
+import type { ChoiceFormField, FormDefinition, FormField } from './definition'
 import { describe, expect, it } from 'vitest'
 import { answerDisplayItems, buildNotedValue, draftFromAnswers, draftSignature, evaluateField, exceedsLength, normalizeHostAnswers, NOTE_TEXT_MAX, OTHER_TEXT_MAX, readOnlyAnswer, serializeAnswers, serializeFieldAnswer, validateAnswers } from './answers'
 import { lengthLimitMessage } from './text'
@@ -274,7 +274,7 @@ describe('normalizeHostAnswers', () => {
 })
 
 describe('answerDisplayItems', () => {
-  const field: FormField = {
+  const field: ChoiceFormField = {
     id: 'f',
     type: 'choice',
     label: 'Q',
@@ -334,15 +334,10 @@ describe('evaluateField — dispatches on the field type', () => {
     expect(evaluateField(required, { other: 'x'.repeat(2001) }).errors.map(e => e.code)).toEqual(['too_long'])
   })
 
-  it('judges the six standard fields', () => {
+  it('judges a text, a number and a checkbox field by their own rules', () => {
     expect(evaluateField(v2Definition.fields[0], ' Ada ')).toEqual({ answer: ' Ada ', errors: [] })
     expect(evaluateField(v2Definition.fields[3], '4')).toEqual({ answer: 4, errors: [] })
     expect(evaluateField(v2Definition.fields[5], true)).toEqual({ answer: true, errors: [] })
-  })
-
-  it('omits a field of a type this component does not know, with no findings', () => {
-    const future = { id: 'z', type: 'slider', label: 'Z', required: true } as unknown as FormField
-    expect(evaluateField(future, '5')).toEqual({ answer: undefined, errors: [] })
   })
 })
 

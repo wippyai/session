@@ -6,6 +6,7 @@ import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
 import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX } from '../../lib/answers'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf } from '../../lib/focus-key'
+import { STALE_MESSAGE } from '../../lib/messages'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
 import { trimAnswerText } from '../../lib/text'
 import FormMessage from '../form-message.vue'
@@ -108,8 +109,7 @@ function onOptionsFocusIn(event: FocusEvent) {
     v-if="stale"
     v-bind="partAttrs('notice')"
   >
-    Asked earlier. You can still answer; the assistant uses it as context and asks again before acting on the
-    earlier request.
+    {{ STALE_MESSAGE }}
   </p>
   <p
     v-if="question.description"

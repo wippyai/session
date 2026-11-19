@@ -189,9 +189,8 @@ describe('styles.css — fields form tokens and parts', () => {
     expect(ruleBody('\\.w-form__field-label')).toMatch(/font-weight:\s*var\(--_label-weight\)/)
   })
 
-  it('draws the description and read-only note muted, through --_muted', () => {
+  it('draws the description muted, through --_muted', () => {
     expect(ruleBody('\\.w-form__field-description')).toMatch(/color:\s*var\(--_muted\)/)
-    expect(ruleBody('\\.w-form__field-note')).toMatch(/color:\s*var\(--_muted\)/)
   })
 
   // The theme makes the popup calendar at least as wide as its input, so the

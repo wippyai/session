@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import { ERROR_TEXT_CLASS } from '../../lib/error-text'
 import { partAttrs } from '../../lib/part-attrs'
 
@@ -20,8 +19,8 @@ defineProps<{
   required: boolean
 }>()
 
-const labelPart = computed(() => partAttrs('field-label'))
-const markerPart = computed(() => partAttrs('field-marker'))
+const labelPart = partAttrs('field-label')
+const markerPart = partAttrs('field-marker')
 </script>
 
 <template>

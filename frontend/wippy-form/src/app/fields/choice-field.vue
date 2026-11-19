@@ -4,7 +4,7 @@ import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import RadioButton from 'primevue/radiobutton'
 import { computed, ref, useId, watch } from 'vue'
-import { answerHasOther, answerOtherText, isOtherAnswer } from '../../lib/definition'
+import { answerHasOption, answerHasOther, answerOtherText } from '../../lib/definition'
 import { partAttrs } from '../../lib/part-attrs'
 import FieldShell from './field-shell.vue'
 
@@ -26,6 +26,10 @@ import FieldShell from './field-shell.vue'
  * `aria-required`, and named by the legend through `aria-labelledby`, because a
  * legend names only its fieldset) around its radios; a multiple choice adds no role, since its
  * fieldset already is the group and `aria-required` is not allowed on one.
+ *
+ * Other is its own selection state, never a reserved option value: an option
+ * value is any text the agent wrote, so no string is safe to reserve. Every
+ * control is binary: it reads whether its option (or Other) is chosen.
  */
 const props = defineProps<{
   field: ChoiceFormField
@@ -45,9 +49,7 @@ const groupId = useId()
 // control's id can never collide with an option id, regardless of what the
 // option values are (they may contain spaces, or literally be "other").
 const otherControlId = `${groupId}-other`
-const otherLabelId = `${otherControlId}-label`
 const otherTextId = `${groupId}-other-text`
-const otherTextLabelId = `${otherTextId}-label`
 
 function optionId(index: number): string {
   return `${groupId}-opt-${index}`
@@ -62,84 +64,60 @@ function inputPt(describedBy: string | undefined) {
   return { input: { 'aria-describedby': describedBy } }
 }
 
-const optionsPart = computed(() => partAttrs('field-options'))
-const optionPart = computed(() => partAttrs('field-option'))
-const otherOptionPart = computed(() => partAttrs('field-option', 'other'))
-const optionInputPart = computed(() => partAttrs('field-option-input'))
-const optionLabelPart = computed(() => partAttrs('field-option-label'))
-const optionDescriptionPart = computed(() => partAttrs('field-option-description'))
-const otherBodyPart = computed(() => partAttrs('field-other'))
-const otherInputPart = computed(() => partAttrs('field-other-input'))
+const optionsPart = partAttrs('field-options')
+const optionPart = partAttrs('field-option')
+const otherOptionPart = partAttrs('field-option', 'other')
+const optionInputPart = partAttrs('field-option-input')
+const optionLabelPart = partAttrs('field-option-label')
+const optionDescriptionPart = partAttrs('field-option-description')
+const otherBodyPart = partAttrs('field-other')
+const otherInputPart = partAttrs('field-other-input')
+
+const control = computed(() => props.field.multiple ? Checkbox : RadioButton)
 
 // The answer a choice field holds is always a choice answer.
 const answer = computed(() => props.modelValue as ChoiceAnswer | undefined)
 
-// A blank Other is the one error that is about the text box rather than the
-// choice, so only then is the box itself marked invalid.
-const otherTextInvalid = computed(() => props.errors.some(e => e.code === 'blank'))
+// A blank or too long Other text is the one error that is about the text box
+// rather than the choice, so only then is the box itself marked invalid.
+const otherTextInvalid = computed(() => props.errors.some(e => e.code === 'blank' || e.code === 'too_long'))
 
-// ── Single choice ──────────────────────────────────────────────
-// The chosen option and a chosen Other are two separate states. Other is never
-// a reserved option value: an option value is any text the agent wrote, so no
-// string is safe to reserve. The option radios read the chosen option (null
-// when Other or nothing is chosen), and the Other radio is a binary radio.
-const singleOption = computed<string | null>(() => typeof answer.value === 'string' ? answer.value : null)
-const singleOtherSelected = computed(() => isOtherAnswer(answer.value))
+const otherChosen = computed(() => answerHasOther(answer.value))
+const otherText = ref(answerOtherText(answer.value))
+watch(answer, (v) => {
+  otherText.value = answerOtherText(v)
+})
 
-function chooseOption(value: unknown) {
-  if (typeof value === 'string')
-    emit('update:modelValue', value)
+function isChosen(value: string): boolean {
+  return answerHasOption(answer.value, value)
 }
 
-function chooseOther() {
-  emit('update:modelValue', { other: singleOtherText.value })
-}
-
-const singleOtherText = ref(answerOtherText(answer.value))
-watch(answer, (v) => {
-  if (!props.field.multiple)
-    singleOtherText.value = answerOtherText(v)
-})
-watch(singleOtherText, (text) => {
-  if (!props.field.multiple && singleOtherSelected.value)
-    emit('update:modelValue', { other: text })
-})
-
-// ── Multiple choice ─────────────────────────────────────────────
-const multiSelected = computed<string[]>(() => {
-  const v = answer.value
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
-})
-const multiOtherChecked = computed(() => props.field.multiple && answerHasOther(answer.value))
-const multiOtherText = ref(answerOtherText(answer.value))
-watch(answer, (v) => {
-  if (props.field.multiple)
-    multiOtherText.value = answerOtherText(v)
-})
-
-function emitMulti(values: string[], includeOther: boolean, otherText: string) {
-  const arr: Array<string | OtherAnswer> = [...values]
+/** A multiple choice's answer: the options `chosen` keeps, in definition order, then Other. */
+function emitMulti(chosen: (value: string) => boolean, includeOther: boolean) {
+  const arr: Array<string | OtherAnswer> = props.field.options.map(o => o.value).filter(chosen)
   if (includeOther)
-    arr.push({ other: otherText })
+    arr.push({ other: otherText.value })
   emit('update:modelValue', arr.length > 0 ? arr : undefined)
 }
 
-function toggleOption(value: string, checked: boolean) {
-  const set = new Set(multiSelected.value)
-  if (checked)
-    set.add(value)
+// A radio only ever reports becoming checked.
+function setOption(value: string, checked: boolean) {
+  if (props.field.multiple)
+    emitMulti(v => v === value ? checked : isChosen(v), otherChosen.value)
   else
-    set.delete(value)
-  emitMulti(props.field.options.filter(o => set.has(o.value)).map(o => o.value), multiOtherChecked.value, multiOtherText.value)
+    emit('update:modelValue', value)
 }
 
-function toggleOther(checked: boolean) {
-  emitMulti(multiSelected.value, checked, multiOtherText.value)
+function setOther(checked: boolean) {
+  if (props.field.multiple)
+    emitMulti(isChosen, checked)
+  else
+    emit('update:modelValue', { other: otherText.value })
 }
 
-watch(multiOtherText, (text) => {
-  if (multiOtherChecked.value)
-    emitMulti(multiSelected.value, true, text)
+watch(otherText, () => {
+  if (otherChosen.value)
+    setOther(true)
 })
 
 defineExpose({
@@ -172,167 +150,76 @@ defineExpose({
   >
     <div
       ref="bodyEl"
-      :part="optionsPart.part"
-      :class="optionsPart.class"
+      v-bind="optionsPart"
       :role="field.multiple ? undefined : 'radiogroup'"
       :aria-labelledby="field.multiple ? undefined : labelId"
       :aria-required="!field.multiple && field.required ? 'true' : undefined"
     >
-      <template v-if="!field.multiple">
-        <div
-          v-for="(option, index) in field.options"
-          :key="option.value"
-          :part="optionPart.part"
-          :class="optionPart.class"
+      <div
+        v-for="(option, index) in field.options"
+        :key="option.value"
+        v-bind="optionPart"
+      >
+        <component
+          :is="control"
+          :model-value="isChosen(option.value)"
+          binary
+          :input-id="optionId(index)"
+          :name="field.multiple ? undefined : groupId"
+          :disabled="disabled"
+          :invalid="invalid"
+          :pt="inputPt(describedBy)"
+          v-bind="optionInputPart"
+          @update:model-value="(checked: unknown) => setOption(option.value, !!checked)"
+        />
+        <label
+          :for="optionId(index)"
+          v-bind="optionLabelPart"
         >
-          <RadioButton
-            :model-value="singleOption"
-            :input-id="optionId(index)"
-            :name="groupId"
-            :value="option.value"
-            :disabled="disabled"
-            :invalid="invalid"
-            :pt="inputPt(describedBy)"
-            :part="optionInputPart.part"
-            :class="optionInputPart.class"
-            @update:model-value="chooseOption"
-          />
+          {{ option.label }}
+          <span
+            v-if="option.description"
+            v-bind="optionDescriptionPart"
+          >{{ option.description }}</span>
+        </label>
+      </div>
+      <div
+        v-if="field.allow_other"
+        v-bind="otherOptionPart"
+      >
+        <component
+          :is="control"
+          :model-value="otherChosen"
+          binary
+          :input-id="otherControlId"
+          :name="field.multiple ? undefined : groupId"
+          :disabled="disabled"
+          :invalid="invalid"
+          :pt="inputPt(describedBy)"
+          v-bind="optionInputPart"
+          @update:model-value="(checked: unknown) => setOther(!!checked)"
+        />
+        <div v-bind="otherBodyPart">
           <label
-            :for="optionId(index)"
-            :part="optionLabelPart.part"
-            :class="optionLabelPart.class"
-          >
-            {{ option.label }}
-            <span
-              v-if="option.description"
-              :part="optionDescriptionPart.part"
-              :class="optionDescriptionPart.class"
-            >{{ option.description }}</span>
-          </label>
-        </div>
-        <div
-          v-if="field.allow_other"
-          :part="otherOptionPart.part"
-          :class="otherOptionPart.class"
-        >
-          <RadioButton
-            :model-value="singleOtherSelected"
-            binary
-            :input-id="otherControlId"
-            :name="groupId"
-            :disabled="disabled"
-            :invalid="invalid"
-            :pt="inputPt(describedBy)"
-            :part="optionInputPart.part"
-            :class="optionInputPart.class"
-            @update:model-value="chooseOther"
-          />
-          <div
-            :part="otherBodyPart.part"
-            :class="otherBodyPart.class"
-          >
-            <label
-              :id="otherLabelId"
-              :for="otherControlId"
-              :part="optionLabelPart.part"
-              :class="optionLabelPart.class"
-            >Other</label>
-            <label
-              :id="otherTextLabelId"
-              :for="otherTextId"
-              class="sr-only"
-            >Other answer</label>
-            <InputText
-              :id="otherTextId"
-              v-model="singleOtherText"
-              :disabled="disabled || !singleOtherSelected"
-              :aria-describedby="describedBy"
-              :invalid="invalid && otherTextInvalid"
-              :part="otherInputPart.part"
-              :class="otherInputPart.class"
-              size="small"
-              fluid
-            />
-          </div>
-        </div>
-      </template>
-
-      <template v-else>
-        <div
-          v-for="(option, index) in field.options"
-          :key="option.value"
-          :part="optionPart.part"
-          :class="optionPart.class"
-        >
-          <Checkbox
-            :model-value="multiSelected.includes(option.value)"
-            binary
-            :input-id="optionId(index)"
-            :disabled="disabled"
-            :invalid="invalid"
-            :pt="inputPt(describedBy)"
-            :part="optionInputPart.part"
-            :class="optionInputPart.class"
-            @update:model-value="(checked) => toggleOption(option.value, !!checked)"
-          />
+            :for="otherControlId"
+            v-bind="optionLabelPart"
+          >Other</label>
           <label
-            :for="optionId(index)"
-            :part="optionLabelPart.part"
-            :class="optionLabelPart.class"
-          >
-            {{ option.label }}
-            <span
-              v-if="option.description"
-              :part="optionDescriptionPart.part"
-              :class="optionDescriptionPart.class"
-            >{{ option.description }}</span>
-          </label>
-        </div>
-        <div
-          v-if="field.allow_other"
-          :part="otherOptionPart.part"
-          :class="otherOptionPart.class"
-        >
-          <Checkbox
-            :model-value="multiOtherChecked"
-            binary
-            :input-id="otherControlId"
-            :disabled="disabled"
-            :invalid="invalid"
-            :pt="inputPt(describedBy)"
-            :part="optionInputPart.part"
-            :class="optionInputPart.class"
-            @update:model-value="(checked) => toggleOther(!!checked)"
+            :for="otherTextId"
+            class="sr-only"
+          >Other answer</label>
+          <InputText
+            :id="otherTextId"
+            v-model="otherText"
+            :disabled="disabled || !otherChosen"
+            :aria-describedby="describedBy"
+            :invalid="invalid && otherTextInvalid"
+            v-bind="otherInputPart"
+            size="small"
+            fluid
           />
-          <div
-            :part="otherBodyPart.part"
-            :class="otherBodyPart.class"
-          >
-            <label
-              :id="otherLabelId"
-              :for="otherControlId"
-              :part="optionLabelPart.part"
-              :class="optionLabelPart.class"
-            >Other</label>
-            <label
-              :id="otherTextLabelId"
-              :for="otherTextId"
-              class="sr-only"
-            >Other answer</label>
-            <InputText
-              :id="otherTextId"
-              v-model="multiOtherText"
-              :disabled="disabled || !multiOtherChecked"
-              :aria-describedby="describedBy"
-              :invalid="invalid && otherTextInvalid"
-              :part="otherInputPart.part"
-              :class="otherInputPart.class"
-              size="small"
-              fluid
-            />
-          </div>
         </div>
-      </template>
+      </div>
     </div>
   </FieldShell>
 </template>

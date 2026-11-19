@@ -14,10 +14,10 @@ import type {
   ArtifactFormChoiceField,
   ArtifactFormDateField,
   ArtifactFormDefinition,
-  ArtifactFormDelivery,
   ArtifactFormEmailField,
   ArtifactFormFieldOption,
   ArtifactFormNumberField,
+  ArtifactFormState,
   ArtifactFormSubmitEnvelope,
   ArtifactFormSubmitResult,
   ArtifactFormTextareaField,
@@ -29,7 +29,7 @@ import type {
  * a form with at least one standard (non-choice) field. A higher value keeps
  * the "needs a newer version" notice, so a V3 form never renders half-known.
  */
-export const SUPPORTED_FORM_VERSIONS: ReadonlySet<number> = new Set([1, 2])
+const SUPPORTED_FORM_VERSIONS: ReadonlySet<number> = new Set([1, 2])
 
 export function isSupportedFormVersion(version: number): boolean {
   return SUPPORTED_FORM_VERSIONS.has(version)
@@ -39,7 +39,7 @@ export type FormFieldOption = ArtifactFormFieldOption
 
 export type ChoiceFormField = ArtifactFormChoiceField
 
-/** `min_length` and `max_length` are always set: the server fills them when it normalizes a definition. The browser never evaluates `pattern` (RE2, linear time on the server). */
+/** `min_length` and `max_length` are always set: the server fills them when it normalizes a definition. */
 export type TextFormField = ArtifactFormTextField
 
 export type TextareaFormField = ArtifactFormTextareaField
@@ -67,11 +67,19 @@ export type FormField = ChoiceFormField | ScalarFormField
 
 export type FormFieldType = FormField['type']
 
-const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<FormFieldType>(['choice', 'text', 'textarea', 'number', 'email', 'date', 'checkbox'])
+const KNOWN_FIELD_TYPES: Readonly<Record<FormFieldType, true>> = {
+  choice: true,
+  text: true,
+  textarea: true,
+  number: true,
+  email: true,
+  date: true,
+  checkbox: true,
+}
 
 /** True when this component can render a field of the given `type`. A future type is not known. */
 export function isKnownFieldType(type: string): boolean {
-  return KNOWN_FIELD_TYPES.has(type)
+  return Object.hasOwn(KNOWN_FIELD_TYPES, type)
 }
 
 export function isChoiceField(field: FormField): field is ChoiceFormField {
@@ -86,10 +94,6 @@ export interface FormDefinition<F extends FormField = FormField> extends Omit<Ar
 /** A definition whose every field is a `choice`: the question card renders it. */
 export type ChoiceFormDefinition = FormDefinition<ChoiceFormField>
 
-/** True for a non-empty definition made only of `choice` fields (a version 1 form). */
-export function isChoiceDefinition(definition: FormDefinition): definition is ChoiceFormDefinition {
-  return definition.fields.length > 0 && definition.fields.every(isChoiceField)
-}
 
 /** The free-text answer that is not one of the options. */
 export interface OtherAnswer {
@@ -124,28 +128,18 @@ export interface FieldError {
   message: string
 }
 
-/** GET `/artifact/{id}/state` response body. */
-export interface FormState<D extends FormDefinition = FormDefinition> {
-  form_version: number
-  artifact_id: string
-  session_id: string
-  status: 'active' | 'idle'
-  stale: boolean
-  late: boolean
-  content_version: number
+/** GET `/artifact/{id}/state` response body, with the stored answers read through `normalizeHostAnswers`. */
+export interface FormState<D extends FormDefinition = FormDefinition> extends Omit<ArtifactFormState, 'definition' | 'data'> {
   definition: D
   data: FormAnswers | null
-  submitted_at: string | null
-  answer_message_id: string | null
-  delivery: ArtifactFormDelivery | null
 }
 
 /** A form state whose definition is choice-only (renders as the question card). */
 export type ChoiceFormState = FormState<ChoiceFormDefinition>
 
-/** True for a loaded state whose definition is choice-only. */
+/** True for a loaded state whose definition is non-empty and choice-only (a version 1 form). */
 export function isChoiceFormState(state: FormState): state is ChoiceFormState {
-  return isChoiceDefinition(state.definition)
+  return state.definition.fields.length > 0 && state.definition.fields.every(isChoiceField)
 }
 
 /** POST `/artifact/{id}/state` request body. The component always sends `expected_content_version`. */
@@ -154,11 +148,12 @@ export interface SubmitEnvelope extends ArtifactFormSubmitEnvelope {
   answers: FormAnswers
 }
 
-/** 200 response body, including an exact replay. An exact replay reports the current delivery, which can be any of the four values. */
+/**
+ * What `artifactState(id).submit()` resolves with: the 200 body, including an
+ * exact replay, which reports the current delivery. Every failure, including
+ * a 422 with field errors, rejects with the Host's `ArtifactStateError`.
+ */
 export type SubmitAccepted = ArtifactFormSubmitResult
-
-/** What `artifactState(id).submit()` resolves with. Every failure, including a 422 with field errors, rejects with the Host's `ArtifactStateError`. */
-export type SubmitResult = SubmitAccepted
 
 /** True for the `{ other: text }` shape of an own answer, in a loaded or a drafted answer. */
 export function isOtherAnswer(value: unknown): value is OtherAnswer {
