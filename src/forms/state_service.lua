@@ -340,22 +340,11 @@ local function conflict_extra(artifact)
     }
 end
 
--- Whether form errors from definition.validate_answers mean the stored form
--- cannot be checked (a pattern that no longer compiles): nothing the user can fix.
-local function cannot_check(form_errors)
-    return form_errors ~= nil and form_errors[1] ~= nil and form_errors[1].code == "internal"
-end
-
-local function cannot_check_failure()
-    return failure(500, "internal", "This form cannot be checked right now.")
-end
-
 -- The canonical encoding of valid answers, or nil when they are not valid.
--- The second result says the stored form could not check them at all.
 local function canonical_of(form, answers)
-    local normalized, _, form_errors = definition.validate_answers(form.definition, answers)
-    if not normalized then return nil, cannot_check(form_errors) end
-    return definition.encode_answers(form.definition, normalized), false
+    local normalized = definition.validate_answers(form.definition, answers)
+    if not normalized then return nil end
+    return definition.encode_answers(form.definition, normalized)
 end
 
 -- Classifies a request against an already accepted submission: an exact
@@ -368,8 +357,7 @@ end
 local function against_existing(artifact, form, submission, request_id, answers)
     if submission.request_id == request_id then
         local accepted = definition.encode_answers(form.definition, submission.answers)
-        local canonical, unchecked = canonical_of(form, answers)
-        if unchecked then return cannot_check_failure() end
+        local canonical = canonical_of(form, answers)
         if canonical and canonical == accepted then
             local delivery, delivery_err = delivery_of(submission, artifact.session_id)
             if delivery_err then return internal_failure("Failed to read the delivery state", delivery_err) end
@@ -529,9 +517,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
                 return failure(400, "invalid_request", UNSUPPORTED_FORM_VERSION)
             end
             if accept_err.validation_failed then
-                local form_errors = accept_err.form_errors
-                if cannot_check(form_errors) then return cannot_check_failure() end
-                return 422, validation_body(accept_err.field_errors, form_errors)
+                return 422, validation_body(accept_err.field_errors, accept_err.form_errors)
             end
             if accept_err.existing then
                 return against_existing(accept_err.existing, accept_err.form,

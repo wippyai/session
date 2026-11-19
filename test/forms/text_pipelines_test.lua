@@ -291,7 +291,7 @@ local function define_tests()
 
     describe("form_text.read_answer", function()
         local function read(value: string, overrides: any?)
-            local opts = { max = 5, raw_factor = 4, trim = false, multiline = false }
+            local opts = { max = 5, trim = false, multiline = false }
             for key, item in pairs(overrides or {}) do opts[key] = item end
             return form_text.read_answer(value, opts)
         end
@@ -323,11 +323,11 @@ local function define_tests()
             test.is_nil(problem_of("abcde"))
         end)
 
-        it("measures the size guard with the raw factor, from the limit", function()
-            test.is_nil(select(3, read(string.rep("a", 5), { max = 5, raw_factor = 1 })))
-            test.eq(select(3, read(string.rep("a", 6), { max = 5, raw_factor = 1 })), "too_long")
-            test.eq(select(3, read(string.rep("\255", 41), { max = 5, raw_factor = 8 })), "too_long")
-            test.eq(select(3, read(string.rep("\255", 40), { max = 5, raw_factor = 8 })), "not_utf8")
+        it("measures the size guard from the limit: 4 bytes a character, 8 when trimmed", function()
+            test.eq(select(3, read(string.rep("\255", 20))), "not_utf8")
+            test.eq(select(3, read(string.rep("\255", 21))), "too_long")
+            test.eq(select(3, read(string.rep("\255", 40), { trim = true })), "not_utf8")
+            test.eq(select(3, read(string.rep("\255", 41), { trim = true })), "too_long")
         end)
 
         it("allows tabs and line breaks only for multi-line text", function()

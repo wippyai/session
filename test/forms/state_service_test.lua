@@ -7,7 +7,6 @@ local security = require("security")
 local funcs = require("funcs")
 local consts = require("consts")
 local definition = require("definition")
-local form_pattern = require("form_pattern")
 local state_service = require("state_service")
 local control_handlers = require("control_handlers")
 local answer_admission = require("answer_admission")
@@ -1328,7 +1327,8 @@ local function define_tests()
                 test.eq(get(artifact_id), 200)
             end)
 
-            it("answers 500, not 422, when a stored pattern no longer compiles, and still reads the form", function()
+            -- A raised error ends the request as a 500.
+            it("raises, not 422, when a stored pattern no longer compiles, and still reads the form", function()
                 local ctx = new_session()
                 local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
                 local artifact_id = new_v2_form(ctx, def)
@@ -1336,13 +1336,11 @@ local function define_tests()
                     content.props.definition.fields[1].pattern = "("
                 end)
                 test.eq(get(artifact_id), 200)
-                local status, body = post(artifact_id, v2_request({ code = "ABC" }))
-                test.eq(status, 500)
-                test.eq(body.code, "internal")
+                test.is_false((pcall(post, artifact_id, v2_request({ code = "ABC" }))))
                 test.eq(#user_rows(ctx.session_id), 0)
             end)
 
-            it("answers 500, not 409, to an exact replay when a stored pattern no longer compiles", function()
+            it("raises, not 409, on an exact replay when a stored pattern no longer compiles", function()
                 local ctx = new_session()
                 local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
                 local artifact_id = new_v2_form(ctx, def)
@@ -1351,9 +1349,7 @@ local function define_tests()
                 rewrite_content(artifact_id, function(content)
                     content.props.definition.fields[1].pattern = "("
                 end)
-                local status, body = post(artifact_id, request)
-                test.eq(status, 500, tostring(body and body.code))
-                test.eq(body.code, "internal")
+                test.is_false((pcall(post, artifact_id, request)))
                 test.eq(#user_rows(ctx.session_id), 1, "the answer accepted first stays")
             end)
 
@@ -1459,42 +1455,14 @@ local function define_tests()
                 test.eq(artifact.meta.session_form.submission.answers.f, "ann@example.org")
             end)
 
-            it("answers 500 when a pattern stops compiling before acceptance, and stores nothing", function()
+            it("raises when a pattern stops compiling before acceptance, and stores nothing", function()
                 local ctx = new_session()
                 local artifact_id = new_v2_form(ctx, { title = "Form",
                     fields = { { id = "f", type = "text", label = "Field", pattern = "[a-z]+" } } })
                 change_before_acceptance(artifact_id, function(field) field.pattern = "(" end)
-                local status, body = answer_field(artifact_id, "abc")
-                test.eq(status, 500)
-                test.eq(body.code, "internal")
+                test.is_false((pcall(answer_field, artifact_id, "abc")))
                 test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
                 test.eq(#user_rows(ctx.session_id), 0)
-            end)
-
-            it("compiles a form's pattern once across writing the form, answering it and replaying the answer", function()
-                local ctx = new_session()
-                local def = { title = "Code", fields = {
-                    { id = "code", type = "text", label = "Code", pattern = "replay-[0-9]{3}" },
-                } }
-                local original_compile = form_pattern._compile_source
-                local sources = {} :: {string}
-                form_pattern._compile_source = function(source: string)
-                    table.insert(sources, source)
-                    return original_compile(source)
-                end
-                local ok, failure = pcall(function()
-                    local artifact_id = new_v2_form(ctx, def)
-                    test.eq(#sources, 1, "writing the form checks the pattern: one compile")
-                    local request = v2_request({ code = "replay-123" })
-                    test.eq(post(artifact_id, request), 200)
-                    test.eq(#sources, 1, "answering reuses the compiled pattern")
-                    local status, replay = post(artifact_id, request)
-                    test.eq(status, 200)
-                    test.eq(replay.replayed, true)
-                    test.eq(#sources, 1, "a replay validates the answers again and still does not compile")
-                end)
-                form_pattern._compile_source = original_compile
-                if not ok then error(failure, 0) end
             end)
 
             it("answers 422 pattern_mismatch for an answer that does not match the pattern, and accepts one that does", function()

@@ -87,7 +87,7 @@ end
 
 local function option_labels(field: any): {[string]: string}
     local labels: {[string]: string} = {}
-    for _, option in ipairs(field.options or {}) do labels[option.value] = option.label end
+    for _, option in ipairs(field.options) do labels[option.value] = option.label end
     return labels
 end
 

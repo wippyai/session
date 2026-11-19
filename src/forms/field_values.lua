@@ -51,18 +51,15 @@ field_values.LIMITS = {
     NUMBER_DECIMALS = 6,
 }
 
--- A valid answer is at most this many UTF-8 characters, four bytes each.
-local BYTES_PER_CHARACTER = 4
 local RAW_DATE_BYTES = 512
 
-local COMMON_KEYS = { id = true, type = true, label = true, description = true, required = true }
-
-local function keys_of(extra: {string}): {[string]: boolean}
-    local keys: {[string]: boolean} = {}
-    for key in pairs(COMMON_KEYS) do keys[key] = true end
+-- The keys every field may carry, plus the keys of its type.
+function field_values.keys_of(extra: {string}): {[string]: boolean}
+    local keys: {[string]: boolean} = { id = true, type = true, label = true, description = true, required = true }
     for _, key in ipairs(extra) do keys[key] = true end
     return keys
 end
+local keys_of = field_values.keys_of
 
 -- The keys a field of each type may carry. Anything else is `unknown_key`.
 field_values.KEYS = {
@@ -95,12 +92,14 @@ local function refuse(code: string, message: string): (any, any)
     return nil, { code = code, message = message }
 end
 
-local function unanswered(field: any): (any, any)
+-- No answer: (nil, nil), or the `required` refusal for a required field.
+function field_values.unanswered(field: any): (any, any)
     if field.required then
         return nil, { code = "required", message = "This question requires an answer." }
     end
     return nil, nil
 end
+local unanswered = field_values.unanswered
 
 ---------------------------------------------------------------------------
 -- Decimal numbers
@@ -299,7 +298,7 @@ local function check_free_text(field: any, value: any): (any, any)
     -- Text is kept exactly as typed (no trim); only a value of nothing but
     -- whitespace counts as no answer.
     local _, length, problem = form_text.read_answer(value, {
-        max = field.max_length :: number, raw_factor = BYTES_PER_CHARACTER, trim = false, multiline = multiline })
+        max = field.max_length :: number, trim = false, multiline = multiline })
     if problem == "blank" then return unanswered(field) end
     if problem == "too_long" then
         return refuse("too_long", string.format("Must be at most %d characters.", field.max_length))
@@ -316,12 +315,12 @@ local function check_free_text(field: any, value: any): (any, any)
         return refuse("too_short", string.format("Must be at least %d characters.", field.min_length))
     end
     if field.pattern ~= nil then
-        local expression = form_pattern.compile(field.pattern :: string)
+        local expression, compile_err = form_pattern.compile(field.pattern :: string)
         if not expression then
             -- A stored pattern that no longer compiles is the form's fault,
-            -- not the user's.
-            return nil, { code = "internal", internal = true,
-                message = "This question's pattern cannot be checked." }
+            -- not the user's: raised, so the request fails with a 500.
+            error("the stored pattern of field " .. tostring(field.id) .. " does not compile: "
+                .. tostring(compile_err), 0)
         end
         local matched = (expression :: any):match_string(value)
         if not matched then
@@ -339,7 +338,7 @@ local function check_email(field: any, value: any): (any, any)
     -- characters, too many characters) is one refusal; the address syntax and
     -- the local part's length follow.
     local address, _, problem = form_text.read_answer(value, {
-        max = field_values.LIMITS.EMAIL_MAX, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = false })
+        max = field_values.LIMITS.EMAIL_MAX, trim = true, multiline = false })
     if problem == "blank" then return unanswered(field) end
     if problem then return refuse("invalid_email", "Enter a valid email address.") end
     local at = string.find(address :: string, "@", 1, true)
@@ -429,15 +428,10 @@ local ANSWER_CHECKS = {
 }
 
 -- Checks one answer to a standard field (a normalized field of one of the
--- standard types). `value` is nil when the user sent nothing. A refusal with
--- `internal` set is a fault in the stored form, not in the answer.
+-- standard types). `value` is nil when the user sent nothing.
 function field_values.check_answer(field: any, value: any): (any, any)
     if value == nil then return unanswered(field) end
-    local check = ANSWER_CHECKS[field.type]
-    if check == nil then
-        return nil, { code = "internal", internal = true, message = "This question's type cannot be checked." }
-    end
-    return check(field, value)
+    return (ANSWER_CHECKS[field.type] :: any)(field, value)
 end
 
 ---------------------------------------------------------------------------
@@ -454,7 +448,7 @@ function field_values.literal(value: any): string
 end
 
 -- The entries { key, value } that describe a field to an agent that lost the
--- original ask_user call, after "question" and "type": what it needs to
+-- original ask_user_fields call, after "question" and "type": what it needs to
 -- restate the question (answer_text.questions_json). A key with no value is
 -- left out.
 function field_values.question_entries(field: any): {any}
@@ -674,7 +668,7 @@ function field_values.text_budget(fields: {any}): integer
     local total = 0
     for _, field in ipairs(fields) do
         if field.type == "text" or field.type == "textarea" then
-            total = total + (field.max_length or 0)
+            total = total + field.max_length
         elseif field.type == "email" then
             total = total + field_values.LIMITS.EMAIL_MAX
         end

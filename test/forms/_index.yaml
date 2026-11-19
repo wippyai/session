@@ -145,7 +145,6 @@ entries:
     imports:
       consts: wippy.session:consts
       definition: wippy.session.forms:definition
-      form_pattern: wippy.session.forms:form_pattern
       state_service: wippy.session.forms:state_service
       control_handlers: wippy.session.process:control_handlers
       answer_admission: wippy.session.process:answer_admission

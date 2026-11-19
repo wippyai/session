@@ -61,10 +61,7 @@ local FIELD_ID_MAX = 40
 local ROOT_KEYS = {
     title = true, description = true, submit_label = true, answered_message = true, fields = true,
 }
-local FIELD_KEYS = {
-    id = true, type = true, label = true, description = true, required = true,
-    options = true, multiple = true, allow_other = true,
-}
+local FIELD_KEYS = field_values.keys_of({ "options", "multiple", "allow_other" })
 local OPTION_KEYS = { value = true, label = true, description = true }
 
 ---------------------------------------------------------------------------
@@ -384,7 +381,7 @@ local function check_other(field: any, value: table): (any, any)
         return nil, { code = "invalid_type", message = "The other answer must be text." }
     end
     local text, _, problem = form_text.read_answer(value.other, {
-        max = definition.LIMITS.OTHER_TEXT, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = true })
+        max = definition.LIMITS.OTHER_TEXT, trim = true, multiline = true })
     if problem then return nil, refusal(OTHER_WORDING, problem) end
     return { other = text }, nil
 end
@@ -408,7 +405,7 @@ local function check_noted(value: table, positions: {[string]: number}): (any, a
         return nil, { code = "invalid_type", message = "A note must be text." }
     end
     local kept, _, problem = form_text.read_answer(note, {
-        max = definition.LIMITS.NOTE_TEXT, raw_factor = form_text.TRIMMED_RAW_FACTOR, trim = true, multiline = true })
+        max = definition.LIMITS.NOTE_TEXT, trim = true, multiline = true })
     if problem == "blank" then return chosen, nil end
     if problem then return nil, refusal(NOTE_WORDING, problem) end
     return { value = chosen, note = kept }, nil
@@ -420,10 +417,6 @@ local function check_object(field: any, value: table, positions: {[string]: numb
     if value.other ~= nil then return check_other(field, value) end
     if value.value ~= nil then return check_noted(value, positions) end
     return nil, { code = "invalid_type", message = "An answer object has \"value\" (with an optional \"note\") or \"other\"." }
-end
-
-local function required_error(): any
-    return { code = "required", message = "This question requires an answer." }
 end
 
 local function check_single(field: any, value: any, positions: {[string]: number}): (any, any)
@@ -495,10 +488,8 @@ end
 --   field_errors       - { [field_id] = { { code, message } } } (first
 --                        violation per field), or nil when valid
 --   form_errors        - list of { code, message, field? } for problems that
---                        belong to no defined field, or nil when valid. The
---                        code "internal" is a fault in the stored form (a
---                        pattern that no longer compiles), not in the
---                        answers: the caller answers 500, not 422
+--                        belong to no defined field, or nil when valid
+-- A stored pattern that no longer compiles raises an error (field_values).
 function definition.validate_answers(def: any, answers: any): (any, any, any)
     local field_errors = {}
     local form_errors = {}
@@ -538,17 +529,13 @@ function definition.validate_answers(def: any, answers: any): (any, any, any)
                     result, err = check_single(field, value, positions)
                 end
             end
-            if not err and result == nil and field.required then
-                err = required_error()
+            if not err and result == nil then
+                err = select(2, field_values.unanswered(field))
             end
         else
             -- A standard field decides `required` itself: an unchecked
             -- required checkbox is a value (false) that still fails it.
             result, err = field_values.check_answer(field, value)
-            if err and err.internal then
-                -- A fault in the stored form, not in the answers.
-                return nil, nil, { { code = "internal", field = field.id, message = err.message } }
-            end
         end
         if err then
             field_errors[field.id] = { err }

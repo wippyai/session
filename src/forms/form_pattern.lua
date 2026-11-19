@@ -24,7 +24,7 @@ local form_text = require("form_text")
 -- Not in the subset: lookaround and backreferences (RE2 has neither, so they
 -- would not compile), named groups, flags, and \s \S \D \W \b \B \p \x \A \z
 -- and the other letter escapes (RE2 reads these, but the subset stays small
--- enough for the ask_user tool description to list in full).
+-- enough for the ask_user_fields tool description to list in full).
 --
 -- Bounds: 200 characters, 3 nested groups, repeat counts up to 100 (written
 -- without a leading zero, because RE2 reads {01} as the text "{01}"), no
@@ -48,7 +48,7 @@ local UNSUPPORTED = "unsupported_pattern"
 local INVALID = "invalid_pattern"
 
 -- A backslash before one of these is that character, in and out of a class;
--- the ask_user schema lists the same characters (a test compares them).
+-- the ask_user_fields schema lists the same characters (a test compares them).
 form_pattern.ESCAPABLE = "^$\\.*+?()[]{}|/"
 -- And this one, in a class only.
 form_pattern.CLASS_ESCAPABLE = "-"
@@ -351,41 +351,13 @@ function form_pattern.check(pattern: any): (boolean?, string?, string?)
     return true, nil, nil
 end
 
--- Seam for tests: the runtime's compile, called once per pattern that is not
--- cached.
-function form_pattern._compile_source(source: string): (any, any)
-    return text.regexp.compile(source)
-end
-
--- The compiled expressions by pattern text. A form's pattern is compiled
--- when the form is written (the check, then the check of its default), and
--- again on every answer and every replay of an answer, so the expression is
--- kept. The cache is emptied when it is full: a process works with few patterns
--- at a time, and a bound is what matters.
-form_pattern.CACHE_LIMIT = 64
-local cache: {[string]: any} = {}
-local cached = 0
-
-function form_pattern.cached_count(): integer
-    return cached
-end
-
 -- The compiled full-match expression for a pattern, or nil and the error.
 -- This is the one place that compiles a regular expression for a form, the
 -- email syntax of field_values included, and the one place that wraps a pattern
 -- as ^(?:pattern)$, so an alternation is matched as a whole and the author
 -- needs no anchors.
 function form_pattern.compile(pattern: string): (any, any)
-    local known = cache[pattern]
-    if known ~= nil then return known, nil end
-    local expression, err = form_pattern._compile_source("^(?:" .. pattern .. ")$")
-    if not expression then return nil, err end
-    if cached >= form_pattern.CACHE_LIMIT then
-        cache, cached = {}, 0
-    end
-    cache[pattern] = expression
-    cached = cached + 1
-    return expression, nil
+    return text.regexp.compile("^(?:" .. pattern .. ")$")
 end
 
 return form_pattern

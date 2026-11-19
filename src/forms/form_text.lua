@@ -154,18 +154,14 @@ local function trim(text: string): string
     return string.sub(text, first, last)
 end
 
--- The raw_factor of an answer that is trimmed: a valid one is at most 4 bytes
--- per character, plus whatever surrounding whitespace a real client sends. This
--- bounds every per-byte scan of the raw value to a small multiple of the limit,
--- independent of the 64 KiB body cap.
-local TRIMMED_RAW_FACTOR = 8
-
 -- The sequence every free-text answer takes: the Other text and the note of a
 -- choice, and the text, textarea and email fields. One function, so the six
 -- cannot drift apart. It stops at the first problem, in this order:
---   1. the size guard: more than opts.max * opts.raw_factor bytes is
---      "too_long", before anything scans the value. The factor is the bytes a
---      character can take (4), or TRIMMED_RAW_FACTOR where the answer is trimmed;
+--   1. the size guard: more than opts.max times 4 bytes (the most a character
+--      takes) is "too_long", before anything scans the value. Where the answer
+--      is trimmed the factor is 8, which leaves room for the surrounding
+--      whitespace a real client sends. This bounds every per-byte scan of the
+--      raw value to a small multiple of the limit, whatever the body cap;
 --   2. trim, when opts.trim, with the JavaScript set;
 --   3. UTF-8 ("not_utf8"), which counts the characters;
 --   4. control characters ("control_characters"); a tab and a line break are
@@ -177,8 +173,8 @@ local TRIMMED_RAW_FACTOR = 8
 -- in characters, or nil, nil and the problem. The codes and messages are the
 -- caller's: they differ per answer.
 local function read_answer(value: string,
-    opts: {max: number, raw_factor: number, trim: boolean, multiline: boolean}): (string?, number?, string?)
-    if #value > opts.max * opts.raw_factor then return nil, nil, "too_long" end
+    opts: {max: number, trim: boolean, multiline: boolean}): (string?, number?, string?)
+    if #value > opts.max * (opts.trim and 8 or 4) then return nil, nil, "too_long" end
     local kept = opts.trim and trim(value) or value
     local length = char_length(kept)
     if not length then return nil, nil, "not_utf8" end
@@ -202,9 +198,7 @@ form_text.char_length = char_length
 form_text.is_blank = is_blank
 form_text.is_whitespace_only = is_whitespace_only
 form_text.has_control_characters = has_control_characters
-form_text.trim = trim
 form_text.read_answer = read_answer
 form_text.compare_digits = compare_digits
-form_text.TRIMMED_RAW_FACTOR = TRIMMED_RAW_FACTOR
 
 return form_text

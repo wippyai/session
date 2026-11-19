@@ -43,7 +43,7 @@ entries:
   - name: form_pattern
     kind: library.lua
     meta:
-      comment: The bounded Go RE2 subset a text field may carry, its check and its cached full-match compile. Only the server evaluates a pattern
+      comment: The bounded Go RE2 subset a text field may carry, its check and its full-match compile. Only the server evaluates a pattern
     source: file://form_pattern.lua
     modules:
       - text
@@ -246,7 +246,7 @@ entries:
       type: agent.trait
       title: Ask the user with a form
       icon: tabler:message-question
-      comment: Lets an agent ask the user structured choice questions through a form in the chat
+      comment: Lets an agent ask the user structured choice questions through a form in the chat. An alternative to ask_user_fields; give an agent one of the two
       tags:
         - forms
         - session
@@ -386,7 +386,7 @@ entries:
                   },
                   "pattern": {
                     "type": "string",
-                    "description": "text only: the whole answer must match this regular expression, at most 200 characters. The server matches it against the whole answer, so it needs no anchors. Allowed: literal characters; . for any character; ^ and $; classes [abc] [^abc] [a-z] (inside a class write [ as \\[, and put - first or last or write \\-); \\d and \\w (ASCII only); groups ( ) and (?: ); alternation |; the repeats * + ? {n} {n,} {n,m}, each with an optional lazy ? after it as in a{2,5}?, with counts of at most 100 and no leading zero. The whole pattern counts at most 100 with every repeat written out: a literal, a class, . ^ $ and an empty group count 1, a{n} and a{m,n} count n times what they repeat, a{m,} counts m + 1 times, a repeat of zero counts what it repeats once, so a{0} counts 1, * + ? count what they repeat once, nested repeats multiply, and alternatives add up, so (ab){5} counts 10 and (a{5}){3} counts 15. A backslash may only precede one of these characters: ^ $ \\ . * + ? ( ) [ ] { } | / (inside a class also -). Not allowed: lookahead or lookbehind, backreferences, named groups, flags, \\s \\S \\D \\W \\b \\B \\p \\x, any other backslash letter such as \\n or \\t, POSIX classes, groups nested more than 3 deep, and repeats of repeats such as a** or (a+)+."
+                    "description": "text only: the whole answer must match this regular expression of at most 200 characters; it needs no anchors. Allowed: literal characters; . for any character; ^ and $; classes [abc] [^abc] [a-z] (inside a class write [ as \\[, and put - first or last or write \\-); \\d and \\w (ASCII only); groups ( ) and (?: ); alternation |; the repeats * + ? {n} {n,} {n,m}, each with an optional lazy ? as in a{2,5}?, with counts of at most 100 and no leading zero. A backslash may only precede one of these characters: ^ $ \\ . * + ? ( ) [ ] { } | / (inside a class also -). Limits: groups nested at most 3 deep, no repeat of a repeat such as a** or (a+)+, and the pattern counts at most 100 with every repeat written out (a{5} counts 5, (ab){5} counts 10). Not allowed: lookaround, backreferences, named groups, flags, POSIX classes, and \\s \\b \\p or any other backslash letter. An error from this tool names the broken rule."
                   },
                   "placeholder": {
                     "type": "string",
@@ -436,7 +436,7 @@ entries:
       type: agent.trait
       title: Ask the user with a form of fields
       icon: tabler:forms
-      comment: Lets an agent ask the user structured questions (choices, text, numbers, email addresses, dates and checkboxes) through a form in the chat
+      comment: Lets an agent ask the user structured questions (choices, text, numbers, email addresses, dates and checkboxes) through a form in the chat. An alternative to ask_user; give an agent one of the two
       tags:
         - forms
         - session
