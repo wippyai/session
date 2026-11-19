@@ -63,7 +63,7 @@ entries:
     data:
       fixtures:
         capabilities.json: file://fixtures/capabilities.json
-        session_open.json: file://fixtures/session_open.json
+        tool_approval_surface_declare.json: file://fixtures/tool_approval_surface_declare.json
         session_message_runtime_context.json: file://fixtures/session_message_runtime_context.json
         tool_approval_surface.json: file://fixtures/tool_approval_surface.json
         tool_approval_event_pending.json: file://fixtures/tool_approval_event_pending.json
@@ -83,6 +83,7 @@ entries:
         session_update_activity.json: file://fixtures/session_update_activity.json
         session_update_activity_cleared.json: file://fixtures/session_update_activity_cleared.json
         session_error_unavailable.json: file://fixtures/session_error_unavailable.json
+        session_error_limit.json: file://fixtures/session_error_limit.json
         rest_session.json: file://fixtures/rest_session.json
         rest_message_row.json: file://fixtures/rest_message_row.json
         model_result_not_run.json: file://fixtures/model_result_not_run.json
@@ -210,4 +211,115 @@ entries:
     imports:
       test: wippy.test:test
       preview: wippy.session.approval:preview
+    method: run
+
+  # Registry entries the gate suite freezes. Their meta.type is not a
+  # discovery type, so no agent or tool registry picks them up.
+  - name: test_agent
+    kind: registry.entry
+    meta:
+      type: test.approval_agent
+      title: Ops assistant
+      test_only: true
+    data: {}
+
+  - name: target_agent
+    kind: registry.entry
+    meta:
+      type: test.approval_agent
+      title: Billing agent
+      test_only: true
+    data: {}
+
+  - name: marked_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Delete customer
+      description: Permanently deletes a customer and their orders.
+      approval: required
+      test_only: true
+    data: {}
+
+  - name: granted_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Send invoice email
+      approval:
+        required: true
+        approve_all: true
+      test_only: true
+    data: {}
+
+  - name: plain_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Look up customer
+      test_only: true
+    data: {}
+
+  - name: private_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Private lookup
+      private: true
+      test_only: true
+    data: {}
+
+  - name: delegate_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Delegate a task
+      test_only: true
+    data: {}
+
+  - name: gate_test
+    kind: function.lua
+    meta:
+      name: Tool approval gate up to the wait
+      type: test
+      suite: session
+      comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, fail closed (EE2-2710 S7a, AC 1, 2, 3, 19, 26, 32)
+    source: file://gate_test.lua
+    modules:
+      - sql
+      - uuid
+      - registry
+      - security
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      approval_gate: wippy.session.approval:gate
+      approval_events: wippy.session.approval:events
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
+      policy: wippy.session.approval:policy
+      fingerprint: wippy.session.approval:fingerprint
+      tool_caller: wippy.agent.tools:caller
+      wake: wippy.session.approval:wake
+      writer: wippy.session.persist:writer
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: events_test
+    kind: function.lua
+    meta:
+      name: Tool approval events and model results
+      type: test
+      suite: session
+      comment: Model-facing results for every reason including approval_check_failed, closure reasons, event payloads, one notice per turn (EE2-2710 S7a)
+    source: file://events_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      approval_events: wippy.session.approval:events
     method: run

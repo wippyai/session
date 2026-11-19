@@ -5,8 +5,8 @@ namespace: wippy.session.approval
 # trait settings, tool meta, the policy evaluator, call freezing with digests
 # and fingerprints, the argument preview, activation and the wake hub.
 # Nothing here turns the feature on: activation needs the compiled options of
-# the trait entry, and the trait entry, the capability and the gate call come
-# in later slices.
+# the trait entry, and the trait entry and the capability come in later
+# slices. The gate runs only for sessions whose activation is stored.
 entries:
   # wippy.session.approval:trait_config
   - name: trait_config
@@ -92,3 +92,31 @@ entries:
     source: file://preview.lua
     modules:
       - json
+
+  # wippy.session.approval:events
+  - name: events
+    kind: library.lua
+    meta:
+      comment: Tool approval events and results - the tool_approval event, not-run settlements, session notices, the model-facing result of a call that did not run
+    source: file://events.lua
+
+  # wippy.session.approval:gate
+  - name: gate
+    kind: library.lua
+    meta:
+      comment: The approval gate in process_tools - freezes the batch, evaluates the policy, grant audit, per-turn request cap, no approval UI, request creation in the batch record, settlement of calls that do not run
+    source: file://gate.lua
+    modules:
+      - registry
+      - uuid
+      - time
+      - logger
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      freeze: wippy.session.approval:freeze
+      policy: wippy.session.approval:policy
+      preview: wippy.session.approval:preview
+      tool_meta: wippy.session.approval:tool_meta
+      approval_events: wippy.session.approval:events

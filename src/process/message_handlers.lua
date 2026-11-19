@@ -18,6 +18,7 @@ local turn_context = require("turn_context")
 local time = require("time")
 local llm = require("llm")
 local activation = require("activation")
+local approval_gate = require("approval_gate")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -2167,13 +2168,16 @@ function message_handlers.agent_step(ctx, op)
             })
             call_message_types[call.id] = call_type
         end
-        local stored_id, call_message_ids, store_err, stored_date = ctx.writer:add_response(
-            output_text, metadata, intents, step_notes)
+        -- A protected response stores its approval batch record with the
+        -- rows (EE2-2710); an unprotected one passes no options.
+        local stored_id, call_message_ids, store_err, stored_date, approval_batch = ctx.writer:add_response(
+            output_text, metadata, intents, step_notes, nil, approval_gate.response_options(ctx))
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
         end
         assistant_message_id = stored_id
+        result.approval = approval_gate.op_binding(ctx, approval_batch)
         commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts)
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
@@ -2255,6 +2259,7 @@ function message_handlers.agent_step(ctx, op)
             request_id = op.request_id,
             has_text_response = output_text ~= "",
             ui_action_runtime = op.ui_action_runtime,
+            approval = result.approval,
         })
     end
 
@@ -2396,6 +2401,48 @@ local function settle_behavior_round(ctx, op, cancelled)
     return ctx.reader:reset()
 end
 
+-- The operations that follow a settled tool round: a requested checkpoint
+-- (unless skip_checkpoint) and, unless the turn ends, the next model step.
+-- A stopped turn queues neither.
+local function queue_round_end(ctx, op, next_ops, end_turn, skip_checkpoint)
+    if #op.tool_calls == 0 or is_turn_stopped(ctx) then return true end
+    -- Requested compaction waits for the complete tool/result round. The
+    -- existing token-threshold background scheduling remains unchanged.
+    if not skip_checkpoint and ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
+        local checkpoint_agent = current_agent(ctx)
+        if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
+        table.insert(next_ops, {
+            type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
+            requested_only = true,
+            message_id = op.checkpoint_anchor_id or op.message_id,
+            checkpoint_anchor_id = op.checkpoint_anchor_id,
+            checkpoint_bindings = checkpoint_agent and checkpoint_agent.bindings
+                and checkpoint_agent.bindings.checkpoint,
+            agent_options = checkpoint_agent and checkpoint_agent.agent_options,
+            agent = checkpoint_agent and { id = checkpoint_agent.id, model = checkpoint_agent.model },
+            tokens = op.tokens,
+        })
+    end
+    -- A turn that ended by creating a form, or that the approval gate ended,
+    -- queues no continuation step; a handoff does, so the new agent continues
+    -- the turn.
+    if not end_turn then
+        table.insert(next_ops, {
+            type = consts.OP_TYPE.AGENT_CONTINUE,
+            message_id = op.message_id,
+            request_id = op.request_id,
+            ui_action_runtime = op.ui_action_runtime,
+        })
+    end
+    return true
+end
+
+-- The approval gate hook (EE2-2710, architecture 4.4). Replaceable, so tests
+-- can drive process_tools with a fake gate.
+message_handlers._approval_gate = function(ctx, op, env)
+    return approval_gate.run(ctx, op, env)
+end
+
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
@@ -2452,11 +2499,64 @@ function message_handlers.process_tools(ctx, op)
         return { completed = true, next_ops = {} }
     end
 
+    -- The message IDs and the session context are set before the approval
+    -- gate, which freezes both (EE2-2710, architecture 4.4).
     for call_id, tool_call in pairs(validated_tools or {}) do
         if not op.call_message_ids[call_id] then
             return nil, "Tool call intent was not stored with the assistant response: " .. call_id
         end
         tool_call.message_id = op.call_message_ids[call_id]
+    end
+
+    local session_context, err = ctx.reader:get_full_context()
+    if err then
+        session_context = {}
+    end
+    session_context = with_agent_run_context(ctx, session_context, active_agent)
+
+    local function fail_remaining(start_index, reason)
+        local failure = tostring(reason)
+        for index = start_index, #op.tool_calls do
+            local call = op.tool_calls[index]
+            local _, mark_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
+                status = consts.FUNC_STATUS.ERROR,
+                result = failure
+            })
+            if mark_err then failure = failure .. "; settlement failed: " .. tostring(mark_err) end
+        end
+        return nil, failure
+    end
+
+    -- The approval gate (EE2-2710). nil for an unprotected session. It fails
+    -- closed: when the check fails, no call runs.
+    local gated, gate_err = message_handlers._approval_gate(ctx, op, {
+        validated_tools = validated_tools,
+        session_context = session_context,
+    })
+    if gate_err then return fail_remaining(1, "Tool approval check failed: " .. tostring(gate_err)) end
+    gated = gated or {}
+    if gated.fenced then
+        -- The gate settled every call of the batch; none runs.
+        local cancelled, cancel_err = settle_behavior_round(ctx, op, true)
+        if not cancelled then return nil, cancel_err end
+        local next_ops = {}
+        local queued, queue_err = queue_round_end(ctx, op, next_ops, gated.end_turn == true,
+            gated.skip_checkpoint == true)
+        if not queued then return nil, queue_err end
+        return { completed = (#next_ops == 0), next_ops = next_ops }
+    end
+    local settled_by_gate = gated.settled or {}
+    -- In a protected session only the calls the gate released are given to
+    -- the caller; unprotected rounds run as before.
+    local run_tools = validated_tools
+    if gated.released then
+        run_tools = {}
+        for call_id, tool_call in pairs(validated_tools or {}) do
+            if gated.released[call_id] then run_tools[call_id] = tool_call end
+        end
+    end
+
+    for call_id, tool_call in pairs(run_tools or {}) do
         if tool_call.valid and (not ctx.config.delegation_func_id
             or tool_call.registry_id ~= ctx.config.delegation_func_id)
             and not (tool_call.meta and tool_call.meta.private) then
@@ -2467,14 +2567,8 @@ function message_handlers.process_tools(ctx, op)
             end
     end
 
-    local session_context, err = ctx.reader:get_full_context()
-    if err then
-        session_context = {}
-    end
-    session_context = with_agent_run_context(ctx, session_context, active_agent)
-
     local executed, results, execute_err = pcall(function()
-        return caller:execute(session_context, validated_tools, ctx.coordinator and ctx.coordinator.cancel)
+        return caller:execute(session_context, run_tools, ctx.coordinator and ctx.coordinator.cancel)
     end)
     if not executed then
         execute_err = tostring(results)
@@ -2491,21 +2585,10 @@ function message_handlers.process_tools(ctx, op)
     end
 
     local next_ops = {}
-    -- Set by an effect that finishes the turn (a created form): the calls are
-    -- settled as usual, but no continuation step is queued.
-    local end_turn = false
-    local function fail_remaining(start_index, reason)
-        local failure = tostring(reason)
-        for index = start_index, #op.tool_calls do
-            local call = op.tool_calls[index]
-            local _, mark_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
-                status = consts.FUNC_STATUS.ERROR,
-                result = failure
-            })
-            if mark_err then failure = failure .. "; settlement failed: " .. tostring(mark_err) end
-        end
-        return nil, failure
-    end
+    -- Set by an effect that finishes the turn (a created form), or by the
+    -- approval gate: the calls are settled as usual, but no continuation step
+    -- is queued.
+    local end_turn = gated.end_turn == true
     local function announce_function_error(call_id, message_id, function_name, detail)
         ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
             message_id = message_id,
@@ -2528,6 +2611,8 @@ function message_handlers.process_tools(ctx, op)
     local calls_cancelled = false
     for index, call in ipairs(op.tool_calls) do
         local call_id = call.id
+        -- Settled by the approval gate, with its own result and events.
+        if settled_by_gate[call_id] then goto continue_call end
         local result_data = results[call_id]
         if not result_data then
             local failure = execute_err and tostring(execute_err) or "Call outcome unknown"
@@ -2738,35 +2823,8 @@ function message_handlers.process_tools(ctx, op)
         ctx.turn_state.span_open_start = false
     end
 
-    if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
-        -- Requested compaction waits for the complete tool/result round. The
-        -- existing token-threshold background scheduling remains unchanged.
-        if ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
-            local checkpoint_agent = current_agent(ctx)
-            if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
-            table.insert(next_ops, {
-                type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
-                requested_only = true,
-                message_id = op.checkpoint_anchor_id or op.message_id,
-                checkpoint_anchor_id = op.checkpoint_anchor_id,
-                checkpoint_bindings = checkpoint_agent and checkpoint_agent.bindings
-                    and checkpoint_agent.bindings.checkpoint,
-                agent_options = checkpoint_agent and checkpoint_agent.agent_options,
-                agent = checkpoint_agent and { id = checkpoint_agent.id, model = checkpoint_agent.model },
-                tokens = op.tokens,
-            })
-        end
-        -- A turn that ended by creating a form queues no continuation step; a
-        -- handoff does, so the new agent continues the turn.
-        if not end_turn then
-            table.insert(next_ops, {
-                type = consts.OP_TYPE.AGENT_CONTINUE,
-                message_id = op.message_id,
-                request_id = op.request_id,
-                ui_action_runtime = op.ui_action_runtime,
-            })
-        end
-    end
+    local queued, queue_err = queue_round_end(ctx, op, next_ops, end_turn, false)
+    if not queued then return nil, queue_err end
 
     return {
         completed = (#next_ops == 0),

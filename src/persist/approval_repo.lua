@@ -372,6 +372,34 @@ function approval_repo.list_by_state(conn: any, session_id: string, state: strin
     end)
 end
 
+-- The approval records of every batch of the turn `turn_id` (the batch
+-- record's turn_id), in creation order. The gate reads them for the
+-- repeated-denial rule and the per-turn request cap (4.3 order 5, 4.5 step 5).
+function approval_repo.list_by_turn(conn: any, session_id: string, turn_id: string)
+    if not non_empty(session_id) then return nil, "Session ID is required" end
+    if not non_empty(turn_id) then return nil, "Turn ID is required" end
+    return with_connection(conn, function(c)
+        local batches, batch_err = select_rows(c, sql.builder.select("batch_id")
+            :from("session_tool_approval_batches")
+            :where("session_id = ?", session_id):where("turn_id = ?", turn_id), "Failed to list turn batches")
+        if not batches then return nil, batch_err end
+        if #batches == 0 then return {} end
+        local marks, ids = {}, {}
+        for _, row in ipairs(batches) do
+            marks[#marks + 1] = "?"
+            ids[#ids + 1] = row.batch_id
+        end
+        local rows, err = select_rows(c, sql.builder.select(table.unpack(APPROVAL_COLUMNS))
+            :from("session_tool_approvals"):where("session_id = ?", session_id)
+            :where("batch_id IN (" .. table.concat(marks, ", ") .. ")", table.unpack(ids))
+            :order_by("requested_at ASC, approval_id ASC"), "Failed to list turn approvals")
+        if not rows then return nil, err end
+        local records = {}
+        for _, row in ipairs(rows) do records[#records + 1] = approval_from_row(row) end
+        return records
+    end)
+end
+
 -- Creates one approval record. A record starts pending, or already decided
 -- when no person is asked: approved through a grant (decided_via "grant"),
 -- unavailable or limited (4.7). Returns the stored record.

@@ -104,15 +104,25 @@ local function sent_to(run: any, pid: string, topic: string): {any}
     return out
 end
 
-local function open(session_id: string, conn: string, declare: boolean?, from: any?): any
+-- `legacy_declare` puts the pre-v4 field tool_approval_ui on session_open,
+-- which the relay never forwards; the plugin must ignore it.
+local function open(session_id: string, conn: string, legacy_declare: boolean?, from: any?): any
     return { topic = consts.PLUGIN_TOPICS.OPEN, from = from or HUB,
-        data = { session_id = session_id, conn_pid = conn, tool_approval_ui = declare and 1 or nil } }
+        data = { session_id = session_id, conn_pid = conn, tool_approval_ui = legacy_declare and 1 or nil } }
+end
+
+local function surface_command(session_id: string, conn: string, enabled: any, from: any?, request_id: string?): any
+    return { topic = consts.PLUGIN_TOPICS.COMMAND, from = from or HUB,
+        data = { session_id = session_id, conn_pid = conn, request_id = request_id,
+            data = { command = "tool_approval_surface", enabled = enabled } } }
+end
+
+local function declare(session_id: string, conn: string, from: any?): any
+    return surface_command(session_id, conn, true, from, "req-declare")
 end
 
 local function withdraw(session_id: string, conn: string, from: any?): any
-    return { topic = consts.PLUGIN_TOPICS.COMMAND, from = from or HUB,
-        data = { session_id = session_id, conn_pid = conn, request_id = "req-withdraw",
-            data = { command = "tool_approval_surface", enabled = false } } }
+    return surface_command(session_id, conn, false, from, "req-withdraw")
 end
 
 local function message_with(session_id: string, conn: string, runtime_context: any): any
@@ -198,24 +208,54 @@ local function define_tests()
             end
         end)
 
-        it("records a declaration on create and sends the set when the session process starts", function()
-            local run = run_plugin({ open(first, "conn-1", true) })
+        it("records an enabled: true declaration after the open and replies on the session topic", function()
+            local run = run_plugin({ open(first, "conn-1"), declare(first, "conn-1") })
             local list = pushes(run, first)
             test.eq(#list, 1)
             test.eq(list[1], "session-pid-1:1")
             test.eq(run.monitors["conn-1"], 1)
+            test.eq(#sent_to(run, "session-pid-1", consts.TOPICS.COMMAND), 0, "not forwarded")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 1)
+            test.eq(replies[1].type, consts.UPSTREAM_TYPES.COMMAND_RESPONSE)
+            test.eq(replies[1].request_id, "req-declare")
+            test.is_true(replies[1].success)
         end)
 
-        it("records a declaration on reopen of a live session", function()
-            local run = run_plugin({ open(first, "conn-1", false), open(first, "conn-2", true) })
+        it("records a declaration sent after a reopen of a live session", function()
+            local run = run_plugin({ open(first, "conn-1"), open(first, "conn-2"), declare(first, "conn-2") })
             test.eq(#run.spawns, 1, "the live session is reopened, not started again")
             local list = pushes(run, first)
             test.eq(#list, 1)
             test.eq(list[1], "session-pid-1:1")
         end)
 
+        it("ignores tool_approval_ui on session_open, which the relay never forwards", function()
+            local run = run_plugin({ open(first, "conn-1", true), open(first, "conn-2", true) })
+            test.eq(#pushes(run, first), 0, "no surface is declared by an open")
+            test.is_nil(run.monitors["conn-1"])
+            test.is_nil(run.monitors["conn-2"])
+        end)
+
+        it("refuses a surface command whose enabled is not a boolean and changes nothing", function()
+            local run = run_plugin({ open(first, "conn-1"), declare(first, "conn-1"),
+                surface_command(first, "conn-1", 1, nil, "req-bad"),
+                surface_command(first, "conn-1", "false", nil, "req-bad-2"),
+                surface_command(first, "conn-1", nil, nil, "req-bad-3") })
+            local list = pushes(run, first)
+            test.eq(#list, 1, "only the valid declaration changed the set")
+            test.eq(list[1], "session-pid-1:1")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 4)
+            for index = 2, 4 do
+                test.is_false(replies[index].success)
+                test.eq(replies[index].code, "invalid_surface_command")
+            end
+            test.is_nil(run.unmonitors["conn-1"])
+        end)
+
         it("records a declaration from session_message runtime_context before stripping it", function()
-            local run = run_plugin({ open(first, "conn-1", false),
+            local run = run_plugin({ open(first, "conn-1"),
                 message_with(first, "conn-3", { tool_approval_ui = 1 }) })
             local list = pushes(run, first)
             test.eq(#list, 1)
@@ -232,28 +272,29 @@ local function define_tests()
         end)
 
         it("handles the withdrawal in the plugin and never forwards it", function()
-            local run = run_plugin({ open(first, "conn-1", true), withdraw(first, "conn-1") })
+            local run = run_plugin({ open(first, "conn-1"), declare(first, "conn-1"), withdraw(first, "conn-1") })
             local list = pushes(run, first)
             test.eq(#list, 2)
             test.eq(list[2], "session-pid-1:0")
             test.eq(#sent_to(run, "session-pid-1", consts.TOPICS.COMMAND), 0, "not forwarded")
             test.eq(run.unmonitors["conn-1"], 1, "the monitor reference is released")
             local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
-            test.eq(#replies, 1)
-            test.eq(replies[1].type, consts.UPSTREAM_TYPES.COMMAND_RESPONSE)
-            test.eq(replies[1].request_id, "req-withdraw")
-            test.is_true(replies[1].success)
+            test.eq(#replies, 2)
+            test.eq(replies[2].type, consts.UPSTREAM_TYPES.COMMAND_RESPONSE)
+            test.eq(replies[2].request_id, "req-withdraw")
+            test.is_true(replies[2].success)
         end)
 
         it("does not restore a withdrawn declaration on reopen, a later message or a process restart", function()
             local run = run_plugin({
-                open(second, "conn-keep", false),
-                open(first, "conn-1", true),
+                open(second, "conn-keep"),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
                 withdraw(first, "conn-1"),
-                open(first, "conn-1", false),
+                open(first, "conn-1"),
                 message_with(first, "conn-1", { attention = { host_instance_id = "h" } }),
                 session_exit(2),
-                open(first, "conn-1", false),
+                open(first, "conn-1"),
             })
             local list = pushes(run, first)
             test.eq(list[1], "session-pid-2:1")
@@ -263,17 +304,18 @@ local function define_tests()
         end)
 
         it("restores a surface only through a new declaration", function()
-            local run = run_plugin({ open(first, "conn-1", true), withdraw(first, "conn-1"),
-                open(first, "conn-1", true) })
+            local run = run_plugin({ open(first, "conn-1"), declare(first, "conn-1"), withdraw(first, "conn-1"),
+                open(first, "conn-1"), declare(first, "conn-1") })
             local list = pushes(run, first)
             test.eq(list[#list], "session-pid-1:1")
         end)
 
         it("refuses a surface command and declarations from a process that is not the relay", function()
             local run = run_plugin({
-                open(first, "conn-1", true),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
                 withdraw(first, "conn-1", "intruder-pid"),
-                open(first, "conn-2", true, "intruder-pid"),
+                declare(first, "conn-2", "intruder-pid"),
                 message_with(first, "conn-3", { tool_approval_ui = 1 }),
             })
             -- conn-3 came from the relay; the two intruder messages changed nothing.
@@ -283,16 +325,19 @@ local function define_tests()
             test.eq(list[2], "session-pid-1:2")
             test.is_nil(run.unmonitors["conn-1"], "nothing was released")
             test.is_nil(run.monitors["conn-2"], "the intruder's connection is not tracked")
-            test.eq(#sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first), 0, "no reply to the intruder")
+            test.eq(#sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first), 1,
+                "only the relay's declaration is answered; no reply to the intruder")
+            test.eq(#sent_to(run, "conn-2", consts.TOPIC_PREFIXES.SESSION .. first), 0)
             test.eq(#sent_to(run, "session-pid-1", consts.TOPICS.COMMAND), 0)
         end)
 
         it("keeps the live set across a Session process restart while the connection stays open", function()
             local run = run_plugin({
-                open(second, "conn-keep", false),
-                open(first, "conn-1", true),
+                open(second, "conn-keep"),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
                 session_exit(2),
-                open(first, "conn-other", false),
+                open(first, "conn-other"),
             })
             local list = pushes(run, first)
             test.eq(list[1], "session-pid-2:1")
@@ -301,8 +346,9 @@ local function define_tests()
 
         it("drops the surfaces of a closed connection and shares its monitor with the broker count", function()
             local run = run_plugin({
-                open(second, "conn-keep", false),
-                open(first, "conn-1", true),
+                open(second, "conn-keep"),
+                open(first, "conn-1"),
+                declare(first, "conn-1"),
                 message_with(second, "conn-1", { tool_approval_ui = 1 }),
                 withdraw(second, "conn-1"),
                 { event = { kind = process.event.EXIT, from = "conn-1" } },

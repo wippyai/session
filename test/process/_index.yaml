@@ -223,7 +223,7 @@ entries:
       name: Approval UI surfaces
       type: test
       suite: session
-      comment: The surface tracker, plugin declarations on create, reopen and message, withdrawal and sender authority, the live set across a Session process restart, the Session topic sender check and the inbox wake signals (EE2-2710 AC 25 tracking, AC 44 surface part)
+      comment: The surface tracker, plugin declarations (tool_approval_surface enabled true, message runtime_context; session_open ignored), withdrawal and sender authority, the live set across a Session process restart, the Session topic sender check and the inbox wake signals (EE2-2710 AC 25 tracking, AC 44 surface part)
     source: file://approval_surfaces_test.lua
     modules:
       - security

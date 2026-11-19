@@ -148,7 +148,7 @@ local function define_tests()
                 test.eq(#problems, 0, row.file .. ": " .. table.concat(problems, "; "))
                 checked = checked + 1
             end
-            test.eq(checked, 24)
+            test.eq(checked, 25)
         end)
 
         it("reports a fixture that drops a required key or changes a value", function()

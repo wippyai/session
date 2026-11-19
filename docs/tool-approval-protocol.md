@@ -54,29 +54,41 @@ session. The Session asks for a decision only while at least one surface is
 live, or during the 120 s grace period after the last one went away.
 
 A client declares a surface only when the capability is present and a
-transcript that can render cards is mounted for the session. It declares in
-either of two ways:
+transcript that can render cards is mounted for the session. It declares with
+the `tool_approval_surface` command right after it opens the session, or on a
+message:
 
 ```json
-{ "type": "session_open", "session_id": "...", "tool_approval_ui": 1 }
+{ "type": "session_command", "session_id": "...", "request_id": "...", "data": { "command": "tool_approval_surface", "enabled": true } }
 { "type": "session_message", "session_id": "...", "data": { "text": "...", "runtime_context": { "tool_approval_ui": 1 } } }
 ```
 
+- `session_open` carries no declaration. The relay forwards only a fixed list
+  of `session_open` fields, so a `tool_approval_ui` field there never reaches
+  the Session, and the Session ignores it.
 - The declaration belongs to the socket connection that sent it. It ends when
   that connection closes, or when the client withdraws it.
 - Headless `chat.js` users declare through `setToolApprovalUi(sessionId, true)`.
 - When the transcript unmounts while the socket stays open, the client
-  withdraws its surface:
+  withdraws its surface with the same command and `enabled: false`:
 
 ```json
-{ "type": "session_command", "session_id": "...", "data": { "command": "tool_approval_surface", "enabled": false } }
+{ "type": "session_command", "session_id": "...", "request_id": "...", "data": { "command": "tool_approval_surface", "enabled": false } }
 ```
+
+The Session plugin handles `tool_approval_surface` itself and never forwards
+it. `enabled` must be the boolean `true` or `false`. When the command has a
+`request_id`, the reply is a `command_response` on the session topic with the
+same `request_id` and `success: true`, or `success: false` with
+`code: "invalid_surface_command"` and a `message` when `session_id` or
+`enabled` is missing or wrong. A command that does not come through the
+user's authenticated relay is refused without a reply.
 
 A reopen, a later message or a Session process restart does not restore a
 withdrawn surface. Only a new declaration does.
 
-Fixtures: `session_open.json`, `session_message_runtime_context.json`,
-`tool_approval_surface.json`.
+Fixtures: `tool_approval_surface_declare.json`,
+`session_message_runtime_context.json`, `tool_approval_surface.json`.
 
 ## 4. The `tool_approval` event
 
@@ -397,9 +409,14 @@ session `update` events:
 
 When no surface can show a card, the Session sends one session `error` event per
 turn with code `tool_approval_unavailable` and fixed text, and the turn ends.
+When one model step asks for more approvals than the agent's
+`max_requests_per_turn` allows in the turn, no call of the step runs, every
+call settles with the model reason `limit`, the Session sends one session
+`error` event per turn with code `tool_approval_limit` and fixed text, and the
+turn ends.
 
 Fixtures: `session_update_activity.json`, `session_update_activity_cleared.json`,
-`session_error_unavailable.json`.
+`session_error_unavailable.json`, `session_error_limit.json`.
 
 ## 10. REST projections
 
@@ -444,9 +461,19 @@ approval IDs, digests or grant IDs.
 | `changed_before_run` | tool entry, browser binding, context or digest changed before release | continues |
 | `revoked` | the grant that allowed the call was revoked before release | continues |
 | `repeated_denied_call` | same call as one denied earlier in this turn | continues |
+| `approval_check_failed` | the Session could not prepare a valid call for the approval check (for example a value that is not JSON-shaped) | continues |
 
 `changed_before_run` is the model-facing name; the stored disposition reason is
 `intent_changed`. The word `stale` is not used for it.
+
+`approval_check_failed` comes with the instruction "The tool did not run. Do
+not call it again with the same arguments. The call could not be prepared for
+the approval check." No request is created for such a call, and it never runs.
+
+A call that `validate` marks invalid, or whose arguments don't decode, gets no
+approval request and no structured result: it keeps the caller's existing
+error text (for example `Failed to parse arguments: ...`), as before this
+feature.
 
 Fixture: `model_result_not_run.json`.
 
@@ -460,7 +487,7 @@ dotted; a number selects an array item (1-based).
 | Fixture | Message | Required keys |
 | --- | --- | --- |
 | `capabilities.json` | GET capabilities response | `success=true capabilities.schema=wippy.session.capabilities.v1 capabilities.tool_approval:integer` |
-| `session_open.json` | Surface declaration on open | `type=session_open session_id:string tool_approval_ui:integer` |
+| `tool_approval_surface_declare.json` | Surface declaration | `type=session_command session_id:string request_id:string data.command=tool_approval_surface data.enabled=true` |
 | `session_message_runtime_context.json` | Surface declaration on a message | `type=session_message session_id:string data.text:string data.runtime_context.tool_approval_ui:integer` |
 | `tool_approval_surface.json` | Surface withdrawal | `type=session_command session_id:string data.command=tool_approval_surface data.enabled=false` |
 | `tool_approval_event_pending.json` | Pending request event | `type=tool_approval session_id:string message_id:string call_id:string function_name:string row_type:string server_now:string approval.approval_id:string approval.batch_id:string approval.state=pending approval.revision:integer approval.intent_digest:string approval.requested_at:string approval.expires_at:string approval.offered.decisions:array approval.offered.approve_all.scope:string approval.offered.approve_all.covers:array approval.display.title:string approval.display.description:string approval.display.agent:string approval.display.summary:string approval.display.arguments:object approval.display.cut:array approval.display.numbers:array approval.display.batch_peers:array approval.display.approve_all_scope.scope:string approval.display.approve_all_scope.tools:array approval.display.approve_all_scope.covered:array approval.display.approve_all_scope.covered_count:integer` |
@@ -480,6 +507,7 @@ dotted; a number selects an array item (1-based).
 | `session_update_activity.json` | Live session update | `type=update session_id:string activity.kind=awaiting_tool_approval activity.approval_ids:array activity_revision:integer tool_approval.active=true tool_approval.revision:integer tool_approval.grants:array tool_approval.grants.1.grant_id:string tool_approval.grants.1.revision:integer tool_approval.grants.1.scope:string tool_approval.grants.1.status:string tool_approval.grants.1.suspension_reason:string/null tool_approval.grants.1.registry_id:string/null tool_approval.grants.1.title:string/null tool_approval.grants.1.created_at:string` |
 | `session_update_activity_cleared.json` | Activity cleared | `type=update session_id:string activity:null activity_revision:integer` |
 | `session_error_unavailable.json` | No approval surface notice | `type=error session_id:string code=tool_approval_unavailable message:string` |
+| `session_error_limit.json` | Per-turn request cap notice | `type=error session_id:string code=tool_approval_limit message:string` |
 | `rest_session.json` | REST session read | `success=true server_now:string session.session_id:string session.status=running session.activity:object/null session.activity_revision:integer session.tool_approval.active:boolean session.tool_approval.grants:array` |
 | `rest_message_row.json` | REST call row | `success=true server_now:string messages.1.message_id:string messages.1.type:string messages.1.metadata.status=pending messages.1.metadata.approval.approval_id:string messages.1.metadata.approval.call_id:string messages.1.metadata.approval.state:string messages.1.metadata.approval.revision:integer messages.1.metadata.approval.intent_digest:string messages.1.metadata.approval.offered:object messages.1.metadata.approval.display:object messages.1.metadata.approval.requested_at:string messages.1.metadata.approval.expires_at:string` |
 | `model_result_not_run.json` | Model-visible result | `executed=false reason:string instruction:string` |

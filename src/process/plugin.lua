@@ -372,9 +372,12 @@ local function run(args)
         end
     end
 
-    -- The tool_approval_surface command, handled here and never forwarded:
-    -- { enabled = false } withdraws the sending connection's surface for the
-    -- session. Refused, without a reply, unless the relay sent it.
+    -- The tool_approval_surface command, handled here and never forwarded
+    -- (architecture 4.8, v4): { enabled = true } declares that the sending
+    -- connection renders approval cards for the session, { enabled = false }
+    -- withdraws that declaration. The relay forwards only fixed session_open
+    -- fields, so this command, sent after the open, is how a client
+    -- declares. Refused, without a reply, unless the relay sent it.
     local function handle_surface_command(payload_data: any, relay: boolean)
         if not relay then
             logger:warn("approval surface command refused: not sent by the relay", { user_id = state.user_id })
@@ -388,9 +391,12 @@ local function run(args)
             request_id = payload_data.request_id,
             success = false,
         }
-        if type(session_id) ~= "string" or session_id == "" or command.enabled ~= false then
+        if type(session_id) ~= "string" or session_id == "" or type(command.enabled) ~= "boolean" then
             response.code = "invalid_surface_command"
-            response.message = "tool_approval_surface needs a session_id and enabled: false"
+            response.message = "tool_approval_surface needs a session_id and enabled: true or false"
+        elseif command.enabled then
+            declare_surface(session_id, payload_data.conn_pid)
+            response.success = true
         else
             drop_surface(session_id, payload_data.conn_pid)
             response.success = true
@@ -1316,13 +1322,7 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.OPEN then
                 local payload_data = payload:data()
                 logger:debug("handling session open", { user_id = state.user_id })
-                local opened_id = create_session(payload_data, true)
-                -- On create and on reopen of a live session: the declaration
-                -- is recorded once the session is known to this plugin.
-                if opened_id and from_relay(msg:from(), payload_data)
-                    and approval_surfaces.declares(payload_data.tool_approval_ui) then
-                    declare_surface(opened_id, payload_data.conn_pid)
-                end
+                create_session(payload_data, true)
             elseif topic == consts.PLUGIN_TOPICS.CLOSE then
                 handle_session_close(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.MESSAGE then

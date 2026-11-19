@@ -279,7 +279,7 @@ end
 
 -- Commits one step atomically: the notes the request sent, in order, then the
 -- assistant row, its pending calls, and any rows that follow the output.
-function session_writer:add_response(content, metadata, calls, notes, trailing)
+function session_writer:add_response(content, metadata, calls, notes, trailing, options)
     calls = calls or {}
     local seen_call_ids = {}
     for _, call in ipairs(calls) do
@@ -326,11 +326,24 @@ function session_writer:add_response(content, metadata, calls, notes, trailing)
     local trailing_err = append_note_rows(rows, trailing)
     if trailing_err then return nil, nil, trailing_err end
     if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
-    local _, err, dates: any = session_writer._message_repo.create_batch(self.session_id, rows)
+    -- A protected response with calls (options.approval_batch = { turn_id },
+    -- EE2-2710 architecture 4.5 step 9): the batch record is stored in the same
+    -- transaction as the rows, its ID is the assistant row ID and its members
+    -- are the call rows in model order.
+    local batch_descriptor = nil
+    local approval_batch = type(options) == "table" and options.approval_batch or nil
+    if type(approval_batch) == "table" and #calls > 0 then
+        local members = {}
+        for _, call in ipairs(calls) do members[#members + 1] = call_ids[call.id] end
+        batch_descriptor = { batch_id = assistant_id, members = members, turn_id = approval_batch.turn_id }
+    end
+    local _, err, dates: any, batch: any = session_writer._message_repo.create_batch(self.session_id, rows,
+        batch_descriptor)
     if err then return nil, nil, err end
     -- The fourth value is the assistant row's stored date: a live update of
     -- the reply carries it, so the chat shows the time the history keeps.
-    return assistant_id, call_ids, nil, type(dates) == "table" and dates[assistant_id] or nil
+    -- The fifth is the stored approval batch record, or nil.
+    return assistant_id, call_ids, nil, type(dates) == "table" and dates[assistant_id] or nil, batch
 end
 
 function session_writer:update_message_meta(message_id, metadata)

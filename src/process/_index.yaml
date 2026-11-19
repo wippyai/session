@@ -180,6 +180,7 @@ entries:
       session_handlers: wippy.session.process:session_handlers
       turn_context: wippy.agent:turn_context
       activation: wippy.session.approval:activation
+      approval_gate: wippy.session.approval:gate
 
   - name: input_policy
     kind: library.lua
