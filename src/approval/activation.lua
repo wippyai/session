@@ -210,12 +210,15 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
     if not grants then return nil, tostring(err) end
     local suspend = {}
     for _, grant in ipairs(grants) do
-        local option = nil
+        local option, readable = nil, true
         if grant.scope == policy.SCOPE.TOOL then
             local ok, entry = pcall(registry.get, grant.registry_id)
-            option = tool_meta.read(ok and type(entry) == "table" and entry.meta or nil).approve_all
+            readable = ok and type(entry) == "table"
+            if readable then option = tool_meta.read(entry.meta).approve_all end
         end
-        local reason = policy.grant_suspension(effective, grant, option)
+        -- A tool whose entry can't be read is left alone: a call to it does
+        -- not run, and a changed deployment suspends the grant at call time.
+        local reason = readable and policy.grant_suspension(effective, grant, option) or nil
         if reason then suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason } end
     end
     if #suspend == 0 then return true, nil end

@@ -327,6 +327,16 @@ local function define_tests()
             end
         end)
 
+        it("keeps a Stop fence when a finish of the same turn is taken back", function()
+            local ctx = new_ctx({ live = 1 })
+            session._close_approvals_for_finish(ctx)
+            stop(ctx)
+            session._cancel_approvals_finish(ctx)
+            local fence = approval_repo.read_turn_fence(nil, ctx.session_id)
+            test.eq(fence and fence.turn_id, approval_gate.turn_id(ctx))
+            test.eq(fence and fence.reason, "stop")
+        end)
+
         it("opens later batches of the turn again when a finish is taken back", function()
             local ctx = new_ctx({ live = 1 })
             session._close_approvals_for_finish(ctx)
@@ -520,7 +530,7 @@ local function define_tests()
             local now = time.now():unix()
             for _, case in ipairs({
                 { bound_at = now - 40, expires_at = now - 10, runs = false },
-                { expires_at = now + 2, runs = false },
+                { expires_at = now, runs = false },
                 { expires_at = now + 100, runs = true },
             }) do
                 local ctx = new_ctx({ live = 1, policy = { require = "all" } })

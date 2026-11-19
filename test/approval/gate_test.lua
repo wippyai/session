@@ -1,6 +1,7 @@
 local test = require("test")
 local uuid = require("uuid")
 local json = require("json")
+local time = require("time")
 local consts = require("consts")
 local tx = require("tx")
 local approval_gate = require("approval_gate")
@@ -547,6 +548,49 @@ local function define_tests()
             local stored = assert(approval_repo.get_grant(nil, grant.grant_id))
             test.eq(stored.status, "suspended")
             test.eq(stored.suspension_reason, "agent_without_trait")
+        end)
+
+        it("runs a grant-backed UI action released before its binding expires, also with a short lifetime", function()
+            local ui_action = "wippy.agent.tools:ui_action_highlight"
+            for _, ttl in ipairs({ 1, 5 }) do
+                local ctx = new_ctx({ live = 1, policy = { require = "all", approve_all = "tool" } })
+                create_tool_grant(ctx, ui_action)
+                local op = round(ctx, { { id = "call-ui", registry_id = ui_action, args = { selector = "#x" } } })
+                op.ui_action_runtime = { session_id = ctx.session_id, host_instance_id = "host-1",
+                    delivery_handle = "handle-1", agent_actions_authorized = true,
+                    expires_at = time.now():unix() + ttl }
+                assert(message_handlers.process_tools(ctx, op))
+                test.is_true(op.caller.launches["call-ui"], "TTL " .. ttl .. ": the call runs")
+            end
+        end)
+
+        it("keeps a tool grant whose tool is not in the registry active across agent steps", function()
+            local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z" })
+            local grant = assert(tx.run(function(dbtx)
+                return approval_repo.create_grant(dbtx, {
+                    grant_id = uuid.v7(), session_id = ctx.session_id, owner_id = ctx.user_id, epoch = ctx.session_id,
+                    scope = "tool", registry_id = "app.approval:missing_tool", fingerprint = "sha256:" .. string.rep("a", 64),
+                    created_by = ctx.user_id,
+                })
+            end))
+            ctx.agent_ctx = { active_traits = { activation.TRAIT_ID } }
+            for _ = 1, 2 do
+                assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
+            end
+            test.eq(assert(approval_repo.get_grant(nil, grant.grant_id)).status, "active")
+        end)
+
+        it("runs nothing when a finish is accepted while the release reads the context", function()
+            local ctx = new_ctx({ live = 1 })
+            create_tool_grant(ctx, GRANTED)
+            ctx.reader.reset = function()
+                ctx.approval_wake:notify("finish")
+                return true
+            end
+            local op, batch = round(ctx, { { id = "call-1", registry_id = GRANTED, args = { invoice = 7 } } })
+            assert(message_handlers.process_tools(ctx, op))
+            test.eq(launches(op.caller), 0)
+            test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).close_reason, "finish")
         end)
 
         it("fails closed when a protected round has no approval binding", function()

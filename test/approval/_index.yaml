@@ -276,6 +276,7 @@ entries:
     modules:
       - uuid
       - json
+      - time
     imports:
       test: wippy.test:test
       consts: wippy.session:consts

@@ -669,13 +669,12 @@ end
 
 -- The Attention browser binding ends at the expiry the broker set for the
 -- turn (ui_action_ttl_seconds); a call released later would reach a Host the
--- person did not review. A binding without an expiry is never fresh.
-gate.BINDING_MARGIN_SECONDS = 5
-
+-- person did not review. A binding without an expiry is never fresh. The
+-- broker checks the expiry again when it dispatches the action.
 local function binding_fresh(op: any, now: number): boolean
     local runtime = op.ui_action_runtime
     local expires_at = type(runtime) == "table" and tonumber(runtime.expires_at) or nil
-    return expires_at ~= nil and now < expires_at - gate.BINDING_MARGIN_SECONDS
+    return expires_at ~= nil and now < expires_at
 end
 
 -- The release recheck of one approved call. Returns nil when the call may
@@ -731,6 +730,11 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
         if not batch then return nil, batch_err end
         if batch.state == approval_repo.BATCH_STATE.CLOSED then return { close_reason = batch.close_reason } end
         if batch.state ~= approval_repo.BATCH_STATE.OPEN then return nil, "The approval batch was already released" end
+        -- A deletion, exit, Stop or finish the inbox accepted while the
+        -- context was read; a finish closure that failed to store is only
+        -- logged, so the in-memory signal is checked again here.
+        local signal = signalled(ctx)
+        if signal then return { close_reason = signal } end
         local records, list_err = approval_repo.list_by_batch(dbtx, ctx.session_id, binding.batch_id)
         if not records then return nil, list_err end
         local close_reason, reason_err = approval_repo.close_reason(dbtx, ctx.session_id, batch.turn_id,

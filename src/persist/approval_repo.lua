@@ -739,15 +739,17 @@ function approval_repo.read_turn_fence(conn: any, session_id: string)
 end
 
 -- Persists the fence for `turn_id` (reason `stop` or `finish`). A fence that
--- already names the same turn is kept, so the first closure's reason stays.
--- Returns { turn_id, reason, written } for the fence in force; written is
--- false when an earlier fence of the turn was kept.
+-- already names the same turn is kept, except that a Stop replaces a finish:
+-- stop is the stronger reason, and a finish that is taken back clears only
+-- its own fence. Returns { turn_id, reason, written } for the fence in force;
+-- written is false when the earlier fence of the turn was kept.
 function approval_repo.write_turn_fence(dbtx: any, session_id: string, turn_id: string, reason: string)
     if not non_empty(turn_id) then return nil, "Turn ID is required" end
     if not FENCE_REASONS[reason] then return nil, "Turn fence reason must be stop or finish" end
     local current, read_err = approval_repo.read_turn_fence(dbtx, session_id)
     if read_err then return nil, read_err end
-    if type(current) == "table" and current.turn_id == turn_id then
+    if type(current) == "table" and current.turn_id == turn_id
+        and (current.reason == reason or current.reason == "stop") then
         return { turn_id = current.turn_id, reason = current.reason, written = false }
     end
     local encoded, encode_err = encode({ turn_id = turn_id, reason = reason })
