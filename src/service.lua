@@ -3,6 +3,7 @@ local uuid = require("uuid")
 local consts = require("consts")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
+local owner_events = require("owner_events")
 
 type Session = {
     session_id: string,
@@ -56,6 +57,11 @@ type DeleteSessionArgs = {
 local M = {
     _upstream = require("upstream"),
 }
+
+local function notify_committed(session_id, changes, user_id)
+    local published, err = M._upstream.notify_external(session_id, changes, user_id)
+    if not published then owner_events.warn("session:" .. session_id, err) end
+end
 
 local function required_string(value, name)
     if type(value) ~= "string" or value == "" then
@@ -114,6 +120,7 @@ local function normalize_existing_session(session: Session, reset_status: boolea
             return nil, err
         end
         session.status = consts.STATUS.IDLE
+        notify_committed(session.session_id, updated, session.user_id)
     end
 
     return {
@@ -185,6 +192,7 @@ local function create_session(args: EnsureSessionArgs, session_id: string, user_
 
     local created_session = session :: Session
     created_session.status = consts.STATUS.IDLE
+    notify_committed(session_id, { created = true }, user_id)
 
     return {
         session = created_session,
@@ -256,12 +264,15 @@ function M.update(args: UpdateSessionArgs)
         return nil, "updates table is required"
     end
 
+    local current, read_err = session_repo.get(session_id)
+    if not current then return nil, read_err or "Session not found" end
+
     local updated, update_err = session_repo.update_session_meta(session_id, args.updates)
     if update_err then
         return nil, update_err
     end
 
-    local published, publish_err = M._upstream.notify_external(session_id, updated)
+    local published, publish_err = M._upstream.notify_external(session_id, updated, current.user_id)
     if not published then
         return nil, publish_err
     end
@@ -309,7 +320,7 @@ function M.delete(args: DeleteSessionArgs)
         end
     end
 
-    local published, publish_err = M._upstream.notify_external(session_id, { deleted = true })
+    local published, publish_err = M._upstream.notify_external(session_id, { deleted = true }, session.user_id)
     if not published then
         return nil, publish_err
     end

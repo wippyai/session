@@ -4,6 +4,8 @@ local time = require("time")
 local message_order = require("message_order")
 local security = require("security")
 local tx = require("tx")
+local artifact_events = require("artifact_events")
+local owner_events = require("owner_events")
 
 type Artifact = {
     artifact_id: string,
@@ -499,7 +501,17 @@ function artifact_repo.update(artifact_id, updates, opts)
     -- Own transaction: the meta read-merge-write, the conditional UPDATE and the
     -- version read-back must be atomic, or a concurrent writer could lose a meta
     -- key or make this call report a version it did not produce.
-    return tx.run(run_update)
+    local result, err = tx.run(run_update)
+    if not result then return nil, err end
+
+    local artifact, read_err = artifact_repo.get(artifact_id)
+    if artifact then
+        local _, publish_err = artifact_events.publish_updated(artifact)
+        if publish_err then owner_events.warn("artifact:" .. artifact_id, publish_err) end
+    elseif not artifact_repo.is_not_found(read_err) then
+        owner_events.warn("artifact:" .. artifact_id, read_err)
+    end
+    return result
 end
 
 -- List artifacts by session ID
@@ -745,7 +757,7 @@ function artifact_repo.delete(artifact_id)
     end
 
     -- Check if artifact exists
-    local check_query = sql.builder.select("artifact_id")
+    local check_query = sql.builder.select("user_id", "session_id")
         :from("artifacts")
         :where("artifact_id = ?", artifact_id)
 
@@ -776,6 +788,15 @@ function artifact_repo.delete(artifact_id)
         return nil, "Failed to delete artifact: " .. err
     end
 
+    if result.rows_affected > 0 then
+        local topic = "artifact:" .. artifact_id
+        local sent, publish_err = owner_events.send(artifacts[1].user_id, topic, {
+            uuid = artifact_id,
+            session_id = artifacts[1].session_id,
+            deleted = true,
+        })
+        if not sent then owner_events.warn(topic, publish_err) end
+    end
     return { deleted = true }
 end
 

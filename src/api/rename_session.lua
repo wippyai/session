@@ -97,7 +97,7 @@ local function handler()
         return
     end
 
-    local published, publish_err = api._upstream.notify_external(session_id, { title = title })
+    local published, publish_err = api._upstream.notify_external(session_id, { title = title }, actor:id())
     if not published then
         res:set_status(api._http.STATUS.INTERNAL_ERROR)
         res:write_json({

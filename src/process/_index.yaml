@@ -83,6 +83,11 @@ entries:
     imports:
       consts: wippy.session:consts
 
+  - name: owner_events
+    kind: library.lua
+    source: file://owner_events.lua
+    modules: [logger]
+
   # wippy.session.process:upstream
   - name: upstream
     kind: library.lua
@@ -91,6 +96,7 @@ entries:
       description: Handles communication between session process and upstream systems
     source: file://upstream.lua
     imports:
+      owner_events: wippy.session.process:owner_events
       session_repo: wippy.session.persist:session_repo
       consts: wippy.session:consts
       input_policy: wippy.session.process:input_policy
@@ -125,7 +131,6 @@ entries:
     imports:
       consts: wippy.session:consts
       artifact_repo: wippy.session.persist:artifact_repo
-      artifact_events: wippy.session.persist:artifact_events
       tx: wippy.session.persist:tx
       message_date: wippy.session.persist:message_date
       definition: wippy.session.forms:definition
