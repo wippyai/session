@@ -554,6 +554,31 @@ local function define_tests()
             test.eq(stored.suspension_reason, "agent_without_trait")
         end)
 
+        it("fails the agent step and leaves the grant as it is when its tool's registry read fails", function()
+            local failures = {
+                raises = function() error("registry unavailable") end,
+                returns_error = function() return nil, "registry unavailable" end,
+            }
+            for case, failing_get in pairs(failures) do
+                local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z" })
+                local grant = create_tool_grant(ctx, GRANTED)
+                local saved_get = tool_meta._registry_get
+                tool_meta._registry_get = failing_get
+                -- A switch to an opted-in agent whose Approve-all mode is narrower.
+                ctx.agent_ctx = { active_traits = { { id = activation.TRAIT_ID, context = { approve_all = "off" } } } }
+                local applied, result, err, kind = pcall(activation.apply, ctx,
+                    { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } })
+                tool_meta._registry_get = saved_get
+                if not applied then error(result) end
+                test.is_nil(result, case .. ": the step does not run")
+                test.eq(kind, activation.FAILURE.STORAGE, case)
+                test.contains(tostring(err), "registry unavailable", case)
+                local stored = assert(approval_repo.get_grant(nil, grant.grant_id))
+                test.eq(stored.status, "active", case .. ": no suspension is written")
+                test.is_nil(stored.suspension_reason, case)
+            end
+        end)
+
         it("stores the grant suspensions of the evaluation when the batch was already closed", function()
             local ctx = new_ctx({ live = 1, policy = { agent_opted_in = false } })
             local grant = create_tool_grant(ctx, GRANTED)
@@ -597,9 +622,16 @@ local function define_tests()
                 })
             end))
             ctx.agent_ctx = { active_traits = { activation.TRAIT_ID } }
-            for _ = 1, 2 do
-                assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
-            end
+            -- The real registry (not found), then a registry that returns nothing.
+            local saved_get = tool_meta._registry_get
+            local ok, failure = pcall(function()
+                for _, registry_get in ipairs({ saved_get or false, function() return nil end }) do
+                    tool_meta._registry_get = registry_get or nil
+                    assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
+                end
+            end)
+            tool_meta._registry_get = saved_get
+            if not ok then error(failure) end
             test.eq(assert(approval_repo.get_grant(nil, grant.grant_id)).status, "active")
         end)
 

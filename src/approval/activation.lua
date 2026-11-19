@@ -214,11 +214,15 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
     for _, grant in ipairs(grants) do
         local reason = nil
         if grant.scope == policy.SCOPE.TOOL and effective.agent_opted_in then
-            -- Only the Approve-all mode check needs the tool option. A tool
-            -- whose entry can't be read is left alone for it: a call to it
-            -- does not run, and a changed deployment suspends the grant at
-            -- call time.
-            local entry = tool_meta.entry(grant.registry_id)
+            -- Only these checks need the tool option. A tool no longer in the
+            -- registry is left alone: a call to it does not run, and a tool
+            -- added again has another fingerprint, so the grant does not
+            -- match it. A failed read fails the step, because the check
+            -- can't be done without the option.
+            local entry, read_err = tool_meta.entry(grant.registry_id)
+            if read_err then
+                return nil, "Failed to read tool " .. tostring(grant.registry_id) .. " for its grant: " .. read_err
+            end
             if entry then reason = policy.grant_suspension(effective, grant, tool_meta.approve_all(entry)) end
         else
             reason = policy.grant_suspension(effective, grant, nil)
@@ -236,7 +240,7 @@ end
 -- Runs at every agent step, before the model call. Returns true, or nil,
 -- detail, kind: kind "invalid" fails the turn with
 -- tool_approval_config_invalid and no model call; kind "storage" is a
--- storage failure the caller treats as fatal. Sets ctx.tool_approval_policy
+-- storage or registry read failure the caller treats as fatal. Sets ctx.tool_approval_policy
 -- (trait_config.effective; nil when the session is not protected) for the
 -- approval gate.
 function activation.apply(ctx: any, agent: any): (boolean?, string?, string?)

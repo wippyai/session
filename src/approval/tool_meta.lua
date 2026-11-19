@@ -80,12 +80,16 @@ function tool_meta.read(meta: any)
     return out
 end
 
--- The registry entry of `id`, or nil when it is missing or can't be read.
-function tool_meta.entry(id: any): any
-    if type(id) ~= "string" or id == "" then return nil end
-    local ok, entry = pcall(tool_meta._registry_get or registry.get, id)
-    if ok and type(entry) == "table" then return entry end
-    return nil
+-- The registry entry of `id`. Returns nil, nil when the registry has no such
+-- entry, and nil, err when the read failed (registry.get raised or returned
+-- an error other than not found).
+function tool_meta.entry(id: any): (any, string?)
+    if type(id) ~= "string" or id == "" then return nil, nil end
+    local ok, entry, err = pcall(tool_meta._registry_get or registry.get, id)
+    if not ok then return nil, tostring(entry) end
+    if type(entry) == "table" then return entry, nil end
+    if err == nil or errors.is(err, errors.NOT_FOUND) then return nil, nil end
+    return nil, tostring(err)
 end
 
 -- The tool option approve_all (true, false or nil for absent) of an entry.
