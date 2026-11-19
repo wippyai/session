@@ -212,21 +212,22 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
     if not grants then return nil, tostring(err) end
     local suspend = {}
     for _, grant in ipairs(grants) do
-        local reason = nil
+        local option = nil
         if grant.scope == policy.SCOPE.TOOL and effective.agent_opted_in then
-            -- Only these checks need the tool option. A tool no longer in the
-            -- registry is left alone: a call to it does not run, and a tool
-            -- added again has another fingerprint, so the grant does not
-            -- match it. A failed read fails the step, because the check
-            -- can't be done without the option.
+            -- Only these checks need the tool option. A failed read fails the
+            -- step, because the check can't be done without the option. A
+            -- tool no longer in the registry is checked as if it had no
+            -- option: the same entry can come back with the same
+            -- fingerprint, so a narrower mode must suspend the grant now.
+            -- A call to a missing tool can't use the grant anyway, and a
+            -- tool added again asks once.
             local entry, read_err = tool_meta.entry(grant.registry_id)
             if read_err then
                 return nil, "Failed to read tool " .. tostring(grant.registry_id) .. " for its grant: " .. read_err
             end
-            if entry then reason = policy.grant_suspension(effective, grant, tool_meta.approve_all(entry)) end
-        else
-            reason = policy.grant_suspension(effective, grant, nil)
+            if entry then option = tool_meta.approve_all(entry) end
         end
+        local reason = policy.grant_suspension(effective, grant, option)
         if reason then suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason } end
     end
     if #suspend == 0 then return true, nil end

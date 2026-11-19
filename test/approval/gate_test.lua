@@ -612,27 +612,63 @@ local function define_tests()
             if not ok then error(failure) end
         end)
 
-        it("keeps a tool grant whose tool is not in the registry active across agent steps", function()
-            local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z" })
-            local grant = assert(tx.run(function(dbtx)
-                return approval_repo.create_grant(dbtx, {
-                    grant_id = uuid.v7(), session_id = ctx.session_id, owner_id = ctx.user_id, epoch = ctx.session_id,
-                    scope = "tool", registry_id = "app.approval:missing_tool", fingerprint = "sha256:" .. string.rep("a", 64),
-                    created_by = ctx.user_id,
-                })
-            end))
-            ctx.agent_ctx = { active_traits = { activation.TRAIT_ID } }
-            -- The real registry (not found), then a registry that returns nothing.
-            local saved_get = tool_meta._registry_get
-            local ok, failure = pcall(function()
-                for _, registry_get in ipairs({ saved_get or false, function() return nil end }) do
-                    tool_meta._registry_get = registry_get or nil
-                    assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
+        it("checks a tool grant whose tool is not in the registry as if the tool had no approve_all option", function()
+            -- "tool" and "session" permit a tool grant without the option;
+            -- "off" and "batch" do not.
+            local expected = { tool = "active", session = "active", off = "suspended", batch = "suspended" }
+            for _, mode in ipairs({ "tool", "session", "off", "batch" }) do
+                local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z", policy = { approve_all = mode } })
+                local grant = assert(tx.run(function(dbtx)
+                    return approval_repo.create_grant(dbtx, {
+                        grant_id = uuid.v7(), session_id = ctx.session_id, owner_id = ctx.user_id, epoch = ctx.session_id,
+                        scope = "tool", registry_id = "app.approval:missing_tool", fingerprint = "sha256:" .. string.rep("a", 64),
+                        created_by = ctx.user_id,
+                    })
+                end))
+                ctx.agent_ctx = { active_traits = { { id = activation.TRAIT_ID, context = { approve_all = mode } } } }
+                -- The real registry (not found), then a registry that returns nothing.
+                local saved_get = tool_meta._registry_get
+                local ok, failure = pcall(function()
+                    for _, registry_get in ipairs({ saved_get or false, function() return nil end }) do
+                        tool_meta._registry_get = registry_get or nil
+                        assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
+                    end
+                end)
+                tool_meta._registry_get = saved_get
+                if not ok then error(failure) end
+                local stored = assert(approval_repo.get_grant(nil, grant.grant_id))
+                test.eq(stored.status, expected[mode], mode)
+                if expected[mode] == "suspended" then
+                    test.eq(stored.suspension_reason, "mode_not_permitted", mode)
                 end
-            end)
+            end
+        end)
+
+        it("asks again for a tool removed under a narrower mode and restored unchanged", function()
+            local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z", policy = { approve_all = "tool" } })
+            local grant = create_tool_grant(ctx, MARKED)
+            local function switch(mode: string)
+                ctx.agent_ctx = { active_traits = { { id = activation.TRAIT_ID, context = { approve_all = mode } } } }
+                assert(activation.apply(ctx, { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }))
+            end
+            -- The tool leaves the registry while the mode narrows to "off".
+            local saved_get = tool_meta._registry_get
+            tool_meta._registry_get = function(id)
+                if id == MARKED then return nil end
+                error("unexpected registry read: " .. tostring(id))
+            end
+            local switched, switch_err = pcall(switch, "off")
             tool_meta._registry_get = saved_get
-            if not ok then error(failure) end
-            test.eq(assert(approval_repo.get_grant(nil, grant.grant_id)).status, "active")
+            if not switched then error(switch_err) end
+            -- The identical entry is back, and so is the "tool" mode.
+            switch("tool")
+            local stored = assert(approval_repo.get_grant(nil, grant.grant_id))
+            test.eq(stored.status, "suspended")
+            test.eq(stored.suspension_reason, "mode_not_permitted")
+            local op, batch = round(ctx, { { id = "call-1", registry_id = MARKED, args = { n = 1 } } })
+            assert(message_handlers.process_tools(ctx, op))
+            test.eq(launches(op.caller), 0, "the call asks again instead of running on the old grant")
+            test.eq(records_by_call(ctx.session_id, batch.batch_id)["call-1"].state, "interrupted")
         end)
 
         it("runs nothing when a finish is accepted while the release reads the context", function()
