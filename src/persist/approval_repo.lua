@@ -734,6 +734,16 @@ function approval_repo.suspend_grant(dbtx: any, session_id: string, grant_id: st
         { status = approval_repo.GRANT_STATUS.SUSPENDED, suspension_reason = reason })
 end
 
+-- Suspends every { grant_id, reason } of `list` that is still active; a grant
+-- that is no longer active is left as it is. Returns true.
+function approval_repo.suspend_grants(dbtx: any, session_id: string, list: {any}?)
+    for _, item in ipairs(list or {}) do
+        local _, err = approval_repo.suspend_grant(dbtx, session_id, item.grant_id, nil, item.reason)
+        if err and not approval_repo.is_conflict(err) then return nil, err end
+    end
+    return true
+end
+
 -- active or suspended -> revoked. A revoked grant never matches again.
 function approval_repo.revoke_grant(dbtx: any, session_id: string, grant_id: string, expected_revision: number?, revoked_by: string)
     if not non_empty(revoked_by) then return nil, "revoked_by is required" end
@@ -785,14 +795,16 @@ function approval_repo.write_turn_fence(dbtx: any, session_id: string, turn_id: 
     return { turn_id = turn_id, reason = reason, written = true }
 end
 
--- Clears the fence at the next turn's admission. Returns the cleared fence,
--- or nil when none was set.
-function approval_repo.clear_turn_fence(dbtx: any, session_id: string)
+-- Clears the fence. With `turn_id` and `reason`, only a fence that names that
+-- turn with that reason (a finish taken back clears its own fence). Returns
+-- the cleared fence, or nil when none was cleared.
+function approval_repo.clear_turn_fence(dbtx: any, session_id: string, turn_id: string?, reason: string?)
     local _, lock_err = approval_repo.lock_session(dbtx, session_id)
     if lock_err then return nil, lock_err end
     local current, read_err = approval_repo.read_turn_fence(dbtx, session_id)
     if read_err then return nil, read_err end
-    if current == nil then return nil end
+    if type(current) ~= "table" then return nil end
+    if turn_id ~= nil and (current.turn_id ~= turn_id or current.reason ~= reason) then return nil end
     local _, update_err = exec(sql.builder.update("sessions"):set("approval_turn_fence", sql.builder.expr("NULL"))
         :where("session_id = ?", session_id), dbtx, "Failed to clear turn fence")
     if update_err then return nil, update_err end

@@ -23,9 +23,13 @@ entries:
     source: file://activation.lua
     modules:
       - time
+      - registry
     imports:
       trait_config: wippy.session.approval:trait_config
       agent_registry: wippy.agent.discovery:registry
+      policy: wippy.session.approval:policy
+      tool_meta: wippy.session.approval:tool_meta
+      approval_repo: wippy.session.persist:approval_repo
       consts: wippy.session:consts
 
   # wippy.session.approval:wake

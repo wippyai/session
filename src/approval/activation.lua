@@ -28,6 +28,10 @@
 -- drops a tool_approval key from `_control` payloads.
 local trait_config = require("trait_config")
 local agent_registry = require("agent_registry")
+local policy = require("policy")
+local tool_meta = require("tool_meta")
+local approval_repo = require("approval_repo")
+local registry = require("registry")
 local consts = require("consts")
 local time = require("time")
 
@@ -199,6 +203,31 @@ local function live_surfaces(ctx: any): number
     return type(surfaces) == "table" and tonumber(surfaces.live) or 0
 end
 
+-- Suspends the active grants of the session that `effective` no longer
+-- permits (the agent lacks the trait, or its Approve-all mode is narrower),
+-- before the model step. Only an authenticated user action restores a
+-- suspended grant, so a later switch back does not bring it back.
+local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, string?)
+    local grants, err = approval_repo.list_grants(nil, ctx.session_id, { approval_repo.GRANT_STATUS.ACTIVE })
+    if not grants then return nil, tostring(err) end
+    local suspend = {}
+    for _, grant in ipairs(grants) do
+        local option = nil
+        if grant.scope == policy.SCOPE.TOOL then
+            local ok, entry = pcall(registry.get, grant.registry_id)
+            option = tool_meta.read(ok and type(entry) == "table" and entry.meta or nil).approve_all
+        end
+        local reason = policy.grant_suspension(effective, grant, option)
+        if reason then suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason } end
+    end
+    if #suspend == 0 then return true, nil end
+    local _, suspend_err = approval_repo.transact(ctx.session_id, function(dbtx)
+        return approval_repo.suspend_grants(dbtx, ctx.session_id, suspend)
+    end)
+    if suspend_err then return nil, tostring(suspend_err) end
+    return true, nil
+end
+
 -- Runs at every agent step, before the model call. Returns
 --   { protected = false }                         the session is not protected
 --   { protected = true, policy, opted_in }        policy is trait_config.effective
@@ -227,10 +256,12 @@ function activation.apply(ctx: any, agent: any): (any, string?, string?)
     end
     if stored == nil then return { protected = false }, nil, nil end
 
-    local policy, policy_err = trait_config.effective(stored, settings, activation.enforcement())
-    if not policy then return nil, policy_err, activation.FAILURE.INVALID end
-    ctx.tool_approval_policy = policy
-    return { protected = true, policy = policy, opted_in = opted_in }, nil, nil
+    local effective, policy_err = trait_config.effective(stored, settings, activation.enforcement())
+    if not effective then return nil, policy_err, activation.FAILURE.INVALID end
+    local suspended, suspend_err = suspend_unpermitted_grants(ctx, effective)
+    if not suspended then return nil, suspend_err, activation.FAILURE.STORAGE end
+    ctx.tool_approval_policy = effective
+    return { protected = true, policy = effective, opted_in = opted_in }, nil, nil
 end
 
 return activation

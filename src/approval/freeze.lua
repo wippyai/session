@@ -137,6 +137,20 @@ function freeze.denial_key(frozen: any): (string?, string?)
     })
 end
 
+-- The target agent the model chose for a delegation call: the validated
+-- call's agent_id, else its context's to_agent_id. The caller's merge may
+-- replace to_agent_id through the session context, so the merged context is
+-- not read here.
+function freeze.delegate_target_id(validated: any): string?
+    if type(validated) ~= "table" then return nil end
+    local target = validated.agent_id
+    if type(target) ~= "string" or target == "" then
+        target = type(validated.context) == "table" and validated.context.to_agent_id or nil
+    end
+    if type(target) ~= "string" or target == "" then return nil end
+    return target
+end
+
 local function entry_text(entry: any, key: string): string?
     local meta = type(entry) == "table" and entry.meta or nil
     local value = type(meta) == "table" and meta[key] or nil
@@ -190,15 +204,8 @@ function freeze.call(validated: any, env: any): (any, any)
     local identity = { registry_id = registry_id, fingerprint = tool_fingerprint }
     if is_delegation then
         row_type = "delegation"
-        -- The target the model chose, from the validated call; the caller's
-        -- merge may have replaced to_agent_id through session context.
-        local target = validated.agent_id
-        if type(target) ~= "string" or target == "" then
-            target = type(validated.context) == "table" and validated.context.to_agent_id or nil
-        end
-        if type(target) ~= "string" or target == "" then
-            return changed("The delegation call names no target agent")
-        end
+        local target = freeze.delegate_target_id(validated)
+        if not target then return changed("The delegation call names no target agent") end
         if merged.to_agent_id ~= target then
             return changed("The execution context delegates to " .. tostring(merged.to_agent_id)
                 .. ", not to the requested agent " .. target)

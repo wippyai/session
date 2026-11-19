@@ -319,6 +319,7 @@ entries:
       message_handlers: wippy.session.process:message_handlers
       policy: wippy.session.approval:policy
       tool_caller: wippy.agent.tools:caller
+      activation: wippy.session.approval:activation
       wait_for_boot: app:wait_for_boot
       gate_fixtures: app.approval:gate_fixtures
     method: run
@@ -341,6 +342,8 @@ entries:
       message_handlers: wippy.session.process:message_handlers
       session: wippy.session.process:session
       session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      reader: wippy.session.persist:reader
       tool_caller: wippy.agent.tools:caller
       wait_for_boot: app:wait_for_boot
       gate_fixtures: app.approval:gate_fixtures

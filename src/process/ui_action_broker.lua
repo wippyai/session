@@ -817,6 +817,7 @@ function ui_action_broker:bind_turn(fields)
         host_instance_id = binding.host_instance_id,
         inspection_authorized = true,
         agent_actions_authorized = binding.agent_actions_authorized,
+        expires_at = binding.expires_at,
     }, nil
 end
 

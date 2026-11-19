@@ -1613,11 +1613,6 @@ function message_handlers.agent_step(ctx, op)
     end
     if op.from_user and type(ctx.activate_attention_turn) == "function" then
         op.ui_action_runtime = ctx.activate_attention_turn(op)
-        -- When the browser binding started (it lasts 120 s): the approval
-        -- release refuses a gated UI action whose binding has expired.
-        if type(op.ui_action_runtime) == "table" and op.ui_action_runtime.bound_at == nil then
-            op.ui_action_runtime.bound_at = time.now():unix()
-        end
     end
     local input_updates, input_err = answer_admission.prepare_pending_inputs(ctx,
         op.from_user and op.message_id or nil)
@@ -2525,11 +2520,12 @@ function message_handlers.process_tools(ctx, op)
         tool_call.message_id = op.call_message_ids[call_id]
     end
 
-    local session_context, err = ctx.reader:get_full_context()
-    if err then
-        session_context = {}
+    local function read_session_context()
+        local context, read_err = ctx.reader:get_full_context()
+        if read_err then return nil, read_err end
+        return with_agent_run_context(ctx :: SessionContext, context or {}, active_agent), nil
     end
-    session_context = with_agent_run_context(ctx, session_context, active_agent)
+    local session_context = read_session_context() or with_agent_run_context(ctx, {}, active_agent)
 
     local function fail_remaining(start_index, reason)
         local failure = tostring(reason)
@@ -2549,11 +2545,12 @@ function message_handlers.process_tools(ctx, op)
     local gated, gate_err = message_handlers._approval_gate(ctx, op, {
         validated_tools = validated_tools,
         session_context = session_context,
-        -- The release rereads the context, and dispatch uses what it rechecked.
+        -- The release rereads the stored context (the reader caches it), and
+        -- dispatch uses what it rechecked.
         read_session_context = function()
-            local fresh, read_err = ctx.reader:get_full_context()
-            if read_err then return nil, read_err end
-            return with_agent_run_context(ctx :: SessionContext, fresh or {}, active_agent), nil
+            local reset, reset_err = ctx.reader:reset()
+            if not reset then return nil, reset_err end
+            return read_session_context()
         end,
     })
     if gate_err then return fail_remaining(1, "Tool approval check failed: " .. tostring(gate_err)) end

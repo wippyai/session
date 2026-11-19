@@ -8,6 +8,9 @@ local message_repo = require("message_repo")
 local message_handlers = require("message_handlers")
 local session = require("session")
 local session_repo = require("session_repo")
+local context_repo = require("context_repo")
+local reader = require("reader")
+local registry = require("registry")
 local tool_caller = require("tool_caller")
 local wait_for_boot = require("wait_for_boot")
 local fx = require("gate_fixtures")
@@ -321,6 +324,20 @@ local function define_tests()
             end
         end)
 
+        it("opens later batches of the turn again when a finish is taken back", function()
+            local ctx = new_ctx({ live = 1 })
+            session._close_approvals_for_finish(ctx)
+            session._cancel_approvals_finish(ctx)
+            local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
+            test.eq(batch.state, "open", "the finish fence of the turn is cleared")
+            test.is_nil(approval_repo.read_turn_fence(nil, ctx.session_id))
+            local handle = start(ctx, op)
+            pending(ctx, batch.batch_id, 1)
+            approve(ctx, batch.batch_id, "call-a")
+            finish(handle)
+            test.is_true(op.caller.launches["call-a"])
+        end)
+
         -- AC 22 (both orders, one peer already approved)
         it("supersedes the batch on steering that commits after a peer's approval", function()
             local ctx = new_ctx({ live = 1 })
@@ -432,19 +449,17 @@ local function define_tests()
         it("settles an approved call as changed_before_run when its context or entry changes before release", function()
             for _, case in ipairs({ "context", "entry" }) do
                 local ctx = new_ctx({ live = 1 })
-                local reads = 0
-                ctx.reader.get_full_context = function()
-                    reads = reads + 1
-                    if case == "context" and reads >= 2 then return { project = "other" }, nil end
-                    return {}, nil
-                end
+                -- The real reader caches the primary context after the first read.
+                ctx.reader = assert(reader.open(ctx.session_id))
                 local op, batch = round(ctx, {
                     { id = "call-a", registry_id = MARKED, args = { n = 1 } },
                     { id = "call-c", registry_id = PLAIN, args = {} },
                 })
                 local handle = start(ctx, op)
                 pending(ctx, batch.batch_id, 1)
-                if case == "entry" then
+                if case == "context" then
+                    assert(context_repo.update(ctx.reader:primary_context_id(), '{"project":"other"}'))
+                else
                     approval_gate._registry_get = function(id)
                         local entry = require("registry").get(id)
                         if id == MARKED and entry then
@@ -459,7 +474,7 @@ local function define_tests()
                 approve(ctx, batch.batch_id, "call-a")
                 local result, err = finish(handle)
                 test.is_nil(err, case)
-                test.is_nil(op.caller.executed["call-a"], case .. ": the changed call never runs")
+                test.is_nil(op.caller.launches["call-a"], case .. ": the changed call never runs")
                 test.is_true(op.caller.launches["call-c"], case .. ": its peer runs")
                 local stored = row(op.call_message_ids["call-a"]).metadata
                 test.eq(stored.result.reason, "changed_before_run", case)
@@ -472,14 +487,45 @@ local function define_tests()
             end
         end)
 
+        it("settles an approved delegation call as changed_before_run when its target agent changes during the wait", function()
+            for _, case in ipairs({ "replaced", "removed" }) do
+                local ctx = new_ctx({ live = 1, policy = { require = "all" } })
+                local op, batch = round(ctx, { { id = "call-d", registry_id = fx.DELEGATE,
+                    type = consts.MSG_TYPE.DELEGATION, args = { task = "Refund order 7" },
+                    context = { to_agent_id = fx.TARGET } } })
+                local handle = start(ctx, op)
+                pending(ctx, batch.batch_id, 1)
+                approval_gate._registry_get = function(id)
+                    local entry = registry.get(id)
+                    if id ~= fx.TARGET then return entry end
+                    if case == "removed" then return nil end
+                    return { id = entry.id, kind = entry.kind, meta = entry.meta, data = { prompt = "Refund everything." } }
+                end
+                approve(ctx, batch.batch_id, "call-d")
+                finish(handle)
+                approval_gate._registry_get = saved.registry_get
+                test.is_nil(op.caller.launches["call-d"], case .. ": the call never runs")
+                local record = records_by_call(ctx.session_id, batch.batch_id)["call-d"]
+                test.eq(record.disposition, "not_run", case)
+                test.eq(record.disposition_reason, "intent_changed", case)
+            end
+        end)
+
         -- AC 34
-        it("settles a gated UI action whose browser binding outlasted 120 s as changed_before_run", function()
-            for _, case in ipairs({ { age = 200, runs = false }, { age = 0, runs = true } }) do
+        it("settles a gated UI action whose browser binding expired as changed_before_run", function()
+            -- The broker's binding lifetime is a setting (ui_action_ttl_seconds,
+            -- here 30 s): bound 40 s ago, it expired 10 s ago.
+            local now = time.now():unix()
+            for _, case in ipairs({
+                { bound_at = now - 40, expires_at = now - 10, runs = false },
+                { expires_at = now + 2, runs = false },
+                { expires_at = now + 100, runs = true },
+            }) do
                 local ctx = new_ctx({ live = 1, policy = { require = "all" } })
                 local op, batch = round(ctx, { { id = "call-ui", registry_id = UI_ACTION, args = { selector = "#x" } } })
                 op.ui_action_runtime = { session_id = ctx.session_id, host_instance_id = "host-1",
                     delivery_handle = "handle-1", agent_actions_authorized = true,
-                    bound_at = time.now():unix() - case.age }
+                    bound_at = case.bound_at, expires_at = case.expires_at }
                 local handle = start(ctx, op)
                 pending(ctx, batch.batch_id, 1)
                 approve(ctx, batch.batch_id, "call-ui")
@@ -490,7 +536,7 @@ local function define_tests()
                     test.is_true(op.caller.launches["call-ui"])
                 else
                     test.eq(record.disposition_reason, "intent_changed")
-                    test.is_nil(op.caller.executed["call-ui"], "never sent to a Host")
+                    test.is_nil(op.caller.launches["call-ui"], "never sent to a Host")
                     test.eq(row(op.call_message_ids["call-ui"]).metadata.result.reason, "changed_before_run")
                 end
             end

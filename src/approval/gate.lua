@@ -147,23 +147,17 @@ local function browser_binding(op: any, registry_id: any): any
     }
 end
 
--- The delegate target the model chose, read as freeze.lua reads it.
-local function delegate_target_id(validated: any): any
-    if type(validated) ~= "table" then return nil end
-    if type(validated.agent_id) == "string" and validated.agent_id ~= "" then return validated.agent_id end
-    if type(validated.context) == "table" then return validated.context.to_agent_id end
-    return nil
-end
-
--- The freeze environment of one call (freeze.lua): the registry entries are
--- read now, so a release recheck sees the deployment that would run.
+-- The freeze environment of one call (freeze.lua). The tool entry and the
+-- delegate target's entry are read now, so a release recheck sees the
+-- deployment that would run.
 local function freeze_env(ctx: any, op: any, item: any, session_context: any): any
+    local target_id = item.row_type == consts.MSG_TYPE.DELEGATION and freeze.delegate_target_id(item.validated) or nil
     return {
         session_context = session_context,
         row_type = item.row_type,
         delegation_func_id = ctx.config and ctx.config.delegation_func_id,
         entry = registry_get(item.registry_id),
-        target_entry = item.target_entry,
+        target_entry = target_id and registry_get(target_id) or nil,
         browser_binding = browser_binding(op, item.registry_id),
     }
 end
@@ -190,9 +184,9 @@ local function freeze_calls(ctx: any, op: any, env: any): ({any}?, string?)
         if type(validated) ~= "table" then
             failure = { outcome = freeze.OUTCOME.FREEZE_FAILED, error = "The call has no validated entry" }
         else
-            local target_id = row_type == consts.MSG_TYPE.DELEGATION and delegate_target_id(validated) or nil
-            item.target_entry = target_id and registry_get(target_id) or nil
-            frozen, failure = freeze.call(validated, freeze_env(ctx, op, item, env.session_context))
+            local call_env = freeze_env(ctx, op, item, env.session_context)
+            item.target_entry = call_env.target_entry
+            frozen, failure = freeze.call(validated, call_env)
         end
         if frozen then
             item.frozen = frozen
@@ -403,27 +397,15 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, effe
     return records, nil
 end
 
--- Persists the evaluator's grant suspensions. A grant that is no longer
--- active is left as it is.
-local function apply_suspensions(dbtx: any, session_id: string, suspend: any): (boolean?, string?)
-    for _, item in ipairs(suspend or {}) do
-        local _, err = approval_repo.suspend_grant(dbtx, session_id, item.grant_id, nil, item.reason)
-        if err and not approval_repo.is_conflict(err) then return nil, tostring(err) end
-    end
-    return true, nil
-end
-
 -- Stores the records and their row projections (metadata.approval) in
 -- `dbtx`; with pending requests also the session activity. The batch must
 -- still be open. Returns { records, activity } or (nil, err).
-local function store_records(dbtx: any, ctx: any, binding: any, requests: {any}, suspend: any): (any, any)
+local function store_records(dbtx: any, ctx: any, binding: any, requests: {any}): (any, any)
     local batch, batch_err = approval_repo.get_batch(dbtx, binding.batch_id)
     if not batch then return nil, batch_err end
     if batch.state ~= approval_repo.BATCH_STATE.OPEN then
         return { closed = batch }
     end
-    local suspended, suspend_err = apply_suspensions(dbtx, ctx.session_id, suspend)
-    if not suspended then return nil, suspend_err end
     local stored, pending_ids = {}, {}
     for _, request in ipairs(requests) do
         local record, create_err = approval_repo.create_request(dbtx, request)
@@ -535,13 +517,16 @@ end
 -- publishes the record events and then the settlements. `requests` are
 -- records to create in the same transaction (the limit and unavailable
 -- paths). A closure that an earlier writer (Stop, finish, a stop denial)
--- committed keeps its reason.
-local function close_and_settle(ctx: any, run: any, reason: string, requests: {any}?, suspend: any): (any, string?)
+-- committed keeps its reason. The evaluator's grant suspensions are stored
+-- whatever the reason.
+local function close_and_settle(ctx: any, run: any, reason: string, requests: {any}?): (any, string?)
     local items = run.items
     if reason == "deleted" then return deleted_result(items), nil end
     local outcome, err = approval_repo.transact(ctx.session_id, function(dbtx)
+        local suspended, suspend_err = approval_repo.suspend_grants(dbtx, ctx.session_id, run.suspend)
+        if not suspended then return nil, suspend_err end
         if requests and #requests > 0 then
-            local stored, store_err = store_records(dbtx, ctx, run.binding, requests, suspend)
+            local stored, store_err = store_records(dbtx, ctx, run.binding, requests)
             if not stored then return nil, store_err end
         end
         local closed, close_err, latest = approval_repo.close_batch(dbtx, run.binding.batch_id, reason)
@@ -583,6 +568,7 @@ local function close_and_settle(ctx: any, run: any, reason: string, requests: {a
         return nil, tostring(err)
     end
     run.had_activity = false
+    run.suspend = nil
 
     publish_records(ctx, run, outcome.records)
     publish_settlements(ctx, outcome.settled)
@@ -711,18 +697,15 @@ function gate._wait(ctx: any, run: any, waiting: any): (any, string?)
     end
 end
 
--- The Attention browser binding lasts 120 s from the turn's binding
--- (ui_action_broker); a call released later would reach a Host the person
--- did not review (architecture 4.10). bound_at is stamped by agent_step; a
--- binding without it can't be shown fresh.
-gate.BINDING_TTL_SECONDS = 120
+-- The Attention browser binding ends at the expiry the broker set for the
+-- turn (ui_action_ttl_seconds); a call released later would reach a Host the
+-- person did not review. A binding without an expiry is never fresh.
 gate.BINDING_MARGIN_SECONDS = 5
 
 local function binding_fresh(op: any, now: number): boolean
     local runtime = op.ui_action_runtime
-    local bound_at = type(runtime) == "table" and tonumber(runtime.bound_at) or nil
-    if not bound_at then return false end
-    return now < bound_at + gate.BINDING_TTL_SECONDS - gate.BINDING_MARGIN_SECONDS
+    local expires_at = type(runtime) == "table" and tonumber(runtime.expires_at) or nil
+    return expires_at ~= nil and now < expires_at - gate.BINDING_MARGIN_SECONDS
 end
 
 -- The release recheck of one approved call (4.5 step 9). Returns nil when
@@ -760,7 +743,7 @@ local DISPOSITION_REASON = {
 -- released and settles the calls that do not run. The batch cancellation
 -- channel is registered on the wake hub before it begins. Returns the gate
 -- result for process_tools.
-local function release(ctx: any, op: any, env: any, run: any, suspend: any): (any, string?)
+local function release(ctx: any, op: any, env: any, run: any): (any, string?)
     local binding, items = run.binding, run.items
     local hub = ctx.approval_wake
     local cancel = nil
@@ -776,7 +759,7 @@ local function release(ctx: any, op: any, env: any, run: any, suspend: any): (an
     if not reason and hub and hub:batch_cancelled(binding.batch_id) then reason = "stop" end
     if reason then
         unregister()
-        return close_and_settle(ctx, run, reason, nil, suspend)
+        return close_and_settle(ctx, run, reason, nil)
     end
 
     local session_context = env.session_context
@@ -784,12 +767,16 @@ local function release(ctx: any, op: any, env: any, run: any, suspend: any): (an
         local fresh, context_err = env.read_session_context()
         if context_err then
             unregister()
+            local _, batch_err = approval_repo.get_batch(nil, binding.batch_id)
+            if session_gone(batch_err) then return deleted_result(items), nil end
             return nil, "Failed to read the session context for the release: " .. tostring(context_err)
         end
         session_context = fresh
     end
     local now = now_unix()
     local outcome, err = approval_repo.transact(ctx.session_id, function(dbtx)
+        local suspended, suspend_err = approval_repo.suspend_grants(dbtx, ctx.session_id, run.suspend)
+        if not suspended then return nil, suspend_err end
         local batch, batch_err = approval_repo.get_batch(dbtx, binding.batch_id)
         if not batch then return nil, batch_err end
         if batch.state == approval_repo.BATCH_STATE.CLOSED then
@@ -821,8 +808,6 @@ local function release(ctx: any, op: any, env: any, run: any, suspend: any): (an
             if not closed then return nil, close_err, latest end
             return { close_reason = closed.close_reason or close_reason }
         end
-        local suspended, suspend_err = apply_suspensions(dbtx, ctx.session_id, suspend)
-        if not suspended then return nil, suspend_err end
 
         local by_message = {}
         for _, record in ipairs(records) do by_message[record.tool_message_id] = record end
@@ -890,9 +875,10 @@ local function release(ctx: any, op: any, env: any, run: any, suspend: any): (an
         if session_gone(err) then return deleted_result(items), nil end
         return nil, tostring(err)
     end
+    run.suspend = nil
     if outcome.close_reason then
         unregister()
-        return close_and_settle(ctx, run, outcome.close_reason, nil, nil)
+        return close_and_settle(ctx, run, outcome.close_reason, nil)
     end
     run.had_activity = false
 
@@ -964,6 +950,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
     if not history then return nil, history_err end
     local evaluated, eval_err = evaluate(ctx, items, effective, history)
     if not evaluated then return nil, eval_err end
+    run.suspend = evaluated.suspend
 
     local asks, grants = 0, 0
     for _, item in ipairs(items) do
@@ -979,7 +966,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
     if batch.state == approval_repo.BATCH_STATE.CLOSED then
         -- Closed before the gate (Stop, finish or steering committed first):
         -- nothing of the batch runs and no request is created.
-        return close_and_settle(ctx, run, batch.close_reason or "finish", nil, nil)
+        return close_and_settle(ctx, run, batch.close_reason or "finish")
     end
     if batch.state ~= approval_repo.BATCH_STATE.OPEN then
         return nil, "The approval batch is " .. tostring(batch.state) .. " before the gate"
@@ -988,7 +975,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
     if asks == 0 and grants == 0 then
         -- Nothing needs a decision: the batch goes straight to the release
         -- transaction, which also settles the calls the gate refused itself.
-        return release(ctx, op, env, run, evaluated.suspend)
+        return release(ctx, op, env, run)
     end
 
     local now = now_unix()
@@ -998,7 +985,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
         -- member settles as not run with reason limit; the turn ends.
         local requests, build_err = build_records(ctx, op, binding, items, effective, approval_repo.STATE.LIMITED, now)
         if not requests then return nil, build_err end
-        local result, close_err = close_and_settle(ctx, run, "limit", requests, evaluated.suspend)
+        local result, close_err = close_and_settle(ctx, run, "limit", requests)
         if not result then return nil, close_err end
         if result.end_reason == "limit" then
             events.publish_notice(ctx.upstream, ctx.turn_state, gate.turn_id(ctx, op), events.NOTICE.LIMIT)
@@ -1012,7 +999,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
         local requests, build_err = build_records(ctx, op, binding, items, effective,
             approval_repo.STATE.UNAVAILABLE, now)
         if not requests then return nil, build_err end
-        local result, close_err = close_and_settle(ctx, run, "unavailable", requests, evaluated.suspend)
+        local result, close_err = close_and_settle(ctx, run, "unavailable", requests)
         if not result then return nil, close_err end
         if result.end_reason == "unavailable" then
             events.publish_notice(ctx.upstream, ctx.turn_state, gate.turn_id(ctx, op), events.NOTICE.UNAVAILABLE)
@@ -1031,17 +1018,20 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
         if hub and waiter then hub:disarm(waiter) end
     end
     local stored, store_err = approval_repo.transact(ctx.session_id, function(dbtx)
-        return store_records(dbtx, ctx, binding, requests, evaluated.suspend)
+        local suspended, suspend_err = approval_repo.suspend_grants(dbtx, ctx.session_id, run.suspend)
+        if not suspended then return nil, suspend_err end
+        return store_records(dbtx, ctx, binding, requests)
     end)
     if not stored then
         disarm()
         if session_gone(store_err) then return deleted_result(items), nil end
         return nil, tostring(store_err)
     end
+    run.suspend = nil
     if stored.closed then
         -- A closure committed between the read above and the write.
         disarm()
-        return close_and_settle(ctx, run, stored.closed.close_reason or "finish", nil, nil)
+        return close_and_settle(ctx, run, stored.closed.close_reason or "finish")
     end
     run.had_activity = stored.activity ~= nil
     publish_records(ctx, run, stored.records)
@@ -1055,7 +1045,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
         disarm()
         if not outcome then return nil, wait_err end
         if outcome.close_reason then
-            local result, close_err = close_and_settle(ctx, run, outcome.close_reason, nil, nil)
+            local result, close_err = close_and_settle(ctx, run, outcome.close_reason)
             -- No surface came back within the grace period: the same notice
             -- as a session that never declared one (4.5 step 6).
             if result and result.end_reason == "grace" then
@@ -1064,7 +1054,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
             return result, close_err
         end
     end
-    return release(ctx, op, env, run, nil)
+    return release(ctx, op, env, run)
 end
 
 return gate

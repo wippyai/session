@@ -140,6 +140,15 @@ local function grant_permitted(effective: any, option: any, grant_scope: string)
     return false, policy.SUSPENSION.MODE_NOT_PERMITTED
 end
 
+-- Why the current policy no longer lets `grant` match a call to its tool, or
+-- nil when it still may. `option` is the tool's approve_all (nil for a
+-- session grant).
+function policy.grant_suspension(effective: any, grant: any, option: any): string?
+    local permitted, reason = grant_permitted(effective, option, grant.scope)
+    if permitted then return nil end
+    return reason
+end
+
 -- Same tool (registry ID and delegate target), whatever the deployment.
 local function same_tool(a: any, b: any): boolean
     return type(a) == "table" and type(b) == "table"

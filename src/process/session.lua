@@ -93,6 +93,22 @@ local function close_approvals_for_finish(context: any)
     end
 end
 
+-- A finish taken back before the session started to finish: the finish fence
+-- it wrote for the running turn is cleared, so later batches of the turn are
+-- created open again. The batches it closed stay closed.
+local function cancel_approvals_finish(context: any)
+    context.approval_wake:cancel_finish()
+    local turn = approval_turn(context)
+    if not turn then return end
+    local _, err = approval_repo.transact(context.session_id, function(dbtx)
+        return approval_repo.clear_turn_fence(dbtx, context.session_id, turn.turn_id, "finish")
+    end)
+    if err then
+        logger:warn("tool approval finish fence was not cleared",
+            { session_id = context.session_id, error = tostring(err) })
+    end
+end
+
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -1022,7 +1038,7 @@ local function run(args: SessionArgs)
                     finish_generation = finish_generation + 1
                     pending_finish = false
                     finish_check_sent = false
-                    context.approval_wake:cancel_finish()
+                    cancel_approvals_finish(context)
                 end
             elseif topic == consts.TOPICS.APPROVAL_SURFACES then
                 if not accept_surfaces(context, msg:from(), msg:payload():data()) then
@@ -1211,4 +1227,5 @@ return { run = run, route_input = route_input, flush_held = flush_held,
     write_held_before_form = write_held_before_form,
     commit_held_before_form = commit_held_before_form,
     reference_artifact = reference_artifact, _commit_stop = commit_stop,
-    _close_approvals_for_finish = close_approvals_for_finish }
+    _close_approvals_for_finish = close_approvals_for_finish,
+    _cancel_approvals_finish = cancel_approvals_finish }
