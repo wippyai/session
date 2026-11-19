@@ -3,8 +3,7 @@
 This document is the wire contract between the Session module and a chat
 client (the Wippy Web Host, `<wippy-chat>`, or a headless `chat.js` user) for
 native tool-call approval. It lists every message a client sends or receives,
-with every field. The design behind it is in the tool approval architecture
-(Jira EE2-2710).
+with every field.
 
 **Status: off until the gate ships.** No released Session module advertises
 the capability yet. Until `GET /api/v1/sessions/capabilities` returns
@@ -12,10 +11,9 @@ the capability yet. Until `GET /api/v1/sessions/capabilities` returns
 below, and it will receive none of the events.
 
 Machine-readable examples of every message are in
-`test/approval/fixtures/*.json`. The test `app.approval:protocol_fixtures_test`
-checks each fixture against the "Fixture index" table at the end of this
-document, so the two cannot drift apart silently. Clients may copy the JSON
-files as test data.
+`test/approval/fixtures/*.json`; each section names its fixtures. The test
+`app.approval:protocol_fixtures_test` checks that every fixture keeps the keys a
+client reads. Clients may copy the JSON files as test data.
 
 ## 1. Defaults
 
@@ -81,14 +79,16 @@ it. `enabled` must be the boolean `true` or `false`. When the command has a
 `request_id`, the reply is a `command_response` on the session topic with the
 same `request_id` and `success: true`, or `success: false` with
 `code: "invalid_surface_command"` and a `message` when `session_id` or
-`enabled` is missing or wrong. A command that does not come through the
+`enabled` is missing or wrong, or with `code: "surface_unavailable"` when the
+Session could not record the declaration (the surface is not live; the client
+may declare again). A command that does not come through the
 user's authenticated relay is refused without a reply.
 
 A reopen, a later message or a Session process restart does not restore a
 withdrawn surface. Only a new declaration does.
 
 Fixtures: `tool_approval_surface_declare.json`,
-`session_message_runtime_context.json`, `tool_approval_surface.json`.
+`session_message_runtime_context.json`, `tool_approval_surface_withdraw.json`.
 
 ## 4. The `tool_approval` event
 
@@ -481,38 +481,3 @@ error text (for example `Failed to parse arguments: ...`), as before this
 feature.
 
 Fixture: `model_result_not_run.json`.
-
-## 12. Fixture index
-
-Each row names a fixture file and the keys it must have. `path:type` checks a
-type (`string`, `integer`, `number`, `boolean`, `object`, `array`, `null`;
-alternatives joined with `/`). `path=value` checks an exact value. Paths are
-dotted; a number selects an array item (1-based).
-
-| Fixture | Message | Required keys |
-| --- | --- | --- |
-| `capabilities.json` | GET capabilities response | `success=true capabilities.schema=wippy.session.capabilities.v1 capabilities.tool_approval:integer` |
-| `tool_approval_surface_declare.json` | Surface declaration | `type=session_command session_id:string request_id:string data.command=tool_approval_surface data.enabled=true` |
-| `session_message_runtime_context.json` | Surface declaration on a message | `type=session_message session_id:string data.text:string data.runtime_context.tool_approval_ui:integer` |
-| `tool_approval_surface.json` | Surface withdrawal | `type=session_command session_id:string data.command=tool_approval_surface data.enabled=false` |
-| `tool_approval_event_pending.json` | Pending request event | `type=tool_approval session_id:string message_id:string call_id:string function_name:string row_type:string server_now:string approval.approval_id:string approval.batch_id:string approval.state=pending approval.revision:integer approval.intent_digest:string approval.requested_at:string approval.expires_at:string approval.offered.decisions:array approval.offered.approve_all.scope:string approval.offered.approve_all.covers:array approval.display.title:string approval.display.description:string approval.display.agent:string approval.display.summary:string approval.display.arguments:object approval.display.cut:array approval.display.numbers:array approval.display.batch_peers:array approval.display.approve_all_scope.scope:string approval.display.approve_all_scope.tools:array approval.display.approve_all_scope.covered:array approval.display.approve_all_scope.covered_count:integer` |
-| `tool_approval_event_decided.json` | State change event | `type=tool_approval session_id:string message_id:string call_id:string server_now:string approval.approval_id:string approval.state=approved approval.revision:integer approval.decided_via=user approval.decided_at:string` |
-| `tool_approval_event_grant.json` | Grant audit event | `type=tool_approval row_type=private_function approval.state=approved approval.decided_via=grant approval.grant_id:string` |
-| `decision_approve.json` | Approve | `type=session_command session_id:string request_id:string data.command=tool_approval data.approval_id:string data.decision=approve data.intent_digest:string data.expected_revision:integer` |
-| `decision_approve_all.json` | Approve all | `type=session_command request_id:string data.command=tool_approval data.decision=approve_all data.approve_all_scope:string data.intent_digest:string data.expected_revision:integer` |
-| `decision_deny_stop.json` | Deny and stop | `type=session_command request_id:string data.command=tool_approval data.decision=deny data.then=stop data.intent_digest:string data.expected_revision:integer` |
-| `decision_deny_continue.json` | Deny and continue | `type=session_command request_id:string data.command=tool_approval data.decision=deny data.then=continue data.reason:string data.intent_digest:string data.expected_revision:integer` |
-| `grant_revoke.json` | Grant revocation | `type=session_command session_id:string request_id:string data.command=tool_approval_grant_revoke data.grant_id:string data.expected_revision:integer` |
-| `command_response_decision.json` | Decision reply | `type=command_response session_id:string request_id:string success=true approval.approval_id:string approval.state:string approvals:array approvals.1.approval_id:string grant.grant_id:string grant.scope:string grant.status=active grant.revision:integer` |
-| `command_response_revoke.json` | Revocation reply | `type=command_response request_id:string success=true grant.grant_id:string grant.status=revoked grant.revision:integer` |
-| `command_error_not_pending.json` | Decision refused | `type=error session_id:string request_id:string code=approval_not_pending message:string approval.approval_id:string approval.state:string approval.revision:integer` |
-| `command_error_stale.json` | Digest or revision mismatch | `type=error request_id:string code=approval_stale message:string` |
-| `function_error_not_approved.json` | Not-run settlement | `type=function_error session_id:string message_id:string call_id:string function_name:string error:string outcome=not_approved approval.approval_id:string approval.state:string approval.disposition=not_run` |
-| `function_call_approved.json` | Execution starts | `type=function_call session_id:string message_id:string function_name:string approval.state=approved approval.decided_via:string approval.grant_id:string/null` |
-| `session_update_activity.json` | Live session update | `type=update session_id:string activity.kind=awaiting_tool_approval activity.approval_ids:array activity_revision:integer tool_approval.active=true tool_approval.revision:integer tool_approval.grants:array tool_approval.grants.1.grant_id:string tool_approval.grants.1.revision:integer tool_approval.grants.1.scope:string tool_approval.grants.1.status:string tool_approval.grants.1.suspension_reason:string/null tool_approval.grants.1.registry_id:string/null tool_approval.grants.1.title:string/null tool_approval.grants.1.created_at:string` |
-| `session_update_activity_cleared.json` | Activity cleared | `type=update session_id:string activity:null activity_revision:integer` |
-| `session_error_unavailable.json` | No approval surface notice | `type=error session_id:string code=tool_approval_unavailable message:string` |
-| `session_error_limit.json` | Per-turn request cap notice | `type=error session_id:string code=tool_approval_limit message:string` |
-| `rest_session.json` | REST session read | `success=true server_now:string session.session_id:string session.status=running session.activity:object/null session.activity_revision:integer session.tool_approval.active:boolean session.tool_approval.grants:array` |
-| `rest_message_row.json` | REST call row | `success=true server_now:string messages.1.message_id:string messages.1.type:string messages.1.metadata.status=pending messages.1.metadata.approval.approval_id:string messages.1.metadata.approval.call_id:string messages.1.metadata.approval.state:string messages.1.metadata.approval.revision:integer messages.1.metadata.approval.intent_digest:string messages.1.metadata.approval.offered:object messages.1.metadata.approval.display:object messages.1.metadata.approval.requested_at:string messages.1.metadata.approval.expires_at:string` |
-| `model_result_not_run.json` | Model-visible result | `executed=false reason:string instruction:string` |

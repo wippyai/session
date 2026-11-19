@@ -1,5 +1,7 @@
 local test = require("test")
 local json = require("json")
+local registry = require("registry")
+local time = require("time")
 local approval_events = require("approval_events")
 
 -- Model-facing results and event payloads of the approval gate (EE2-2710,
@@ -95,6 +97,29 @@ local function define_tests()
             test.eq(not_run.error, "Not run: too many approval requests in this turn.")
             test.eq(not_run.approval.disposition, "not_run")
             test.eq(approval_events.not_run_payload("m1", "c", "f", "stopped", nil, true).outcome, "cancelled")
+        end)
+
+        it("clears the activity with an explicit null, as the protocol fixture shows", function()
+            local raw = registry.get("app.approval:protocol_fixtures").data.fixtures["session_update_activity_cleared.json"]
+            local sent = nil
+            local upstream = { update_session = function(_self, changes) sent = changes end }
+            approval_events.publish_activity(upstream, { activity = nil, revision = 8 })
+            local event = { type = "update", session_id = "01990a2b-0000-7000-8000-000000000001" }
+            for key, value in pairs(sent) do event[key] = value end
+            local encoded = json.encode(event)
+            test.contains(encoded, '"activity":null', "the key is on the wire")
+            test.contains(tostring(raw), '"activity": null')
+            local fixture = assert(json.decode(tostring(raw)))
+            local decoded = assert(json.decode(encoded))
+            for _, key in ipairs({ "type", "session_id", "activity_revision" }) do
+                test.eq(decoded[key], fixture[key], key)
+            end
+            -- The null survives the process message the upstream sends.
+            local inbox = process.inbox()
+            process.send(process.pid(), "approval_activity_probe", event)
+            local got = channel.select({ inbox:case_receive(), time.after("1s"):case_receive() })
+            test.is_true(got.channel == inbox, "the probe message arrived")
+            test.contains(json.encode(got.value:payload():data()), '"activity":null')
         end)
 
         it("sends each notice once per turn", function()

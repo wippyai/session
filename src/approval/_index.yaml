@@ -103,6 +103,8 @@ entries:
     meta:
       comment: Tool approval events and results - the tool_approval event, not-run settlements, session notices, the model-facing result of a call that did not run
     source: file://events.lua
+    modules:
+      - json
 
   # wippy.session.approval:gate
   - name: gate

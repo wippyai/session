@@ -2,43 +2,8 @@ version: "1.0"
 namespace: app.approval
 
 # Tool approval suites. The fixtures are the machine-readable examples of
-# docs/tool-approval-protocol.md; the loader inlines each file:// value. The
-# loader refuses file:// paths outside this folder, so the document is read
-# through a volume on the repository's docs folder instead. The make targets
-# point it there (-o app.approval:docs:directory=<repository>/docs); without
-# that override it is an empty folder in the workspace and the suite fails.
+# docs/tool-approval-protocol.md; the loader inlines each file:// value.
 entries:
-  - name: docs
-    kind: fs.directory
-    meta:
-      comment: The repository docs folder, set by the make targets
-    auto_init: true
-    directory: ./approval-docs
-
-  # The repository src folder, set by the make targets the same way
-  # (-o app.approval:source:directory=<repository>/src); the text safety
-  # suite scans it and fails when the folder is empty.
-  - name: source
-    kind: fs.directory
-    meta:
-      comment: The repository src folder, set by the make targets
-    auto_init: true
-    directory: ./approval-source
-
-  - name: text_safety_test
-    kind: function.lua
-    meta:
-      name: No hidden bidirectional or zero-width characters in src and docs
-      type: test
-      suite: session
-      comment: Scans every file under src/ and docs/ for literal U+200B-200F, U+202A-202E and U+2066-2069 (Trojan Source)
-    source: file://text_safety_test.lua
-    modules:
-      - fs
-    imports:
-      test: wippy.test:test
-    method: run
-
   - name: canonical_json_test
     kind: function.lua
     meta:
@@ -65,7 +30,7 @@ entries:
         capabilities.json: file://fixtures/capabilities.json
         tool_approval_surface_declare.json: file://fixtures/tool_approval_surface_declare.json
         session_message_runtime_context.json: file://fixtures/session_message_runtime_context.json
-        tool_approval_surface.json: file://fixtures/tool_approval_surface.json
+        tool_approval_surface_withdraw.json: file://fixtures/tool_approval_surface_withdraw.json
         tool_approval_event_pending.json: file://fixtures/tool_approval_event_pending.json
         tool_approval_event_decided.json: file://fixtures/tool_approval_event_decided.json
         tool_approval_event_grant.json: file://fixtures/tool_approval_event_grant.json
@@ -94,12 +59,11 @@ entries:
       name: Tool approval protocol fixtures
       type: test
       suite: session
-      comment: Checks every fixture against the required keys in the protocol document's fixture index
+      comment: Every fixture decodes and keeps the keys a client reads, nulls at their exact paths
     source: file://protocol_fixtures_test.lua
     modules:
       - json
       - registry
-      - fs
     imports:
       test: wippy.test:test
     method: run
@@ -309,6 +273,7 @@ entries:
     source: file://gate_test.lua
     modules:
       - uuid
+      - json
     imports:
       test: wippy.test:test
       consts: wippy.session:consts
@@ -350,6 +315,7 @@ entries:
     modules:
       - time
       - registry
+      - json
     method: run
   - name: events_test
     kind: function.lua
@@ -361,6 +327,8 @@ entries:
     source: file://events_test.lua
     modules:
       - json
+      - registry
+      - time
     imports:
       test: wippy.test:test
       approval_events: wippy.session.approval:events

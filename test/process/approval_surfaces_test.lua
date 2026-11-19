@@ -19,7 +19,7 @@ local SURFACES = consts.TOPICS.APPROVAL_SURFACES
 -- run, for pids known only at run time). Event items: { event = { kind, from,
 -- result } }. Every spawn is confirmed at once with SESSION_OPENED from the new
 -- pid. After the script the plugin is cancelled.
-local function run_plugin(script: {any}): any
+local function run_plugin(script: {any}, monitor_error: string?): any
     local run = { sent = {}, spawns = {}, monitors = {}, unmonitors = {} }
     local queue = {}
     for _, item in ipairs(script) do table.insert(queue, item) end
@@ -46,6 +46,7 @@ local function run_plugin(script: {any}): any
         return true, nil
     end)
     mock("process.monitor", function(pid)
+        if monitor_error then return false, monitor_error end
         run.monitors[pid] = (run.monitors[pid] or 0) + 1
         return true, nil
     end)
@@ -220,6 +221,15 @@ local function define_tests()
             test.eq(replies[1].type, consts.UPSTREAM_TYPES.COMMAND_RESPONSE)
             test.eq(replies[1].request_id, "req-declare")
             test.is_true(replies[1].success)
+        end)
+
+        it("answers a declaration whose connection can't be monitored as failed and records nothing", function()
+            local run = run_plugin({ open(first, "conn-1"), declare(first, "conn-1") }, "monitor failed")
+            test.eq(#pushes(run, first), 0, "no surface is counted as live")
+            local replies = sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first)
+            test.eq(#replies, 1)
+            test.is_false(replies[1].success)
+            test.eq(replies[1].code, "surface_unavailable")
         end)
 
         it("records a declaration sent after a reopen of a live session", function()

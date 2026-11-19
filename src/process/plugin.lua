@@ -345,8 +345,9 @@ local function run(args)
         end
     end
 
-    local function declare_surface(session_id: any, conn_pid: any)
-        if not surfaces:declare(session_id, conn_pid) then return end
+    -- Returns false when the surface could not be recorded.
+    local function declare_surface(session_id: any, conn_pid: any): boolean
+        if not surfaces:declare(session_id, conn_pid) then return true end
         local monitored, monitor_err = broker:retain_monitor(conn_pid)
         if not monitored then
             -- An unmonitored surface could outlive its connection, so it is
@@ -354,9 +355,10 @@ local function run(args)
             surfaces:withdraw(session_id, conn_pid)
             logger:warn("approval surface not recorded: connection monitor failed",
                 { session_id = session_id, error = tostring(monitor_err) })
-            return
+            return false
         end
         push_surfaces(session_id)
+        return true
     end
 
     local function drop_surface(session_id: any, conn_pid: any)
@@ -394,12 +396,14 @@ local function run(args)
         if type(session_id) ~= "string" or session_id == "" or type(command.enabled) ~= "boolean" then
             response.code = "invalid_surface_command"
             response.message = "tool_approval_surface needs a session_id and enabled: true or false"
-        elseif command.enabled then
-            declare_surface(session_id, payload_data.conn_pid)
-            response.success = true
-        else
+        elseif not command.enabled then
             drop_surface(session_id, payload_data.conn_pid)
             response.success = true
+        elseif declare_surface(session_id, payload_data.conn_pid) then
+            response.success = true
+        else
+            response.code = "surface_unavailable"
+            response.message = "The approval surface could not be recorded"
         end
         if payload_data.request_id ~= nil then
             process.send(payload_data.conn_pid :: string,

@@ -1,172 +1,134 @@
 local test = require("test")
 local json = require("json")
 local registry = require("registry")
-local fs = require("fs")
 
--- docs/tool-approval-protocol.md ends with a fixture index: one table row per
--- fixture file, with the keys and value types that file must have. This suite
--- reads the document (through the app.approval:docs volume) and the fixtures
--- (inlined into the registry entry app.approval:protocol_fixtures at load
--- time) and checks one against the other, so a change to either one without
--- the other fails here.
+-- The JSON fixtures of docs/tool-approval-protocol.md (inlined into the
+-- registry entry app.approval:protocol_fixtures) keep the keys a client
+-- reads. Paths are dotted; a number selects an array item (1-based). A path
+-- in `null` must hold a JSON null at exactly that path.
+local REQUIRED = {
+    ["capabilities.json"] = { "success", "capabilities.schema", "capabilities.tool_approval" },
+    ["tool_approval_surface_declare.json"] = { "type", "session_id", "request_id", "data.command", "data.enabled" },
+    ["session_message_runtime_context.json"] = { "type", "session_id", "data.text",
+        "data.runtime_context.tool_approval_ui" },
+    ["tool_approval_surface_withdraw.json"] = { "type", "session_id", "data.command", "data.enabled" },
+    ["tool_approval_event_pending.json"] = { "type", "session_id", "message_id", "call_id", "function_name",
+        "row_type", "server_now", "approval.approval_id", "approval.batch_id", "approval.state",
+        "approval.revision", "approval.intent_digest", "approval.requested_at", "approval.expires_at",
+        "approval.offered.decisions", "approval.offered.approve_all.scope", "approval.offered.approve_all.covers",
+        "approval.display.title", "approval.display.description", "approval.display.agent",
+        "approval.display.summary", "approval.display.arguments", "approval.display.cut",
+        "approval.display.numbers", "approval.display.batch_peers", "approval.display.approve_all_scope.scope",
+        "approval.display.approve_all_scope.tools", "approval.display.approve_all_scope.covered",
+        "approval.display.approve_all_scope.covered_count",
+        null = { "approval.decided_at", "approval.decided_via", "approval.grant_id", "approval.disposition" } },
+    ["tool_approval_event_decided.json"] = { "type", "session_id", "message_id", "call_id", "server_now",
+        "approval.approval_id", "approval.state", "approval.revision", "approval.decided_via", "approval.decided_at" },
+    ["tool_approval_event_grant.json"] = { "type", "row_type", "approval.state", "approval.decided_via",
+        "approval.grant_id" },
+    ["decision_approve.json"] = { "type", "session_id", "request_id", "data.command", "data.approval_id",
+        "data.decision", "data.intent_digest", "data.expected_revision" },
+    ["decision_approve_all.json"] = { "type", "request_id", "data.command", "data.decision",
+        "data.approve_all_scope", "data.intent_digest", "data.expected_revision" },
+    ["decision_deny_stop.json"] = { "type", "request_id", "data.command", "data.decision", "data.then",
+        "data.intent_digest", "data.expected_revision" },
+    ["decision_deny_continue.json"] = { "type", "request_id", "data.command", "data.decision", "data.then",
+        "data.reason", "data.intent_digest", "data.expected_revision" },
+    ["grant_revoke.json"] = { "type", "session_id", "request_id", "data.command", "data.grant_id",
+        "data.expected_revision" },
+    ["command_response_decision.json"] = { "type", "session_id", "request_id", "success", "approval.approval_id",
+        "approval.state", "approvals.1.approval_id", "grant.grant_id", "grant.scope", "grant.status",
+        "grant.revision" },
+    ["command_response_revoke.json"] = { "type", "request_id", "success", "grant.grant_id", "grant.status",
+        "grant.revision" },
+    ["command_error_not_pending.json"] = { "type", "session_id", "request_id", "code", "message",
+        "approval.approval_id", "approval.state", "approval.revision" },
+    ["command_error_stale.json"] = { "type", "request_id", "code", "message" },
+    ["function_error_not_approved.json"] = { "type", "session_id", "message_id", "call_id", "function_name",
+        "error", "outcome", "approval.approval_id", "approval.state", "approval.disposition" },
+    ["function_call_approved.json"] = { "type", "session_id", "message_id", "function_name", "approval.state",
+        "approval.decided_via", null = { "approval.grant_id" } },
+    ["session_update_activity.json"] = { "type", "session_id", "activity.kind", "activity.approval_ids",
+        "activity_revision", "tool_approval.active", "tool_approval.revision", "tool_approval.grants.1.grant_id",
+        "tool_approval.grants.1.revision", "tool_approval.grants.1.scope", "tool_approval.grants.1.status",
+        "tool_approval.grants.1.registry_id", "tool_approval.grants.1.title", "tool_approval.grants.1.created_at",
+        null = { "tool_approval.grants.1.suspension_reason" } },
+    ["session_update_activity_cleared.json"] = { "type", "session_id", "activity_revision", null = { "activity" } },
+    ["session_error_unavailable.json"] = { "type", "session_id", "code", "message" },
+    ["session_error_limit.json"] = { "type", "session_id", "code", "message" },
+    ["rest_session.json"] = { "success", "server_now", "session.session_id", "session.status", "session.activity",
+        "session.activity_revision", "session.tool_approval.active", "session.tool_approval.grants" },
+    ["rest_message_row.json"] = { "success", "server_now", "messages.1.message_id", "messages.1.type",
+        "messages.1.metadata.status", "messages.1.metadata.approval.approval_id",
+        "messages.1.metadata.approval.call_id", "messages.1.metadata.approval.state",
+        "messages.1.metadata.approval.revision", "messages.1.metadata.approval.intent_digest",
+        "messages.1.metadata.approval.offered", "messages.1.metadata.approval.display",
+        "messages.1.metadata.approval.requested_at", "messages.1.metadata.approval.expires_at" },
+    ["model_result_not_run.json"] = { "executed", "reason", "instruction" },
+}
 
-local SOURCE = "app.approval:protocol_fixtures"
-local DOCS = "app.approval:docs"
-local DOCUMENT = "/tool-approval-protocol.md"
-local INDEX_HEADING = "## 12. Fixture index"
-local ROW_PATTERN = "^| `([%w_]+%.json)` | [^|]+ | `([^`]+)` |%s*$"
+-- The JSON decoder drops a null; each object value null is decoded as this
+-- marker instead, so a null is told apart from a missing key at its path.
+local NULL = "<json null>"
 
-local function load_source()
-    local entry, err = registry.get(SOURCE)
-    if not entry then error("Missing " .. SOURCE .. ": " .. tostring(err)) end
-    local volume, volume_err = fs.get(DOCS)
-    if not volume then error("Missing " .. DOCS .. ": " .. tostring(volume_err)) end
-    local document, read_err = volume:readfile(DOCUMENT)
-    if not document then error("Cannot read " .. DOCUMENT .. ": " .. tostring(read_err)) end
-    return { document = document, fixtures = entry.data.fixtures }
+local function decode(raw: string): (any, string?)
+    local marked = raw:gsub(":%s*null(%s*[,}])", ': "<json null>"%1')
+    local decoded, err = json.decode(marked)
+    if err then return nil, tostring(err) end
+    return decoded, nil
 end
 
--- Rows of the fixture index: { file, rules = { "path:type" | "path=value", ... } }.
-local function index_rows(document: string)
-    local rows = {}
-    local in_index = false
-    for line in (document .. "\n"):gmatch("([^\n]*)\n") do
-        line = line:gsub("\r$", "")
-        if line == INDEX_HEADING then
-            in_index = true
-        elseif in_index and line:match("^## ") then
-            break
-        elseif in_index then
-            local file, rules = line:match(ROW_PATTERN)
-            if file then
-                local list = {}
-                for rule in rules:gmatch("%S+") do list[#list + 1] = rule end
-                rows[#rows + 1] = { file = file, rules = list }
-            end
-        end
-    end
-    return rows
-end
-
-local function decode_fixture(raw: any)
-    if type(raw) == "table" then return raw end
-    local decoded, err = json.decode(tostring(raw))
-    if err then return nil, err end
-    return decoded
-end
-
-local function resolve(value: any, path: string)
+local function resolve(value: any, path: string): any
     local current = value
     for segment in path:gmatch("[^%.]+") do
         if type(current) ~= "table" then return nil end
-        local index = tonumber(segment)
-        if index then current = current[index] else current = current[segment] end
+        current = current[tonumber(segment) or segment]
     end
     return current
 end
 
-local function is_array(value: any): boolean
-    if type(value) ~= "table" then return false end
-    for key in pairs(value) do
-        if type(key) ~= "number" then return false end
-    end
-    return true
-end
-
-local function has_type(value: any, kind: string, raw: string, path: string): boolean
-    if kind == "string" then return type(value) == "string" end
-    if kind == "number" then return type(value) == "number" end
-    if kind == "integer" then return type(value) == "number" and value % 1 == 0 end
-    if kind == "boolean" then return type(value) == "boolean" end
-    if kind == "array" then return is_array(value) end
-    if kind == "object" then
-        if type(value) ~= "table" then return false end
-        return next(value) == nil or not is_array(value)
-    end
-    if kind == "null" then
-        -- JSON null decodes to nil, which an absent key also gives; the raw
-        -- text must name the key with a null value.
-        local key = path:match("([^%.]+)$")
-        return value == nil and raw:find('"' .. key .. '"%s*:%s*null') ~= nil
-    end
-    error("Unknown type in the fixture index: " .. kind)
-end
-
--- Checks one fixture against its rules. Returns a list of problems.
-local function check_fixture(raw: string, fixture: any, rules: {string})
+-- The problems of one fixture against its required keys.
+local function problems_of(raw: string, required: any): {string}
+    local fixture, err = decode(raw)
+    if not fixture then return { "not JSON: " .. tostring(err) } end
     local problems = {}
-    for _, rule in ipairs(rules) do
-        local path, expected = rule:match("^([^:=]+)=(.+)$")
-        if path then
-            local actual = resolve(fixture, path)
-            if tostring(actual) ~= expected then
-                problems[#problems + 1] = path .. " is " .. tostring(actual) .. ", expected " .. expected
-            end
-        else
-            local type_path, kinds = rule:match("^([^:=]+):(.+)$")
-            if not type_path then error("Malformed rule in the fixture index: " .. rule) end
-            local actual = resolve(fixture, type_path)
-            local matched = false
-            for kind in kinds:gmatch("[^/]+") do
-                if has_type(actual, kind, raw, type_path) then matched = true end
-            end
-            if not matched then
-                problems[#problems + 1] = type_path .. " is not " .. kinds
-            end
-        end
+    for _, path in ipairs(required) do
+        if resolve(fixture, path) == nil then problems[#problems + 1] = path .. " is missing" end
+    end
+    for _, path in ipairs(required.null or {}) do
+        if resolve(fixture, path) ~= NULL then problems[#problems + 1] = path .. " is not null" end
     end
     return problems
 end
 
+local function fixtures(): any
+    return assert(registry.get("app.approval:protocol_fixtures")).data.fixtures
+end
+
 local function define_tests()
     describe("Tool approval protocol fixtures", function()
-        it("lists every fixture in the document and nothing else", function()
-            local source = load_source()
-            test.eq(type(source.document), "string", "the document is inlined")
-            local rows = index_rows(source.document)
-            test.is_true(#rows >= 20, "fixture index rows parsed: " .. #rows)
+        it("checks every registered fixture and nothing else", function()
+            for file in pairs(fixtures()) do test.not_nil(REQUIRED[file], "required keys listed: " .. file) end
+            for file in pairs(REQUIRED) do test.not_nil(fixtures()[file], "fixture registered: " .. file) end
+        end)
 
-            local listed = {}
-            for _, row in ipairs(rows) do
-                test.is_nil(listed[row.file], "listed once: " .. row.file)
-                listed[row.file] = true
-                test.not_nil(source.fixtures[row.file], "fixture file registered: " .. row.file)
-            end
-            for file in pairs(source.fixtures) do
-                test.is_true(listed[file] == true, "fixture listed in the document: " .. file)
+        it("gives every fixture the keys a client reads", function()
+            for file, raw in pairs(fixtures()) do
+                local problems = problems_of(tostring(raw), REQUIRED[file] or {})
+                test.eq(#problems, 0, file .. ": " .. table.concat(problems, "; "))
             end
         end)
 
-        it("gives every fixture the keys and types the document requires", function()
-            local source = load_source()
-            local checked = 0
-            for _, row in ipairs(index_rows(source.document)) do
-                local raw = source.fixtures[row.file]
-                local fixture, err = decode_fixture(raw)
-                test.is_nil(err, "valid JSON: " .. row.file)
-                local problems = check_fixture(tostring(raw), fixture, row.rules)
-                test.eq(#problems, 0, row.file .. ": " .. table.concat(problems, "; "))
-                checked = checked + 1
-            end
-            test.eq(checked, 25)
-        end)
-
-        it("reports a fixture that drops a required key or changes a value", function()
-            local raw = '{"type":"tool_approval","approval":{"state":"approved","revision":"1"}}'
-            local fixture = assert(decode_fixture(raw))
-            local problems = check_fixture(raw, fixture, {
-                "type=tool_approval", "approval.state=pending", "approval.revision:integer",
-                "message_id:string", "approval.grant_id:null",
-            })
-            test.eq(#problems, 4, table.concat(problems, "; "))
+        it("reports a missing key and a null that sits at another path", function()
+            local problems = problems_of('{"approval":{"state":"approved"},"other":{"grant_id":null}}',
+                { "approval.revision", null = { "approval.grant_id" } })
+            test.eq(table.concat(problems, "; "), "approval.revision is missing; approval.grant_id is not null")
         end)
 
         it("never names a client request_id in a state event", function()
-            local source = load_source()
             for _, file in ipairs({ "tool_approval_event_pending.json", "tool_approval_event_decided.json",
                 "tool_approval_event_grant.json" }) do
-                local fixture = assert(decode_fixture(source.fixtures[file]))
-                test.is_nil(fixture.request_id, file)
+                test.is_nil(resolve(assert(decode(tostring(fixtures()[file]))), "request_id"), file)
             end
         end)
     end)

@@ -1,5 +1,6 @@
 local test = require("test")
 local uuid = require("uuid")
+local json = require("json")
 local consts = require("consts")
 local tx = require("tx")
 local approval_gate = require("approval_gate")
@@ -61,7 +62,7 @@ local function define_tests()
                     end
                 end
             end
-            local control = { evaluate_batch = 0, repo = 0 }
+            local unprotected, control = nil, nil
             local ok, err = pcall(function()
                 local op = round(ctx, {
                     { id = "call-1", registry_id = MARKED, args = { customer_id = "c_1" } },
@@ -75,24 +76,22 @@ local function define_tests()
                 test.is_nil(row(op.call_message_ids["call-1"]).metadata.approval)
                 test.is_nil(row(op.call_message_ids["call-1"]).metadata.batch_id)
                 test.is_true(has_continue(result))
+                unprotected = { evaluate = calls.evaluate, evaluate_batch = calls.evaluate_batch,
+                    repo = table.concat(calls.repo, ", ") }
                 -- Positive control: the same spies see a protected round.
-                local before_eval, before_repo = calls.evaluate_batch, #calls.repo
                 local protected_ctx = new_ctx({ live = 1 })
                 local protected_op = round(protected_ctx, { { id = "call-1", registry_id = PLAIN, args = {} } })
                 assert(message_handlers.process_tools(protected_ctx, protected_op))
-                control.evaluate_batch = calls.evaluate_batch - before_eval
-                control.repo = #calls.repo - before_repo
-                calls.evaluate_batch, calls.evaluate = before_eval, 0
-                while #calls.repo > before_repo do table.remove(calls.repo) end
+                control = { evaluate = calls.evaluate - unprotected.evaluate, repo = #calls.repo }
             end)
             policy.evaluate, policy.evaluate_batch = saved_policy.evaluate, saved_policy.evaluate_batch
             for name, fn in pairs(saved_repo) do approval_repo[name] = fn end
             if not ok then error(err) end
-            test.is_true(control.evaluate_batch > 0, "positive control: the spy sees the evaluator")
+            test.is_true(control.evaluate > 0, "positive control: the spy sees the evaluator")
             test.is_true(control.repo > 0, "positive control: the spy sees the store")
-            test.eq(calls.evaluate, 0, "the evaluator is not called")
-            test.eq(calls.evaluate_batch, 0, "the evaluator is not called")
-            test.eq(#calls.repo, 0, "approval store calls: " .. table.concat(calls.repo, ", "))
+            test.eq(unprotected.evaluate, 0, "the evaluator is not called")
+            test.eq(unprotected.evaluate_batch, 0, "the evaluator is not called")
+            test.eq(unprotected.repo, "", "no approval store call")
             for _, table_name in ipairs(TABLES) do test.eq(count(table_name, ctx.session_id), 0, table_name) end
             test.eq(#updates_of(captured, approval_events.TOOL_APPROVAL), 0)
         end)
@@ -166,7 +165,7 @@ local function define_tests()
             -- The activity is set while the request waits, then cleared.
             test.eq(#captured.session_updates, 2)
             test.eq(captured.session_updates[1].activity.kind, "awaiting_tool_approval")
-            test.is_nil(captured.session_updates[2].activity)
+            test.eq(captured.session_updates[2].activity, json.null, "cleared with an explicit null")
             test.is_true(captured.session_updates[2].activity_revision > captured.session_updates[1].activity_revision)
         end)
 

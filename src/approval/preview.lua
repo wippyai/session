@@ -265,10 +265,16 @@ local function pointer(path: string, key: string): string
     return path .. "/" .. escaped
 end
 
-local function is_array(value: any): boolean
-    local count = 0
-    for _ in pairs(value) do count = count + 1 end
-    return count > 0 and count == #value
+-- The length of a table read as a JSON array, as canonical_json reads it:
+-- only positive integer keys, up to the largest one (a decoded null leaves a
+-- hole). nil for an object or an empty table.
+local function array_length(value: any): integer?
+    local length = nil
+    for key in pairs(value) do
+        if type(key) ~= "number" or key % 1 ~= 0 or key < 1 then return nil end
+        if not length or key > length then length = math.floor(key) end
+    end
+    return length
 end
 
 local function sorted_keys(value: any): {any}
@@ -287,9 +293,10 @@ local function full_size(value: any, memo: any): integer
     if memo[value] then return memo[value] end
     local total = 2
     local first = true
-    if is_array(value) then
-        for _, child in ipairs(value) do
-            total = total + full_size(child, memo) + (first and 0 or 1)
+    local length = array_length(value)
+    if length then
+        for index = 1, length do
+            total = total + full_size(value[index], memo) + (first and 0 or 1)
             first = false
         end
     else
@@ -431,10 +438,11 @@ local function render_container(value: any, depth: integer, path: string, budget
         local text, text_cost = marker("[cut, " .. preview.size_text(size) .. "]")
         return text, text_cost
     end
-    local array = is_array(value)
+    local length = array_length(value)
+    local array = length ~= nil
     local members = {}
-    if array then
-        for index, child in ipairs(value) do members[#members + 1] = { value = child } end
+    if length then
+        for index = 1, length do members[index] = { value = value[index] } end
     else
         local keys = sorted_keys(value)
         local texts, shortened = display_keys(keys)
@@ -458,7 +466,7 @@ local function render_container(value: any, depth: integer, path: string, budget
             end
             local text, text_cost = marker("[cut, " .. omitted .. " more, " .. preview.size_text(omitted_size) .. "]")
             if array then
-                out[#out + 1] = text
+                out[index] = text
                 state.cut[#state.cut + 1] = pointer(path, tostring(index - 1))
                 used = used + separator + text_cost
             else
@@ -472,7 +480,13 @@ local function render_container(value: any, depth: integer, path: string, budget
         local child_path = pointer(path, array and tostring(index - 1) or tostring(member.key_text))
         if member.key_cut then state.cut[#state.cut + 1] = child_path end
         local rendered, rendered_cost = render_value(member.value, depth + 1, child_path, room, state)
-        if array then out[#out + 1] = rendered else out[member.key_text] = rendered end
+        if array then
+            -- A null item stays in its place.
+            if rendered == nil then rendered = json.null end
+            out[index] = rendered
+        else
+            out[member.key_text] = rendered
+        end
         used = used + separator + key_cost + rendered_cost
     end
     return out, used
@@ -526,7 +540,8 @@ end
 
 local function summary_value(original: any, shown: any, path: string, numbers: any): string
     if type(original) == "table" then
-        if is_array(original) then return "[" .. #original .. " items]" end
+        local length = array_length(original)
+        if length then return "[" .. length .. " items]" end
         local count = 0
         for _ in pairs(original) do count = count + 1 end
         if count == 0 then return "{}" end
@@ -541,7 +556,7 @@ end
 local function build_summary(args: any, arguments: any, numbers: {string}): string
     local number_paths = {}
     for _, path in ipairs(numbers) do number_paths[path] = true end
-    if type(args) ~= "table" or is_array(args) then
+    if type(args) ~= "table" or array_length(args) then
         local text = summary_value(args, arguments, "", number_paths)
         if char_count(text) > preview.SUMMARY_CHARS then
             text = truncate_chars(text, preview.SUMMARY_CHARS - 1) .. ELLIPSIS

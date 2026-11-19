@@ -6,6 +6,8 @@
 -- settlement of a call that did not run, the session notices and the
 -- session `activity` update. The model-facing result of a call that did not
 -- run is fixed server text; it never names approval IDs, digests or grants.
+local json = require("json")
+
 local events = {}
 
 -- The per-call event type (upstream message type).
@@ -233,10 +235,13 @@ function events.publish_not_run(upstream: any, call_id: string, payload: any)
     upstream:send_message_update(call_id, events.FUNCTION_ERROR, payload)
 end
 
--- Publishes the session activity (nil clears it) with its revision.
+-- Publishes the session activity with its revision. A cleared activity is
+-- sent as an explicit JSON null: a client keeps a key the update leaves out.
 function events.publish_activity(upstream: any, activity: any)
     if type(activity) ~= "table" then return end
-    upstream:update_session({ activity = activity.activity, activity_revision = activity.revision })
+    local value = activity.activity
+    if value == nil then value = json.null end
+    upstream:update_session({ activity = value, activity_revision = activity.revision })
 end
 
 -- Publishes a session notice at most once per turn. `turn` is the turn
