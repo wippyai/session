@@ -117,8 +117,9 @@ local function define_tests()
             }
         end
 
-        local function new_form(ctx)
-            local def = definition.normalize(DEFINITION)
+        local function new_form(ctx, raw: any?)
+            local def, errors = definition.normalize(raw or DEFINITION)
+            test.is_nil(errors, definition.format_errors(errors))
             local artifact_id = uuid.v7()
             local _, err = control_handlers.control_forms(ctx, {
                 forms = { { artifact_id = artifact_id, definition = def } },
@@ -126,6 +127,17 @@ local function define_tests()
             })
             test.is_nil(err)
             return artifact_id
+        end
+
+        -- Writes the stored content of a form as it is given, with no revision
+        -- change, as an older or damaged record would hold it.
+        local function store_content(artifact_id: string, content: string)
+            local db, db_err = sql.get(consts.get_db_resource())
+            test.is_nil(db_err)
+            local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
+                { content, artifact_id })
+            db:release()
+            test.is_nil(update_err)
         end
 
         local function post(artifact_id, body, as_user)
@@ -188,12 +200,7 @@ local function define_tests()
 
             local ctx = new_session()
             local artifact_id = new_form(ctx)
-            local db, db_err = sql.get(consts.get_db_resource())
-            test.is_nil(db_err)
-            local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
-                { frozen.content, artifact_id })
-            db:release()
-            test.is_nil(update_err)
+            store_content(artifact_id, frozen.content)
 
             local function with_ids(text: string, values: any?): string
                 local filled = string.gsub(string.gsub(text, "@ARTIFACT@", artifact_id), "@SESSION@", ctx.session_id)
@@ -282,12 +289,7 @@ local function define_tests()
             local before: any = artifact_repo.get(artifact_id)
             local content: any = json.decode(tostring(before.content))
             content.props.density = "comfortable"
-            local db, db_err = sql.get(consts.get_db_resource())
-            test.is_nil(db_err)
-            local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
-                { json.encode(content), artifact_id })
-            db:release()
-            test.is_nil(update_err)
+            store_content(artifact_id, json.encode(content))
 
             local status = post(artifact_id, answer())
             test.eq(status, 200)
@@ -1075,15 +1077,7 @@ local function define_tests()
             }
 
             local function new_v2_form(ctx, def: any?)
-                local normalized, errors = definition.normalize(def or V2_DEFINITION)
-                test.is_nil(errors, definition.format_errors(errors))
-                local artifact_id = uuid.v7()
-                local _, err = control_handlers.control_forms(ctx, {
-                    forms = { { artifact_id = artifact_id, definition = normalized } },
-                    turn_id = "turn-" .. uuid.v7(), call_id = "call-1", tool_message_id = "tool-row-1",
-                })
-                test.is_nil(err)
-                return artifact_id
+                return new_form(ctx, def or V2_DEFINITION)
             end
 
             local function v2_answers()
@@ -1092,22 +1086,16 @@ local function define_tests()
             end
 
             local function v2_request(answers: any?, request_id: any?, version: any?)
-                return { form_version = 2, request_id = request_id or uuid.v7(), expected_content_version = version or 1,
-                    answers = answers or v2_answers() }
+                local request = answer(request_id, answers or v2_answers(), version)
+                request.form_version = 2
+                return request
             end
 
-            -- Replaces the stored content of a form, as an older or damaged
-            -- record would hold it.
             local function rewrite_content(artifact_id: string, change: any)
                 local row: any = artifact_repo.get(artifact_id)
                 local content: any = json.decode(tostring(row.content))
                 change(content)
-                local db, db_err = sql.get(consts.get_db_resource())
-                test.is_nil(db_err)
-                local _, update_err = db:execute("UPDATE artifacts SET content = $1 WHERE artifact_id = $2",
-                    { json.encode(content), artifact_id })
-                db:release()
-                test.is_nil(update_err)
+                store_content(artifact_id, json.encode(content))
             end
 
             it("stores a form with a standard field as version 2 and a choice-only form as version 1", function()
@@ -1353,24 +1341,33 @@ local function define_tests()
                 test.eq(#user_rows(ctx.session_id), 1, "the answer accepted first stays")
             end)
 
-            it("refuses a form version the form no longer has once the lock is held", function()
-                local ctx = new_session()
-                local artifact_id = new_form(ctx)
-                -- After the first read and before the acceptance transaction:
-                -- the choice form becomes a version 2 form, so the request's
-                -- version passed the first check and no longer matches.
+            -- Changes the stored form between the first read of a submission
+            -- and its acceptance transaction, so the answer was valid for the
+            -- form the first read saw. `change` gets the first field and the
+            -- whole content.
+            local function change_before_acceptance(artifact_id: string, change: any)
                 local original_new_id = state_service._new_message_id
                 state_service._new_message_id = function()
                     state_service._new_message_id = original_new_id
                     local artifact: any = artifact_repo.get(artifact_id)
                     local content: any = json.decode(tostring(artifact.content))
-                    content.props["form-version"] = 2
-                    table.insert(content.props.definition.fields, { id = "name", type = "text", label = "Name",
-                        min_length = 0, max_length = 500 })
+                    change(content.props.definition.fields[1], content)
                     local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
                     test.is_nil(update_err)
                     return original_new_id()
                 end
+            end
+
+            it("refuses a form version the form no longer has once the lock is held", function()
+                local ctx = new_session()
+                local artifact_id = new_form(ctx)
+                -- The choice form becomes a version 2 form, so the request's
+                -- version passed the first check and no longer matches.
+                change_before_acceptance(artifact_id, function(_, content)
+                    content.props["form-version"] = 2
+                    table.insert(content.props.definition.fields, { id = "name", type = "text", label = "Name",
+                        min_length = 0, max_length = 500 })
+                end)
                 local request = answer()
                 request.expected_content_version = nil
                 local status, body = post(artifact_id, request)
@@ -1383,22 +1380,6 @@ local function define_tests()
                 test.eq(#user_rows(ctx.session_id), 0, "the refused answer creates no pending row")
                 test.eq(#wakes, 0, "the refused answer does not wake the session")
             end)
-
-            -- Changes the first field of the stored form between the first read
-            -- of a submission and its acceptance transaction, so the answer was
-            -- valid for the form the first read saw.
-            local function change_before_acceptance(artifact_id: string, change: any)
-                local original_new_id = state_service._new_message_id
-                state_service._new_message_id = function()
-                    state_service._new_message_id = original_new_id
-                    local artifact: any = artifact_repo.get(artifact_id)
-                    local content: any = json.decode(tostring(artifact.content))
-                    change(content.props.definition.fields[1])
-                    local _, update_err = artifact_repo.update_content(artifact_id, json.encode(content))
-                    test.is_nil(update_err)
-                    return original_new_id()
-                end
-            end
 
             local function answer_field(artifact_id: string, value: any)
                 local request = v2_request({ f = value })

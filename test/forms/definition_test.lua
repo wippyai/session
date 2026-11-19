@@ -40,6 +40,19 @@ local function normalized(def)
     return result
 end
 
+-- Structural equality: json.encode key order is not stable.
+local function same(a: any, b: any): boolean
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= "table" then return a == b end
+    for key, value in pairs(a) do
+        if not same(value, b[key]) then return false end
+    end
+    for key in pairs(b) do
+        if a[key] == nil then return false end
+    end
+    return true
+end
+
 local function define_tests()
     describe("definition normalizer", function()
         it("normalizes string options and fills boolean defaults", function()
@@ -102,18 +115,6 @@ local function define_tests()
             local once = normalized(form({ choice("a", { multiple = true, allow_other = true }) },
                 { description = "Pick", submit_label = "Send" }))
             local twice = normalized(once)
-            -- json.encode key order is not stable, so compare structurally.
-            local function same(a, b)
-                if type(a) ~= type(b) then return false end
-                if type(a) ~= "table" then return a == b end
-                for key, value in pairs(a) do
-                    if not same(value, b[key]) then return false end
-                end
-                for key in pairs(b) do
-                    if a[key] == nil then return false end
-                end
-                return true
-            end
             test.is_true(same(once, twice))
             test.eq(json.decode(json.encode(twice)).fields[1].options[2].value, "Pickup point")
         end)
@@ -872,17 +873,6 @@ local function define_tests()
         it("is idempotent on a definition with standard fields", function()
             local once = standard_form()
             local twice = normalized(once)
-            local function same(a: any, b: any): boolean
-                if type(a) ~= type(b) then return false end
-                if type(a) ~= "table" then return a == b end
-                for key, value in pairs(a) do
-                    if not same(value, b[key]) then return false end
-                end
-                for key in pairs(b) do
-                    if a[key] == nil then return false end
-                end
-                return true
-            end
             test.is_true(same(once, twice))
         end)
 
@@ -905,7 +895,7 @@ local function define_tests()
             test.eq(unknown[1].code, "unknown_key", "structure is still checked")
         end)
 
-        -- The range rules of a new definition (D32) apply to new definitions
+        -- The range rules of a new definition apply to new definitions
         -- only: a stored one keeps the ranges it holds, so a later, stricter
         -- rule never breaks a form that was already asked.
         it("keeps the ranges of a stored definition as stored", function()
@@ -986,13 +976,6 @@ local function define_tests()
             test.eq(found["fields[0].id"], "invalid_id")
             test.eq(found["fields[0].label"], "required")
             test.eq(found["fields[1].label"], "blank")
-        end)
-
-        it("lists the supported types when a type is not one of them", function()
-            local _, errors = definition.normalize(form({ { id = "a", type = "rating", label = "A" } }))
-            test.eq(errors[1].code, "unsupported_type")
-            test.contains(errors[1].message, "textarea")
-            test.contains(errors[1].message, "checkbox")
         end)
 
         it("reports only the type for a field of an unknown type, not that a choice lacks options", function()

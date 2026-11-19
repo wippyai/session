@@ -57,8 +57,7 @@ local function read_fixture(): string
     return raw
 end
 
-local function load_cases(): any
-    local raw = read_fixture()
+local function load_cases(raw: string): any
     local cases, decode_err = json.decode(raw)
     if type(cases) ~= "table" then error("fixture JSON: " .. tostring(decode_err)) end
     return cases
@@ -206,7 +205,8 @@ end
 
 local function define_tests()
     describe("V2 conformance fixture", function()
-        local cases = load_cases()
+        local raw = read_fixture()
+        local cases = load_cases(raw)
 
         it("holds a case for every rule, each with a unique name", function()
             test.gt(#cases, 400)
@@ -221,7 +221,6 @@ local function define_tests()
         -- 100.0 and -0 into 0, which would leave a case named for its
         -- spelling testing another one. The spelling is in the text.
         it("keeps the number spellings the cases are named for", function()
-            local raw = read_fixture()
             local spellings = {
                 { "number: exponent spelling", "\"value\":1e2," },
                 { "number: capital exponent spelling", "\"value\":1E2," },

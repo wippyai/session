@@ -23,83 +23,84 @@ local SPACES = "   \194\160\227\128\128" -- spaces, no-break space, ideographic 
 -- Per pipeline: how an answer is written, what a refusal says, and how each
 -- kind of blank answer comes out. `max` and `raw` are the character limit and
 -- the size guard's multiplier; `stored` reads the kept text from the result.
+-- The single and the list form of a choice answer share their wording.
+local function pipeline_of(shared: any, own: any): any
+    local merged = {}
+    for key, value in pairs(shared) do merged[key] = value end
+    for key, value in pairs(own) do merged[key] = value end
+    return merged
+end
+
+local OTHER = {
+    max = 2000, raw = 8, multiline = true, trims = true,
+    too_long = "The other answer must be at most 2000 characters.",
+    not_utf8 = "The other answer must be valid UTF-8 text.",
+    control = "The other answer must not contain control characters other than tabs and line breaks.",
+    blank = function(result: any, code: any, message: any)
+        test.is_nil(result)
+        test.eq(code, "blank")
+        test.eq(message, "Enter the other answer.")
+    end,
+}
+
+local NOTE = {
+    max = 1000, raw = 8, multiline = true, trims = true,
+    too_long = "A note must be at most 1000 characters.",
+    not_utf8 = "The note must be valid UTF-8 text.",
+    control = "The note must not contain control characters other than tabs and line breaks.",
+}
+
+local FREE_TEXT = {
+    max = 5, raw = 4, trims = false,
+    too_long = "Must be at most 5 characters.",
+    not_utf8 = "Must be valid UTF-8 text.",
+    wrap = function(text) return text end,
+    stored = function(result: any) return result end,
+    blank = function(result: any, code: any)
+        test.is_nil(code)
+        test.is_nil(result)
+    end,
+}
+
 local PIPELINES = {
-    {
-        name = "other", field = "pick", max = 2000, raw = 8, multiline = true, trims = true,
+    pipeline_of(OTHER, {
+        name = "other", field = "pick",
         wrap = function(text) return { other = text } end,
         stored = function(result: any) return result.other end,
-        too_long = "The other answer must be at most 2000 characters.",
-        not_utf8 = "The other answer must be valid UTF-8 text.",
-        control = "The other answer must not contain control characters other than tabs and line breaks.",
-        blank = function(result: any, code: any, message: any)
-            test.is_nil(result)
-            test.eq(code, "blank")
-            test.eq(message, "Enter the other answer.")
-        end,
-    },
-    {
-        name = "other in a list", field = "many", max = 2000, raw = 8, multiline = true, trims = true,
+    }),
+    pipeline_of(OTHER, {
+        name = "other in a list", field = "many",
         wrap = function(text) return { { other = text } } end,
         stored = function(result: any) return result[1].other end,
-        too_long = "The other answer must be at most 2000 characters.",
-        not_utf8 = "The other answer must be valid UTF-8 text.",
-        control = "The other answer must not contain control characters other than tabs and line breaks.",
-        blank = function(result: any, code: any, message: any)
-            test.is_nil(result)
-            test.eq(code, "blank")
-            test.eq(message, "Enter the other answer.")
-        end,
-    },
-    {
-        name = "note", field = "pick", max = 1000, raw = 8, multiline = true, trims = true,
+    }),
+    pipeline_of(NOTE, {
+        name = "note", field = "pick",
         wrap = function(text) return { value = "A", note = text } end,
         stored = function(result: any) return result.note end,
-        too_long = "A note must be at most 1000 characters.",
-        not_utf8 = "The note must be valid UTF-8 text.",
-        control = "The note must not contain control characters other than tabs and line breaks.",
         -- A blank note is no note: the plain option comes back.
         blank = function(result: any, code: any)
             test.is_nil(code)
             test.eq(result, "A")
         end,
-    },
-    {
-        name = "note in a list", field = "many", max = 1000, raw = 8, multiline = true, trims = true,
+    }),
+    pipeline_of(NOTE, {
+        name = "note in a list", field = "many",
         wrap = function(text) return { { value = "A", note = text } } end,
         stored = function(result: any) return result[1].note end,
-        too_long = "A note must be at most 1000 characters.",
-        not_utf8 = "The note must be valid UTF-8 text.",
-        control = "The note must not contain control characters other than tabs and line breaks.",
         blank = function(result: any, code: any)
             test.is_nil(code)
             test.eq(result[1], "A")
             test.eq(#result, 1)
         end,
-    },
-    {
-        name = "text", field = "line", max = 5, raw = 4, multiline = false, trims = false,
-        wrap = function(text) return text end,
-        stored = function(result: any) return result end,
-        too_long = "Must be at most 5 characters.",
-        not_utf8 = "Must be valid UTF-8 text.",
+    }),
+    pipeline_of(FREE_TEXT, {
+        name = "text", field = "line", multiline = false,
         control = "Must not contain control characters or line breaks.",
-        blank = function(result: any, code: any)
-            test.is_nil(code)
-            test.is_nil(result)
-        end,
-    },
-    {
-        name = "textarea", field = "area", max = 5, raw = 4, multiline = true, trims = false,
-        wrap = function(text) return text end,
-        stored = function(result: any) return result end,
-        too_long = "Must be at most 5 characters.",
-        not_utf8 = "Must be valid UTF-8 text.",
+    }),
+    pipeline_of(FREE_TEXT, {
+        name = "textarea", field = "area", multiline = true,
         control = "Must not contain control characters other than tabs and line breaks.",
-        blank = function(result: any, code: any)
-            test.is_nil(code)
-            test.is_nil(result)
-        end,
-    },
+    }),
 }
 
 local function run(pipeline: any, text: string): (any, any, any)
@@ -141,9 +142,7 @@ local function define_tests()
                 test.eq(both_message, pipeline.not_utf8)
             end)
 
-            -- Since runtime 0.3.63a, Lua source reads "\xF0" and "\u{...}" as
-            -- escapes (earlier runtimes kept them as plain characters). The
-            -- rules see bytes, so a byte is handled the same however the
+            -- The rules see bytes, so a byte is handled the same however the
             -- source writes it.
             it("handles a byte written as a hex escape like the same byte written in decimal", function()
                 local _, code, message = run(pipeline, "a\xF0")

@@ -56,8 +56,26 @@ entries:
       name: Standard field rules
       type: test
       suite: session
-      comment: Decimal number text and step arithmetic, the pattern subset checker, a stored form whose pattern no longer compiles, the ask_user schema against the accepted keys, and the shared text helpers
+      comment: Decimal number text and step arithmetic, the pattern subset checker, a stored form whose pattern no longer compiles, and the shared text helpers
     source: file://field_values_test.lua
+    modules:
+      - json
+    imports:
+      definition: wippy.session.forms:definition
+      field_values: wippy.session.forms:field_values
+      form_pattern: wippy.session.forms:form_pattern
+      form_text: wippy.session.forms:form_text
+      test: wippy.test:test
+    method: run
+
+  - name: tool_schema_test
+    kind: function.lua
+    meta:
+      name: Form tool schemas
+      type: test
+      suite: session
+      comment: The types, keys and limits the ask_user and ask_user_fields schemas and the trait prompt state, against what the validator enforces
+    source: file://tool_schema_test.lua
     modules:
       - json
       - registry
@@ -65,7 +83,6 @@ entries:
       definition: wippy.session.forms:definition
       field_values: wippy.session.forms:field_values
       form_pattern: wippy.session.forms:form_pattern
-      form_text: wippy.session.forms:form_text
       test: wippy.test:test
     method: run
 

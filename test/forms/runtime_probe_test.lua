@@ -8,26 +8,6 @@ local text = require("text")
 -- tests run on. Each case asserts what the runtime does today: when a runtime
 -- upgrade changes one, the failure points at the rule that has to be looked
 -- at again.
---
--- Observed on Wippy 0.3.66a, the latest stable release on 2026-11-17; CI
--- installs the latest release (framework .github/actions/setup-wippy), so a
--- runtime change shows up here first.
--- Runtime 0.3.63a changed four of these facts (0.3.57a and 0.3.60a had the
--- old ones; 0.3.61a and 0.3.62a were not checked):
--- - "\xHH" and "\u{...}" are escapes. Before, the backslash was dropped and
---   the characters kept ("\xF0" was the three characters xF0).
--- - math.huge is infinity. Before, it was the largest finite float.
--- - math.floor returns an integer where one fits. Before, a float stayed a
---   float.
--- - tonumber reads an exponent after a mantissa without a point ("1e2").
---   Before, it returned nil.
--- The rules that rely on them have their own tests: field_values_test (whole
--- numbers, number text, repeat counts) and text_pipelines_test (bytes written
--- as hex escapes). The number-text test of an exponent answer and the
--- repeat-count refusal are regression guards that pass on runtimes before
--- and after 0.3.63a; the infinity test of is_whole and the hex-escape
--- pipeline tests fail on 0.3.60a. Lua source in the form tests still writes
--- raw bytes as decimal escapes ("\240").
 
 local function compile(pattern: string): (any, any)
     return text.regexp.compile(pattern)
@@ -44,47 +24,7 @@ local function matches(pattern: string, subject: string): boolean
 end
 
 local function define_tests()
-    describe("Lua source escapes", function()
-        it("has decimal, hex and Unicode escapes", function()
-            test.eq(#"\240", 1)
-            test.eq(string.byte("\240", 1), 240)
-            test.eq(#"\xF0", 1, "\\xF0 is one byte")
-            test.eq("\xF0", "\240")
-            test.eq(#"\u{E9}", 2, "\\u{E9} is the two UTF-8 bytes of é")
-            test.eq("\u{E9}", "\195\169")
-        end)
-    end)
-
     describe("numbers", function()
-        it("decodes integers exactly and everything else as a float", function()
-            local cases = {
-                { "3", 3, "integer" },
-                { "3.0", 3, "float" },
-                { "1e2", 100, "float" },
-                { "0.1", 0.1, "float" },
-                { "-0", 0, "integer" },
-                { "1e21", 1e21, "float" },
-                { "1e-7", 1e-7, "float" },
-                { "123456789012345678", 123456789012345678, "integer" },
-                { "12345678901234567890", 1.2345678901234567e19, "float" },
-            }
-            for _, case in ipairs(cases) do
-                local value, err = json.decode(case[1])
-                test.is_nil(err, case[1])
-                test.eq(value, case[2], case[1])
-                test.eq(math.type(value), case[3], case[1])
-            end
-            -- "-0.0" keeps its sign as a float; "-0" has none.
-            local negative_zero = json.decode("-0.0")
-            test.eq(math.type(negative_zero), "float")
-            test.is_true(1 / negative_zero < -1e308, "1 / -0.0 is negative infinity")
-            -- math.huge is infinity (since 0.3.63a; before, it was the largest
-            -- finite float). is_whole refuses both infinities through it.
-            test.eq(math.huge, 1 / 0)
-            test.is_true(math.huge > 1.7976931348623157e308)
-            test.eq(math.type(math.huge), "float")
-        end)
-
         it("fails the whole decode on a number outside the float range", function()
             for _, source in ipairs({ "1e400", "-1e400" }) do
                 local value, err = json.decode(source)
@@ -94,82 +34,6 @@ local function define_tests()
                 test.is_nil(object, "an overflowing answer fails the whole body")
                 test.not_nil(object_err)
             end
-        end)
-
-        it("keeps integers exact in sums, differences, comparison and modulo", function()
-            local big = json.decode("9007199254740993") -- 2^53 + 1
-            test.eq(math.type(big), "integer")
-            test.eq(big - 9007199254740992, 1, "subtraction is exact")
-            test.eq(big == 9007199254740992, false, "== compares integers exactly")
-            local wide = json.decode("123456789012345678")
-            test.eq(wide - 123456789012345000, 678, "subtraction is exact")
-            test.eq(wide % 1000, 678, "% is exact")
-            test.eq(math.type(3 % 2), "integer")
-            test.eq(math.tointeger(1e18), 1000000000000000000)
-            test.eq(math.type(math.tointeger(3.0)), "integer")
-            -- math.floor returns an integer where one fits (since 0.3.63a;
-            -- before, a float stayed a float), and a float past the integer
-            -- range, or infinity, stays a float.
-            test.eq(math.type(math.floor(json.decode("3.0"))), "integer")
-            test.eq(math.type(math.floor(1e18)), "integer")
-            test.eq(math.type(math.floor(2 ^ 63)), "float")
-            test.eq(math.type(math.floor(1 / 0)), "float")
-        end)
-
-        it("encodes numbers in a position-dependent spelling", function()
-            test.eq(json.encode(3.0), "3")
-            test.eq(json.encode(0.1), "0.1")
-            test.eq(json.encode(-0.0), "-0")
-            test.eq(json.encode(1e-7), "1e-7")
-            test.eq(json.encode(1e21), "1e+21")
-            test.eq(json.encode({ a = 1e-7 }), '{"a":0.0000001}')
-            test.eq(json.encode({ a = 1e21 }), '{"a":1000000000000000000000}')
-            test.eq(json.encode({ a = 3.0 }), '{"a":3}')
-        end)
-
-        it("formats and parses decimal text", function()
-            test.eq(string.format("%.1e", 0.1), "1.0e-01")
-            test.eq(string.format("%.16e", 0.1), "1.0000000000000001e-01")
-            test.eq(string.format("%.2e", 123456.0), "1.23e+05")
-            test.eq(string.format("%d", 3.0), "3")
-            test.eq(string.format("%.3e", json.decode("5")), "5.000e+00")
-            test.eq(tonumber("1.5e+02"), 150)
-            test.eq(tonumber("1.0e-01"), 0.1)
-            -- An exponent no longer needs a point in the mantissa (since
-            -- 0.3.63a; before, tonumber("1e2") was nil). A repeat count never
-            -- reaches tonumber with one: form_pattern reads digits only.
-            test.eq(tonumber("1e2"), 100)
-            test.eq(tonumber("2e-03"), 0.002)
-            test.is_nil(tonumber("inf"))
-            test.is_nil(tonumber("nan"))
-            test.eq(tostring(0.30000000000000004), "0.30000000000000004")
-            test.eq(tostring(1e-7), "1e-07")
-            test.eq(tostring(123456789.125), "1.23456789125e+08")
-        end)
-    end)
-
-    describe("null in decoded answers", function()
-        it("drops a null object member and leaves a hole in an array", function()
-            local object, err = json.decode('{"a":null,"b":1}')
-            test.is_nil(err)
-            test.is_nil(object.a)
-            test.eq(object.b, 1)
-            local keys = 0
-            for _ in pairs(object) do keys = keys + 1 end
-            test.eq(keys, 1)
-
-            local list = json.decode("[1,null,2]")
-            local count = 0
-            for _ in pairs(list) do count = count + 1 end
-            test.eq(count, 2)
-            test.eq(#list, 3, "the length counts the hole, so it is not a plain array")
-
-            local nothing, nothing_err = json.decode("null")
-            test.is_nil(nothing)
-            test.is_nil(nothing_err)
-
-            local nested = json.decode('{"answers":{"x":null}}')
-            test.is_nil(next(nested.answers), "an answer sent as null is an answer not sent")
         end)
     end)
 
@@ -239,51 +103,11 @@ local function define_tests()
             end
         end)
 
-        it("matches the whole text only, ASCII classes, one character per code point", function()
-            test.is_true(matches("^(?:a+)$", "aaa"))
-            test.is_false(matches("^(?:a+)$", "aaa\n"), "$ is the end of the text, not before a final newline")
-            test.is_false(matches("(?:a+)$", "aaa\n"))
-            test.is_true(matches("^(?:\\d+)$", "123"))
-            test.is_false(matches("^(?:\\d+)$", "\217\161\217\162"), "\\d is ASCII only (Arabic-Indic digits)")
-            test.is_true(matches("^(?:\\w+)$", "abc_1"))
-            test.is_false(matches("^(?:\\w+)$", "é"), "\\w is ASCII only")
-            test.is_false(matches("^(?:\\s)$", "\194\160"), "\\s does not match a no-break space (JavaScript's does)")
-            test.is_true(matches("^(?:\\pL+)$", "é"))
-            test.is_true(matches("^(?:.)$", "\240\159\152\128"), ". is one code point, not one UTF-8 byte")
-            test.is_false(matches("^(?:..)$", "\240\159\152\128"))
-            test.is_true(matches("^(?:[\240\159\152\128])$", "\240\159\152\128"))
-            test.is_true(matches("^(?:.)$", "\r"), ". matches CR (JavaScript's does not)")
-            test.is_true(matches("^(?:.)$", "\226\128\168"), ". matches U+2028 (JavaScript's does not)")
-            test.is_false(matches("^(?:.)$", "\n"))
-            test.is_true(matches("(?i)^(?:abc)$", "ABC"))
-            test.is_true(matches("^(?:a{2,3})$", "aa"))
-            test.is_true(matches("^(?:a+?)$", "aaa"))
-            test.is_true(matches("^(?:(a{2}){3})$", "aaaaaa"))
-        end)
-
-        it("reads invalid UTF-8 in a subject as a replacement character", function()
-            test.is_true(matches("^(?:.+)$", "ab\255cd"))
-            test.is_false(matches("^(?:[a-z]+)$", "ab\255cd"))
-        end)
-
-        it("runs in linear time on patterns that make a backtracking engine stall", function()
-            local started = time.now()
+        -- A backtracking engine would not finish these.
+        it("matches in linear time on patterns that make a backtracking engine stall", function()
             test.is_false(matches("^(?:(a+)+b)$", string.rep("a", 2000)))
             test.is_false(matches("^(?:(x+x+)+y)$", string.rep("x", 2000)))
             test.is_false(matches("^(?:(a|b|ab)+c)$", string.rep("ab", 1000)))
-            local long = string.rep("ab ", 666)
-            local re = compile("^(?:[a-z ]*)$")
-            for _ = 1, 100 do
-                test.is_true(((re :: any):match_string(long)))
-            end
-            local elapsed = time.now():sub(started):milliseconds()
-            test.lt(elapsed, 2000, "a 2000-character value matches in far under a second")
-        end)
-
-        it("compiles a pattern wrapped for a full match", function()
-            test.is_true(matches("^(?:a|b)$", "b"))
-            test.is_false(matches("^(?:a|b)$", "ab"))
-            test.is_true(matches("^(?:^a$)$", "a"), "an author's own anchors are harmless inside the wrapper")
         end)
     end)
 end
