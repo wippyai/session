@@ -119,7 +119,7 @@ entries:
       name: Runtime facts behind the V2 field rules
       type: test
       suite: session
-      comment: Number decoding and arithmetic, null handling, date parsing and regexp behavior of the runtime that the V2 standard field rules rely on, asserted as observed so a runtime change shows up
+      comment: The runtime facts the V2 standard field rules rely on (a number outside the float range, date parsing, which patterns the regexp engine refuses or takes, and its linear-time matching), asserted as observed so a runtime change shows up
     source: file://runtime_probe_test.lua
     modules:
       - json

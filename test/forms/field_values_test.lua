@@ -359,8 +359,9 @@ local function define_tests()
                 test.contains(big_message, "out of order")
             end)
 
-            -- tonumber reads "1e2" as 100. A count is digits only, so an exponent, a sign, a point or a hex prefix never
-            -- reaches tonumber; RE2 itself reads such a brace as text.
+            -- tonumber reads "1e2" as 100. A count is digits only, so an
+            -- exponent, a sign, a point or a hex prefix never reaches
+            -- tonumber; RE2 itself reads such a brace as text.
             it("refuses a count written with an exponent, a sign, a point or a hex prefix", function()
                 for _, pattern in ipairs({ "a{1e2}", "a{1E2}", "a{1e+2}", "a{1,1e2}", "a{+5}", "a{-1}", "a{1.0}", "a{0x10}", "a{ 5}" }) do
                     local ok, code = check(pattern)

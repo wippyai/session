@@ -1324,7 +1324,9 @@ local function define_tests()
                     content.props.definition.fields[1].pattern = "("
                 end)
                 test.eq(get(artifact_id), 200)
-                test.is_false((pcall(post, artifact_id, v2_request({ code = "ABC" }))))
+                local ok, err = pcall(post, artifact_id, v2_request({ code = "ABC" }))
+                test.is_false(ok)
+                test.contains(tostring(err), "does not compile")
                 test.eq(#user_rows(ctx.session_id), 0)
             end)
 
@@ -1337,7 +1339,9 @@ local function define_tests()
                 rewrite_content(artifact_id, function(content)
                     content.props.definition.fields[1].pattern = "("
                 end)
-                test.is_false((pcall(post, artifact_id, request)))
+                local ok, err = pcall(post, artifact_id, request)
+                test.is_false(ok)
+                test.contains(tostring(err), "does not compile")
                 test.eq(#user_rows(ctx.session_id), 1, "the answer accepted first stays")
             end)
 
@@ -1434,16 +1438,6 @@ local function define_tests()
                 test.eq(status, 200, tostring(body and body.code))
                 local artifact = artifact_repo.get(artifact_id)
                 test.eq(artifact.meta.session_form.submission.answers.f, "ann@example.org")
-            end)
-
-            it("raises when a pattern stops compiling before acceptance, and stores nothing", function()
-                local ctx = new_session()
-                local artifact_id = new_v2_form(ctx, { title = "Form",
-                    fields = { { id = "f", type = "text", label = "Field", pattern = "[a-z]+" } } })
-                change_before_acceptance(artifact_id, function(field) field.pattern = "(" end)
-                test.is_false((pcall(answer_field, artifact_id, "abc")))
-                test.is_nil(artifact_repo.get(artifact_id).meta.session_form.submission)
-                test.eq(#user_rows(ctx.session_id), 0)
             end)
 
             it("answers 422 pattern_mismatch for an answer that does not match the pattern, and accepts one that does", function()
