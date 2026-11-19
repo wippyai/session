@@ -303,6 +303,7 @@ local function define_tests()
             }) do
                 local continued = false
                 local ctx = { writer = {
+                    session_id = "session-1",
                     update_artifact = function() return nil, failure.error end
                 } }
                 local bus = command_bus.new(ctx)
@@ -317,7 +318,10 @@ local function define_tests()
                     artifacts = {{ id = "artifact-1", content = "updated" }} })
                 bus:queue_op({ type = "after_update" })
 
+                local original_find = artifact_repo.find
+                artifact_repo.find = function() return { session_id = "session-1" } end
                 local ok, err = bus:run()
+                artifact_repo.find = original_find
 
                 test.is_nil(ok)
                 test.contains(tostring(err), failure.error)
@@ -708,14 +712,34 @@ local function define_tests()
             test.eq(type(published.payload.content_version), "number")
         end)
 
+        it("checks every edit target before creating artifacts in the batch", function()
+            local ctx = real_ctx()
+            ctx.upstream.send_message_update = function() end
+            local before_count = assert(artifact_repo.count_by_session(test_data.session_id))
+            local result, err = control_handlers.control_artifacts(ctx, {
+                artifacts = {
+                    { title = "New artifact", content = "text", instructions = false },
+                    { id = uuid.v7(), title = "Missing artifact", content = "updated" },
+                },
+            })
+
+            test.is_nil(result)
+            test.contains(tostring(err), "Artifact not found")
+            local after_count = assert(artifact_repo.count_by_session(test_data.session_id))
+            test.eq(after_count - before_count, 0)
+        end)
+
         it("does not publish when the artifact update fails", function()
             local send_calls = 0
             mock("process.registry", { lookup = function() return "hub-pid" end })
             mock("process.send", function() send_calls = send_calls + 1 end)
 
-            local ctx = { writer = { update_artifact = function() return nil, "disk unavailable" end } }
+            local ctx = real_ctx()
+            local id = uuid.v7()
+            test.eq(ctx.writer:create_artifact(id, consts.ARTIFACT_TYPES.INLINE, "Original", "text"), id)
+            ctx.writer.update_artifact = function() return nil, "disk unavailable" end
             local result, err = control_handlers.control_artifacts(ctx, {
-                artifacts = {{ id = uuid.v7(), status = "active" }}
+                artifacts = {{ id = id, status = "active" }}
             })
 
             test.is_nil(result)

@@ -276,10 +276,16 @@ function control_handlers.control_artifacts(ctx, op)
     -- item never leaves the earlier ones created and announced.
     for _, artifact_data in ipairs(op.artifacts) do
         if artifact_data.id then
+            local target, lookup_err = artifact_repo.find(artifact_data.id)
+            if lookup_err then
+                return nil, "Failed to read artifact: " .. tostring(lookup_err)
+            end
+            if not target or target.session_id ~= ctx.writer.session_id then
+                return nil, "Failed to update artifact: Artifact not found"
+            end
             -- A session form's content, answers and origin binding are
             -- server-authored; an agent changes a question by asking a new form.
-            local target = artifact_repo.get(artifact_data.id)
-            if target and form_meta.of(target.meta) then
+            if form_meta.of(target.meta) then
                 return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
             end
         end
