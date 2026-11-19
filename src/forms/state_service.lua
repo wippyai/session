@@ -392,7 +392,7 @@ local function validation_body(field_errors, form_errors)
     })
 end
 
-function state_service.submit(user_id, artifact_id, raw_body)
+local function submit_answers(user_id, artifact_id, raw_body)
     if type(raw_body) ~= "string" then raw_body = "" end
     if #raw_body > state_service.MAX_BODY_BYTES then
         return failure(413, "payload_too_large", "The submission is larger than 64 KiB.")
@@ -557,6 +557,14 @@ function state_service.submit(user_id, artifact_id, raw_body)
         content_version = accepted.content_version, late = accepted.late,
         delivery = "pending", replayed = false,
     })
+end
+
+-- A raised error (such as a stored pattern that no longer compiles) is logged
+-- and answered as the API's JSON 500, not as the runtime's plain-text one.
+function state_service.submit(user_id, artifact_id, raw_body)
+    local ok, status, body = pcall(submit_answers, user_id, artifact_id, raw_body)
+    if not ok then return internal_failure("The answer could not be saved.", status) end
+    return status, body
 end
 
 -- Sends `form_answer` to the session's registered process. When none runs

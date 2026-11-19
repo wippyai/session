@@ -318,7 +318,8 @@ local function check_free_text(field: any, value: any): (any, any)
         local expression, compile_err = form_pattern.compile(field.pattern :: string)
         if not expression then
             -- A stored pattern that no longer compiles is the form's fault,
-            -- not the user's: raised, so the request fails with a 500.
+            -- not the user's: raised, and state_service.submit logs it and
+            -- answers a 500.
             error("the stored pattern of field " .. tostring(field.id) .. " does not compile: "
                 .. tostring(compile_err), 0)
         end

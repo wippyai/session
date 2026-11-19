@@ -1315,8 +1315,8 @@ local function define_tests()
                 test.eq(get(artifact_id), 200)
             end)
 
-            -- A raised error ends the request as a 500.
-            it("raises, not 422, when a stored pattern no longer compiles, and still reads the form", function()
+            -- A raised error is logged and answered as the API's JSON 500.
+            it("answers a logged 500, not 422, when a stored pattern no longer compiles, and still reads the form", function()
                 local ctx = new_session()
                 local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
                 local artifact_id = new_v2_form(ctx, def)
@@ -1324,13 +1324,13 @@ local function define_tests()
                     content.props.definition.fields[1].pattern = "("
                 end)
                 test.eq(get(artifact_id), 200)
-                local ok, err = pcall(post, artifact_id, v2_request({ code = "ABC" }))
-                test.is_false(ok)
-                test.contains(tostring(err), "does not compile")
+                local status, body = post(artifact_id, v2_request({ code = "ABC" }))
+                test.eq(status, 500)
+                test.eq(body.code, "internal")
                 test.eq(#user_rows(ctx.session_id), 0)
             end)
 
-            it("raises, not 409, on an exact replay when a stored pattern no longer compiles", function()
+            it("answers a logged 500, not 409, on an exact replay when a stored pattern no longer compiles", function()
                 local ctx = new_session()
                 local def = { title = "Code", fields = { { id = "code", type = "text", label = "Code", pattern = "[A-Z]+" } } }
                 local artifact_id = new_v2_form(ctx, def)
@@ -1339,9 +1339,9 @@ local function define_tests()
                 rewrite_content(artifact_id, function(content)
                     content.props.definition.fields[1].pattern = "("
                 end)
-                local ok, err = pcall(post, artifact_id, request)
-                test.is_false(ok)
-                test.contains(tostring(err), "does not compile")
+                local status, body = post(artifact_id, request)
+                test.eq(status, 500)
+                test.eq(body.code, "internal")
                 test.eq(#user_rows(ctx.session_id), 1, "the answer accepted first stays")
             end)
 
