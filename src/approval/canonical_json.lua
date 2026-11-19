@@ -1,16 +1,15 @@
 local json = require("json")
 
--- Canonical JSON for tool approval digests and fingerprints (EE2-2710).
+-- Canonical JSON for tool approval digests and fingerprints.
 --
--- The design names wippy.agent:canonical, but on runtime 0.3.66a that encoder
--- can't be used for a security digest:
---   - it walks arrays with ipairs, so [1,null,3] and [1,null,9] both encode
---     as [1] (the JSON decoder leaves a hole for null);
---   - it turns every key into a string before the lookup, so {[2]="a",["2"]="b"}
---     encodes like {[2]="c",["2"]="b"};
---   - it writes null for a value json.encode can't encode (a function, NaN).
--- This encoder accepts only JSON-shaped values and refuses everything else
--- instead of substituting a value:
+-- The Session keeps its own strict encoder: an intent digest, a denial key
+-- or a grant fingerprint must not change with the runtime JSON encoder or
+-- with the version of wippy/agent (wippy.agent:canonical). The Session's
+-- other canonical forms do not fit either: context_attachments.canonical_json
+-- reads an array up to its first null hole, and the action fingerprint in
+-- message_handlers is a comparison string, not JSON. This encoder accepts
+-- only JSON-shaped values and refuses everything else instead of
+-- substituting a value:
 --   - strings (bytes kept as they are; ", \ and control bytes escaped);
 --   - booleans; integers; finite floats ("%.17g", which round-trips);
 --   - json.null, written as null;
@@ -20,8 +19,8 @@ local json = require("json")
 -- Nesting deeper than MAX_DEPTH (32) levels is refused.
 local canonical_json = {}
 
--- Each level costs two Lua frames; on runtime 0.3.66a 64 levels already
--- overflowed the call stack inside a test, so the limit stays well below.
+-- Each level costs two Lua frames; 64 levels overflowed the call stack
+-- inside a test, so the limit stays well below.
 -- The digest input wraps the arguments one level down, so arguments may nest
 -- 31 levels; deeper ones fail to freeze and settle as not run.
 canonical_json.MAX_DEPTH = 32

@@ -121,7 +121,7 @@ local function define_tests()
                                 local pair = batch({ call("c1", opts), call("c2", opts) }, eff)
                                 local single = batch({ call("c1", opts) }, eff)
                                 if row_type == "delegation" and require_value == "marked" then
-                                    -- Phase 1: delegation calls are gated only under require: all.
+                                    -- Delegation calls are gated only under require: all.
                                     test.eq(pair.results[1].decision, "allow", label)
                                     test.eq(pair.results[1].reason, "not_required", label)
                                     test.is_nil(pair.results[1].offered, label)

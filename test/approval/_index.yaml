@@ -88,7 +88,7 @@ entries:
       name: Tool approval activation
       type: test
       suite: session
-      comment: Raw trait list, fail-closed checks, the sticky and monotonic stored record, ui_declared_at once, the operator switch (AC 31)
+      comment: Raw trait list, fail-closed checks, the sticky and monotonic stored record, ui_declared_at once, the operator switch
     source: file://activation_test.lua
     imports:
       test: wippy.test:test
@@ -122,7 +122,7 @@ entries:
       name: Tool approval wake hub
       type: test
       suite: session
-      comment: Non-blocking notify, sticky finish, deletion and exit, the batch cancellation channel registered and closed synchronously (tracking parts of AC 25)
+      comment: Non-blocking notify, sticky finish, deletion and exit, a finish taken back
     source: file://wake_test.lua
     imports:
       test: wippy.test:test
@@ -271,7 +271,7 @@ entries:
       name: Tool approval gate up to the wait
       type: test
       suite: session
-      comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit and release, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, fail closed (EE2-2710 S7a, AC 1, 2, 3, 19, 26, 32, 42)
+      comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit and release, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, grant suspensions, fail closed
     source: file://gate_test.lua
     modules:
       - uuid
@@ -297,7 +297,7 @@ entries:
       name: Tool approval gate wait, release and end of turn
       type: test
       suite: session
-      comment: The wait on the wake hub, fence closures by Stop, finish, steering, exit and deletion, the release recheck, Stop after release, precomputed results, the approval turn end (EE2-2710 S7b, AC 5, 6, 20, 21, 22, 23, 28, 33, 34, 35, 41)
+      comment: The wait on the wake hub, fence closures by Stop, finish, steering, exit and deletion, the release recheck, Stop after release, not-run calls for after-execute wrappers, the approval turn end
     source: file://gate_wait_test.lua
     imports:
       test: wippy.test:test
@@ -325,7 +325,7 @@ entries:
       name: Tool approval events and model results
       type: test
       suite: session
-      comment: Model-facing results for every reason including approval_check_failed, closure reasons, event payloads, one notice per turn (EE2-2710 S7a)
+      comment: Model-facing results for every reason including approval_check_failed, closure reasons, event payloads, the cleared activity
     source: file://events_test.lua
     modules:
       - json

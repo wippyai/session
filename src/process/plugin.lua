@@ -318,10 +318,11 @@ local function run(args)
         end,
     })
 
-    -- Approval UI surfaces (EE2-2710, architecture 4.8). Each declaration of a
-    -- connection for a session holds one monitor reference in the broker's
-    -- shared count; the live set of a session goes to its Session process
-    -- on every change and when a Session process for it starts.
+    -- Approval UI surfaces (docs/tool-approval-protocol.md section 3). Each
+    -- declaration of a connection for a session holds one monitor reference
+    -- in the broker's shared count; the live set of a session goes to its
+    -- Session process on every change and when a Session process for it
+    -- starts.
     local surfaces: any = approval_surfaces.new()
 
     -- Messages, commands and opens from the user's clients reach the plugin
@@ -374,10 +375,10 @@ local function run(args)
         end
     end
 
-    -- The tool_approval_surface command, handled here and never forwarded
-    -- (architecture 4.8, v4): { enabled = true } declares that the sending
-    -- connection renders approval cards for the session, { enabled = false }
-    -- withdraws that declaration. The relay forwards only fixed session_open
+    -- The tool_approval_surface command, handled here and never forwarded:
+    -- { enabled = true } declares that the sending connection renders
+    -- approval cards for the session, { enabled = false } withdraws that
+    -- declaration. The relay forwards only fixed session_open
     -- fields, so this command, sent after the open, is how a client
     -- declares. Refused, without a reply, unless the relay sent it.
     local function handle_surface_command(payload_data: any, relay: boolean)

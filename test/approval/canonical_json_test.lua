@@ -3,9 +3,8 @@ local json = require("json")
 local canonical_json = require("canonical_json")
 local fingerprint = require("fingerprint")
 
--- Canonical JSON for digests (R1 item D). wippy.agent:canonical on runtime
--- 0.3.66a encodes [1,null,3] and [1,null,9] the same, merges {[2]=..,["2"]=..}
--- and writes null for values it can't encode; this encoder must not.
+-- Canonical JSON for digests: array holes, mixed keys and values that are not
+-- JSON never encode alike or as a substitute value.
 
 local function enc(value: any): string
     local text, err = canonical_json.encode(value)

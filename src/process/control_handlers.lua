@@ -622,7 +622,7 @@ function control_handlers.control_config(ctx, op)
         return nil, "No config changes provided"
     end
     -- Tool approval activation and grants are not agent controlled
-    -- (EE2-2710, architecture 4.3): a `_control` or behavior control that
+    -- (sticky activation): a `_control` or behavior control that
     -- names tool_approval is refused as a whole and changes nothing. A trait,
     -- tool or agent change still leaves the stored activation in force.
     if type(op.config_changes) == "table" and op.config_changes.tool_approval ~= nil then

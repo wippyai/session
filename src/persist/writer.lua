@@ -85,7 +85,7 @@ function session_writer:update_meta(updates)
         end
         if replaces_config then
             -- Only update_tool_approval writes config.tool_approval
-            -- (EE2-2710, sticky activation). A whole-config writer keeps the
+            -- (sticky activation). A whole-config writer keeps the
             -- stored value, also when its copy of the config is older or
             -- names another one. The caller's table is updated too, because
             -- callers then adopt it as ctx.config.
@@ -327,7 +327,7 @@ function session_writer:add_response(content, metadata, calls, notes, trailing, 
     if trailing_err then return nil, nil, trailing_err end
     if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
     -- A protected response with calls (options.approval_batch = { turn_id },
-    -- EE2-2710 architecture 4.5 step 9): the batch record is stored in the same
+    -- the approval gate enforces): the batch record is stored in the same
     -- transaction as the rows, its ID is the assistant row ID and its members
     -- are the call rows in model order.
     local batch_descriptor = nil

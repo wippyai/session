@@ -1,12 +1,12 @@
 version: "1.0"
 namespace: wippy.session.approval
 
-# Native tool-call approval (EE2-2710). Building blocks of the approval gate:
-# trait settings, tool meta, the policy evaluator, call freezing with digests
-# and fingerprints, the argument preview, activation and the wake hub.
-# Nothing here turns the feature on: activation needs the compiled options of
-# the trait entry, and the trait entry and the capability come in later
-# slices. The gate runs only for sessions whose activation is stored.
+# Native tool-call approval: trait settings, tool meta, the policy evaluator,
+# call freezing with digests and fingerprints, the argument preview,
+# activation, the wake hub, events and the gate. Activation needs the
+# compiled options of the tool_approval trait entry; the gate runs only for
+# sessions whose activation is stored. Wire contract:
+# docs/tool-approval-protocol.md.
 entries:
   # wippy.session.approval:trait_config
   - name: trait_config
@@ -35,7 +35,7 @@ entries:
   - name: wake
     kind: library.lua
     meta:
-      comment: Wake hub of one session process - non-blocking signals to a waiting approval gate, sticky finish, deletion and exit, the synchronously closed batch cancellation channel
+      comment: Wake hub of one session process - non-blocking signals to a waiting approval gate, sticky finish, deletion and exit
     source: file://wake.lua
 
   # wippy.session.approval:tool_meta

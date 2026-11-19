@@ -5,8 +5,7 @@ local fingerprint = require("fingerprint")
 local tool_caller = require("tool_caller")
 local canonical_json = require("canonical_json")
 
--- Freeze, intent digest, denial key and fingerprints (architecture 4.3 and
--- 4.5 step 3; AC 15, 16, 28, 36, 43).
+-- Freeze, intent digest, denial key and fingerprints.
 
 local DELEGATE = "app:delegate_to_agent"
 
@@ -253,7 +252,7 @@ local function define_tests()
         end)
     end)
 
-    describe("Tool approval freeze: delegation (AC 16, 43)", function()
+    describe("Tool approval freeze: delegation", function()
         it("takes the target from the validated call and keys the grant to it", function()
             local frozen = frozen_of(delegation_call("app.agents:worker"), delegation_env("app.agents:worker"))
             test.eq(frozen.row_type, "delegation")
@@ -324,7 +323,7 @@ local function define_tests()
         end)
     end)
 
-    describe("Tool approval fingerprints (AC 15)", function()
+    describe("Tool approval fingerprints", function()
         it("is stable for equal entries and changes with kind, meta or data", function()
             local base = fingerprint.of_entry(entry())
             test.eq(fingerprint.of_entry(entry()), base)

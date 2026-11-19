@@ -1,5 +1,4 @@
--- Reads the `approval` field of a tool's registry meta (EE2-2710,
--- architecture 4.3). Two forms:
+-- Reads the `approval` field of a tool's registry meta. Two forms:
 --
 --   approval: required                       short form
 --   approval: { required: true, approve_all: true | false }   object form
@@ -8,12 +7,11 @@
 -- there must not stop the turn. It fails closed instead and reports why in
 -- `warnings` for the caller to log:
 --   - an unknown string in the short form marks the tool as required;
---   - the object form marks the tool when `required` is true (architecture
---     4.3: "`approval.required: true`"); an absent or false `required` leaves
---     it unmarked, and a non-boolean `required` marks it;
+--   - the object form marks the tool when `required` is true; an absent or
+--     false `required` leaves it unmarked, and a non-boolean `required` marks it;
 --   - a non-boolean `approve_all` reads as false (no Approve all, no grant);
 --   - unknown object keys are ignored, so a tool written for a later phase
---     still asks on a Phase 1 Session.
+--     still asks on this Session.
 -- `approval: true` marks the tool and `approval: false` does not.
 -- The field does nothing unless the session is protected (the gate decides).
 local tool_meta = {}

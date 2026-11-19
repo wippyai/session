@@ -1,7 +1,7 @@
 local json = require("json")
 
--- Server-built argument preview for the approval card (EE2-2710,
--- architecture 4.6, "Argument preview, built by the server").
+-- Server-built argument preview for the approval card
+-- (docs/tool-approval-protocol.md, the `display` object).
 --
 -- preview.build(args) returns
 --   arguments  the preview value (decoded JSON, at most 8 KB as JSON text, depth 6)

@@ -2,15 +2,14 @@ local hash = require("hash")
 local registry = require("registry")
 local canonical_json = require("canonical_json")
 
--- Deployment fingerprints and digests for tool approval (EE2-2710,
--- architecture 4.3 and 4.5 step 3). A fingerprint is `sha256:` of the
+-- Deployment fingerprints and digests for tool approval. A fingerprint is `sha256:` of the
 -- canonical JSON of a registry entry's kind, meta and data. Registry entries
 -- have no version, so this is what a grant pins. An edit that changes only
 -- code the entry points to, and not the entry itself, does not change the
 -- fingerprint.
 --
--- The canonical JSON is canonical_json.lua, not wippy.agent:canonical: see
--- that file for the shapes the framework encoder can't tell apart. It keeps
+-- The canonical JSON is canonical_json.lua (see that file for why the
+-- Session keeps its own encoder). It keeps
 -- every 64-bit integer exactly; numbers above the int64 range reach the
 -- Session as floats already (docs/tool-approval-protocol.md, "Exact
 -- numbers"). A value that is not JSON-shaped is refused, never hashed.
@@ -46,8 +45,8 @@ end
 
 -- The grant fingerprint of a delegation call: the delegation function's
 -- entry and the target agent's entry together, so a change to either one
--- needs fresh consent (architecture 4.3, "A delegation grant key contains the
--- delegation function ID, the resolved target agent ID and its fingerprint").
+-- needs fresh consent (a delegation grant key holds the delegation function
+-- ID, the resolved target agent ID and its fingerprint).
 function fingerprint.delegation(function_fingerprint: string, target_fingerprint: string): (string?, string?)
     if type(function_fingerprint) ~= "string" or type(target_fingerprint) ~= "string" then
         return nil, "both fingerprints are required"

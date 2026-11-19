@@ -1,5 +1,5 @@
--- Approval UI surfaces per session, kept by the session plugin (EE2-2710,
--- architecture 4.8). A surface is a live client connection that declared it
+-- Approval UI surfaces per session, kept by the session plugin
+-- (docs/tool-approval-protocol.md section 3). A surface is a live client connection that declared it
 -- renders approval cards for a session: the tool_approval_surface command with
 -- `enabled: true`, or `tool_approval_ui: 1` in session_message
 -- data.runtime_context. A connection withdraws with the same command and

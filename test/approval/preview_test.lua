@@ -2,7 +2,7 @@ local test = require("test")
 local json = require("json")
 local preview = require("preview")
 
--- Argument preview (architecture 4.6; AC 36), one case per rule.
+-- Argument preview, one case per rule.
 
 local BS = "\\"
 
@@ -28,7 +28,7 @@ local function base64_of(bytes: integer): string
 end
 
 local function define_tests()
-    describe("Tool approval argument preview (AC 36)", function()
+    describe("Tool approval argument preview", function()
         it("shows U+202E and the literal text \\u202e differently", function()
             local out = preview.build({ a = "x\u{202E}y", b = "x" .. BS .. "u202ey" })
             test.eq(out.arguments.a, "x" .. BS .. "u202ey", "the character becomes its escape")

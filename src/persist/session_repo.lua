@@ -645,7 +645,7 @@ function session_repo.delete(session_id)
         end
 
         -- Delete the tool approval store: requests, batch fences, grants and
-        -- command receipts. Grants end with the session (4.3).
+        -- command receipts. Grants end with the session.
         for _, approval_table in ipairs({
             "session_tool_approvals", "session_tool_approval_batches",
             "session_tool_approval_grants", "session_command_receipts",

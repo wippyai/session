@@ -270,7 +270,7 @@ local function grant_from_row(row: any): any
     }
 end
 
--- The row projection stored as metadata.approval on the call row (4.6).
+-- The row projection stored as metadata.approval on the call row.
 function approval_repo.projection(record: any): any
     return {
         approval_id = record.approval_id,
@@ -351,7 +351,7 @@ end
 
 -- The approval records of every batch of the turn `turn_id` (the batch
 -- record's turn_id), in creation order. The gate reads them for the
--- repeated-denial rule and the per-turn request cap (4.3 order 5, 4.5 step 5).
+-- repeated-denial rule and the per-turn request cap.
 function approval_repo.list_by_turn(conn: any, session_id: string, turn_id: string)
     if not non_empty(session_id) then return nil, "Session ID is required" end
     if not non_empty(turn_id) then return nil, "Turn ID is required" end
@@ -379,7 +379,7 @@ end
 
 -- Creates one approval record. A record starts pending, or already decided
 -- when no person is asked: approved through a grant (decided_via "grant"),
--- unavailable or limited (4.7). Returns the stored record.
+-- unavailable or limited. Returns the stored record.
 function approval_repo.create_request(dbtx: any, request: any)
     if type(request) ~= "table" then return nil, "Approval request is required" end
     for _, key in ipairs({ "approval_id", "session_id", "batch_id", "tool_message_id", "row_type",
@@ -439,7 +439,7 @@ end
 -- Commits a decision on a pending request: moves it from pending to a
 -- terminal state with revision + 1. decision = { state, decided_via, then,
 -- reason, grant_id, decided_at, decided_by }. A request that is not pending
--- is reported before a revision mismatch (4.8 step 5), so a competing
+-- is reported before a revision mismatch, so a competing
 -- decision always gets the committed state.
 function approval_repo.decide(dbtx: any, session_id: string, approval_id: string, expected_revision: number, decision: any)
     if type(decision) ~= "table" then return nil, "Decision is required" end
@@ -557,7 +557,7 @@ function approval_repo.get_receipt(conn: any, owner_id: string, session_id: stri
     end)
 end
 
--- Receipt lookup for a command (4.8 step 3). Returns the stored response when
+-- Receipt lookup for a command. Returns the stored response when
 -- the same request_id came with the same body hash; nil when there is no
 -- receipt; (nil, request_conflict, receipt) when the body differs.
 function approval_repo.lookup_receipt(conn: any, owner_id: string, session_id: string, request_id: string, body_hash: string)
@@ -691,7 +691,7 @@ local function change_grant(dbtx: any, session_id: string, grant_id: string, exp
     return read_grant(dbtx, session_id, grant_id)
 end
 
--- active -> suspended (4.3: a stricter agent mode suspends a grant).
+-- active -> suspended (a stricter agent mode suspends a grant).
 function approval_repo.suspend_grant(dbtx: any, session_id: string, grant_id: string, expected_revision: number?, reason: string)
     if not non_empty(reason) then return nil, "Suspension reason is required" end
     return change_grant(dbtx, session_id, grant_id, expected_revision,
@@ -941,7 +941,7 @@ local function update_batch(dbtx: any, batch: any, changes: {[string]: any})
     return read_batch(dbtx, batch.batch_id)
 end
 
--- Closes a batch (4.6). Returns the batch record; its `changed` field (not
+-- Closes a batch. Returns the batch record; its `changed` field (not
 -- stored) lists the approval records this closure wrote. A single return
 -- value, because tx.run reads a second one as an error.
 --
@@ -1020,7 +1020,7 @@ function approval_repo.close_batch(dbtx: any, batch_id: string, reason: string)
     return updated
 end
 
--- Releases an open batch (4.5 step 9): succeeds at most once, and never for a
+-- Releases an open batch: succeeds at most once, and never for a
 -- closed batch or while a request of the batch is still pending. The caller
 -- writes the dispositions of the released calls in the same transaction.
 function approval_repo.release_batch(dbtx: any, batch_id: string)
@@ -1045,7 +1045,7 @@ function approval_repo.release_batch(dbtx: any, batch_id: string)
 end
 
 ---------------------------------------------------------------------------
--- Stored activation (sessions.config.tool_approval, architecture 4.3)
+-- Stored activation (sessions.config.tool_approval)
 ---------------------------------------------------------------------------
 
 -- Reads the session config inside `dbtx` with the session row locked and
