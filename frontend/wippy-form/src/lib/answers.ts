@@ -43,12 +43,20 @@ export function exceedsLength(raw: string, max: number): boolean {
 }
 
 /** What is wrong with the Other text of a choice, or `null`: it is blank, or longer than `OTHER_TEXT_MAX`. */
-export function otherTextError(text: string): FieldError | null {
+function otherTextError(text: string): FieldError | null {
   if (trimAnswerText(text) === '')
     return { code: 'blank', message: BLANK_OTHER_MESSAGE }
   if (exceedsLength(text, OTHER_TEXT_MAX))
     return { code: 'too_long', message: lengthLimitMessage(OTHER_TEXT_MAX) }
   return null
+}
+
+/**
+ * True for a choice's error about its Other text (blank or too long), the
+ * one where the text box, not the group, is what needs fixing.
+ */
+export function isOtherTextError(error: FieldError): boolean {
+  return error.code === 'blank' || error.code === 'too_long'
 }
 
 /** The wire shape of a chosen option: the plain value, or `{ value, note }` once the trimmed note is not blank. */

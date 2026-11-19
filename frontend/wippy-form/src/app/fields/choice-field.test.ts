@@ -33,6 +33,37 @@ function mountField(props: Partial<InstanceType<typeof ChoiceField>['$props']> =
   })
 }
 
+describe('ChoiceField: option labels', () => {
+  it('renders backtick spans of a label as code, as the answered view does', () => {
+    const wrapper = mountField({ field: { ...trickyField, options: [{ value: 'a', label: 'Use `npm ci` here' }] } })
+    expect(wrapper.find('label code').text()).toBe('npm ci')
+  })
+})
+
+describe('ChoiceField: several answers', () => {
+  const several: ChoiceFormField = { ...trickyField, multiple: true, options: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }] }
+  const last = (wrapper: ReturnType<typeof mountField>) => wrapper.emitted('update:modelValue')?.at(-1)?.[0]
+
+  it('unticks one of several and keeps the rest', async () => {
+    const wrapper = mountField({ field: several, modelValue: ['a', 'b'] })
+    await wrapper.findAll('input[type="checkbox"]')[0].setValue(false)
+    expect(last(wrapper)).toEqual(['b'])
+  })
+
+  it('ticks Other next to the chosen options, sends what is typed in it, and unticks it', async () => {
+    const wrapper = mountField({ field: several, modelValue: ['b'] })
+    const checkboxes = wrapper.findAll('input[type="checkbox"]')
+    await checkboxes[2].setValue(true)
+    expect(last(wrapper)).toEqual(['b', { other: '' }])
+    await wrapper.setProps({ modelValue: ['b', { other: '' }] })
+    await wrapper.find('input[type="text"]').setValue('mine')
+    expect(last(wrapper)).toEqual(['b', { other: 'mine' }])
+    await wrapper.setProps({ modelValue: ['b', { other: 'mine' }] })
+    await checkboxes[2].setValue(false)
+    expect(last(wrapper)).toEqual(['b'])
+  })
+})
+
 describe('ChoiceField: the Other box label', () => {
   it.each([false, true])('is for screen readers only (several answers: %s)', (multiple) => {
     const wrapper = mountField({ field: { ...trickyField, multiple } })

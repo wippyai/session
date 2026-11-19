@@ -242,7 +242,7 @@ A `text` field may carry a `pattern` (a full-match expression). The component do
 
 ### Tokens
 
-All the shared tokens of the question card apply to the root (`--wippy-form-font`, `-font-size`, `-small-size`, `-question-size`, `-question-weight` for the title, `-surface`, `-border`, `-radius`, `-padding`, `-text`, `-text-muted`, `-focus`). Three tokens are new:
+All the shared tokens of the question card apply to the root (`--wippy-form-font`, `-font-size`, `-small-size`, `-question-size`, `-question-weight` for the title of the answered view (the open form and the notice use the card's `.w-form__title`), `-surface`, `-border`, `-radius`, `-padding`, `-text`, `-text-muted`, `-focus`). Three tokens are new:
 
 | Token | Default (as coded) | Used for |
 | --- | --- | --- |
@@ -259,6 +259,7 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 | Part | States | What it is |
 | --- | --- | --- |
 | `card`, `fields` | `answered` (the answered view), `unsupported` (a notice) on `card` | The whole form; the same element carries both parts and the `w-form` class |
+| `title` | | The form title, an `<h2>` with an icon (shared with the card) |
 | `form-description` | | The form's own description (shared with the card) |
 | `notice` | | "Asked earlier" and offline lines (shared with the card) |
 | `fields-error` | | Form-level errors from a 422 (also spoken in the status region, see "Accessibility and keyboard") |

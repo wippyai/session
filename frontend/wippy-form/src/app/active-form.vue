@@ -3,7 +3,7 @@ import type { FieldAnswer, FieldError, FormAnswers, FormState } from '../lib/def
 import type { ComponentPublicInstance } from 'vue'
 import type { SubmitBanner } from '../lib/submit-error'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { draftFromAnswers, draftSignature, serializeAnswers, validateAnswers } from '../lib/answers'
+import { draftFromAnswers, draftSignature, isOtherTextError, serializeAnswers, validateAnswers } from '../lib/answers'
 import { ERROR_TEXT_CLASS } from '../lib/error-text'
 import { OFFLINE_MESSAGE, SENDING_MESSAGE, STALE_MESSAGE } from '../lib/messages'
 import { ownValue } from '../lib/own'
@@ -222,8 +222,8 @@ function handleSubmit() {
   if (invalidIds.length > 0) {
     fieldErrors.value = errors
     formErrors.value = []
-    // A blank Other is the one failure where the text box, not the group, needs focus.
-    const blankOther = invalidIds.filter(id => errors[id].some(e => e.code === 'blank'))
+    // An error about the Other text (blank or too long) focuses the text box, not the group.
+    const blankOther = invalidIds.filter(id => errors[id].some(isOtherTextError))
     focusFirstInvalid(invalidIds, blankOther)
     announceErrorSummary()
     return
@@ -289,13 +289,14 @@ defineExpose({
     <QuestionCardHeading
       :definition="state.definition"
       icon="tabler:messages"
-    />
-    <p
-      v-if="state.stale"
-      v-bind="noticePart"
     >
-      {{ STALE_MESSAGE }}
-    </p>
+      <p
+        v-if="state.stale"
+        v-bind="noticePart"
+      >
+        {{ STALE_MESSAGE }}
+      </p>
+    </QuestionCardHeading>
 
     <FormFieldControl
       v-for="field in state.definition.fields"

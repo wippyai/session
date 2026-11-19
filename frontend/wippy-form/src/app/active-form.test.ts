@@ -735,6 +735,27 @@ describe('ActiveForm — a choice among the fields', () => {
     expect(wrapper.emitted('submit')).toBeUndefined()
     expect(wrapper.text()).toContain('Enter the other answer.')
     expect(wrapper.find('[role="status"]').text()).toContain('1 question needs attention.')
+    await wrapper.vm.$nextTick()
+    expect(document.activeElement).toBe(wrapper.find('input[type="text"]').element)
+    wrapper.unmount()
+  })
+
+  it('focuses the Other text box when that text is too long', async () => {
+    const withOther = formState<FormState['definition']>({
+      form_version: 2,
+      definition: {
+        title: 'Question',
+        fields: [{ id: 'extras', type: 'choice', label: 'Extras', required: false, options: [{ value: 'gift', label: 'Gift wrap' }], multiple: true, allow_other: true }],
+      },
+      data: { extras: ['gift', { other: 'x'.repeat(2001) }] },
+    })
+    const wrapper = mountForm(withOther)
+    await wrapper.find('form').trigger('submit')
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    expect(document.activeElement).toBe(wrapper.find('input[type="text"]').element)
     wrapper.unmount()
   })
 })
@@ -762,7 +783,8 @@ describe('ActiveForm — heading', () => {
     ]) {
       const heading = wrapper.findComponent(QuestionCardHeading)
       expect(heading.exists()).toBe(true)
-      expect(heading.text()).toContain('Delivery details')
+      // An <h2> has the heading role at level 2.
+      expect(heading.find('h2').text()).toBe('Delivery details')
       expect(heading.text()).toContain('Where should it go?')
     }
   })

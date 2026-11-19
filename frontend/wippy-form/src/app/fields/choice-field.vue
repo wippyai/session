@@ -4,8 +4,10 @@ import Checkbox from 'primevue/checkbox'
 import InputText from 'primevue/inputtext'
 import RadioButton from 'primevue/radiobutton'
 import { computed, ref, useId, watch } from 'vue'
+import { isOtherTextError } from '../../lib/answers'
 import { answerHasOption, answerHasOther, answerOtherText } from '../../lib/definition'
 import { partAttrs } from '../../lib/part-attrs'
+import QuestionCardRichText from '../question-card/question-card-rich-text.vue'
 import FieldShell from './field-shell.vue'
 
 /**
@@ -78,9 +80,8 @@ const control = computed(() => props.field.multiple ? Checkbox : RadioButton)
 // The answer a choice field holds is always a choice answer.
 const answer = computed(() => props.modelValue as ChoiceAnswer | undefined)
 
-// A blank or too long Other text is the one error that is about the text box
-// rather than the choice, so only then is the box itself marked invalid.
-const otherTextInvalid = computed(() => props.errors.some(e => e.code === 'blank' || e.code === 'too_long'))
+// Only an error about the Other text marks the box itself invalid.
+const otherTextInvalid = computed(() => props.errors.some(isOtherTextError))
 
 const otherChosen = computed(() => answerHasOther(answer.value))
 const otherText = ref(answerOtherText(answer.value))
@@ -124,7 +125,7 @@ defineExpose({
   focusFirstControl() {
     shell.value?.focusFirstControl()
   },
-  // For a blank Other answer the text box is what needs fixing.
+  // For an error about the Other text the text box is what needs fixing.
   focusOtherText() {
     // Ids come from Vue's useId plus a fixed suffix, so a quoted attribute
     // selector needs no escaping.
@@ -176,7 +177,7 @@ defineExpose({
           :for="optionId(index)"
           v-bind="optionLabelPart"
         >
-          {{ option.label }}
+          <QuestionCardRichText :text="option.label" />
           <span
             v-if="option.description"
             v-bind="optionDescriptionPart"
