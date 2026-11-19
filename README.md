@@ -149,8 +149,8 @@ Stop the user asked for, not a failure. Pending tool calls are repaired, form
 answers sent during the stopped turn are delivered without a new turn, and the
 session is stored idle with `can_send` true. Clients get no error.
 
-On Windows, `make.bat <target>` runs the same targets as `make <target>`
-(`make.bat` starts the `make.ps1` adapter, which keeps the Makefile's
+On Windows, `make.bat <target>` runs the same target as `make <target>` for
+every row below (`make.bat` starts the `make.ps1` adapter, which keeps the Makefile's
 dependencies, arguments, environment variables and failure behavior). Set
 `WIPPY_BIN` when Wippy is not on PATH. The adapter has no command-line
 variables: pass settings as environment variables named like the Makefile
@@ -170,18 +170,14 @@ The adapter needs `sqlite3` on PATH to reset the test database.
 | `make test-ui`, `make lint-ui`, `make check-ui`, `make build-ui` | the same names with `make.bat` |
 | `make verify` | `make.bat verify` |
 
-The test target clears only its own test database. On Windows the six
-"External test bootstrap" cases (`app.runtime:bootstrap_test`) fail with
-`exec: "sh": executable file not found`, because they run the shell scripts
-that the Makefile uses; `make.bat test` therefore exits non-zero there, while
-`make.bat test-runtime` and `make.bat test-admission` pass.
+The test target clears only its own test database. Where `sh` is not on PATH
+(Windows), the six "External test bootstrap" cases are skipped, because they run
+the shell scripts that the Makefile uses; CI runs them on Linux.
 
-Test filters need Wippy runtime v0.3.63a or later. `TEST_FILTER` holds one or
-more space-separated filters, for example
+`TEST_FILTER` holds one or more space-separated filters, for example
 `TEST_FILTER="app.runtime:handoff_runtime app.persist:checkpoint_repo_test"`;
-each word selects its own suites and nothing else runs. Runtimes before
-v0.3.63a only accept the older `test -- <filter>` form, which newer runtimes
-read as a second filter named `test`.
+each word selects its own suites and nothing else runs. The runtime version that
+reads filters this way is noted in the Makefile above the `test` target.
 
 ## Runtime tests and benchmarks
 
