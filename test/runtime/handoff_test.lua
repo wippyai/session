@@ -935,7 +935,10 @@ local function run_loaded_trait_scenario()
             "a tool the agent already had is not announced again")
         test.eq(result.metadata.loaded_traits.agent, "app.runtime:loader_agent")
         test.eq(result.metadata.loaded_traits.keys[1], "app.runtime:pack_trait")
-        local note = requests[2].messages[loaded_at + 1]
+        local marker = requests[2].messages[loaded_at + 1]
+        test.eq(marker.role, "cache_marker")
+        test.eq(marker.marker_id, "history_tail")
+        local note = requests[2].messages[loaded_at + 2]
         test.eq(note.role, "system")
         test.is_true(note.metadata.preserve_position)
         test.eq(note.content[1].text, "Pack guidance. Use pack_tool for packed documents.")
