@@ -5,18 +5,17 @@ local tx = require("tx")
 local consts = require("consts")
 local message_date = require("message_date")
 
--- Tool approval store (EE2-2710): approval requests, batch fences, grants,
--- command receipts, the turn-scoped fence and session activity.
+-- Tool approval store: approval requests, batch fences, grants, command
+-- receipts, the turn-scoped fence and session activity.
 --
 -- Transaction contract. Every write helper takes the caller's open
 -- transaction (`dbtx`) as its first argument and never starts one: tx.run
 -- refuses nesting, and the write must commit together with the caller's other
--- writes (a message insert, a Stop, a decision receipt). Each write helper
--- takes the session row lock (message_date.lock_session) before its first
--- read; a caller that already holds it pays one more no-op update. Conditional
--- updates check `revision = expected`. Only after the commit does a caller
--- wake the gate. approval_repo.transact(session_id, fn) is the thin wrapper
--- for a caller that has no transaction yet.
+-- writes (a message insert, a Stop, a decision receipt). The caller takes the
+-- session row lock first (approval_repo.transact, or message_date.lock_session
+-- in a message transaction), so reads and writes of one session never
+-- interleave. Conditional updates check `revision = expected`. Only after the
+-- commit does a caller wake the gate.
 --
 -- Read helpers take a connection or transaction, or nil for a pooled
 -- connection.
@@ -93,7 +92,7 @@ local APPROVAL_COLUMNS = {
     "disposition_reason", "revision", "requested_at", "expires_at", "decided_at", "decided_by",
 }
 local BATCH_COLUMNS = {
-    "batch_id", "session_id", "members", "turn_id", "state", "close_reason", "controls",
+    "batch_id", "session_id", "turn_id", "state", "close_reason", "controls",
     "revision", "created_at", "closed_at", "released_at",
 }
 local GRANT_COLUMNS = {
@@ -237,7 +236,6 @@ local function batch_from_row(row: any): any
     return {
         batch_id = row.batch_id,
         session_id = row.session_id,
-        members = decode(row.members) or {},
         turn_id = row.turn_id,
         state = row.state,
         close_reason = row.close_reason,
@@ -342,32 +340,11 @@ function approval_repo.get(conn: any, approval_id: string)
     end)
 end
 
--- The approval record of a call row, or nil when it has none.
-function approval_repo.get_by_message(conn: any, session_id: string, tool_message_id: string)
-    return with_connection(conn, function(c)
-        local records, err = list_approvals(c, {
-            sql.builder.expr("session_id = ?", session_id),
-            sql.builder.expr("tool_message_id = ?", tool_message_id),
-        })
-        if not records then return nil, err end
-        return records[1]
-    end)
-end
-
 function approval_repo.list_by_batch(conn: any, session_id: string, batch_id: string)
     return with_connection(conn, function(c)
         return list_approvals(c, {
             sql.builder.expr("session_id = ?", session_id),
             sql.builder.expr("batch_id = ?", batch_id),
-        })
-    end)
-end
-
-function approval_repo.list_by_state(conn: any, session_id: string, state: string)
-    return with_connection(conn, function(c)
-        return list_approvals(c, {
-            sql.builder.expr("session_id = ?", session_id),
-            sql.builder.expr("state = ?", state),
         })
     end)
 end
@@ -428,8 +405,6 @@ function approval_repo.create_request(dbtx: any, request: any)
     local offered, offered_err = encode(request.offered)
     if offered_err then return nil, offered_err end
 
-    local _, lock_err = approval_repo.lock_session(dbtx, request.session_id)
-    if lock_err then return nil, lock_err end
 
     local now = approval_repo.now()
     local decided_via = request.decided_via
@@ -480,8 +455,6 @@ function approval_repo.decide(dbtx: any, session_id: string, approval_id: string
         return nil, "Only a denial takes then and reason"
     end
 
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local current, read_err = read_approval(dbtx, session_id, approval_id)
     if read_err then return nil, read_err end
     if not current then return nil, not_found("approval", approval_id) end
@@ -520,8 +493,6 @@ function approval_repo.set_disposition(dbtx: any, session_id: string, approval_i
     if disposition ~= approval_repo.DISPOSITION.DISPATCHED and disposition ~= approval_repo.DISPOSITION.NOT_RUN then
         return nil, "Disposition must be dispatched or not_run"
     end
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local current, read_err = read_approval(dbtx, session_id, approval_id)
     if read_err then return nil, read_err end
     if not current then return nil, not_found("approval", approval_id) end
@@ -612,8 +583,6 @@ function approval_repo.store_receipt(dbtx: any, receipt: any)
     if type(receipt.response) ~= "table" then return nil, "Receipt response is required" end
     local response, encode_err = encode(receipt.response)
     if encode_err then return nil, encode_err end
-    local _, lock_err = approval_repo.lock_session(dbtx, receipt.session_id)
-    if lock_err then return nil, lock_err end
     local _, insert_err = exec(sql.builder.insert("session_command_receipts"):set_map({
         owner_id = receipt.owner_id,
         session_id = receipt.session_id,
@@ -679,8 +648,6 @@ function approval_repo.create_grant(dbtx: any, grant: any)
     end
     local manifest, encode_err = encode(grant.manifest)
     if encode_err then return nil, encode_err end
-    local _, lock_err = approval_repo.lock_session(dbtx, grant.session_id)
-    if lock_err then return nil, lock_err end
     local _, insert_err = exec(sql.builder.insert("session_tool_approval_grants"):set_map({
         grant_id = grant.grant_id,
         session_id = grant.session_id,
@@ -703,8 +670,6 @@ end
 
 local function change_grant(dbtx: any, session_id: string, grant_id: string, expected_revision: number?,
                             allowed: {[string]: boolean}, refused_code: string, changes: {[string]: any})
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local current, read_err = read_grant(dbtx, session_id, grant_id)
     if read_err then return nil, read_err end
     if not current then return nil, not_found("grant", grant_id) end
@@ -780,8 +745,6 @@ end
 function approval_repo.write_turn_fence(dbtx: any, session_id: string, turn_id: string, reason: string)
     if not non_empty(turn_id) then return nil, "Turn ID is required" end
     if not FENCE_REASONS[reason] then return nil, "Turn fence reason must be stop or finish" end
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local current, read_err = approval_repo.read_turn_fence(dbtx, session_id)
     if read_err then return nil, read_err end
     if type(current) == "table" and current.turn_id == turn_id then
@@ -799,8 +762,6 @@ end
 -- turn with that reason (a finish taken back clears its own fence). Returns
 -- the cleared fence, or nil when none was cleared.
 function approval_repo.clear_turn_fence(dbtx: any, session_id: string, turn_id: string?, reason: string?)
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local current, read_err = approval_repo.read_turn_fence(dbtx, session_id)
     if read_err then return nil, read_err end
     if type(current) ~= "table" then return nil end
@@ -835,8 +796,6 @@ function approval_repo.write_activity(dbtx: any, session_id: string, activity: a
     end
     local encoded, encode_err = encode(activity)
     if encode_err then return nil, encode_err end
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local current, read_err = approval_repo.read_activity(dbtx, session_id)
     if not current then return nil, read_err end
     if expected_revision ~= nil and current.revision ~= expected_revision then
@@ -854,23 +813,25 @@ function approval_repo.write_activity(dbtx: any, session_id: string, activity: a
 end
 
 ---------------------------------------------------------------------------
--- Batches (the batch fence, 4.5 step 9)
+-- Batches (the batch fence)
 ---------------------------------------------------------------------------
 
--- Whether the session has a steering input stored as pending (a user row
--- whose metadata.input.state is "pending").
-local function has_pending_input(dbtx: any, session_id: string)
-    local rows, err = select_rows(dbtx, sql.builder.select("metadata"):from("messages")
-        :where("session_id = ?", session_id):where("type = ?", consts.MSG_TYPE.USER)
-        :where("metadata LIKE ?", '%"input"%'), "Failed to read pending inputs")
-    if not rows then return nil, err end
-    for _, row in ipairs(rows) do
-        local metadata = decode(row.metadata)
-        if type(metadata) == "table" and type(metadata.input) == "table" and metadata.input.state == "pending" then
-            return true
-        end
+-- Why an open batch of the turn `turn_id` must close, or nil: the turn's Stop
+-- or finish fence, then a steering input stored as pending
+-- (pending_input(conn, session_id), message_repo.has_pending_input), then a
+-- stop denial among `records`.
+function approval_repo.close_reason(conn: any, session_id: string, turn_id: string?, pending_input: any,
+                                    records: {any}?): (string?, any)
+    local fence, fence_err = approval_repo.read_turn_fence(conn, session_id)
+    if fence_err then return nil, fence_err end
+    if type(fence) == "table" and turn_id ~= nil and fence.turn_id == turn_id then return fence.reason, nil end
+    local steering, steering_err = pending_input(conn, session_id)
+    if steering_err then return nil, steering_err end
+    if steering then return "steering", nil end
+    for _, record in ipairs(records or {}) do
+        if record.state == STATE.DENIED and record["then"] == "stop" then return "stop_denial", nil end
     end
-    return false
+    return nil, nil
 end
 
 -- Validates a batch descriptor { batch_id, members, turn_id? }. member_ids,
@@ -898,32 +859,17 @@ end
 
 -- Writes the batch record inside the call-and-batch transaction
 -- (message_repo.create_batch). The batch is created already closed when an
--- earlier closure applies: the turn-scoped Stop or finish fence of its turn,
--- or a pending steering input. Returns the stored batch.
-function approval_repo.create_batch_record(dbtx: any, session_id: string, descriptor: any)
+-- earlier closure applies (approval_repo.close_reason). Returns the stored
+-- batch.
+function approval_repo.create_batch_record(dbtx: any, session_id: string, descriptor: any, pending_input: any)
     local valid, invalid = approval_repo.validate_descriptor(descriptor)
     if not valid then return nil, invalid end
-    local members, encode_err = encode(descriptor.members)
-    if encode_err then return nil, encode_err end
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
-
-    local close_reason = nil
-    local fence, fence_err = approval_repo.read_turn_fence(dbtx, session_id)
-    if fence_err then return nil, fence_err end
-    if type(fence) == "table" and descriptor.turn_id ~= nil and fence.turn_id == descriptor.turn_id then
-        close_reason = fence.reason
-    else
-        local pending, pending_err = has_pending_input(dbtx, session_id)
-        if pending_err then return nil, pending_err end
-        if pending then close_reason = "steering" end
-    end
-
+    local close_reason, reason_err = approval_repo.close_reason(dbtx, session_id, descriptor.turn_id, pending_input)
+    if reason_err then return nil, reason_err end
     local now = approval_repo.now()
     local _, insert_err = exec(sql.builder.insert("session_tool_approval_batches"):set_map({
         batch_id = descriptor.batch_id,
         session_id = session_id,
-        members = members,
         turn_id = descriptor.turn_id,
         state = close_reason and BATCH.CLOSED or BATCH.OPEN,
         close_reason = close_reason,
@@ -936,38 +882,23 @@ function approval_repo.create_batch_record(dbtx: any, session_id: string, descri
     return read_batch(dbtx, descriptor.batch_id)
 end
 
--- Whether a steering input is stored as pending in the session. The release
--- transaction checks it under the session lock (4.5 step 9): steering that
--- committed first closes the batch instead of letting it run.
-function approval_repo.has_pending_input(conn: any, session_id: string)
-    return with_connection(conn, function(c) return has_pending_input(c, session_id) end)
-end
-
--- Closes the batches of the turn `turn_id` that are still open, and applies
--- `reason` to its released batches (close_batch: stop and exit cancel their
--- controls; steering, finish and deleted change nothing). Runs in the
--- caller's transaction. Returns the list of batch records after the closure.
-function approval_repo.close_turn_batches(dbtx: any, session_id: string, turn_id: string, reason: string)
-    if not non_empty(turn_id) then return nil, "Turn ID is required" end
-    if not CLOSE[reason] then return nil, "Unknown batch close reason: " .. tostring(reason) end
-    local _, lock_err = approval_repo.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
-    local rows, err = select_rows(dbtx, sql.builder.select("batch_id"):from("session_tool_approval_batches")
-        :where("session_id = ?", session_id):where("turn_id = ?", turn_id)
-        :where("state IN (?, ?)", BATCH.OPEN, BATCH.RELEASED), "Failed to list turn batches")
-    if not rows then return nil, err end
-    local closed = {}
-    for _, row in ipairs(rows) do
-        local batch, close_err = approval_repo.close_batch(dbtx, row.batch_id, reason)
-        if not batch then
-            -- A released batch refuses reasons other than stop and exit,
-            -- steering, finish and deleted: nothing to do for it.
-            if not approval_repo.is_conflict(close_err) then return nil, close_err end
-        else
-            closed[#closed + 1] = batch
+-- A Stop or finish of the turn `turn_id`: writes the turn fence (the first
+-- reason of the turn stays) and closes the turn's batches with `reason`
+-- (close_batch: an open batch closes; a released one has its controls
+-- cancelled by a Stop and keeps them for a finish). Runs in the caller's
+-- transaction. Returns true.
+function approval_repo.fence_turn(dbtx: any, session_id: string, turn_id: string, reason: string)
+    local _, fence_err = approval_repo.write_turn_fence(dbtx, session_id, turn_id, reason)
+    if fence_err then return nil, fence_err end
+    local batches, list_err = approval_repo.list_batches(dbtx, session_id, { BATCH.OPEN, BATCH.RELEASED })
+    if not batches then return nil, list_err end
+    for _, batch in ipairs(batches) do
+        if batch.turn_id == turn_id then
+            local closed, close_err = approval_repo.close_batch(dbtx, batch.batch_id, reason)
+            if not closed then return nil, close_err end
         end
     end
-    return closed
+    return true
 end
 
 function approval_repo.get_batch(conn: any, batch_id: string)
@@ -995,20 +926,6 @@ function approval_repo.list_batches(conn: any, session_id: string, states: {stri
         for _, row in ipairs(rows) do batches[#batches + 1] = batch_from_row(row) end
         return batches
     end)
-end
-
--- Takes the lock of the session that owns the batch, then reads the batch.
-local function lock_batch(dbtx: any, batch_id: string)
-    if not non_empty(batch_id) then return nil, "Batch ID is required" end
-    local _, lock_err = dbtx:execute([[UPDATE sessions SET last_message_date = last_message_date
-        WHERE session_id = (SELECT session_id FROM session_tool_approval_batches WHERE batch_id = $1)]], { batch_id })
-    if lock_err then return nil, "Failed to lock session: " .. tostring(lock_err) end
-    local batch, read_err = read_batch(dbtx, batch_id)
-    if read_err then return nil, read_err end
-    if not batch then return nil, not_found("batch", batch_id) end
-    local _, session_err = approval_repo.lock_session(dbtx, batch.session_id)
-    if session_err then return nil, session_err end
-    return batch
 end
 
 local function update_batch(dbtx: any, batch: any, changes: {[string]: any})
@@ -1041,8 +958,8 @@ end
 function approval_repo.close_batch(dbtx: any, batch_id: string, reason: string)
     local close = CLOSE[reason]
     if not close then return nil, "Unknown batch close reason: " .. tostring(reason) end
-    local batch, lock_err = lock_batch(dbtx, batch_id)
-    if not batch then return nil, lock_err end
+    local batch, batch_err = approval_repo.get_batch(dbtx, batch_id)
+    if not batch then return nil, batch_err end
     batch.changed = {}
 
     if batch.state == BATCH.CLOSED then return batch end
@@ -1107,8 +1024,8 @@ end
 -- closed batch or while a request of the batch is still pending. The caller
 -- writes the dispositions of the released calls in the same transaction.
 function approval_repo.release_batch(dbtx: any, batch_id: string)
-    local batch, lock_err = lock_batch(dbtx, batch_id)
-    if not batch then return nil, lock_err end
+    local batch, batch_err = approval_repo.get_batch(dbtx, batch_id)
+    if not batch then return nil, batch_err end
     if batch.state == BATCH.CLOSED then
         return nil, conflict(CONFLICT.BATCH_CLOSED, "Batch is closed"), batch
     end
@@ -1126,10 +1043,6 @@ function approval_repo.release_batch(dbtx: any, batch_id: string)
     end
     return update_batch(dbtx, batch, { state = BATCH.RELEASED, released_at = approval_repo.now() })
 end
-
----------------------------------------------------------------------------
--- Owner-level wrapper
----------------------------------------------------------------------------
 
 ---------------------------------------------------------------------------
 -- Stored activation (sessions.config.tool_approval, architecture 4.3)

@@ -1,5 +1,5 @@
--- Tool approval events and results (EE2-2710, architecture 4.8 and 4.9,
--- docs/tool-approval-protocol.md sections 4, 8, 9 and 11).
+-- Tool approval events and results (docs/tool-approval-protocol.md sections
+-- 4, 8, 9 and 11).
 --
 -- Builders only, plus thin publish helpers over the session upstream: the
 -- `tool_approval` event on the per-call topic, the `function_error`
@@ -7,15 +7,15 @@
 -- session `activity` update. The model-facing result of a call that did not
 -- run is fixed server text; it never names approval IDs, digests or grants.
 local json = require("json")
+local consts = require("consts")
 
 local events = {}
 
 -- The per-call event type (upstream message type).
 events.TOOL_APPROVAL = "tool_approval"
-events.FUNCTION_ERROR = "function_error"
 events.OUTCOME = { NOT_APPROVED = "not_approved", CANCELLED = "cancelled" }
 
--- Session notices (session `error` events), one per turn each.
+-- Session notices (session `error` events). Each one ends the turn.
 events.NOTICE = {
     UNAVAILABLE = {
         code = "tool_approval_unavailable",
@@ -27,7 +27,7 @@ events.NOTICE = {
     },
 }
 
--- Model-facing reasons (4.9). `approval_check_failed` is the reason for the
+-- Model-facing reasons. `approval_check_failed` is the reason for the
 -- freeze outcome `freeze_failed`: a valid call the Session could not freeze
 -- for the approval check (malformed call, nesting, a value that is not
 -- JSON-shaped). It never runs and is never asked about; the turn continues.
@@ -111,7 +111,7 @@ function events.is_reason(reason: any): boolean
     return TEXT[reason] ~= nil
 end
 
--- The structured result the model sees for a call that did not run (4.9).
+-- The structured result the model sees for a call that did not run.
 -- feedback is the user's text of a `continue` denial.
 function events.model_result(reason: string, feedback: string?): any
     local text = TEXT[reason]
@@ -132,7 +132,7 @@ end
 -- of a call whose own request the closure ended (`own`) and of every other
 -- unreleased call (`peer`), whether the turn ends, and whether a requested
 -- checkpoint is skipped (the bus refuses it while it drains a Stop or
--- shuts down). Architecture 4.5 step 12 and 4.9.
+-- shuts down).
 events.CLOSE = {
     stop_denial = { own = REASON.NOT_RUN_BATCH_STOPPED, peer = REASON.NOT_RUN_BATCH_STOPPED, end_turn = true },
     stop = { own = REASON.STOPPED, peer = REASON.STOPPED, end_turn = true, skip_checkpoint = true, cancelled = true },
@@ -232,7 +232,7 @@ end
 
 -- Publishes the not-run settlement of one call (every row type).
 function events.publish_not_run(upstream: any, call_id: string, payload: any)
-    upstream:send_message_update(call_id, events.FUNCTION_ERROR, payload)
+    upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, payload)
 end
 
 -- Publishes the session activity with its revision. A cleared activity is
@@ -244,22 +244,10 @@ function events.publish_activity(upstream: any, activity: any)
     upstream:update_session({ activity = value, activity_revision = activity.revision })
 end
 
--- Publishes a session notice at most once per turn. `turn` is the turn
--- state table, which keeps the notices sent for the turn `turn_id` (the
--- table outlives a turn, so a new turn ID starts over). Returns true when
--- sent.
-function events.publish_notice(upstream: any, turn: any, turn_id: any, notice: any): boolean
-    if type(turn) == "table" then
-        local sent = turn.approval_notices
-        if type(sent) ~= "table" or sent.turn_id ~= turn_id then
-            sent = { turn_id = turn_id, codes = {} }
-            turn.approval_notices = sent
-        end
-        if sent.codes[notice.code] then return false end
-        sent.codes[notice.code] = true
-    end
+-- Publishes a session notice. Each notice ends the turn, so a turn sends it
+-- at most once.
+function events.publish_notice(upstream: any, notice: any)
     upstream:session_error(notice.code, notice.message)
-    return true
 end
 
 return events

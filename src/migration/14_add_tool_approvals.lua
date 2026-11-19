@@ -1,4 +1,4 @@
--- Tool approval store (EE2-2710). Additive: four new tables and three new
+-- Tool approval store. Additive: four new tables and three new
 -- session columns; no existing row changes. The SQL is the same on PostgreSQL
 -- and SQLite (TEXT, BIGINT, no foreign keys): session_repo.delete removes the
 -- rows explicitly, as it does for the other dependent tables. Timestamps are
@@ -42,7 +42,6 @@ local STATEMENTS = {
     [[CREATE TABLE session_tool_approval_batches (
         batch_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
-        members TEXT NOT NULL,
         turn_id TEXT,
         state TEXT NOT NULL,
         close_reason TEXT,

@@ -459,6 +459,16 @@ local function define_tests()
             test.is_false(cancelled[2], "The next turn must start with an open cancel channel")
         end)
 
+        it("closes the turn cancel channel once for deletion or exit, also before a later Stop", function()
+            local bus = command_bus.new({})
+            bus.state, bus.turn_state.id, bus.cancel = "running", "turn-1", channel.new()
+            bus:cancel_turn()
+            local selected = channel.select({ bus.cancel:case_receive(), default = true })
+            test.is_true(selected.default ~= true, "closed")
+            bus:cancel_turn()
+            test.is_true(bus:request_stop(), "a later Stop still drains the turn")
+        end)
+
         it("applies tool outcomes and control before draining STOP", function()
             local order = {}
             local ctx = { held = { "held" } }

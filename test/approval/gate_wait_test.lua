@@ -16,11 +16,11 @@ local tool_caller = require("tool_caller")
 local wait_for_boot = require("wait_for_boot")
 local fx = require("gate_fixtures")
 
--- The approval gate's wait, release and end of turn (EE2-2710 slice S7b).
--- process_tools runs in its own coroutine, as the command bus runs it; the
--- test plays the session inbox: it commits decisions through approval_repo
--- (the way the S8 decision command will) and Stop, finish, steering, exit and
--- deletion the way session.lua does, then wakes the gate through the hub.
+-- The approval gate's wait, release and end of turn. process_tools runs in
+-- its own coroutine, as the command bus runs it; the test plays the session
+-- inbox: it commits decisions through approval_repo, and Stop, finish,
+-- steering, exit and deletion the way session.lua does, then wakes the gate
+-- through the hub.
 
 local MARKED, PLAIN, PRIVATE = fx.MARKED, fx.PLAIN, fx.PRIVATE
 local new_ctx, round, row = fx.new_ctx, fx.round, fx.row
@@ -62,8 +62,8 @@ local function pending(ctx: any, batch_id: string, n: number)
     error("the gate did not create its requests")
 end
 
--- Commits a decision the way the S8 decision command will: one locked
--- transaction; a stop denial closes the batch in it. Wakes the gate unless
+-- Commits a decision in one locked transaction; a stop denial closes the
+-- batch in it. Wakes the gate unless
 -- opts.quiet. Returns the committed record, or nil, the error and the record.
 local function decide(ctx: any, batch_id: string, call_id: string, decision: any, opts: any?): (any, any, any)
     local record = fx.records_by_call(ctx.session_id, batch_id)[call_id]
@@ -88,12 +88,14 @@ local function approve(ctx: any, batch_id: string, call_id: string, opts: any?):
     return decide(ctx, batch_id, call_id, { state = "approved" }, opts)
 end
 
--- The inbox's Stop: the Stop transaction (with the approval fence), then the
--- synchronous close of the batch cancellation channel (route_input).
+-- The inbox's Stop (route_input): the Stop transaction with the approval
+-- fence, the wake signal, then what bus:request_stop does.
 local function stop(ctx: any)
     local committed, err = session._commit_stop(ctx, ctx.upstream, nil)
     test.is_true(committed == true, "Stop committed: " .. tostring(err))
-    ctx.approval_wake:accept_stop(approval_gate.turn_id(ctx))
+    ctx.approval_wake:notify("stop")
+    ctx.coordinator.state = "draining_stop"
+    ctx.coordinator.cancel:close()
 end
 
 -- A committed steering message: a pending input row, then the wake signal.
@@ -111,13 +113,14 @@ local function reasons(op: any, call_ids: {string}): string
     return table.concat(out, " ")
 end
 
--- A tool caller whose second call (in call ID order) waits for the
--- cancellation channel, as the framework caller does for a slow launch.
+-- A sequential tool caller, in call ID order, as the framework runs one: the
+-- first call finishes at once, the second waits for the cancellation
+-- channel, and a later call is not launched once the channel is closed.
 local function slow_caller(): any
     local caller: any = { launches = {}, executed = {}, runs = 0, launched = channel.new(1), cancel = nil }
     function caller:set_strategy() end
     function caller:set_runtime_context_resolver() end
-    function caller:execute(_context, tools, cancel, _options)
+    function caller:execute(_context, tools, cancel)
         self.runs = self.runs + 1
         self.cancel = cancel
         local ids = {}
@@ -127,10 +130,14 @@ local function slow_caller(): any
         for index, call_id in ipairs(ids) do
             local tool = tools[call_id]
             self.executed[call_id] = true
-            self.launches[call_id] = true
-            if index == 1 then
+            local closed = cancel ~= nil and not channel.select({ cancel:case_receive(), default = true }).default
+            if closed then
+                results[call_id] = { error = "Tool call was cancelled", cancelled = true, tool_call = tool }
+            elseif index == 1 then
+                self.launches[call_id] = true
                 results[call_id] = { result = { ok = true }, tool_call = tool }
             else
+                self.launches[call_id] = true
                 self.launched:send(true)
                 local selected = channel.select({ cancel:case_receive(), time.after("3s"):case_receive() })
                 if selected.channel == cancel then
@@ -146,7 +153,7 @@ local function slow_caller(): any
 end
 
 local function define_tests()
-    describe("Tool approval gate wait, release and end of turn (EE2-2710 S7b)", function()
+    describe("Tool approval gate wait, release and end of turn", function()
         local saved = {}
         before_all(function()
             wait_for_boot.run()
@@ -161,7 +168,6 @@ local function define_tests()
         end)
         after_all(function() fx.cleanup() end)
 
-        -- AC 5
         it("runs nothing of the batch after a stop denial, ends the turn and cancels its controls", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, {
@@ -192,7 +198,6 @@ local function define_tests()
             end
         end)
 
-        -- AC 6
         it("runs the approved peers and the unmarked call after a continue denial and continues the turn", function()
             local ctx = new_ctx({ live = 1 })
             local op, batch = round(ctx, {
@@ -208,7 +213,7 @@ local function define_tests()
                 { state = "denied", ["then"] = "continue", reason = "Use the staging customer instead." }))
             local result, err = finish(handle)
             test.is_nil(err)
-            test.is_nil(op.caller.executed["call-a"], "the denied call never reaches the caller")
+            test.is_nil(op.caller.launches["call-a"], "the denied call never runs")
             test.is_true(op.caller.launches["call-b"])
             test.is_true(op.caller.launches["call-c"])
             local denied = row(op.call_message_ids["call-a"]).metadata
@@ -226,7 +231,6 @@ local function define_tests()
             test.eq(row(op.checkpoint_anchor_id).metadata.behavior_control_state, "applied")
         end)
 
-        -- AC 20
         it("expires the batch at the deadline, runs nothing and ends the turn", function()
             local ctx, captured = new_ctx({ live = 1, policy = { timeout_seconds = 30 } })
             local base = time.now():unix()
@@ -250,7 +254,6 @@ local function define_tests()
             test.eq(captured.session_updates[#captured.session_updates].activity, json.null, "the activity is cleared")
         end)
 
-        -- AC 21 (Stop, both orders with a decision)
         it("ends the wait on Stop within 10 s when Stop commits first, and refuses a later decision", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
@@ -294,7 +297,6 @@ local function define_tests()
             test.eq(record.disposition, "not_run")
         end)
 
-        -- AC 21 (finish, supervisor cancel, deletion)
         it("ends the wait on finish, exit and deletion within 10 s with no tool run", function()
             for _, case in ipairs({ "finish", "exit", "deleted" }) do
                 local ctx = new_ctx({ live = 1 })
@@ -339,7 +341,6 @@ local function define_tests()
             test.is_true(op.caller.launches["call-a"])
         end)
 
-        -- AC 22 (both orders, one peer already approved)
         it("supersedes the batch on steering that commits after a peer's approval", function()
             local ctx = new_ctx({ live = 1 })
             local op, batch = round(ctx, {
@@ -379,7 +380,6 @@ local function define_tests()
             test.eq(approval_repo.conflict_code(late_err), "not_pending")
         end)
 
-        -- AC 41 (the locked check in the release transaction)
         it("refuses the release when steering committed before it, with every request approved", function()
             local ctx = new_ctx({ live = 1 })
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
@@ -393,30 +393,33 @@ local function define_tests()
             test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).close_reason, "steering")
         end)
 
-        -- AC 23
         it("stops the remaining launches on Stop after the release and keeps finished results", function()
             local ctx = new_ctx({ live = 1 })
             local caller = slow_caller()
             local op, batch = round(ctx, {
                 { id = "call-a", registry_id = MARKED, args = { n = 1 } },
                 { id = "call-b", registry_id = MARKED, args = { n = 2 } },
+                { id = "call-c", registry_id = MARKED, args = { n = 3 } },
             }, caller)
             local handle = start(ctx, op)
-            pending(ctx, batch.batch_id, 2)
+            pending(ctx, batch.batch_id, 3)
             approve(ctx, batch.batch_id, "call-a", { quiet = true })
-            approve(ctx, batch.batch_id, "call-b")
+            approve(ctx, batch.batch_id, "call-b", { quiet = true })
+            approve(ctx, batch.batch_id, "call-c")
             caller.launched:receive()
             stop(ctx)
             local _, err, seconds = finish(handle)
             test.is_nil(err)
             test.is_true(seconds < 10)
-            test.not_nil(caller.cancel, "the gate passed the batch cancellation channel")
+            test.eq(caller.cancel, ctx.coordinator.cancel, "the caller got the turn's cancellation channel")
             local first = row(op.call_message_ids["call-a"]).metadata
             test.eq(first.status, consts.FUNC_STATUS.SUCCESS, "the finished result is kept")
             local second = row(op.call_message_ids["call-b"]).metadata
             test.eq(second.status, consts.FUNC_STATUS.CANCELLED)
             test.eq(second.result, "Session stopped while the call was running",
                 "the caller's cancellation result, never 'not run'")
+            test.is_nil(caller.launches["call-c"], "a call not launched before Stop never launches")
+            test.eq(row(op.call_message_ids["call-c"]).metadata.status, consts.FUNC_STATUS.CANCELLED)
             local records = records_by_call(ctx.session_id, batch.batch_id)
             test.eq(records["call-b"].disposition, "dispatched")
             test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).controls, "cancelled",
@@ -446,7 +449,6 @@ local function define_tests()
             test.eq(stored.controls, "kept")
         end)
 
-        -- AC 28
         it("settles an approved call as changed_before_run when its context or entry changes before release", function()
             for _, case in ipairs({ "context", "entry" }) do
                 local ctx = new_ctx({ live = 1 })
@@ -512,7 +514,6 @@ local function define_tests()
             end
         end)
 
-        -- AC 34
         it("settles a gated UI action whose browser binding expired as changed_before_run", function()
             -- The broker's binding lifetime is a setting (ui_action_ttl_seconds,
             -- here 30 s): bound 40 s ago, it expired 10 s ago.
@@ -543,8 +544,7 @@ local function define_tests()
             end
         end)
 
-        -- AC 33
-        it("gives after-execute wrappers every call with its real or precomputed result", function()
+        it("gives after-execute wrappers every call, the not-run ones with their not-run text", function()
             local ctx = new_ctx({ live = 1 })
             local wrapper_calls = {}
             local saved_funcs, saved_contract = tool_caller._funcs, tool_caller._contract
@@ -598,19 +598,14 @@ local function define_tests()
                 local results = wrapper_calls[1].tool_results or {}
                 test.not_nil(results["call-b"])
                 test.not_nil(results["call-c"])
-                if tool_caller.FEATURES and tool_caller.FEATURES.precomputed_results then
-                    test.not_nil(results["call-a"], "the not-run call reaches the wrappers as a precomputed result")
-                    test.eq(results["call-a"].error, "Not run: you denied this call.")
-                else
-                    test.is_nil(results["call-a"], "without the caller feature the Session settles it itself")
-                end
+                test.not_nil(results["call-a"], "the denied call reaches the wrappers")
+                test.eq(results["call-a"].error, "Not run: you denied this call.")
                 test.eq(row(op.call_message_ids["call-a"]).metadata.result.reason, "denied_by_user")
             end)
             tool_caller._funcs, tool_caller._contract = saved_funcs, saved_contract
             if not ok then error(failure) end
         end)
 
-        -- AC 35
         it("keeps a requested checkpoint after a fence unless finish ends the batch, with no dispatch while waiting", function()
             for _, case in ipairs({ { signal = "deadline", checkpoint = true }, { signal = "finish", checkpoint = false } }) do
                 local ctx = new_ctx({ live = 1, policy = { timeout_seconds = 30 } })
@@ -690,8 +685,8 @@ local function define_tests()
             test.is_true(has_continue(result))
         end)
 
-        -- Host EE2-2711: a client learns a private call's row type from its
-        -- tool_approval event, so that event comes before the function_error.
+        -- A client learns a private call's row type from its tool_approval
+        -- event, so that event comes before the function_error.
         it("publishes a private call's tool_approval event before its function_error", function()
             local ctx, captured = new_ctx({ live = 1, policy = { require = "all" } })
             local op, batch = round(ctx, {

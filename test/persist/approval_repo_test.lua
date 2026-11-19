@@ -1,36 +1,24 @@
 local test = require("test")
-local sql = require("sql")
 local uuid = require("uuid")
 local consts = require("consts")
 local tx = require("tx")
 local approval_repo = require("approval_repo")
 local message_repo = require("message_repo")
 local session_repo = require("session_repo")
-local context_repo = require("context_repo")
 local wait_for_boot = require("wait_for_boot")
+local fx = require("gate_fixtures")
 
--- The tool approval store (EE2-2710, architecture 4.6): conditional writes,
--- receipts, batch fences, grants, the turn fence, session activity, the
--- create_batch descriptor and session deletion. Runs on SQLite and
--- PostgreSQL (POSTGRES_TEST_FILTER).
+-- The tool approval store: conditional writes, receipts, batch fences,
+-- grants, the turn fence, session activity, the create_batch descriptor and
+-- session deletion. Runs on SQLite and PostgreSQL (POSTGRES_TEST_FILTER).
 
 local HASH_A = "sha256:" .. string.rep("a", 64)
 local HASH_B = "sha256:" .. string.rep("b", 64)
 
-local function count(table_name, session_id)
-    local db = assert(sql.get(consts.get_db_resource()))
-    local rows, err = db:query("SELECT COUNT(*) AS n FROM " .. table_name .. " WHERE session_id = $1", { session_id })
-    db:release()
-    if err then error(err) end
-    return tonumber(rows[1].n)
-end
+local count = fx.count
 
-local function new_session(user_id)
-    local context_id = uuid.v7()
-    assert(context_repo.create(context_id, "primary", "approval test"))
-    local session_id = uuid.v7()
-    assert(session_repo.create(session_id, user_id or uuid.v7(), context_id, "Approval test"))
-    return session_id
+local function new_session(user_id: string?): string
+    return fx.new_session({ user_id = user_id or uuid.v7() })
 end
 
 -- An assistant row and `n` function call rows, stored through create_batch.
@@ -95,6 +83,9 @@ local function define_tests()
         before_all(function()
             wait_for_boot.run()
         end)
+        after_all(function()
+            fx.cleanup()
+        end)
 
         describe("create_batch descriptor", function()
             it("behaves as before without a descriptor: no batch, no batch_id", function()
@@ -118,9 +109,7 @@ local function define_tests()
                 test.eq(calls.batch.controls, "kept")
                 test.eq(calls.batch.turn_id, "turn-1")
                 test.eq(calls.batch.revision, 1)
-                test.eq(#calls.batch.members, 3)
                 for index, member in ipairs(calls.members) do
-                    test.eq(calls.batch.members[index], member)
                     local row = assert(message_repo.get(member))
                     test.eq(row.metadata.batch_id, calls.batch_id)
                     test.eq(row.metadata.call_id, "call_" .. index)
@@ -176,8 +165,6 @@ local function define_tests()
                 test.is_nil(record.decided_via)
                 local read = assert(approval_repo.get(nil, record.approval_id))
                 test.eq(read.tool_message_id, calls.members[1])
-                local by_message = assert(approval_repo.get_by_message(nil, session_id, calls.members[1]))
-                test.eq(by_message.approval_id, record.approval_id)
                 local projection = approval_repo.projection(read)
                 test.eq(projection.approval_id, record.approval_id)
                 test.eq(projection.call_id, "call_1")

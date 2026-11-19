@@ -22,7 +22,6 @@ entries:
       comment: Fail-closed, sticky activation at every agent step - reads the effective agent's raw trait list, validates the trait context and compiled options, stores config.tool_approval with the row locked
     source: file://activation.lua
     modules:
-      - time
       - registry
     imports:
       trait_config: wippy.session.approval:trait_config
@@ -52,8 +51,6 @@ entries:
     meta:
       comment: Pure policy evaluator - requirement, repeated denial, grant matching and suspension, Approve-all offers per batch
     source: file://policy.lua
-    imports:
-      tool_meta: wippy.session.approval:tool_meta
 
   # wippy.session.approval:canonical_json
   - name: canonical_json
@@ -105,6 +102,8 @@ entries:
     source: file://events.lua
     modules:
       - json
+    imports:
+      consts: wippy.session:consts
 
   # wippy.session.approval:gate
   - name: gate
@@ -125,4 +124,6 @@ entries:
       policy: wippy.session.approval:policy
       preview: wippy.session.approval:preview
       tool_meta: wippy.session.approval:tool_meta
+      activation: wippy.session.approval:activation
+      ui_action_broker: wippy.session.process:ui_action_broker
       approval_events: wippy.session.approval:events

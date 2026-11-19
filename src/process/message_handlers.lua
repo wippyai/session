@@ -49,7 +49,7 @@ type SessionContext = {
     model_step_at: number?,
     model_cache_ttl: string?,
     model_cache_expires_at: number?,
-    approval_turn_end: any?,
+    approval_turn_end: string?,
 }
 
 type AttentionToolContext = {
@@ -886,25 +886,23 @@ deactivation_refs = function(state)
     return { deactivation_range = range }
 end
 
--- Whether the current turn ended by creating a form (control_forms keys its
--- one-form-per-turn marker by the same turn id). Such a turn takes no
--- further step; steering that is still pending starts the next turn instead
--- (session.flush_held).
-function message_handlers.ended_by_form(ctx): boolean
+-- Whether `marker` (a turn id) names the current turn.
+local function ends_current_turn(ctx, marker): boolean
     local state = ctx.turn_state
-    if type(state) ~= "table" or ctx.form_turn_id == nil then return false end
-    return ctx.form_turn_id == (state.id or state.message_id)
+    return type(state) == "table" and marker ~= nil and marker == (state.id or state.message_id)
 end
 
--- Whether the approval gate ended the current turn (EE2-2710, architecture
--- 4.5 step 12): a stop denial, expiry, finish, deletion, exit, no approval UI
--- or the request cap. Such a turn takes no further step; pending steering
--- joins the next user turn (flush_held is unchanged).
+-- Whether the current turn ended by creating a form (control_forms keys its
+-- one-form-per-turn marker by the same turn id), or the approval gate ended
+-- it (a stop denial, expiry, finish, deletion, exit, no approval UI or the
+-- request cap). Such a turn takes no further step; steering that is still
+-- pending starts the next turn instead (session.flush_held).
+function message_handlers.ended_by_form(ctx): boolean
+    return ends_current_turn(ctx, ctx.form_turn_id)
+end
+
 function message_handlers.ended_by_approval(ctx): boolean
-    local state = ctx.turn_state
-    local marker = ctx.approval_turn_end
-    if type(state) ~= "table" or type(marker) ~= "table" or marker.turn_id == nil then return false end
-    return marker.turn_id == (state.id or state.message_id)
+    return ends_current_turn(ctx, ctx.approval_turn_end)
 end
 
 -- The interaction a turn start or end persists, resolved against the state
@@ -1665,8 +1663,8 @@ function message_handlers.agent_step(ctx, op)
         return stop_turn(ctx, op, agent, state, "repeated_tool_calls", detail)
     end
 
-    -- Tool approval activation (EE2-2710): before any other side effect of
-    -- the step and before the model call. It fails closed: a listed trait
+    -- Tool approval activation: before any other side effect of the step
+    -- and before the model call. It fails closed: a listed trait
     -- that can't be activated ends the turn with no model call.
     local _, activation_err, activation_kind = activation.apply(ctx, agent)
     if activation_err then
@@ -2181,7 +2179,7 @@ function message_handlers.agent_step(ctx, op)
             call_message_types[call.id] = call_type
         end
         -- A protected response stores its approval batch record with the
-        -- rows (EE2-2710); an unprotected one passes no options.
+        -- rows; an unprotected one passes no options.
         local stored_id, call_message_ids, store_err, stored_date, approval_batch = ctx.writer:add_response(
             output_text, metadata, intents, step_notes, nil, approval_gate.response_options(ctx))
         if store_err then
@@ -2449,8 +2447,8 @@ local function queue_round_end(ctx, op, next_ops, end_turn, skip_checkpoint)
     return true
 end
 
--- The approval gate hook (EE2-2710, architecture 4.4). Replaceable, so tests
--- can drive process_tools with a fake gate.
+-- The approval gate hook. Replaceable, so tests can drive process_tools with
+-- a fake gate.
 message_handlers._approval_gate = function(ctx, op, env)
     return approval_gate.run(ctx, op, env)
 end
@@ -2512,7 +2510,7 @@ function message_handlers.process_tools(ctx, op)
     end
 
     -- The message IDs and the session context are set before the approval
-    -- gate, which freezes both (EE2-2710, architecture 4.4).
+    -- gate, which freezes both.
     for call_id, tool_call in pairs(validated_tools or {}) do
         if not op.call_message_ids[call_id] then
             return nil, "Tool call intent was not stored with the assistant response: " .. call_id
@@ -2540,8 +2538,8 @@ function message_handlers.process_tools(ctx, op)
         return nil, failure
     end
 
-    -- The approval gate (EE2-2710). nil for an unprotected session. It fails
-    -- closed: when the check fails, no call runs.
+    -- The approval gate. nil for an unprotected session. It fails closed:
+    -- when the check fails, no call runs.
     local gated, gate_err = message_handlers._approval_gate(ctx, op, {
         validated_tools = validated_tools,
         session_context = session_context,
@@ -2559,10 +2557,7 @@ function message_handlers.process_tools(ctx, op)
         -- The gate settled every call of the batch; none runs. A turn the gate
         -- ended takes no further step, and pending steering waits for the
         -- next user turn (ended_by_approval in finish_turn).
-        if gated.end_turn then
-            local marker: any = { turn_id = approval_gate.turn_id(ctx, op), reason = gated.end_reason }
-            ctx.approval_turn_end = marker
-        end
+        if gated.end_turn then ctx.approval_turn_end = approval_gate.turn_id(ctx, op) end
         -- A deleted session has no rows left to mark.
         if not gated.deleted then
             local cancelled, cancel_err = settle_behavior_round(ctx, op, true)
@@ -2575,13 +2570,23 @@ function message_handlers.process_tools(ctx, op)
         return { completed = (#next_ops == 0), next_ops = next_ops }
     end
     local settled_by_gate = gated.settled or {}
-    -- In a protected session only the calls the gate released are given to
-    -- the caller; unprotected rounds run as before.
+    -- In a protected session the caller gets the calls the gate released, and
+    -- each call the gate settled as an entry that does not run (valid false,
+    -- its not-run text as the error), so the result listener and the
+    -- after-execute wrappers see every call. Unprotected rounds run as before.
     local run_tools = validated_tools
     if gated.released then
         run_tools = {}
         for call_id, tool_call in pairs(validated_tools or {}) do
-            if gated.released[call_id] then run_tools[call_id] = tool_call end
+            local not_run = gated.not_run[call_id]
+            if not_run then
+                local entry = {}
+                for key, value in pairs(tool_call) do entry[key] = value end
+                entry.valid, entry.error = false, not_run
+                run_tools[call_id] = entry
+            elseif gated.released[call_id] then
+                run_tools[call_id] = tool_call
+            end
         end
     end
 
@@ -2597,28 +2602,14 @@ function message_handlers.process_tools(ctx, op)
             end
     end
 
-    -- After an approval release: the context the release rechecked, the
-    -- batch cancellation channel (only Stop, exit and deletion close it), and
-    -- the settled calls as precomputed results when the caller supports them,
-    -- so the result listener and after-execute wrappers see every call.
-    -- Without the feature the caller gets only the released calls.
+    -- After an approval release, dispatch uses the context the release
+    -- rechecked. Only Stop, exit and deletion close the turn's cancellation
+    -- channel, so released calls are not cancelled by steering or finish.
     if gated.session_context ~= nil then session_context = gated.session_context end
-    local cancel = gated.cancel or (ctx.coordinator and ctx.coordinator.cancel)
-    local execute_options = nil
-    local features = caller.FEATURES
-    if gated.precomputed and next(gated.precomputed) ~= nil
-        and type(features) == "table" and features.precomputed_results then
-        run_tools = run_tools or {}
-        for call_id in pairs(gated.precomputed) do
-            if validated_tools and validated_tools[call_id] then run_tools[call_id] = validated_tools[call_id] end
-        end
-        execute_options = { precomputed_results = gated.precomputed }
-    end
 
     local executed, results, execute_err = pcall(function()
-        return caller:execute(session_context, run_tools, cancel, execute_options)
+        return caller:execute(session_context, run_tools, ctx.coordinator and ctx.coordinator.cancel)
     end)
-    if gated.batch_id and ctx.approval_wake then ctx.approval_wake:unregister_batch_cancel(gated.batch_id) end
     if not executed then
         execute_err = tostring(results)
         results = nil

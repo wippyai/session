@@ -374,7 +374,7 @@ local function define_tests()
         end)
     end)
 
-    -- EE2-2710 AC 31: `_control` payloads can't change config.tool_approval.
+    -- `_control` payloads can't change config.tool_approval.
     describe("control_config and the tool approval activation", function()
         local STORED = { active = true, require = "all", approve_all = "off", timeout_seconds = 900,
             max_requests_per_turn = 10, revision = 2 }
@@ -412,9 +412,11 @@ local function define_tests()
         it("refuses tool_approval in a behavior control proposal", function()
             local ctx, captured = mock_ctx()
             ctx.config = { agent_id = "agent:old", tool_approval = STORED }
-            local _ok, _err = control_handlers.apply_behavior_controls(ctx, {
+            local ok, err = control_handlers.apply_behavior_controls(ctx, {
                 { config = { tool_approval = { active = false } } }
             })
+            test.is_nil(ok)
+            test.contains(tostring(err), "only supports agent, model, traits and tools")
             test.eq(captured.persist_calls, 0)
             test.eq(ctx.config.tool_approval, STORED)
         end)

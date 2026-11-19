@@ -264,6 +264,7 @@ entries:
       wake: wippy.session.approval:wake
       activation: wippy.session.approval:activation
       approval_repo: wippy.session.persist:approval_repo
+      approval_gate: wippy.session.approval:gate
     method: run
 
   # wippy.session.process:plugin

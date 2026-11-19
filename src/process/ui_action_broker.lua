@@ -629,7 +629,7 @@ function ui_action_broker:_unmonitor(pid)
 end
 
 -- One shared monitor reference count per process for the session plugin:
--- the approval UI surface tracker (EE2-2710) takes and releases references
+-- the approval UI surface tracker takes and releases references
 -- here, so a connection that both binds UI actions and declares an approval
 -- surface is monitored once and unmonitored only when both are done.
 function ui_action_broker:retain_monitor(pid)

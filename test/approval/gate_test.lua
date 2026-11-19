@@ -13,9 +13,9 @@ local activation = require("activation")
 local wait_for_boot = require("wait_for_boot")
 local fx = require("gate_fixtures")
 
--- The approval gate up to the wait (EE2-2710 slice S7a): process_tools with
--- the real gate, the real store and a fake tool caller that records every
--- launch. The wait itself is covered by gate_wait_test.
+-- The approval gate up to the wait: process_tools with the real gate, the
+-- real store and a fake tool caller that records every launch. The wait is
+-- replaced by a closure as finish; gate_wait_test covers the wait itself.
 
 local MARKED, GRANTED, PLAIN, PRIVATE = fx.MARKED, fx.GRANTED, fx.PLAIN, fx.PRIVATE
 local DELEGATE, TARGET, TABLES = fx.DELEGATE, fx.TARGET, fx.TABLES
@@ -23,10 +23,7 @@ local count, new_ctx, round, row = fx.count, fx.new_ctx, fx.round, fx.row
 local updates_of, has_continue, launches = fx.updates_of, fx.has_continue, fx.launches
 local records_by_call, create_tool_grant, entry_meta = fx.records_by_call, fx.create_tool_grant, fx.entry_meta
 local function define_tests()
-    describe("Tool approval gate up to the wait (EE2-2710 S7a)", function()
-        -- These cases stop at the wait: a batch that needs a decision is
-        -- closed there as interrupted, as no decision command exists before
-        -- slice S8. The wait itself is covered by gate_wait_test.
+    describe("Tool approval gate up to the wait", function()
         local saved_wait = nil
         before_all(function()
             wait_for_boot.run()
@@ -42,7 +39,6 @@ local function define_tests()
             fx.cleanup()
         end)
 
-        -- AC 1
         it("does not call the evaluator or touch the approval tables for an unprotected session", function()
             local ctx, captured = new_ctx({ protected = false })
             local calls = { evaluate = 0, evaluate_batch = 0, repo = {} }
@@ -62,7 +58,7 @@ local function define_tests()
                     end
                 end
             end
-            local unprotected, control = nil, nil
+            local unprotected: any, control: any = nil, nil
             local ok, err = pcall(function()
                 local op = round(ctx, {
                     { id = "call-1", registry_id = MARKED, args = { customer_id = "c_1" } },
@@ -107,7 +103,6 @@ local function define_tests()
             for _, table_name in ipairs(TABLES) do test.eq(count(table_name, ctx.session_id), 0, table_name) end
         end)
 
-        -- AC 2
         it("require marked: asks for a marked call and never runs it or its peers", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, {
@@ -186,7 +181,6 @@ local function define_tests()
             test.eq(count("session_tool_approvals", ctx.session_id), 0)
         end)
 
-        -- AC 3
         it("require all: every call asks, including private and delegation calls, each with an event", function()
             local ctx, captured = new_ctx({ live = 1, policy = { require = "all" } })
             local op, batch = round(ctx, {
@@ -246,7 +240,6 @@ local function define_tests()
             test.is_nil(started["call-2"].approval)
         end)
 
-        -- AC 42 (release recheck of a grant-only batch)
         it("settles a grant-allowed call as revoked when the grant is revoked before the release", function()
             local ctx = new_ctx({ live = 1 })
             local grant = create_tool_grant(ctx, GRANTED)
@@ -275,12 +268,10 @@ local function define_tests()
             test.is_true(has_continue(result), "the turn continues")
         end)
 
-        -- AC 19
         it("settles a repeated denial at once, creates no request and checks it before grants", function()
             local ctx, captured = new_ctx({ live = 1 })
             local args = { customer_id = "c_9" }
-            -- First batch of the turn: the user denies the call (the decision
-            -- command is slice S8, so the test commits it in the wait seam).
+            -- First batch of the turn: the user denies the call while it waits.
             approval_gate._wait = function(gate_ctx, run)
                 local record = assert(approval_repo.list_by_batch(nil, gate_ctx.session_id, run.binding.batch_id))[1]
                 assert(approval_repo.transact(gate_ctx.session_id, function(dbtx)
@@ -316,7 +307,6 @@ local function define_tests()
             test.eq(errors[#errors].payload.outcome, "not_approved")
         end)
 
-        -- AC 26
         it("settles every member as limit, publishes one notice per turn and ends the turn", function()
             local ctx, captured = new_ctx({ live = 1, policy = { max_requests_per_turn = 2 } })
             local op, batch = round(ctx, {
@@ -344,14 +334,6 @@ local function define_tests()
             for _, update in ipairs(updates_of(captured, approval_events.TOOL_APPROVAL)) do
                 test.eq(update.payload.approval.state, "limited", "no request is ever pending")
             end
-            -- A second capped batch in the same turn sends no second notice.
-            local again = round(ctx, {
-                { id = "call-5", registry_id = MARKED, args = { n = 5 } },
-                { id = "call-6", registry_id = MARKED, args = { n = 6 } },
-                { id = "call-7", registry_id = MARKED, args = { n = 7 } },
-            })
-            assert(message_handlers.process_tools(ctx, again))
-            test.eq(#captured.notices, 1, "one notice per turn")
         end)
 
         it("counts only new pending requests toward the cap, not grant audit records", function()
@@ -404,12 +386,6 @@ local function define_tests()
             test.eq(#captured.notices, 1)
             test.eq(captured.notices[1].code, "tool_approval_unavailable")
             test.eq(#captured.session_updates, 0, "no activity: nothing waited")
-            assert(message_handlers.process_tools(ctx, round(ctx, { { id = "call-3", registry_id = MARKED, args = {} } })))
-            test.eq(#captured.notices, 1, "one notice per turn")
-            -- begin_turn keeps the turn state table and moves its message_id.
-            ctx.turn_state.message_id = "turn-" .. uuid.v7()
-            assert(message_handlers.process_tools(ctx, round(ctx, { { id = "call-4", registry_id = MARKED, args = {} } })))
-            test.eq(#captured.notices, 2, "the next turn gets its own notice")
         end)
 
         it("gives the caller only the calls the gate released", function()
@@ -428,12 +404,13 @@ local function define_tests()
             local _, err = message_handlers.process_tools(ctx, op)
             test.is_nil(err)
             test.is_true(op.caller.launches["call-1"])
-            test.is_nil(op.caller.executed["call-odd"])
-            test.is_nil(op.caller.executed["call-extra"])
+            test.is_nil(op.caller.launches["call-odd"])
+            test.is_true(op.caller.executed["call-odd"], "given to the caller as an entry that does not run")
+            test.is_nil(op.caller.executed["call-extra"], "a call outside the round never reaches the caller")
             test.eq(row(op.call_message_ids["call-odd"]).metadata.result.reason, "approval_check_failed")
         end)
 
-        it("creates the requests when a surface was declared before but none is live (grace period is S7b)", function()
+        it("creates the requests when a surface was declared before but none is live", function()
             local ctx, captured = new_ctx({ declared = "2026-11-19T10:00:00Z" })
             local op, batch = round(ctx, { { id = "call-1", registry_id = MARKED, args = { n = 1 } } })
             assert(message_handlers.process_tools(ctx, op))
@@ -460,7 +437,6 @@ local function define_tests()
             test.is_true(has_continue(result), "steering continues the turn")
         end)
 
-        -- AC 32 (the gate part): invalid calls and arguments that don't decode.
         it("keeps the caller's error text for invalid calls and undecodable arguments, with no request", function()
             local invalid = { id = "call-bad", registry_id = MARKED, valid = false,
                 error = "Failed to get tool schema: gone" }
@@ -501,9 +477,10 @@ local function define_tests()
                 test.eq(stored.result, expected[call_id], call_id)
                 test.is_nil(stored.approval, call_id)
             end
-            local records = assert(approval_repo.list_by_state(nil, fenced_ctx.session_id, "interrupted"))
+            local records = assert(approval_repo.list_by_batch(nil, fenced_ctx.session_id, fenced.approval.batch_id))
             test.eq(#records, 1)
             test.eq(records[1].call_id, "call-ok")
+            test.eq(records[1].state, "interrupted")
             local texts = {}
             for _, update in ipairs(updates_of(captured, consts.UPSTREAM_TYPES.FUNCTION_ERROR)) do
                 texts[update.id] = update.payload
@@ -512,7 +489,6 @@ local function define_tests()
             test.is_nil(texts["call-args"].outcome, "today's event shape")
         end)
 
-        -- The freeze outcome freeze_failed (S4 left the model reason open).
         it("settles a call that can't be frozen as approval_check_failed and runs its peers", function()
             local ctx, captured = new_ctx({ live = 1 })
             local deep: any = {}
@@ -532,9 +508,7 @@ local function define_tests()
             test.is_false(stored.result.executed)
             test.eq(stored.result.reason, "approval_check_failed")
             test.eq(stored.result.instruction, approval_events.model_result("approval_check_failed").instruction)
-            test.eq(stored.result.instruction, "The tool did not run. Do not call it again with the same arguments."
-                .. " The call could not be prepared for the approval check.")
-            test.is_nil(op.caller.executed["call-deep"], "never given to the caller")
+            test.is_nil(op.caller.launches["call-deep"], "never runs")
             test.is_true(op.caller.launches["call-ok"])
             test.is_true(has_continue(result))
             test.eq(count("session_tool_approvals", ctx.session_id), 0)

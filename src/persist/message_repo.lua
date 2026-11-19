@@ -160,7 +160,8 @@ function message_repo.create_batch(session_id, rows, batch)
             end
         end
         if batch ~= nil then
-            local record, batch_err = approval_repo.create_batch_record(dbtx, session_id, batch)
+            local record, batch_err = approval_repo.create_batch_record(dbtx, session_id, batch,
+                message_repo.has_pending_input)
             if not record then return nil, batch_err end
             batch_record = record
         end
@@ -482,17 +483,6 @@ function message_repo.admit(message_id, session_id, msg_type, data, metadata, se
             return nil, "Failed to create message: " .. tostring(insert_err)
         end
 
-        -- A protected session's Stop (EE2-2710, architecture 4.5 step 9):
-        -- the turn fence and the closure of the turn's approval batches
-        -- commit with the Stop itself, so no batch of the turn is released
-        -- or created open after it.
-        local fence = session_updates.approval_fence
-        if type(fence) == "table" and type(fence.turn_id) == "string" and fence.turn_id ~= "" then
-            local _, fence_err = approval_repo.write_turn_fence(dbtx, session_id, fence.turn_id, "stop")
-            if fence_err then return nil, fence_err end
-            local _, close_err = approval_repo.close_turn_batches(dbtx, session_id, fence.turn_id, "stop")
-            if close_err then return nil, close_err end
-        end
         local current_meta, meta_err = session_meta_of(dbtx, session_id)
         if not current_meta then return nil, meta_err end
         for key, value in pairs(session_updates.meta or {}) do current_meta[key] = value end
@@ -791,6 +781,24 @@ function message_repo.list_steering_inputs(session_id: string?, relevant: (any, 
     return kept, nil
 end
 
+-- Whether the session has a steering input stored as pending, read on
+-- `conn` (a transaction) or on a pooled connection when it is nil.
+function message_repo.has_pending_input(conn: any, session_id: string): (boolean?, string?)
+    local db = conn
+    if not db then
+        local opened, err = get_db()
+        if not opened then return nil, err end
+        db = opened
+    end
+    local rows, err = steering_candidates(db, session_id)
+    if not conn then db:release() end
+    if not rows then return nil, err end
+    for _, message in ipairs(rows) do
+        if message.metadata.input.state == "pending" then return true, nil end
+    end
+    return false, nil
+end
+
 function message_repo.list_pending_inputs(session_id)
     local rows, err = message_repo.list_steering_candidates(session_id)
     if not rows then return nil, err end
@@ -935,16 +943,12 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
                 boundary_date = date
             end
         end
-        -- A protected session's Stop (EE2-2710, architecture 4.5 step 9):
-        -- the turn fence and the closure of the turn's approval batches
-        -- commit with the Stop itself, so no batch of the turn is released
-        -- or created open after it.
-        local fence = session_updates.approval_fence
-        if type(fence) == "table" and type(fence.turn_id) == "string" and fence.turn_id ~= "" then
-            local _, fence_err = approval_repo.write_turn_fence(dbtx, session_id, fence.turn_id, "stop")
+        -- A protected session's Stop: the turn fence and the closure of the
+        -- turn's approval batches commit with the Stop itself, so no batch of
+        -- the turn is released or created open after it.
+        if session_updates.approval_turn_id ~= nil then
+            local _, fence_err = approval_repo.fence_turn(dbtx, session_id, session_updates.approval_turn_id, "stop")
             if fence_err then return nil, fence_err end
-            local _, close_err = approval_repo.close_turn_batches(dbtx, session_id, fence.turn_id, "stop")
-            if close_err then return nil, close_err end
         end
         local current_meta, meta_err = session_meta_of(dbtx, session_id)
         if not current_meta then return nil, meta_err end
@@ -1026,9 +1030,9 @@ function message_repo.update_metadata(message_id, metadata, expected_session_id)
 end
 
 -- update_metadata for approval-bearing rows: merges `metadata` (top-level
--- keys) into the row's metadata inside the caller's transaction, with the
--- session row locked first, so the read and the write cannot interleave with
--- another writer of the session (4.6). Never starts a transaction. The row
+-- keys) into the row's metadata inside the caller's transaction, which holds
+-- the session row lock, so the read and the write cannot interleave with
+-- another writer of the session. Never starts a transaction. The row
 -- must belong to `session_id`. Returns { message_id, updated, metadata }.
 function message_repo.update_metadata_tx(dbtx, session_id, message_id, metadata)
     if not dbtx then return nil, "A transaction is required" end
@@ -1036,8 +1040,6 @@ function message_repo.update_metadata_tx(dbtx, session_id, message_id, metadata)
     if not message_id or message_id == "" then return nil, "Message ID is required" end
     if type(metadata) ~= "table" then return nil, "Metadata must be a table" end
 
-    local _, lock_err = message_date.lock_session(dbtx, session_id)
-    if lock_err then return nil, lock_err end
     local rows, read_err = sql.builder.select("metadata"):from("messages")
         :where("session_id = ?", session_id):where("message_id = ?", message_id)
         :limit(1):run_with(dbtx):query()

@@ -4,8 +4,8 @@ local registry = require("registry")
 local time = require("time")
 local approval_events = require("approval_events")
 
--- Model-facing results and event payloads of the approval gate (EE2-2710,
--- architecture 4.8 and 4.9, docs/tool-approval-protocol.md section 11).
+-- Model-facing results and event payloads of the approval gate
+-- (docs/tool-approval-protocol.md sections 4, 8, 9 and 11).
 
 local REASONS = {
     "denied_by_user", "stopped_by_user", "not_run_batch_stopped", "expired", "stopped",
@@ -44,10 +44,11 @@ local function define_tests()
         end)
 
         it("matches the protocol fixture for a continue denial", function()
-            local result = approval_events.model_result("denied_by_user", "Use the staging customer instead.")
-            test.eq(result.user_feedback, "Use the staging customer instead.")
-            test.eq(result.instruction,
-                "The tool did not run. Do not call it again with the same arguments. Follow the user's feedback.")
+            local raw = registry.get("app.approval:protocol_fixtures").data.fixtures["model_result_not_run.json"]
+            local fixture = assert(json.decode(tostring(raw)))
+            local result = approval_events.model_result(fixture.reason, fixture.user_feedback)
+            for key, value in pairs(fixture) do test.eq(result[key], value, key) end
+            for key in pairs(result) do test.not_nil(fixture[key], key) end
             test.eq(approval_events.not_run_text("denied_by_user"), "Not run: you denied this call.")
         end)
 
@@ -122,24 +123,6 @@ local function define_tests()
             test.contains(json.encode(got.value:payload():data()), '"activity":null')
         end)
 
-        it("sends each notice once per turn", function()
-            local sent = {}
-            local upstream = { session_error = function(_self, code, message)
-                sent[#sent + 1] = { code = code, message = message }
-            end }
-            local turn = {}
-            test.is_true(approval_events.publish_notice(upstream, turn, "turn-1", approval_events.NOTICE.LIMIT))
-            test.is_false(approval_events.publish_notice(upstream, turn, "turn-1", approval_events.NOTICE.LIMIT))
-            test.is_true(approval_events.publish_notice(upstream, turn, "turn-1", approval_events.NOTICE.UNAVAILABLE))
-            test.eq(#sent, 2)
-            -- The turn state table outlives a turn: a new turn ID sends again.
-            test.is_true(approval_events.publish_notice(upstream, turn, "turn-2", approval_events.NOTICE.LIMIT))
-            test.eq(#sent, 3)
-            test.eq(sent[1].code, "tool_approval_limit")
-            test.eq(sent[2].code, "tool_approval_unavailable")
-            test.eq(sent[2].message,
-                "A tool call needs your approval, but no open chat window can show it. The assistant stopped.")
-        end)
     end)
 end
 

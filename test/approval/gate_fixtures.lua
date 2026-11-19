@@ -12,11 +12,14 @@ local wake = require("wake")
 local writer = require("writer")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
+local trait_config = require("trait_config")
+local activation = require("activation")
 
--- Shared fixtures of the approval gate suites (EE2-2710 S7a and S7b): a
--- session owned by the test actor with a process_tools context on it, a
--- fake tool caller that records every launch, a stored model response with
--- its PROCESS_TOOLS operation, and readers for rows, events and records.
+-- Shared fixtures of the tool approval suites: sessions that are deleted
+-- after the suite, a process_tools context on a session owned by the test
+-- actor, a fake tool caller that records every launch, a stored model
+-- response with its PROCESS_TOOLS operation, and readers for rows, events
+-- and records.
 local AGENT = "app.approval:test_agent"
 local MARKED = "app.approval:marked_tool"
 local GRANTED = "app.approval:granted_tool"
@@ -35,30 +38,30 @@ local function count(table_name: string, session_id: string): number
     return tonumber(rows[1].n) or 0
 end
 
-local function effective(overrides: any?): any
-    local value = {
-        active = true, enforcement = "enforce", require = "marked", approve_all = "off",
-        timeout_seconds = 900, max_requests_per_turn = 10, agent_opted_in = true,
-    }
-    for key, item in pairs(overrides or {}) do value[key] = item end
-    return value
-end
-
 local fixtures = {}
+
+-- Creates a session (opts.user_id, default the test actor; opts.config) with
+-- its primary context; cleanup() deletes both. Returns the session ID.
+local function new_session(opts: any?): string
+    opts = opts or {}
+    local context_id, session_id = uuid.v7(), uuid.v7()
+    assert(context_repo.create(context_id, "primary", "{}"))
+    assert(session_repo.create(session_id, opts.user_id or assert(security.actor()):id(), context_id, "Approval",
+        "test", {}, opts.config or {}))
+    table.insert(fixtures, { session_id = session_id, context_id = context_id })
+    return session_id
+end
 
 -- A session owned by the test actor, and a process_tools context on it.
 --   opts.protected   false: no stored activation and no policy
---   opts.policy      overrides of the effective policy
+--   opts.policy      trait settings, plus enforcement = "off" and
+--                    agent_opted_in = false (an agent without the trait)
 --   opts.live        live approval UI surfaces
 --   opts.declared    ui_declared_at of the stored activation
 local function new_ctx(opts: any?): (any, any)
     opts = opts or {}
-    local actor = assert(security.actor(), "the test needs a security actor")
-    local owner = actor:id()
-    local context_id, session_id = uuid.v7(), uuid.v7()
-    assert(context_repo.create(context_id, "primary", "{}"))
-    assert(session_repo.create(session_id, owner, context_id, "Gate", "test", {}, { agent_id = AGENT }))
-    table.insert(fixtures, { session_id = session_id, context_id = context_id })
+    local owner = assert(security.actor(), "the test needs a security actor"):id()
+    local session_id = new_session({ config = { agent_id = AGENT } })
     local captured = { updates = {}, session_updates = {}, notices = {} }
     local config: any = { agent_id = AGENT, delegation_func_id = DELEGATE }
     local ctx: any = {
@@ -84,16 +87,20 @@ local function new_ctx(opts: any?): (any, any)
         turn_state = { message_id = "turn-" .. uuid.v7(), active = true, steps = 1, repeated_calls = 0 },
         approval_wake = wake.new(),
         approval_surfaces = opts.live and { live = opts.live, revision = 1 } or nil,
+        -- The command bus fields the gate and process_tools read; stop()
+        -- does what bus:request_stop does.
+        coordinator = { state = "running", cancel = channel.new(),
+            stop_requested = function(self) return self.state == "draining_stop" end },
         current_agent = { id = AGENT, tools = {} },
     }
     if opts.protected ~= false then
-        local stored = effective(opts.policy)
-        config.tool_approval = {
-            active = true, require = stored.require, approve_all = stored.approve_all,
-            timeout_seconds = stored.timeout_seconds, max_requests_per_turn = stored.max_requests_per_turn,
-            revision = 1, ui_declared_at = opts.declared,
-        }
-        ctx.tool_approval_policy = stored
+        local policy = opts.policy or {}
+        local context = {}
+        for _, key in ipairs(trait_config.SETTING_KEYS) do context[key] = policy[key] end
+        local settings = assert(trait_config.normalize(context))
+        config.tool_approval = activation.merge(nil, settings, opts.declared)
+        ctx.tool_approval_policy = assert(trait_config.effective(config.tool_approval,
+            policy.agent_opted_in ~= false and settings or nil, policy.enforcement or "enforce"))
     end
     return ctx, captured
 end
@@ -205,7 +212,6 @@ local function create_tool_grant(ctx: any, registry_id: string): any
     end))
 end
 
-
 -- Deletes every session the fixtures created.
 local function cleanup()
     for _, fixture in ipairs(fixtures) do
@@ -218,7 +224,7 @@ end
 return {
     AGENT = AGENT, MARKED = MARKED, GRANTED = GRANTED, PLAIN = PLAIN, PRIVATE = PRIVATE,
     DELEGATE = DELEGATE, TARGET = TARGET, TABLES = TABLES,
-    count = count, effective = effective, new_ctx = new_ctx, fake_caller = fake_caller,
+    count = count, new_session = new_session, new_ctx = new_ctx, fake_caller = fake_caller,
     entry_meta = entry_meta, round = round, row = row, updates_of = updates_of,
     has_continue = has_continue, launches = launches, records_by_call = records_by_call,
     create_tool_grant = create_tool_grant, cleanup = cleanup,

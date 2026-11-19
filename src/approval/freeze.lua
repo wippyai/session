@@ -2,12 +2,11 @@ local json = require("json")
 local fingerprint = require("fingerprint")
 local tool_meta = require("tool_meta")
 
--- Freezes one validated tool call for approval (EE2-2710, architecture 4.5
--- step 3): decoded arguments, the effective execution context, the tool
+-- Freezes one validated tool call for approval: decoded arguments, the effective execution context, the tool
 -- entry's identity, title, description and deployment fingerprint, the
 -- delegate target for delegation calls and the Attention browser binding.
 -- The intent digest covers all of them; the denial key covers what the
--- repeated-denial rule compares (4.3, order 5).
+-- repeated-denial rule compares.
 --
 -- freeze.call(validated, env) never reads the registry; the gate passes the
 -- entries in `env`:
@@ -51,12 +50,8 @@ freeze.RUNTIME_CONTEXT_FIELDS = {
 -- Context keys that are not part of the call's meaning: the caller sets
 -- call_id per call, and the runtime fields carry per-launch capability
 -- tokens. They are excluded from the intent digest and the denial key.
-freeze.TRANSIENT_CONTEXT_KEYS = {
-    call_id = true,
-    attention_inspection_runtime = true,
-    attention_context_runtime = true,
-    ui_action_runtime = true,
-}
+freeze.TRANSIENT_CONTEXT_KEYS = { call_id = true }
+for key in pairs(freeze.RUNTIME_CONTEXT_FIELDS) do freeze.TRANSIENT_CONTEXT_KEYS[key] = true end
 
 local MAX_COPY_DEPTH = 64
 
@@ -102,7 +97,7 @@ local function freeze_failed(message: any)
     return failure(freeze.OUTCOME.FREEZE_FAILED, message)
 end
 
--- The fields the intent digest covers (architecture 4.5 step 3).
+-- The fields the intent digest covers.
 local function digest_input(frozen: any): table
     return {
         registry_id = frozen.registry_id,

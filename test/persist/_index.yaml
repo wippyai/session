@@ -358,10 +358,10 @@ entries:
       name: Tool approval store
       type: test
       suite: session
-      comment: Conditional writes, receipts, batch fence, grants, turn fence, activity, create_batch descriptor and session deletion (EE2-2710)
+      comment: Conditional writes, receipts, batch fence, grants, turn fence, activity, create_batch descriptor and session deletion
     source: file://approval_repo_test.lua
     method: run
-    modules: [sql, uuid]
+    modules: [uuid]
     imports:
       test: wippy.test:test
       consts: wippy.session:consts
@@ -369,5 +369,5 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
-      context_repo: wippy.session.persist:context_repo
       wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures

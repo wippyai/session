@@ -5563,8 +5563,9 @@ local function define_tests()
         end)
     end)
 
-    -- EE2-2710 AC 31: activation at every agent step, before the model call.
-    describe("tool approval activation in agent_step", function()
+    -- Tool approval activation at every agent step, before the model call,
+    -- and the approval gate hook in agent_step and process_tools.
+    describe("tool approval in agent_step and process_tools", function()
         local TRAIT = "wippy.session.traits:tool_approval"
 
         local function approval_ctx(agent: any, traits: any): (any, any, any)
@@ -5633,19 +5634,6 @@ local function define_tests()
             test.eq(seen_before_step.require, "all")
             test.eq(store.writes, 1)
             test.eq(ctx.tool_approval_policy.require, "all")
-
-            -- A trait overlay or agent switch without the trait keeps it on.
-            local plain, plain_calls = counting_agent({})
-            ctx.agent_ctx.load_agent = function() return plain, nil end
-            ctx.agent_ctx.active_traits = { "other:trait" }
-            ctx.turn_state = nil
-            local _, switch_err = user_step(ctx)
-            test.is_nil(switch_err)
-            test.eq(plain_calls.steps, 1)
-            test.eq(ctx.config.tool_approval.require, "all")
-            test.is_true(ctx.tool_approval_policy.active)
-            test.is_false(ctx.tool_approval_policy.agent_opted_in)
-            test.eq(store.writes, 1, "an agent without the trait writes nothing")
         end)
 
         it("keeps approvals on through a handoff to an agent without the trait", function()
@@ -5675,25 +5663,26 @@ local function define_tests()
             test.contains(tostring(err), "database is down")
             test.eq(calls.steps, 0, "no model call")
         end)
-    end)
 
-    -- EE2-2710 S7a: the approval gate hook in agent_step and process_tools.
-    describe("tool approval gate wiring", function()
-        local TRAIT = "wippy.session.traits:tool_approval"
-
-        -- A context whose session is protected (stored activation and policy),
-        -- with a spy on the gate hook.
+        -- A protected session (require all) with a spy on the gate hook.
         local function protected_ctx(agent: any): (any, any, any)
-            local ctx, captured = mock_ctx(agent)
-            ctx.agent_ctx.active_traits = { { id = TRAIT, context = { require = "all" } } }
-            local store = { value = nil }
-            ctx.writer.update_tool_approval = function(_self, mutate)
-                local next_value = mutate(store.value)
-                if next_value ~= nil then store.value = next_value end
-                return store.value
-            end
-            local gate = { calls = 0 }
-            return ctx, captured, gate
+            local ctx, captured = approval_ctx(agent, { { id = TRAIT, context = { require = "all" } } })
+            return ctx, captured, { calls = 0 }
+        end
+
+        -- A process_tools op with one stored call, and a caller that counts runs.
+        local function gated_op(ctx: any): (any, any)
+            local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = "call-1", status = consts.FUNC_STATUS.PENDING })
+            local runs = { executed = 0 }
+            return {
+                tool_calls = { { id = "call-1", name = "pack_document", arguments = "{}" } },
+                call_message_ids = { ["call-1"] = id },
+                validated_tools = { ["call-1"] = { valid = true, name = "pack_document", args = {} } },
+                caller = { set_strategy = function() end,
+                    execute = function() runs.executed = runs.executed + 1; return {} end },
+                message_id = "msg-user",
+            }, runs
         end
 
         local function with_gate_spy(gate: any, body: any)
@@ -5708,7 +5697,7 @@ local function define_tests()
             if not ok then error(err) end
         end
 
-        it("fails a protected turn on a validate error before any row is stored, with no gate call (AC 32)", function()
+        it("fails a protected turn on a validate error before any row is stored, with no gate call", function()
             local agent = fake_agent(nil)
             agent.agent_options = { tool_approval = { schema = 1 } }
             local ctx, captured, gate = protected_ctx(agent)
@@ -5724,8 +5713,9 @@ local function define_tests()
                 }
             end
             local result, err
-            with_gate_spy(gate, function() result, err = user_step(ctx) end)
+            local ok, failure = pcall(with_gate_spy, gate, function() result, err = user_step(ctx) end)
             tool_caller.new = original_new
+            if not ok then error(failure) end
             test.is_nil(err)
             test.contains(tostring(result.failed), "Multiple exclusive tools found")
             test.eq(#captured.response_batches, 0, "no row is stored")
@@ -5733,7 +5723,7 @@ local function define_tests()
             test.not_nil(ctx.tool_approval_policy, "the session is protected")
         end)
 
-        it("settles cancel_only exactly as before in a protected session, with no gate call (AC 32)", function()
+        it("settles cancel_only exactly as before in a protected session, with no gate call", function()
             local ctx, captured, gate = protected_ctx(fake_agent(nil))
             ctx.config.tool_approval = { active = true, require = "all", approve_all = "off",
                 timeout_seconds = 900, max_requests_per_turn = 10, revision = 1 }
@@ -5756,7 +5746,7 @@ local function define_tests()
             test.eq(captured.stored[1].metadata.result, "Session stopped before the call executed")
         end)
 
-        it("asks the writer for a batch record only in a protected session (AC 1)", function()
+        it("asks the writer for a batch record only in a protected session", function()
             local seen = {}
             local function capture(ctx: any)
                 local original = ctx.writer.add_response
@@ -5787,25 +5777,12 @@ local function define_tests()
         it("runs nothing when the gate fences the batch and ends the turn as the gate says", function()
             for _, case in ipairs({ { end_turn = true, continues = false }, { end_turn = false, continues = true } }) do
                 local ctx, _captured, gate = protected_ctx(fake_agent(nil))
-                local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
-                    call_id = "call-1", status = consts.FUNC_STATUS.PENDING })
-                local executed = 0
+                local op, runs = gated_op(ctx)
                 gate.result = { fenced = true, end_turn = case.end_turn, settled = { ["call-1"] = true } }
                 local result, err
-                with_gate_spy(gate, function()
-                    result, err = message_handlers.process_tools(ctx, {
-                        tool_calls = { { id = "call-1", name = "pack_document", arguments = "{}" } },
-                        call_message_ids = { ["call-1"] = id },
-                        validated_tools = { ["call-1"] = { valid = true, name = "pack_document", args = {} } },
-                        caller = {
-                            set_strategy = function() end,
-                            execute = function() executed = executed + 1; return {} end,
-                        },
-                        message_id = "msg-user",
-                    })
-                end)
+                with_gate_spy(gate, function() result, err = message_handlers.process_tools(ctx, op) end)
                 test.is_nil(err)
-                test.eq(executed, 0, "caller:execute is never called")
+                test.eq(runs.executed, 0, "caller:execute is never called")
                 test.eq(gate.calls, 1)
                 test.eq(find_op(result.next_ops, consts.OP_TYPE.AGENT_CONTINUE) ~= nil, case.continues)
             end
@@ -5824,7 +5801,7 @@ local function define_tests()
                         metadata = { input = { state = "pending" } } } }, nil
                 end
                 ctx.reader.newest_non_input_id = function() return "msg-user", nil end
-                if case.marker then ctx.approval_turn_end = { turn_id = case.marker, reason = "deadline" } end
+                ctx.approval_turn_end = case.marker
                 test.eq(message_handlers.ended_by_approval(ctx), not case.continues, tostring(case.marker))
                 local finished, err = message_handlers.finish_turn(ctx)
                 test.is_nil(err)
@@ -5835,23 +5812,12 @@ local function define_tests()
 
         it("fails closed and runs nothing when the gate fails", function()
             local ctx, captured, gate = protected_ctx(fake_agent(nil))
-            local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
-                call_id = "call-1", status = consts.FUNC_STATUS.PENDING })
-            local executed = 0
+            local op, runs = gated_op(ctx)
             gate.err = "database is down"
             local _, err
-            with_gate_spy(gate, function()
-                _, err = message_handlers.process_tools(ctx, {
-                    tool_calls = { { id = "call-1", name = "pack_document", arguments = "{}" } },
-                    call_message_ids = { ["call-1"] = id },
-                    validated_tools = { ["call-1"] = { valid = true, name = "pack_document", args = {} } },
-                    caller = { set_strategy = function() end,
-                        execute = function() executed = executed + 1; return {} end },
-                    message_id = "msg-user",
-                })
-            end)
+            with_gate_spy(gate, function() _, err = message_handlers.process_tools(ctx, op) end)
             test.contains(tostring(err), "Tool approval check failed: database is down")
-            test.eq(executed, 0)
+            test.eq(runs.executed, 0)
             test.eq(captured.stored[1].metadata.status, consts.FUNC_STATUS.ERROR)
         end)
     end)

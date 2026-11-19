@@ -1,5 +1,4 @@
--- Settings of the wippy.session.traits:tool_approval trait (EE2-2710,
--- architecture 4.3). normalize() validates the trait context an agent author
+-- Settings of the wippy.session.traits:tool_approval trait. normalize() validates the trait context an agent author
 -- wrote and fills the defaults. effective() combines the stored, sticky
 -- activation with the current agent's settings into the policy the evaluator
 -- reads. Pure functions: no registry, database or logger access.
@@ -31,7 +30,10 @@ trait_config.LIMITS = {
 
 local REQUIRE_VALUES = { marked = true, all = true }
 local APPROVE_ALL_VALUES = { off = true, batch = true, tool = true, session = true }
-local KNOWN_KEYS = { require = true, approve_all = true, timeout_seconds = true, max_requests_per_turn = true }
+-- Every setting of the trait context, which a stored activation also holds.
+trait_config.SETTING_KEYS = { "require", "approve_all", "timeout_seconds", "max_requests_per_turn" }
+local KNOWN_KEYS = {}
+for _, key in ipairs(trait_config.SETTING_KEYS) do KNOWN_KEYS[key] = true end
 
 local function invalid(detail: string): (nil, string)
     return nil, trait_config.ERROR_CODE .. ": " .. detail
@@ -102,19 +104,16 @@ local function stored_settings(stored: any): (any, string?)
     end
     -- The activation write stores every setting; a missing one means the
     -- record is damaged, and a default would silently change the policy.
-    for _, key in ipairs({ "require", "approve_all", "timeout_seconds", "max_requests_per_turn" }) do
+    local settings = {}
+    for _, key in ipairs(trait_config.SETTING_KEYS) do
         if stored[key] == nil then return invalid("the stored activation has no " .. key) end
+        settings[key] = stored[key]
     end
-    return trait_config.normalize({
-        require = stored.require,
-        approve_all = stored.approve_all,
-        timeout_seconds = stored.timeout_seconds,
-        max_requests_per_turn = stored.max_requests_per_turn,
-    })
+    return trait_config.normalize(settings)
 end
 
--- The effective policy for one turn (architecture 4.3, "Activation is sticky
--- and monotonic"):
+-- The effective policy for one turn (the activation is sticky and
+-- monotonic):
 --   stored      config.tool_approval of the session, or nil
 --   current     the current agent's trait context when its trait list names
 --               the trait, else nil (pass {} for "listed with no context")

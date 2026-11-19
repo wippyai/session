@@ -97,12 +97,22 @@ function command_bus:is_quiescent()
         and self.pending_ops == 0 and #self.ops == 0 and #self.settle_ops == 0
 end
 
+-- Closes the turn's cancellation channel once. Stop, deletion and exit end
+-- the turn's in-flight model and tool calls; steering and finish never do.
+function command_bus:cancel_turn()
+    local cancel = self.cancel
+    if cancel and self.cancel_closed ~= cancel then
+        self.cancel_closed = cancel
+        cancel:close()
+    end
+end
+
 function command_bus:request_stop(stop_request_id)
     if self.state == "closed" or self.state == "draining_finish" then return false end
     if not self:is_turn_active() then return false end
     if self.state ~= "draining_stop" then
         self.state = "draining_stop"
-        if self.cancel then self.cancel:close() end
+        self:cancel_turn()
     end
     self.turn_state.stop_request_id = stop_request_id or self.turn_state.stop_request_id
     self:wake_loop()

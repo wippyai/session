@@ -12,6 +12,11 @@ local security = require("security")
 local uuid = require("uuid")
 
 local HUB = "relay-hub-1"
+
+-- Whether the waiter's channel holds a wake-up token (taken).
+local function woken(waiter: any): boolean
+    return not channel.select({ waiter.channel:case_receive(), default = true }).default
+end
 local SURFACES = consts.TOPICS.APPROVAL_SURFACES
 
 -- Runs the session plugin over a script of inbox messages and process
@@ -400,7 +405,7 @@ local function define_tests()
             end }
             local waiter = ctx.approval_wake:arm("batch-1")
             test.is_true(session.accept_surfaces(ctx, "plugin-pid", { session_id = "sess-1", live = 0, revision = 1 }))
-            test.is_true(waiter.flags.surfaces)
+            test.is_true(woken(waiter))
             test.eq(writes, 0, "an empty set is no declaration")
             test.is_true(session.accept_surfaces(ctx, "plugin-pid", { session_id = "sess-1", live = 2, revision = 2 }))
             test.not_nil(ctx.config.tool_approval.ui_declared_at)
@@ -422,19 +427,18 @@ local function define_tests()
             return ctx
         end
 
-        it("closes the batch cancellation channel before bus:request_stop runs", function()
+        it("wakes the gate on a committed Stop, before bus:request_stop runs", function()
             local ctx = stop_ctx()
-            local cancel = ctx.approval_wake:register_batch_cancel("batch-1", "turn-1")
-            local closed_when_requested = nil
+            local waiter = ctx.approval_wake:arm("batch-1")
+            local woken_when_requested = nil
             local bus = { turn_state = { id = "turn-1" }, request_stop = function()
-                local result = channel.select({ cancel:case_receive(), default = true })
-                closed_when_requested = not result.default and not result.ok
+                woken_when_requested = woken(waiter)
                 return true
             end }
             local ok, err = session.route_input(ctx, bus, consts.TOPICS.STOP, {}, {})
             test.is_nil(err)
             test.is_true(ok)
-            test.is_true(closed_when_requested, "closed synchronously before request_stop")
+            test.is_true(woken_when_requested)
         end)
 
         it("wakes the gate for committed steering only", function()
@@ -453,20 +457,19 @@ local function define_tests()
                 message_handlers.handle_message = original
                 test.is_nil(err)
                 test.is_true(ok)
-                test.eq(waiter.flags.steering == true, case.woken)
+                test.eq(woken(waiter), case.woken)
             end
         end)
 
-        it("leaves the channel open when Stop is not committed", function()
+        it("neither wakes the gate nor stops the bus when Stop is not committed", function()
             local ctx = stop_ctx()
             ctx.writer.stop_with_input_rollback = function() return nil, "disk failure" end
-            local cancel = ctx.approval_wake:register_batch_cancel("batch-1", "turn-1")
+            local waiter = ctx.approval_wake:arm("batch-1")
             local requested = false
             local bus = { turn_state = { id = "turn-1" }, request_stop = function() requested = true; return true end }
             session.route_input(ctx, bus, consts.TOPICS.STOP, {}, {})
             test.is_false(requested)
-            local result = channel.select({ cancel:case_receive(), default = true })
-            test.is_true(result.default)
+            test.is_false(woken(waiter))
         end)
     end)
 end

@@ -102,19 +102,18 @@ entries:
       name: Tool approval activation storage
       type: test
       suite: session
-      comment: The locked config.tool_approval write, whole-config writers and a session-scope input policy change keep it (AC 31)
+      comment: The locked config.tool_approval write, whole-config writers and a session-scope input policy change keep it
     source: file://activation_store_test.lua
     modules:
       - security
-      - uuid
     imports:
       test: wippy.test:test
       activation: wippy.session.approval:activation
       writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
-      context_repo: wippy.session.persist:context_repo
       input_policy: wippy.session.process:input_policy
       wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
     method: run
 
   - name: wake_test
@@ -142,6 +141,7 @@ entries:
       test: wippy.test:test
       policy: wippy.session.approval:policy
       trait_config: wippy.session.approval:trait_config
+      tool_meta: wippy.session.approval:tool_meta
     method: run
 
   - name: freeze_test
@@ -262,6 +262,8 @@ entries:
       writer: wippy.session.persist:writer
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
+      trait_config: wippy.session.approval:trait_config
+      activation: wippy.session.approval:activation
 
   - name: gate_test
     kind: function.lua

@@ -1,5 +1,4 @@
--- Activation of native tool-call approval (EE2-2710, architecture 4.3,
--- "Activation fails closed" to "The model has no tool that lowers approval").
+-- Activation of native tool-call approval.
 --
 -- At every agent step, after the effective agent is loaded and before the
 -- model call, message_handlers.agent_step calls activation.apply. It reads
@@ -25,7 +24,7 @@
 -- Only writer:update_tool_approval writes config.tool_approval. Whole-config
 -- writers (input policy, agent and model changes, `_control` config) keep the
 -- stored value (writer:update_meta), and control_handlers.control_config
--- drops a tool_approval key from `_control` payloads.
+-- refuses a whole `_control` that names tool_approval.
 local trait_config = require("trait_config")
 local agent_registry = require("agent_registry")
 local policy = require("policy")
@@ -33,7 +32,6 @@ local tool_meta = require("tool_meta")
 local approval_repo = require("approval_repo")
 local registry = require("registry")
 local consts = require("consts")
-local time = require("time")
 
 local activation = {}
 
@@ -50,7 +48,6 @@ activation._enforcement = nil :: any
 
 local REQUIRE_ALL = trait_config.REQUIRE.ALL
 local REQUIRE_MARKED = trait_config.REQUIRE.MARKED
-local SETTING_KEYS = { "require", "approve_all", "timeout_seconds", "max_requests_per_turn" }
 
 local function invalid(detail: string): string
     return activation.ERROR_CODE .. ": " .. detail
@@ -58,7 +55,7 @@ end
 
 local function now(): string
     if activation._now then return activation._now() end
-    return time.now():utc():format(time.RFC3339)
+    return approval_repo.now()
 end
 
 -- The operator setting tool_approval_enforcement, "enforce" or "off".
@@ -135,7 +132,7 @@ end
 
 local function same(left: any, right: any): boolean
     if type(left) ~= "table" or type(right) ~= "table" then return false end
-    for _, key in ipairs(SETTING_KEYS) do
+    for _, key in ipairs(trait_config.SETTING_KEYS) do
         if left[key] ~= right[key] then return false end
     end
     return left.active == true and left.ui_declared_at == right.ui_declared_at
@@ -190,7 +187,7 @@ function activation.persist(ctx: any, settings: any, declared_at: string?): (any
 end
 
 -- Records the first live approval UI surface of a protected session
--- (config.tool_approval.ui_declared_at, architecture 4.8). Does nothing for an
+-- (config.tool_approval.ui_declared_at). Does nothing for an
 -- unprotected session or when the time is already stored.
 function activation.note_declared(ctx: any): (any, string?)
     local stored = ctx.config and ctx.config.tool_approval
@@ -198,7 +195,8 @@ function activation.note_declared(ctx: any): (any, string?)
     return activation.persist(ctx, nil, now())
 end
 
-local function live_surfaces(ctx: any): number
+-- The number of live approval UI surfaces the parent plugin last sent.
+function activation.live_surfaces(ctx: any): number
     local surfaces = ctx.approval_surfaces
     return type(surfaces) == "table" and tonumber(surfaces.live) or 0
 end
@@ -247,7 +245,7 @@ function activation.apply(ctx: any, agent: any): (any, string?, string?)
         agent and agent.agent_options)
     if check_err then return nil, check_err, activation.FAILURE.INVALID end
 
-    local declared_at = live_surfaces(ctx) > 0 and now() or nil
+    local declared_at = activation.live_surfaces(ctx) > 0 and now() or nil
     local pending_declaration = type(stored) == "table" and declared_at ~= nil and stored.ui_declared_at == nil
     if settings ~= nil or pending_declaration then
         local committed, write_err = activation.persist(ctx, settings, declared_at)

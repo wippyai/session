@@ -17,7 +17,6 @@ type SessionConfig = {
     enable_agent_cache: boolean?,
     delegation_description_suffix: string?,
     ui_action_ttl_seconds: number?,
-    tool_approval_enforcement: string?,
 }
 
 local consts = {
@@ -132,7 +131,7 @@ local consts = {
         ARTIFACT = "artifact",
         CONTEXT = "context",
         ATTENTION_CONTEXT_SET = "attention_context_set",
-        -- Handled by the session plugin, never forwarded (EE2-2710).
+        -- Handled by the session plugin, never forwarded.
         TOOL_APPROVAL_SURFACE = "tool_approval_surface"
     },
 
@@ -176,7 +175,7 @@ local consts = {
         -- Wake-up from the form state API: { message_id } of a committed answer
         FORM_ANSWER = "form_answer",
         -- Plugin -> Session process only: the live approval UI surfaces of the
-        -- session, { session_id, live, revision } (EE2-2710).
+        -- session, { session_id, live, revision }.
         APPROVAL_SURFACES = "session_approval_surfaces"
     },
 
@@ -363,10 +362,10 @@ local consts = {
     }
 }
 
--- The operator setting tool_approval_enforcement (EE2-2710, architecture
--- 4.3): "off" turns the approval gate off for every session, a documented
--- security downgrade for rollback. Any other value, including a missing or
--- misspelt one, reads as "enforce", so a typo never turns enforcement off.
+-- The operator setting tool_approval_enforcement: "off" turns the approval
+-- gate off for every session, a documented security downgrade for rollback.
+-- Any other value, including a missing or misspelt one, reads as "enforce",
+-- so a typo never turns enforcement off.
 function consts.tool_approval_enforcement(): string
     local value, _ = env.get(consts.ENV_IDS.TOOL_APPROVAL_ENFORCEMENT)
     if value == "off" then return "off" end
@@ -416,7 +415,6 @@ function consts.get_config()
         delegation_func_id = delegation_func_id,
         on_session_end_func_id = on_session_end_func_id,
         ui_action_ttl_seconds = parsed_ui_action_ttl,
-        tool_approval_enforcement = consts.tool_approval_enforcement(),
         encryption_key = encryption_key,
 
         -- Internal constants

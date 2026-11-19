@@ -1,34 +1,28 @@
--- Tool approval policy evaluator (EE2-2710, architecture 4.3). Pure
--- functions: the caller passes the frozen call, the effective policy
+-- Tool approval policy evaluator. Pure functions: the caller passes the frozen call, the effective policy
 -- (trait_config.effective) and the session's grants, and gets a decision. The
 -- evaluator never reads or writes storage; a grant it would suspend is
 -- returned in `suspend` for the caller to persist.
 --
--- Evaluation order, Phase 1 rows of the table in 4.3:
---   1 operator switch `off`   -> allow, reason enforcement_off
---   4 requirement             -> allow, reason not_required, when nothing requires approval
---   5 repeated denial         -> settle, reason repeated_denied_call
---   6 grant                   -> allow, reason grant (unless the tool has approve_all: false)
---   7 request                 -> ask, with the offered decisions
--- Rows 2 and 3 (administrator rules, deny lists) are later phases.
+-- Evaluation order (the gate returns before the evaluator when the operator
+-- switch is off):
+--   requirement      -> allow, reason not_required, when nothing requires approval
+--   repeated denial  -> settle, reason repeated_denied_call
+--   grant            -> allow, reason grant (unless the tool has approve_all: false)
+--   request          -> ask, with the offered decisions
 --
 -- The call (a frozen call, freeze.lua):
 --   call_id     string
 --   row_type    "function" | "private_function" | "delegation"
---   approval    tool_meta.read(meta) result; read from `meta` when absent
---   identity    { registry_id, fingerprint, target_agent_id? } (grant key);
---               built from registry_id, fingerprint, delegate_target when absent
+--   approval    tool_meta.read(meta) of the tool entry
+--   identity    { registry_id, fingerprint, target_agent_id? } (grant key)
 --   denial_key  string (repeated-denial rule)
 -- The turn scope:
 --   session_id, owner_id, epoch   whose grants may match (grant isolation; non-empty strings)
 --   denied_keys                   { [denial_key] = true } for calls denied earlier in this turn
-local tool_meta = require("tool_meta")
-
 local policy = {}
 
 policy.DECISION = { ALLOW = "allow", ASK = "ask", SETTLE = "settle" }
 policy.REASON = {
-    ENFORCEMENT_OFF = "enforcement_off",
     NOT_REQUIRED = "not_required",
     GRANT = "grant",
     REPEATED_DENIED_CALL = "repeated_denied_call",
@@ -43,56 +37,13 @@ policy.SUSPENSION = {
 }
 
 local SCOPE = policy.SCOPE
-local REQUIRE = { marked = true, all = true }
-local MODES = { off = true, batch = true, tool = true, session = true }
-local ENFORCEMENT = { enforce = true, off = true }
 local ROW_TYPES = { ["function"] = true, private_function = true, delegation = true }
 local DELEGATION = "delegation"
 local ACTIVE = "active"
 
-local function check_policy(effective: any): string?
-    if type(effective) ~= "table" or effective.active ~= true then return "the policy is not active" end
-    if not ENFORCEMENT[effective.enforcement] then return "policy.enforcement must be enforce or off" end
-    if not REQUIRE[effective.require] then return "policy.require must be marked or all" end
-    if not MODES[effective.approve_all] then return "policy.approve_all must be off, batch, tool or session" end
-    if type(effective.agent_opted_in) ~= "boolean" then return "policy.agent_opted_in must be a boolean" end
-    return nil
-end
-
--- The call's approval settings: the normalized tool_meta.read result that
--- freeze stores, or read from `meta` when absent. A present but malformed
--- value is an error, never "unmarked".
-local function approval_of(call: any): (any, string?)
-    local approval = call.approval
-    if approval == nil then return tool_meta.read(call.meta), nil end
-    if type(approval) ~= "table" then return nil, "call.approval must be a table" end
-    if type(approval.required) ~= "boolean" then return nil, "call.approval.required must be a boolean" end
-    if approval.approve_all ~= nil and type(approval.approve_all) ~= "boolean" then
-        return nil, "call.approval.approve_all must be a boolean or absent"
-    end
-    if approval.warnings ~= nil and type(approval.warnings) ~= "table" then
-        return nil, "call.approval.warnings must be a list"
-    end
-    return approval, nil
-end
-
 local function blank_to_nil(value: any): any
     if value == "" then return nil end
     return value
-end
-
--- The grant key of a call: tool identity, deployment fingerprint and, for a
--- delegation call, the target agent.
-function policy.identity(call: any): any
-    if type(call.identity) == "table" then
-        return {
-            registry_id = call.identity.registry_id,
-            fingerprint = call.identity.fingerprint,
-            target_agent_id = blank_to_nil(call.identity.target_agent_id),
-        }
-    end
-    local target = type(call.delegate_target) == "table" and call.delegate_target.agent_id or nil
-    return { registry_id = call.registry_id, fingerprint = call.fingerprint, target_agent_id = blank_to_nil(target) }
 end
 
 local function same_identity(a: any, b: any): boolean
@@ -104,7 +55,7 @@ local function same_identity(a: any, b: any): boolean
         and blank_to_nil(a.target_agent_id) == blank_to_nil(b.target_agent_id)
 end
 
--- The maximum Approve-all scope of the combination table in 4.3, for a call
+-- The maximum Approve-all scope of the combination table, for a call
 -- that already requires approval. `option` is the tool's approve_all (true,
 -- false or nil for "absent"). The batch rule "only with at least two eligible
 -- pending requests" is applied per batch in evaluate_batch. Tool and session
@@ -187,12 +138,12 @@ local function owned_by_scope(grant: any, scope: any): boolean
         and non_empty_string(grant.epoch) and grant.epoch == scope.epoch
 end
 
--- Row 6. Returns the matching grant, and every active grant that covers the
+-- Grants. Returns the matching grant, and every active grant that covers the
 -- call but that the current policy no longer permits, with its reason. A
 -- grant for this tool at another deployment fingerprint is suspended with
 -- deployment_changed, so the entry returning to the old deployment does not
--- restore it silently (architecture 4.3: only an authenticated user action
--- restores a suspended grant).
+-- restore it silently (only an authenticated user action restores a
+-- suspended grant).
 local function match_grants(effective: any, approval: any, identity: any, grants: any, scope: any)
     local matched = nil
     local suspend = {}
@@ -231,16 +182,14 @@ local function check_scope(scope: any, grants: any): string?
 end
 
 -- Evaluates one call. Returns a result table, or nil and an error when the
--- policy or the call is malformed (the gate then fails closed).
+-- call or the scope is malformed (the gate then fails closed).
 --   decision   allow | ask | settle
---   reason     enforcement_off | not_required | grant | repeated_denied_call | approval_required
+--   reason     not_required | grant | repeated_denied_call | approval_required
 --   grant_id, grant_scope   for reason grant
 --   max_scope  for ask: the table's scope before the per-batch rule
 --   suspend    { { grant_id, reason } } grants the caller must suspend
---   warnings   tool meta warnings, and the enforcement-off warning
+--   warnings   tool meta warnings
 function policy.evaluate(call: any, effective: any, grants: any, scope: any): (any, string?)
-    local policy_err = check_policy(effective)
-    if policy_err then return nil, policy_err end
     if type(call) ~= "table" or type(call.call_id) ~= "string" or call.call_id == "" then
         return nil, "the call needs a call_id"
     end
@@ -248,8 +197,7 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
     local scope_err = check_scope(scope, grants)
     if scope_err then return nil, scope_err end
 
-    local approval, approval_err = approval_of(call)
-    if not approval then return nil, approval_err end
+    local approval = call.approval
     local result = {
         call_id = call.call_id,
         suspend = {},
@@ -258,16 +206,8 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
     }
     for _, warning in ipairs(approval.warnings or {}) do result.warnings[#result.warnings + 1] = warning end
 
-    -- Row 1: the operator switch.
-    if effective.enforcement == "off" then
-        result.decision = policy.DECISION.ALLOW
-        result.reason = policy.REASON.ENFORCEMENT_OFF
-        result.warnings[#result.warnings + 1] = "tool approval enforcement is off; the approval check was skipped"
-        return result, nil
-    end
-
-    -- Row 4: the requirement. Under `require: marked` only marked tools ask,
-    -- and delegation calls never (Phase 1 gates them only under `all`).
+    -- The requirement. Under `require: marked` only marked tools ask,
+    -- and delegation calls never (only `all` gates them).
     -- Private calls follow the same rules as public calls.
     local required
     if effective.require == "all" then
@@ -281,7 +221,7 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
         return result, nil
     end
 
-    -- Row 5: repeated denial, before any grant.
+    -- Repeated denial, before any grant.
     local denied = scope.denied_keys or {}
     if type(call.denial_key) == "string" and call.denial_key ~= "" and denied[call.denial_key] then
         result.decision = policy.DECISION.SETTLE
@@ -289,10 +229,9 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
         return result, nil
     end
 
-    -- Row 6: a valid, matching grant. approve_all: false blocks every grant.
-    local identity = policy.identity(call)
-    result.identity = identity
-    local grant, suspend = match_grants(effective, approval, identity, grants, scope)
+    -- A valid, matching grant. approve_all: false blocks every grant.
+    result.identity = call.identity
+    local grant, suspend = match_grants(effective, approval, call.identity, grants, scope)
     result.suspend = suspend
     if grant then
         result.decision = policy.DECISION.ALLOW
@@ -302,7 +241,7 @@ function policy.evaluate(call: any, effective: any, grants: any, scope: any): (a
         return result, nil
     end
 
-    -- Row 7: a request.
+    -- A request.
     result.decision = policy.DECISION.ASK
     result.reason = policy.REASON.APPROVAL_REQUIRED
     result.max_scope = policy.max_scope(effective, approval.approve_all)
