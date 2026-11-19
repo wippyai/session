@@ -2,7 +2,6 @@ local json = require("json")
 local uuid = require("uuid")
 local consts = require("consts")
 local artifact_repo = require("artifact_repo")
-local artifact_events = require("artifact_events")
 local tx = require("tx")
 local message_date = require("message_date")
 local definition = require("definition")
@@ -276,7 +275,7 @@ function control_handlers.control_artifacts(ctx, op)
     -- The whole batch is checked before anything is written, so a refused
     -- item never leaves the earlier ones created and announced.
     for _, artifact_data in ipairs(op.artifacts) do
-        if not (artifact_data.title and (artifact_data.content or artifact_data.page_id)) and artifact_data.id then
+        if artifact_data.id then
             -- A session form's content, answers and origin binding are
             -- server-authored; an agent changes a question by asking a new form.
             local target = artifact_repo.get(artifact_data.id)
@@ -290,7 +289,26 @@ function control_handlers.control_artifacts(ctx, op)
     local instructions = {}
 
     for _, artifact_data in ipairs(op.artifacts) do
-        if artifact_data.title and (artifact_data.content or artifact_data.page_id) then
+        if artifact_data.id then
+            -- meta_patch (not a whole-meta replace): a full replace here would wipe
+            -- keys this directive does not provide, such as display_type and page_id.
+            local updates = {
+                title = artifact_data.title,
+                content = artifact_data.content,
+                meta_patch = {
+                    content_type = artifact_data.content_type,
+                    description = artifact_data.description,
+                    preview = artifact_data.preview,
+                    icon = artifact_data.icon,
+                    status = artifact_data.status
+                }
+            }
+
+            local update_result, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
+            if not update_result then
+                return nil, "Failed to update artifact: " .. tostring(update_err)
+            end
+        elseif artifact_data.title and (artifact_data.content or artifact_data.page_id) then
             local record, store_err = control_handlers.store_artifact(ctx, artifact_data)
             if not record then
                 return nil, store_err
@@ -305,33 +323,6 @@ function control_handlers.control_artifacts(ctx, op)
                 table.insert(instructions, record.instruction)
             end
             control_handlers.announce_artifact(ctx, record)
-        elseif artifact_data.id then
-            -- meta_patch (not a whole-meta replace): a full replace here would wipe
-            -- keys this directive doesn't know about (display_type, page_id, preview,
-            -- ...), since it only ever carries these four fields.
-            local updates = {
-                title = artifact_data.title,
-                content = artifact_data.content,
-                meta_patch = {
-                    content_type = artifact_data.content_type,
-                    description = artifact_data.description,
-                    icon = artifact_data.icon,
-                    status = artifact_data.status
-                }
-            }
-
-            local update_result, update_err = ctx.writer:update_artifact(artifact_data.id, updates)
-            if not update_result then
-                return nil, "Failed to update artifact: " .. tostring(update_err)
-            end
-
-            -- Publish only after the write has committed, and read the merged row
-            -- back rather than reconstructing it from the request payload (the
-            -- meta_patch merge happened server-side, inside the repo).
-            local updated_artifact, get_err = artifact_repo.get(artifact_data.id)
-            if not get_err and updated_artifact then
-                artifact_events.publish_updated(updated_artifact)
-            end
         end
     end
 

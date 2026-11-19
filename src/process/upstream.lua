@@ -1,4 +1,5 @@
 local consts = require("consts")
+local owner_events = require("owner_events")
 
 type UpstreamPayload = {
     type: string?,
@@ -8,10 +9,6 @@ type UpstreamPayload = {
 local session_upstream = { _session_repo = require("session_repo") }
 session_upstream.__index = session_upstream
 
-local function is_not_found(err)
-    return type(err) == "userdata" and err:kind() == "NotFound"
-end
-
 function session_upstream.new(session_id, conn_pid, parent_pid)
     local self = setmetatable({}, session_upstream)
     self.session_id = session_id
@@ -20,7 +17,7 @@ function session_upstream.new(session_id, conn_pid, parent_pid)
     return self
 end
 
-function session_upstream.notify_external(session_id, changes)
+function session_upstream.notify_external(session_id, changes, user_id)
     if type(session_id) ~= "string" or session_id == "" then
         return nil, "Session ID is required"
     end
@@ -29,16 +26,23 @@ function session_upstream.notify_external(session_id, changes)
     end
 
     local session_pid, lookup_err = process.registry.lookup("session." .. session_id)
-    if lookup_err and not is_not_found(lookup_err) then return nil, lookup_err end
-    if not session_pid then return true end
+    if lookup_err and not owner_events.is_not_found(lookup_err) then return nil, lookup_err end
+    if session_pid then
+        local sent, send_err = process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
+        if sent then return true end
+        local current, current_err = process.registry.lookup("session." .. session_id)
+        if current or (current_err and not owner_events.is_not_found(current_err)) then return nil, send_err end
+    end
 
-    local sent, send_err = process.send(session_pid, consts.TOPICS.SESSION_UPDATED, changes)
-    if sent then return true end
-    -- Persistence already succeeded. A normal owner exit between lookup and
-    -- delivery does not turn an offline rename into an error.
-    local current, current_err = process.registry.lookup("session." .. session_id)
-    if not current and (not current_err or is_not_found(current_err)) then return true end
-    return nil, send_err
+    if not user_id then return true end
+    -- Inactive sessions have no mailbox to order field updates. Invalidate just
+    -- this row so receivers read the current committed value.
+    return owner_events.send(user_id, consts.TOPIC_PREFIXES.SESSION .. session_id, {
+        type = consts.UPSTREAM_TYPES.UPDATE,
+        session_id = session_id,
+        deleted = changes.deleted or nil,
+        refresh = not changes.deleted or nil,
+    })
 end
 
 -- Called only by the session owner. Notifications invalidate fields; their
@@ -56,6 +60,7 @@ function session_upstream:refresh_external(changes)
     for _, key in ipairs({ "title", "status", "kind", "public_meta", "last_message_date" }) do
         if changes[key] ~= nil then update[key] = current[key] end
     end
+    if changes.meta ~= nil or changes.config ~= nil then update.refresh = true end
     -- Never forward private metadata, config or caller-supplied row contents.
     update.session_id = self.session_id
     self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, update)

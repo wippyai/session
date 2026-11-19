@@ -651,7 +651,7 @@ local function define_tests()
             return { writer = session_writer, upstream = { update_session = function() end } }
         end
 
-        it("meta_patch through the control handler preserves display_type/page_id/preview and publishes the update", function()
+        it("edits the given artifact in place and publishes its new version", function()
             local artifact_id, create_id_err = uuid.v7()
             test.is_nil(create_id_err)
 
@@ -680,14 +680,18 @@ local function define_tests()
             end)
 
             local result, err = control_handlers.control_artifacts(ctx, {
-                artifacts = {{ id = artifact_id, status = consts.ARTIFACT_STATUS.ACTIVE }}
+                artifacts = {{ id = artifact_id, title = "Revised form", content = '{"revised":true}',
+                    status = consts.ARTIFACT_STATUS.ACTIVE }}
             })
             test.is_nil(err)
             test.not_nil(result)
 
             local artifact, get_err = artifact_repo.get(artifact_id)
             test.is_nil(get_err)
-            -- The four-key control op only touched status - everything else must survive.
+            test.eq(#result.created_artifacts, 0)
+            test.eq(artifact.title, "Revised form")
+            test.eq(artifact.content, '{"revised":true}')
+            test.eq(artifact.content_version, 2)
             test.eq(artifact.meta.status, consts.ARTIFACT_STATUS.ACTIVE)
             test.eq(artifact.meta.page_id, "page-form-1")
             test.eq(artifact.meta.display_type, consts.ARTIFACT_DISPLAY.STANDALONE)
@@ -698,6 +702,8 @@ local function define_tests()
             test.eq(published.pid, "hub-pid")
             test.eq(published.topic, "artifact:" .. artifact_id)
             test.eq(published.payload.uuid, artifact_id)
+            test.eq(published.payload.session_id, test_data.session_id)
+            test.eq(published.payload.preview, "fill out this form")
             test.eq(published.payload.content_version, artifact.content_version)
             test.eq(type(published.payload.content_version), "number")
         end)

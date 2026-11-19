@@ -13,6 +13,7 @@ local artifact_projection = {}
 function artifact_projection.build(artifact)
     local response = {
         uuid = artifact.artifact_id,
+        session_id = artifact.session_id,
         type = artifact.kind,
         kind = artifact.kind,
         title = artifact.title,
@@ -24,6 +25,7 @@ function artifact_projection.build(artifact)
     if artifact.meta then
         response.content_type = artifact.meta.content_type
         response.description = artifact.meta.description
+        response.preview = artifact.meta.preview
         response.icon = artifact.meta.icon
         response.status = artifact.meta.status
         response.display_type = artifact.meta.display_type

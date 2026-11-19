@@ -382,6 +382,7 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
+      owner_events: wippy.session.process:owner_events
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       upstream: wippy.session.process:upstream
