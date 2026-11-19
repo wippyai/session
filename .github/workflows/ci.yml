@@ -50,11 +50,20 @@ jobs:
 
       # Trojan Source guard: src and docs hold zero-width and bidirectional
       # control characters (U+200B-200F, U+202A-202E, U+2066-2069) only as
-      # escape text, for example ‮.
+      # escape text, for example \u202e. grep exits 1 when nothing matches;
+      # a match (0) or a scan error (2) fails the step.
       - name: No hidden bidirectional or zero-width characters
         run: |
           pattern=$'\xe2\x80[\x8b-\x8f\xaa-\xae]|\xe2\x81[\xa6-\xa9]'
-          if LC_ALL=C grep -rnE "$pattern" src docs; then exit 1; fi
+          LC_ALL=C grep -qE "$pattern" <<< $'positive control \xe2\x80\xae' || { echo "pattern self-check failed"; exit 1; }
+          for dir in src docs; do
+            [ -n "$(find "$dir" -type f -print -quit)" ] || { echo "no files to scan under $dir"; exit 1; }
+          done
+          status=0
+          LC_ALL=C grep -rnE "$pattern" src docs || status=$?
+          [ "$status" -eq 1 ] && exit 0
+          [ "$status" -eq 0 ] && echo "hidden characters found" || echo "scan failed with status $status"
+          exit 1
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020

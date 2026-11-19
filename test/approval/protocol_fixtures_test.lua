@@ -91,12 +91,17 @@ end
 local function problems_of(raw: string, required: any): {string}
     local fixture, err = decode(raw)
     if not fixture then return { "not JSON: " .. tostring(err) } end
+    local original = json.decode(raw)
     local problems = {}
     for _, path in ipairs(required) do
         if resolve(fixture, path) == nil then problems[#problems + 1] = path .. " is missing" end
     end
+    -- A null decodes to nothing in the original and to the marker after
+    -- marking; an ordinary string equal to the marker stays in the original.
     for _, path in ipairs(required.null or {}) do
-        if resolve(fixture, path) ~= NULL then problems[#problems + 1] = path .. " is not null" end
+        if resolve(fixture, path) ~= NULL or resolve(original, path) ~= nil then
+            problems[#problems + 1] = path .. " is not null"
+        end
     end
     return problems
 end
@@ -123,6 +128,11 @@ local function define_tests()
             local problems = problems_of('{"approval":{"state":"approved"},"other":{"grant_id":null}}',
                 { "approval.revision", null = { "approval.grant_id" } })
             test.eq(table.concat(problems, "; "), "approval.revision is missing; approval.grant_id is not null")
+        end)
+
+        it("reports an ordinary string where a null is required", function()
+            local problems = problems_of('{"activity":"<json null>"}', { null = { "activity" } })
+            test.eq(table.concat(problems, "; "), "activity is not null")
         end)
 
         it("never names a client request_id in a state event", function()
