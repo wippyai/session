@@ -114,6 +114,52 @@ local function define_tests()
             test.is_false(rendered[1] == rendered[2])
             test.is_false(google_rendered[1] == google_rendered[2])
         end)
+
+        it("passes the traits a call loaded to its function result and to no other result", function()
+            local function build()
+                local builder, err = prompt_builder.build({
+                    { message_id = "load-row", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                        function_name = "load", call_id = "call-1", status = consts.FUNC_STATUS.SUCCESS,
+                        result = "loaded", loaded_traits = { agent = "app:agent", keys = { "app:pack" } },
+                    } },
+                    { message_id = "plain-row", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                        function_name = "lookup", call_id = "call-2", status = consts.FUNC_STATUS.SUCCESS,
+                        result = "found",
+                    } },
+                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+                test.is_nil(err)
+                return builder:get_messages()
+            end
+            local messages = build()
+            local results = {}
+            for _, message in ipairs(messages) do
+                if message.role == "function_result" then table.insert(results, message) end
+            end
+            test.eq(#results, 2)
+            test.eq(results[1].metadata.loaded_traits.agent, "app:agent")
+            test.eq(results[1].metadata.loaded_traits.keys[1], "app:pack")
+            test.is_nil(results[2].metadata)
+            local first = json.encode(claude_mapper.map_messages(messages))
+            local second = json.encode(claude_mapper.map_messages(build()))
+            test.eq(first, second)
+        end)
+    end)
+    describe("withdrawn loads", function()
+        it("keeps the loaded traits on a result that was withdrawn", function()
+            local builder, err = prompt_builder.build({
+                { message_id = "load-row", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                    function_name = "load", call_id = "call-1", status = consts.FUNC_STATUS.SUCCESS,
+                    result = "loaded", stale = true, loaded_traits = { agent = "app:agent", keys = { "app:pack" } },
+                } },
+            }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+            test.is_nil(err)
+            local found = nil
+            for _, message in ipairs(builder:get_messages()) do
+                if message.role == "function_result" then found = message end
+            end
+            test.not_nil(found)
+            test.eq(found.metadata.loaded_traits.keys[1], "app:pack")
+        end)
     end)
     describe("interrupted tool rounds", function()
         it("renders a cancelled call result after a thinking-only assistant", function()

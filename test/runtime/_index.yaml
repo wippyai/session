@@ -272,6 +272,55 @@ entries:
     traits:
       - wippy.agent.traits:time_aware
 
+  - name: loader_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Load the pack when the task needs it, then use its tool.
+    tools: [app.runtime:load_pack]
+    agent_options:
+      trait_loading: append
+
+  - name: rebuilding_loader_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+    model: session-runtime-prefix
+    prompt: Load the pack when the task needs it, then use its tool.
+    tools: [app.runtime:load_pack]
+
+  - name: pack_trait
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      name: Pack
+    data:
+      prompt: Pack guidance. Use pack_tool for packed documents.
+      tools: [app.runtime:pack_tool, app.runtime:load_pack]
+
+  - name: load_pack
+    kind: function.lua
+    meta:
+      type: tool
+      name: load_pack
+      description: Load the pack into this conversation.
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: load_pack
+    modules: [store, time]
+
+  - name: pack_tool
+    kind: function.lua
+    meta:
+      type: tool
+      name: pack_tool
+      description: Pack the document.
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://fixtures.lua
+    method: pack_tool
+    modules: [store, time]
+
   - name: prefix_lifecycle
     kind: function.lua
     source: file://fixtures.lua
