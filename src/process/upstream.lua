@@ -153,7 +153,9 @@ function session_upstream:command_success(request_id, details)
     self:_send_session_update(consts.UPSTREAM_TYPES.COMMAND_RESPONSE, payload)
 end
 
--- Report command error with request_id
+-- Report command error with request_id. Tool approval errors may carry the
+-- committed records in `approval`, `approvals` and `grant`; no other extra
+-- key passes.
 function session_upstream:command_error(request_id, code, message, payload)
     payload = payload or {}
     self:_send_session_update(consts.UPSTREAM_TYPES.ERROR, {
@@ -161,7 +163,10 @@ function session_upstream:command_error(request_id, code, message, payload)
         code = code,
         message = message,
         message_id = payload.message_id,
-        input = payload.input
+        input = payload.input,
+        approval = payload.approval,
+        approvals = payload.approvals,
+        grant = payload.grant
     })
 end
 

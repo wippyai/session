@@ -5,6 +5,7 @@ local tool_caller = require("tool_caller")
 local time = require("time")
 local checkpoint_runtime = require("checkpoint_runtime")
 local input_policy = require("input_policy")
+local activation = require("activation")
 
 type BackgroundTriggerResult = {
     skipped: boolean?,
@@ -543,6 +544,17 @@ function session_handlers.agent_change(ctx, op)
     ctx.current_agent = next_agent
     local refreshed, refresh_err = ctx.reader:reset()
     input_policy.accept_committed(ctx, interaction)
+
+    -- A switch the user sent restores the tool approval grants an earlier
+    -- switch suspended, when the new agent permits them. A failure leaves
+    -- them suspended.
+    if op.user_command == true then
+        local _, restore_err = activation.restore_grants(ctx, next_agent)
+        if restore_err then
+            logger:warn("tool approval grants were not restored after the agent switch",
+                { session_id = ctx.session_id, error = tostring(restore_err) })
+        end
+    end
 
     local switch_message = string.format("Agent changed to: %s (model: %s)", op.agent_id, new_model)
     ctx.writer:add_message(consts.MSG_TYPE.SYSTEM, switch_message, {

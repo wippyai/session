@@ -28,41 +28,8 @@ local MARKED, PLAIN, PRIVATE = fx.MARKED, fx.PLAIN, fx.PRIVATE
 local new_ctx, round, row = fx.new_ctx, fx.round, fx.row
 local updates_of, has_continue, launches = fx.updates_of, fx.has_continue, fx.launches
 local records_by_call = fx.records_by_call
+local start, finish, pending = fx.start, fx.finish, fx.pending
 local UI_ACTION = "wippy.agent.tools:ui_action_highlight"
-
--- Starts process_tools in its own coroutine. Returns a handle for finish().
-local function start(ctx: any, op: any): any
-    local handle = { done = channel.new(1), started = time.now():unix() }
-    coroutine.spawn(function()
-        local ok, result, err = pcall(message_handlers.process_tools, ctx, op)
-        handle.done:send({ ok = ok, result = result, err = err })
-    end)
-    return handle
-end
-
--- Waits for process_tools to return (at most `seconds`). Returns its result,
--- its error and the seconds it took.
-local function finish(handle: any, seconds: number?): (any, any, number)
-    local selected = channel.select({ handle.done:case_receive(), time.after(tostring(seconds or 10) .. "s"):case_receive() })
-    test.is_true(selected.channel == handle.done, "process_tools returned in time")
-    local outcome = selected.value
-    test.is_true(outcome.ok, tostring(outcome.result))
-    return outcome.result, outcome.err, time.now():unix() - handle.started
-end
-
--- Yields until the batch has `n` pending requests (the gate waits then).
-local function pending(ctx: any, batch_id: string, n: number)
-    for _ = 1, 200 do
-        local records = approval_repo.list_by_batch(nil, ctx.session_id, batch_id) or {}
-        local count = 0
-        for _, record in ipairs(records) do
-            if record.state == "pending" then count = count + 1 end
-        end
-        if count >= n then return end
-        time.sleep("20ms")
-    end
-    error("the gate did not create its requests")
-end
 
 -- Commits a decision in one locked transaction; a stop denial closes the
 -- batch in it. Wakes the gate unless
@@ -90,21 +57,7 @@ local function approve(ctx: any, batch_id: string, call_id: string, opts: any?):
     return decide(ctx, batch_id, call_id, { state = "approved" }, opts)
 end
 
--- The inbox's Stop (route_input): the Stop transaction with the approval
--- fence, the wake signal, then what bus:request_stop does.
-local function stop(ctx: any)
-    local committed, err = session._commit_stop(ctx, ctx.upstream, nil)
-    test.is_true(committed == true, "Stop committed: " .. tostring(err))
-    ctx.approval_wake:notify("stop")
-    ctx.coordinator.state = "draining_stop"
-    ctx.coordinator.cancel:close()
-end
-
--- A committed steering message: a pending input row, then the wake signal.
-local function steer(ctx: any, quiet: boolean?)
-    assert(ctx.writer:add_message(consts.MSG_TYPE.USER, "Use c_10 instead", { input = { state = "pending" } }))
-    if not quiet then ctx.approval_wake:notify("steering") end
-end
+local stop, steer = fx.stop, fx.steer
 
 local function reasons(op: any, call_ids: {string}): string
     local out = {}

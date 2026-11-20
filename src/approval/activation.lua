@@ -203,6 +203,27 @@ function activation.live_surfaces(ctx: any): number
     return type(surfaces) == "table" and tonumber(surfaces.live) or 0
 end
 
+-- Why `effective` does not let `grant` match, or nil when it does; or nil
+-- and an error when the tool's registry entry can't be read.
+local function unpermitted_reason(effective: any, grant: any): (string?, string?)
+    local option = nil
+    if grant.scope == policy.SCOPE.TOOL and effective.agent_opted_in then
+        -- Only these checks need the tool option. A failed read fails the
+        -- step, because the check can't be done without the option. A
+        -- tool no longer in the registry is checked as if it had no
+        -- option: the same entry can come back with the same
+        -- fingerprint, so a narrower mode must suspend the grant now.
+        -- A call to a missing tool can't use the grant anyway, and a
+        -- tool added again asks once.
+        local entry, read_err = tool_meta.entry(grant.registry_id)
+        if read_err then
+            return nil, "Failed to read tool " .. tostring(grant.registry_id) .. " for its grant: " .. read_err
+        end
+        if entry then option = tool_meta.approve_all(entry) end
+    end
+    return policy.grant_suspension(effective, grant, option), nil
+end
+
 -- Suspends the active grants of the session that `effective` no longer
 -- permits (the agent lacks the trait, or its Approve-all mode is narrower),
 -- before the model step. Only an authenticated user action restores a
@@ -212,22 +233,8 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
     if not grants then return nil, tostring(err) end
     local suspend = {}
     for _, grant in ipairs(grants) do
-        local option = nil
-        if grant.scope == policy.SCOPE.TOOL and effective.agent_opted_in then
-            -- Only these checks need the tool option. A failed read fails the
-            -- step, because the check can't be done without the option. A
-            -- tool no longer in the registry is checked as if it had no
-            -- option: the same entry can come back with the same
-            -- fingerprint, so a narrower mode must suspend the grant now.
-            -- A call to a missing tool can't use the grant anyway, and a
-            -- tool added again asks once.
-            local entry, read_err = tool_meta.entry(grant.registry_id)
-            if read_err then
-                return nil, "Failed to read tool " .. tostring(grant.registry_id) .. " for its grant: " .. read_err
-            end
-            if entry then option = tool_meta.approve_all(entry) end
-        end
-        local reason = policy.grant_suspension(effective, grant, option)
+        local reason, reason_err = unpermitted_reason(effective, grant)
+        if reason_err then return nil, reason_err end
         if reason then suspend[#suspend + 1] = { grant_id = grant.grant_id, reason = reason } end
     end
     if #suspend == 0 then return true, nil end
@@ -235,6 +242,49 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
         return approval_repo.suspend_grants(dbtx, ctx.session_id, suspend)
     end)
     if suspend_err then return nil, tostring(suspend_err) end
+    return true, nil
+end
+
+-- The suspensions an agent switch causes. A grant suspended because its
+-- tool's deployment changed, or because the tool forbids Approve all, needs a
+-- new Approve all.
+local RESTORABLE = {
+    [policy.SUSPENSION.AGENT_WITHOUT_TRAIT] = true,
+    [policy.SUSPENSION.MODE_NOT_PERMITTED] = true,
+}
+
+-- A user agent switch, an authenticated user action, restores the grants
+-- that an agent switch suspended and that the new agent's policy permits
+-- again. Only session_handlers.agent_change calls it, and only for a switch
+-- the user sent; model-originated switches, trait overlays and tool changes
+-- never restore a grant. `agent` is the compiled new agent. Returns true, or
+-- nil and an error (the grants then stay suspended).
+function activation.restore_grants(ctx: any, agent: any): (boolean?, string?)
+    local stored = ctx.config and ctx.config.tool_approval
+    if type(stored) ~= "table" then return true, nil end
+    local settings, _, check_err = activation.check(activation.raw_traits(ctx), agent and agent.agent_options)
+    if check_err then return nil, check_err end
+    local effective, policy_err = trait_config.effective(stored, settings, activation.enforcement())
+    if not effective then return nil, policy_err end
+    local grants, err = approval_repo.list_grants(nil, ctx.session_id, { consts.GRANT_STATUS.SUSPENDED })
+    if not grants then return nil, tostring(err) end
+    local restore = {}
+    for _, grant in ipairs(grants) do
+        if RESTORABLE[grant.suspension_reason] then
+            local reason, reason_err = unpermitted_reason(effective, grant)
+            if reason_err then return nil, reason_err end
+            if not reason then restore[#restore + 1] = grant end
+        end
+    end
+    if #restore == 0 then return true, nil end
+    local _, restore_err = approval_repo.transact(ctx.session_id, function(dbtx)
+        for _, grant in ipairs(restore) do
+            local _, grant_err = approval_repo.restore_grant(dbtx, ctx.session_id, grant.grant_id, grant.revision)
+            if grant_err and not errors.is(grant_err, errors.CONFLICT) then return nil, grant_err end
+        end
+        return true
+    end)
+    if restore_err then return nil, tostring(restore_err) end
     return true, nil
 end
 

@@ -124,9 +124,32 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       message_repo: wippy.session.persist:message_repo
       freeze: wippy.session.approval:freeze
+      fingerprint: wippy.session.approval:fingerprint
       policy: wippy.session.approval:policy
       preview: wippy.session.approval:preview
       tool_meta: wippy.session.approval:tool_meta
       activation: wippy.session.approval:activation
       ui_action_broker: wippy.session.process:ui_action_broker
       approval_events: wippy.session.approval:events
+
+  # wippy.session.approval:commands
+  - name: commands
+    kind: library.lua
+    meta:
+      comment: Session inbox commands - tool_approval decisions and grant revocations with the sender check, receipts, the batch fence and grants
+    source: file://commands.lua
+    modules:
+      - json
+      - uuid
+      - logger
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      fingerprint: wippy.session.approval:fingerprint
+      policy: wippy.session.approval:policy
+      tool_meta: wippy.session.approval:tool_meta
+      activation: wippy.session.approval:activation
+      approval_gate: wippy.session.approval:gate
+      approval_events: wippy.session.approval:events
+      wake: wippy.session.approval:wake

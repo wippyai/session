@@ -19,6 +19,7 @@ local input_policy = require("input_policy")
 local wake = require("wake")
 local approval_repo = require("approval_repo")
 local approval_gate = require("approval_gate")
+local approval_commands = require("approval_commands")
 local activation = require("activation")
 
 type SessionArgs = {
@@ -1124,7 +1125,11 @@ local function run(args: SessionArgs)
                         attention_control:set_connection(payload_data.conn_pid)
                         session_upstream.conn_pid = payload_data.conn_pid
                     end
-                    attention_handled = topic == consts.TOPICS.COMMAND and handle_attention_command(payload_data)
+                    -- Tool approval decisions and revocations are answered
+                    -- here too, never through the command bus, where the
+                    -- approval gate waits.
+                    attention_handled = topic == consts.TOPICS.COMMAND and (handle_attention_command(payload_data)
+                        or approval_commands.handle(context, msg:from(), payload_data))
                 end
                 if not attention_handled then
                     local _, route_err = route_input(context, bus, topic, payload_data, session_state)

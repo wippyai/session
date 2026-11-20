@@ -4,6 +4,7 @@ local consts = require("consts")
 local approval_repo = require("approval_repo")
 local message_repo = require("message_repo")
 local freeze = require("freeze")
+local fingerprint = require("fingerprint")
 local policy = require("policy")
 local preview = require("preview")
 local tool_meta = require("tool_meta")
@@ -93,10 +94,10 @@ function gate.op_binding(ctx: any, batch: any): any
     return binding
 end
 
--- Whose grants may match: the session owner, the logical session and the
--- grant epoch. The epoch is the session ID: a copied or forked session has a
--- new ID and so inherits no grants.
-local function grant_scope(ctx: any): any
+-- Whose grants may match, and whom a new grant belongs to: the session
+-- owner, the logical session and the grant epoch. The epoch is the session
+-- ID: a copied or forked session has a new ID and so inherits no grants.
+function gate.grant_scope(ctx: any): any
     return { session_id = ctx.session_id, owner_id = ctx.user_id, epoch = ctx.session_id }
 end
 
@@ -220,7 +221,7 @@ local function evaluate(ctx: any, items: {any}, effective: any, history: any): (
     if #frozen_calls == 0 then return { suspend = {} }, nil end
     local grants, grants_err = approval_repo.list_grants(nil, ctx.session_id)
     if not grants then return nil, tostring(grants_err) end
-    local scope = grant_scope(ctx)
+    local scope = gate.grant_scope(ctx)
     scope.denied_keys = history.denied_keys
     local evaluated = policy.evaluate_batch(frozen_calls, effective, grants, scope)
     for index, result in ipairs(evaluated.results) do
@@ -248,20 +249,24 @@ local function call_title(item: any): string
     return (item.frozen and item.frozen.title) or tostring(item.name or item.registry_id or "")
 end
 
--- display.approve_all_scope: every tool in the scope of the offer and every
--- covered pending call.
+-- display.approve_all_scope: every tool in the scope of the offer, with the
+-- grant identity (registry ID, deployment fingerprint, delegate target), and
+-- every covered pending call. The tool list is immutable once stored: a
+-- session grant's manifest is exactly this list (approval_commands), so the
+-- person consents to what the card discloses and nothing else.
 local function approve_all_disclosure(ctx: any, offered: any, covered_items: {any}): any
     local tools, seen = {}, {}
-    local function add_tool(registry_id: any, title: any, target: any)
+    local function add_tool(registry_id: any, title: any, tool_fingerprint: any, target: any)
         local key = tostring(registry_id) .. "\0" .. tostring(target or "")
         if seen[key] then return end
         seen[key] = true
-        tools[#tools + 1] = { registry_id = registry_id, title = title, target_agent_id = target }
+        tools[#tools + 1] = { registry_id = registry_id, title = title, fingerprint = tool_fingerprint,
+            target_agent_id = target }
     end
     local covered = {}
     for _, item in ipairs(covered_items) do
-        local target = item.frozen.delegate_target and item.frozen.delegate_target.agent_id or nil
-        add_tool(item.registry_id, call_title(item), target)
+        local identity = item.frozen.identity
+        add_tool(identity.registry_id, call_title(item), identity.fingerprint, identity.target_agent_id)
         covered[#covered + 1] = { approval_id = item.approval_id, title = call_title(item) }
     end
     if offered.approve_all.scope == policy.SCOPE.SESSION then
@@ -269,8 +274,11 @@ local function approve_all_disclosure(ctx: any, offered: any, covered_items: {an
         for _, tool in ipairs(type(agent) == "table" and type(agent.tools) == "table" and agent.tools or {}) do
             local registry_id = type(tool) == "table" and tool.registry_id or nil
             local entry = tool_meta.entry(registry_id)
-            if entry and tool_meta.approve_all(entry) ~= false then
-                add_tool(registry_id, tool_meta.title(entry, registry_id), nil)
+            local tool_fingerprint = entry and fingerprint.of_entry(entry) or nil
+            -- A tool that can't be fingerprinted can't be granted, so it is
+            -- not disclosed either.
+            if tool_fingerprint and tool_meta.approve_all(entry) ~= false then
+                add_tool(registry_id, tool_meta.title(entry, registry_id), tool_fingerprint, nil)
             end
         end
     end

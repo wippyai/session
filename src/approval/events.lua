@@ -185,6 +185,43 @@ local function approval_object(record: any): any
     }
 end
 
+-- An approval record in a command reply (protocol section 7): the committed
+-- state without the card content.
+function events.command_record(record: any): any
+    return {
+        approval_id = record.approval_id,
+        batch_id = record.batch_id,
+        call_id = record.call_id,
+        state = record.state,
+        decided_via = record.decided_via,
+        revision = record.revision,
+        intent_digest = record.intent_digest,
+        requested_at = record.requested_at,
+        expires_at = record.expires_at,
+        decided_at = record.decided_at,
+        ["then"] = record["then"],
+        reason = record.reason,
+        grant_id = record.grant_id,
+        disposition = record.disposition,
+    }
+end
+
+-- A grant as clients see it (protocol section 9). `title` is the registry
+-- title of a tool grant's tool; a session grant has no registry_id or title.
+function events.grant_object(grant: any, title: string?): any
+    local tool = grant.scope == "tool"
+    return {
+        grant_id = grant.grant_id,
+        revision = grant.revision,
+        scope = grant.scope,
+        status = grant.status,
+        suspension_reason = grant.suspension_reason,
+        registry_id = tool and grant.registry_id or nil,
+        title = tool and title or nil,
+        created_at = grant.created_at,
+    }
+end
+
 -- Payload of a tool_approval event for `record` on the call's topic. It never
 -- carries a client request_id.
 function events.tool_approval_payload(record: any, function_name: any, server_now: string): any

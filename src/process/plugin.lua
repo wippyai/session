@@ -48,6 +48,13 @@ type ActiveSession = {
 -- (resume_pending_answer_sessions): sessions listed per scan, sessions started
 -- per scan, the longest wait in scans before a session whose start failed is
 -- tried again, and the page size of the stale running session scan.
+-- Session commands that change approval state: the session takes them only
+-- from this plugin, with the relay user stamped as sender_user_id.
+local APPROVAL_COMMANDS = {
+    [consts.COMMANDS.TOOL_APPROVAL] = true,
+    [consts.COMMANDS.TOOL_APPROVAL_GRANT_REVOKE] = true,
+}
+
 local RESUME_SCAN_LIMIT = 20
 local RESUME_STARTS_PER_SCAN = 3
 local MAX_RESUME_WAIT = 32
@@ -745,6 +752,9 @@ local function run(args)
             local cmd_data = request_data.data or {}
             cmd_data.conn_pid = conn_pid
             if request_id then cmd_data.request_id = request_id end
+            -- The authenticated user of this plugin, never a client value:
+            -- the session accepts approval commands only with it.
+            cmd_data.sender_user_id = state.user_id
             if cmd_data.command == consts.COMMANDS.STOP then
                 cmd_data.stop_supervised = true
                 local stop_request_id = session_info.stop_request_id
@@ -1026,6 +1036,13 @@ local function run(args)
         if topic_type == consts.HANDLER_TYPES.COMMAND and type(payload_data.data) == "table"
             and payload_data.data.command == consts.COMMANDS.TOOL_APPROVAL_SURFACE then
             handle_surface_command(payload_data, relay == true)
+            return
+        end
+        -- Approval decisions and grant revocations: only from the user's
+        -- authenticated relay. forward_request stamps the sender.
+        if topic_type == consts.HANDLER_TYPES.COMMAND and type(payload_data.data) == "table"
+            and APPROVAL_COMMANDS[payload_data.data.command] and not relay then
+            logger:warn("tool approval command refused: not sent by the relay", { user_id = state.user_id })
             return
         end
 

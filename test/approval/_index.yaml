@@ -216,6 +216,17 @@ entries:
       test_only: true
     data: {}
 
+  - name: forbidden_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Wire money
+      approval:
+        required: true
+        approve_all: false
+      test_only: true
+    data: {}
+
   - name: plain_tool
     kind: registry.entry
     meta:
@@ -251,7 +262,10 @@ entries:
       - uuid
       - registry
       - security
+      - time
     imports:
+      message_handlers: wippy.session.process:message_handlers
+      session: wippy.session.process:session
       consts: wippy.session:consts
       tx: wippy.session.persist:tx
       approval_gate: wippy.session.approval:gate
@@ -323,6 +337,32 @@ entries:
       - registry
       - json
     method: run
+  - name: commands_test
+    kind: function.lua
+    meta:
+      name: Tool approval inbox commands
+      type: test
+      suite: session
+      comment: Decisions and grant revocations through the session inbox - sender and owner checks, receipts, one committed decision, Approve all scopes and covered lists, the batch fence, grant lifetime, revocation around the release, restoring suspended grants
+    source: file://commands_test.lua
+    modules:
+      - uuid
+      - time
+      - sql
+      - registry
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_commands: wippy.session.approval:commands
+      approval_repo: wippy.session.persist:approval_repo
+      session_repo: wippy.session.persist:session_repo
+      fingerprint: wippy.session.approval:fingerprint
+      activation: wippy.session.approval:activation
+      tool_meta: wippy.session.approval:tool_meta
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
   - name: events_test
     kind: function.lua
     meta:

@@ -158,6 +158,20 @@ local function define_tests()
             test.eq(events[1].data.code, "STORAGE_ERROR")
         end)
 
+        it("passes only the committed approval records as extra keys of a command error", function()
+            local sender, events = fixture()
+            sender:command_error("r4", "approval_not_pending", "decided", {
+                approval = { approval_id = "a1", state = "approved" },
+                approvals = { { approval_id = "a1" } },
+                grant = { grant_id = "g1" },
+                secret = "dropped",
+            })
+            test.eq(events[1].data.approval.state, "approved")
+            test.eq(events[1].data.approvals[1].approval_id, "a1")
+            test.eq(events[1].data.grant.grant_id, "g1")
+            test.is_nil(events[1].data.secret)
+        end)
+
         it("confirms a command through a typed command response", function()
             local sender, events = fixture()
             sender:command_success("r3", { staged = true })

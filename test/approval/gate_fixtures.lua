@@ -14,6 +14,9 @@ local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local trait_config = require("trait_config")
 local activation = require("activation")
+local message_handlers = require("message_handlers")
+local session = require("session")
+local time = require("time")
 
 -- Shared fixtures of the tool approval suites: sessions that are deleted
 -- after the suite, a process_tools context on a session owned by the test
@@ -27,8 +30,10 @@ local PLAIN = "app.approval:plain_tool"
 local PRIVATE = "app.approval:private_tool"
 local DELEGATE = "app.approval:delegate_tool"
 local TARGET = "app.approval:target_agent"
+local FORBIDDEN = "app.approval:forbidden_tool"
 local TABLES = { "session_tool_approvals", "session_tool_approval_batches",
     "session_tool_approval_grants", "session_command_receipts" }
+local PLUGIN_PID = "session-plugin-pid"
 
 local function count(table_name: string, session_id: string): number
     local db = assert(sql.get(consts.get_db_resource()))
@@ -58,11 +63,14 @@ end
 --                    agent_opted_in = false (an agent without the trait)
 --   opts.live        live approval UI surfaces
 --   opts.declared    ui_declared_at of the stored activation
+--   opts.session_id  an existing session: a new process of it (fresh wake
+--                    hub and turn)
+--   opts.user_id     the user the process runs for (default the test actor)
 local function new_ctx(opts: any?): (any, any)
     opts = opts or {}
-    local owner = assert(security.actor(), "the test needs a security actor"):id()
-    local session_id = new_session({ config = { agent_id = AGENT } })
-    local captured = { updates = {}, session_updates = {}, notices = {} }
+    local owner = opts.user_id or assert(security.actor(), "the test needs a security actor"):id()
+    local session_id = opts.session_id or new_session({ config = { agent_id = AGENT } })
+    local captured = { updates = {}, session_updates = {}, notices = {}, replies = {} }
     local config: any = { agent_id = AGENT, delegation_func_id = DELEGATE }
     local ctx: any = {
         session_id = session_id,
@@ -83,7 +91,17 @@ local function new_ctx(opts: any?): (any, any)
             session_error = function(_self, code, message)
                 table.insert(captured.notices, { code = code, message = message })
             end,
+            command_success = function(_self, request_id, details)
+                table.insert(captured.replies, { request_id = request_id, success = true, details = details })
+            end,
+            command_error = function(_self, request_id, code, message, payload)
+                table.insert(captured.replies, { request_id = request_id, success = false, code = code,
+                    message = message, details = payload })
+            end,
         },
+        -- The session plugin that started the process (approval commands
+        -- are accepted only from it).
+        parent_pid = PLUGIN_PID,
         turn_state = { message_id = "turn-" .. uuid.v7(), active = true, steps = 1, repeated_calls = 0 },
         approval_wake = wake.new(),
         approval_surfaces = opts.live and { live = opts.live, revision = 1 } or nil,
@@ -212,6 +230,60 @@ local function create_tool_grant(ctx: any, registry_id: string): any
     end))
 end
 
+-- Starts process_tools in its own coroutine, as the command bus runs it.
+-- Returns a handle for finish().
+local function start(ctx: any, op: any): any
+    local handle = { done = channel.new(1), started = time.now():unix() }
+    coroutine.spawn(function()
+        local ok, result, err = pcall(message_handlers.process_tools, ctx, op)
+        handle.done:send({ ok = ok, result = result, err = err })
+    end)
+    return handle
+end
+
+-- Waits for process_tools to return (at most `seconds`, default 10). Returns
+-- its result, its error and the seconds it took; raises when it did not
+-- return in time or raised itself.
+local function finish(handle: any, seconds: number?): (any, any, number)
+    local selected = channel.select({ handle.done:case_receive(),
+        time.after(tostring(seconds or 10) .. "s"):case_receive() })
+    if selected.channel ~= handle.done then error("process_tools did not return in time") end
+    local outcome = selected.value
+    if not outcome.ok then error(tostring(outcome.result)) end
+    return outcome.result, outcome.err, time.now():unix() - handle.started
+end
+
+-- Yields until the batch has `n` pending requests (the gate waits then).
+local function pending(ctx: any, batch_id: string, n: number)
+    for _ = 1, 200 do
+        local records = approval_repo.list_by_batch(nil, ctx.session_id, batch_id) or {}
+        local found = 0
+        for _, record in ipairs(records) do
+            if record.state == "pending" then found = found + 1 end
+        end
+        if found >= n then return end
+        time.sleep("20ms")
+    end
+    error("the gate did not create its requests")
+end
+
+-- The inbox's Stop (route_input): the Stop transaction with the approval
+-- fence, the wake signal, then what bus:request_stop does.
+local function stop(ctx: any)
+    local committed, err = session._commit_stop(ctx, ctx.upstream, nil)
+    if committed ~= true then error("Stop was not committed: " .. tostring(err)) end
+    ctx.approval_wake:notify("stop")
+    ctx.coordinator.state = "draining_stop"
+    ctx.coordinator.cancel:close()
+end
+
+-- A committed steering message: a pending input row, then the wake signal
+-- unless `quiet`.
+local function steer(ctx: any, quiet: boolean?)
+    assert(ctx.writer:add_message(consts.MSG_TYPE.USER, "Use c_10 instead", { input = { state = "pending" } }))
+    if not quiet then ctx.approval_wake:notify("steering") end
+end
+
 -- Deletes every session the fixtures created.
 local function cleanup()
     for _, fixture in ipairs(fixtures) do
@@ -223,9 +295,10 @@ end
 
 return {
     AGENT = AGENT, MARKED = MARKED, GRANTED = GRANTED, PLAIN = PLAIN, PRIVATE = PRIVATE,
-    DELEGATE = DELEGATE, TARGET = TARGET, TABLES = TABLES,
+    DELEGATE = DELEGATE, TARGET = TARGET, FORBIDDEN = FORBIDDEN, TABLES = TABLES, PLUGIN_PID = PLUGIN_PID,
     count = count, new_session = new_session, new_ctx = new_ctx, fake_caller = fake_caller,
     entry_meta = entry_meta, round = round, row = row, updates_of = updates_of,
     has_continue = has_continue, launches = launches, records_by_call = records_by_call,
-    create_tool_grant = create_tool_grant, cleanup = cleanup,
+    create_tool_grant = create_tool_grant, start = start, finish = finish, pending = pending,
+    stop = stop, steer = steer, cleanup = cleanup,
 }

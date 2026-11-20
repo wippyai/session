@@ -132,7 +132,11 @@ local consts = {
         CONTEXT = "context",
         ATTENTION_CONTEXT_SET = "attention_context_set",
         -- Handled by the session plugin, never forwarded.
-        TOOL_APPROVAL_SURFACE = "tool_approval_surface"
+        TOOL_APPROVAL_SURFACE = "tool_approval_surface",
+        -- Forwarded only from the user's relay, with sender_user_id stamped
+        -- by the plugin; handled in the session inbox.
+        TOOL_APPROVAL = "tool_approval",
+        TOOL_APPROVAL_GRANT_REVOKE = "tool_approval_grant_revoke"
     },
 
     -- Tool approval grant states.

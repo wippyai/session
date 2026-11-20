@@ -12,6 +12,7 @@ local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local message_repo = require("message_repo")
 local wait_for_boot = require("wait_for_boot")
+local activation = require("activation")
 
 local function mock_ctx(state_config)
     local captured = {
@@ -241,6 +242,31 @@ local function define_tests()
     end)
 
     describe("session_handlers config normalization", function()
+        it("restores tool approval grants only for an agent switch the user sent", function()
+            local saved = activation.restore_grants
+            local calls = {}
+            activation.restore_grants = function(ctx, agent)
+                calls[#calls + 1] = agent and agent.id
+                return true, nil
+            end
+            local ok, failure = pcall(function()
+                for _, op in ipairs({
+                    { agent_id = "agent:init", init = true },
+                    { agent_id = "agent:model" },
+                    { agent_id = "agent:user", user_command = true },
+                }) do
+                    local ctx = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+                    local result, err = session_handlers.agent_change(ctx, op)
+                    test.is_nil(err)
+                    test.not_nil(result)
+                end
+            end)
+            activation.restore_grants = saved
+            if not ok then error(failure) end
+            test.eq(#calls, 1, "only the user's switch")
+            test.eq(calls[1], "agent:user", "with the new compiled agent")
+        end)
+
         it("agent_change tolerates a missing live ctx.config", function()
             local ctx, captured = mock_ctx({
                 agent_id = "agent:old",

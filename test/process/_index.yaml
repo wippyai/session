@@ -259,6 +259,7 @@ entries:
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
       wait_for_boot: app:wait_for_boot
+      activation: wippy.session.approval:activation
       test: wippy.test:test
     method: run_tests
 

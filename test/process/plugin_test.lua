@@ -3032,6 +3032,46 @@ local function define_tests()
             test.eq(#sent_to(run, "script-pid-1", consts.TOPICS.COMMAND), 0)
         end)
 
+        it("forwards approval decisions and revocations from the relay with its own user as sender_user_id", function()
+            local run = run_surfaces({
+                open(first, "conn-1"),
+                { topic = consts.PLUGIN_TOPICS.COMMAND, from = SURFACE_HUB, data = { session_id = first,
+                    conn_pid = "conn-1", request_id = "req-decide", data = { command = "tool_approval",
+                        approval_id = "a1", decision = "approve", sender_user_id = "forged-user" } } },
+                { topic = consts.PLUGIN_TOPICS.COMMAND, from = SURFACE_HUB, data = { session_id = first,
+                    conn_pid = "conn-1", request_id = "req-revoke", data = { command = "tool_approval_grant_revoke",
+                        grant_id = "g1", expected_revision = 1 } } },
+            })
+            local forwarded = sent_to(run, "script-pid-1", consts.TOPICS.COMMAND)
+            test.eq(#forwarded, 2)
+            for _, command in ipairs(forwarded) do
+                test.eq(command.sender_user_id, security.actor():id(), command.command .. ": stamped, never the client value")
+                test.eq(command.conn_pid, "conn-1")
+            end
+            test.eq(forwarded[1].request_id, "req-decide")
+            test.eq(forwarded[2].request_id, "req-revoke")
+        end)
+
+        it("refuses approval decisions and revocations from a process that is not the relay and changes nothing", function()
+            local run = run_surfaces({
+                open(first, "conn-1"),
+                { topic = consts.PLUGIN_TOPICS.COMMAND, from = "intruder-pid", data = { session_id = first,
+                    conn_pid = "conn-1", request_id = "req-decide", data = { command = "tool_approval",
+                        approval_id = "a1", decision = "approve" } } },
+                { topic = consts.PLUGIN_TOPICS.COMMAND, from = "intruder-pid", data = { session_id = first,
+                    conn_pid = "conn-1", request_id = "req-revoke", data = { command = "tool_approval_grant_revoke",
+                        grant_id = "g1", expected_revision = 1 } } },
+                -- Positive control: another command from the same process is
+                -- forwarded as before.
+                { topic = consts.PLUGIN_TOPICS.COMMAND, from = "intruder-pid", data = { session_id = first,
+                    conn_pid = "conn-1", request_id = "req-model", data = { command = "model", name = "m" } } },
+            })
+            local forwarded = sent_to(run, "script-pid-1", consts.TOPICS.COMMAND)
+            test.eq(#forwarded, 1, "only the control command reaches the session")
+            test.eq(forwarded[1].command, "model")
+            test.eq(#sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first), 0, "no reply to the intruder")
+        end)
+
         it("keeps the live set across a Session process restart while the connection stays open", function()
             local run = run_surfaces({
                 open(second, "conn-keep"),

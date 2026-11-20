@@ -532,6 +532,9 @@ end
 -- Command receipts
 ---------------------------------------------------------------------------
 
+-- The longest request_id a receipt keeps.
+approval_repo.MAX_REQUEST_ID = 160
+
 local function valid_hash(value: any): boolean
     return type(value) == "string" and #value == 71 and value:match("^sha256:[a-f0-9]+$") ~= nil
 end
@@ -578,7 +581,7 @@ function approval_repo.store_receipt(dbtx: any, receipt: any)
     for _, key in ipairs({ "owner_id", "session_id", "request_id" }) do
         if not non_empty(receipt[key]) then return nil, "Receipt " .. key .. " is required" end
     end
-    if #receipt.request_id > 160 then return nil, "Receipt request_id is too long" end
+    if #receipt.request_id > approval_repo.MAX_REQUEST_ID then return nil, "Receipt request_id is too long" end
     if not valid_hash(receipt.body_hash) then return nil, "Receipt body_hash must be sha256:<64 hex>" end
     if type(receipt.response) ~= "table" then return nil, "Receipt response is required" end
     local response, encode_err = encode(receipt.response)
@@ -709,6 +712,13 @@ function approval_repo.suspend_grants(dbtx: any, session_id: string, list: {any}
     return true
 end
 
+-- suspended -> active (an authenticated user action restores a grant).
+function approval_repo.restore_grant(dbtx: any, session_id: string, grant_id: string, expected_revision: number?)
+    return change_grant(dbtx, session_id, grant_id, expected_revision,
+        { suspended = true }, CONFLICT.GRANT_NOT_ACTIVE,
+        { status = consts.GRANT_STATUS.ACTIVE, suspension_reason = sql.builder.expr("NULL") })
+end
+
 -- active or suspended -> revoked. A revoked grant never matches again.
 function approval_repo.revoke_grant(dbtx: any, session_id: string, grant_id: string, expected_revision: number?, revoked_by: string)
     if not non_empty(revoked_by) then return nil, "revoked_by is required" end
@@ -727,6 +737,16 @@ local function read_session_column(conn: any, session_id: string, column: string
     if not rows then return nil, err end
     if #rows == 0 then return nil, not_found("session", session_id) end
     return rows[1]
+end
+
+-- The owner (sessions.user_id) of the session, or nil and a NOT_FOUND error
+-- (code "session").
+function approval_repo.session_owner(conn: any, session_id: string)
+    return with_connection(conn, function(c)
+        local row, err = read_session_column(c, session_id, "user_id")
+        if not row then return nil, err end
+        return row.user_id
+    end)
 end
 
 -- The turn-scoped Stop or finish fence { turn_id, reason }, or nil.

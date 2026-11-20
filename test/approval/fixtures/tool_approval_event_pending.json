@@ -45,7 +45,8 @@
       "approve_all_scope": {
         "scope": "batch",
         "tools": [
-          { "registry_id": "app.tools:delete_customer", "title": "Delete customer" }
+          { "registry_id": "app.tools:delete_customer", "title": "Delete customer",
+            "fingerprint": "sha256:5d1e8c0b7a6f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d" }
         ],
         "covered": [
           { "approval_id": "01990a2b-0000-7000-8000-0000000000a1", "title": "Delete customer" },
