@@ -5,15 +5,22 @@ client (the Wippy Web Host, `<wippy-chat>`, or a headless `chat.js` user) for
 native tool-call approval. It lists every message a client sends or receives,
 with every field.
 
-**Status: off until the gate ships.** No released Session module advertises
-the capability yet. Until `GET /api/v1/sessions/capabilities` returns
-`tool_approval: 1`, a client must not send any of the commands or declarations
-below, and it will receive none of the events.
+A client checks the capability first (section 2). Without
+`tool_approval: 1` in `GET /api/v1/sessions/capabilities`, a client must not
+send any of the commands or declarations below, and it will receive none of
+the events.
+
+Null fields. A field that this document shows as `null` may be left out of a
+message instead; a client reads a missing field as `null`. The exception is
+`activity` in session objects and session updates (section 9): it is always
+sent when its revision is, as `null` when nothing waits.
 
 Machine-readable examples of every message are in
 `test/approval/fixtures/*.json`; each section names its fixtures. The test
 `app.approval:protocol_fixtures_test` checks that every fixture keeps the keys a
-client reads. Clients may copy the JSON files as test data.
+client reads, and `app.approval:contract_test` checks that every event, reply
+and REST projection the Session sends has exactly the keys of its fixture.
+Clients may copy the JSON files as test data.
 
 ## 1. Defaults
 
@@ -140,7 +147,7 @@ The `approval` object:
 | `reason` | string or null | For a `continue` denial: the user's text. |
 | `grant_id` | string or null | The grant that allowed the call, or the grant this decision created. |
 | `disposition` | string or null | `dispatched` or `not_run`, once known. An approved call can still end `not_run`. |
-| `offered` | object | What the card may offer (below). Present while the request is pending and kept afterwards. |
+| `offered` | object or null | What the card may offer (below). Present while the request is pending and kept afterwards; `null` for a record that a grant decided. |
 | `display` | object | Server-built card content (below). |
 
 `offered`:
@@ -168,7 +175,7 @@ data and must be shown escaped, never as HTML):
 | `target_agent` | string | Delegation calls only: the target agent title. |
 | `approve_all_scope` | object | Present when `approve_all` is offered: the disclosure for the Details view. |
 | `approve_all_scope.scope` | string | Same as `offered.approve_all.scope`. |
-| `approve_all_scope.tools` | array of object | Every tool in the grant scope: `{ "registry_id", "title", "fingerprint" }`, plus `target_agent_id` for delegation. `fingerprint` is the tool's deployment fingerprint when the card was built. The list never changes, and a session grant covers exactly these tools at these fingerprints. |
+| `approve_all_scope.tools` | array of object | Every tool in the grant scope: `{ "registry_id", "title", "fingerprint" }`, plus `target_agent_id` for delegation. `fingerprint` is the tool's deployment fingerprint when the card was built. For scope `session` the list holds every tool of the agent and every agent it can delegate to: a delegation target is listed with the delegation function as `registry_id`, the target agent as `target_agent_id` and title, and the fingerprint of the function and the target together. The list never changes, and a session grant covers exactly these tools and targets at these fingerprints. |
 | `approve_all_scope.covered` | array of object | Every covered pending call: `{ "approval_id", "title" }`. |
 | `approve_all_scope.covered_count` | integer | Number of covered calls. |
 
@@ -226,8 +233,10 @@ public call: `tool_approval` (pending), `tool_approval` (approved),
 a grant allows has no pending event; its `function_call` carries
 `decided_via: "grant"`. Approved private and delegation calls get no
 `function_call` or `function_success`. When a grant allows one of them, the
-Session publishes one `tool_approval` event with state `approved` and
-`decided_via: "grant"` as the audit record.
+Session publishes exactly one `tool_approval` event with state `approved` and
+`decided_via: "grant"` as the audit record, once the call's disposition is
+known (`dispatched`, or `not_run` when the batch closed or the grant was
+revoked first).
 
 Old clients ignore the unknown `tool_approval` type.
 
@@ -415,7 +424,10 @@ when Stop ended the call.
 When a call with an approval record does not run, the Session publishes its
 `tool_approval` state event before the `function_error`. `function_error`
 carries no `row_type`, so a client learns from the earlier event that a
-private or delegation row is not a public tool call.
+private or delegation row is not a public tool call. A private or delegation
+call without an approval record (one that needed no approval in a batch that
+did not run) gets no `function_error`: without approval, private and
+delegation calls get no function events.
 
 `function_call` keeps its meaning "execution starts" and gains an `approval`
 object that old clients ignore:
@@ -429,8 +441,9 @@ Fixtures: `function_error_not_approved.json`, `function_call_approved.json`.
 
 ## 9. Session fields: `activity` and `tool_approval`
 
-Two new session fields, in REST session reads, the session list and live
-session `update` events:
+Two new session fields, in REST session reads, the session list, the open
+announcement (the first session `update` a Session process sends when it
+starts, with `status`) and live session `update` events:
 
 ```json
 {
@@ -451,11 +464,23 @@ session `update` events:
   revision.
 - `activity.kind` is `awaiting_tool_approval`; `activity.approval_ids` lists the
   pending requests. Each committed decision updates it.
-- `tool_approval.active` is `true` once the session is protected.
+- `tool_approval` is always present. `tool_approval.active` is `true` once
+  the session is protected; an unprotected session has
+  `{ "active": false, "revision": 0, "grants": [] }`. `tool_approval.revision`
+  is the revision of the stored activation; it moves when the activation
+  changes, not when a grant does.
+- A live `update` carries `tool_approval` when the session becomes protected
+  or its activation changes, and when a grant is created, revoked, suspended
+  or restored. It always holds the complete list of grants; a grant missing
+  from it was revoked. Order one grant's changes by its `revision`.
+- The open announcement carries `activity`, `activity_revision` and
+  `tool_approval`, read after recovery, so a client knows whether the session
+  is protected before it renders the transcript.
 - Each grant carries `grant_id`, `revision`, `scope` (`tool` or `session`),
   `status` (`active` or `suspended`), `suspension_reason`, `registry_id` and
   `title` (both `null` for scope `session`, which covers every tool in its
-  manifest), and `created_at`. Revoked grants are not listed.
+  manifest; for a delegation grant the title is the target agent's), and
+  `created_at`. Revoked grants are not listed.
 - Session `status` stays `running` while a card waits.
 
 When no surface can show a card, the Session sends one session `error` event per
@@ -475,12 +500,15 @@ Fixtures: `session_update_activity.json`, `session_update_activity_cleared.json`
   (`null` when nothing waits), `activity_revision` and `tool_approval` in each
   session object.
 - `GET /api/v1/sessions/messages` returns each approval-bearing call row with
-  `metadata.approval`: `{ approval_id, call_id, state, decided_via, disposition,
-  revision, then, reason, offered, intent_digest, display, requested_at,
-  expires_at, decided_at, grant_id }`. The row keeps `metadata.status =
-  "pending"` while it waits.
-- Both responses carry a top-level `server_now` (RFC 3339, UTC), so a reloaded
-  card computes time left the same way as a live one.
+  `metadata.approval`: `{ approval_id, batch_id, call_id, state, decided_via,
+  disposition, revision, then, reason, offered, intent_digest, display,
+  requested_at, expires_at, decided_at, grant_id }`. The row keeps
+  `metadata.status = "pending"` while it waits. A row that ended never keeps a
+  `pending` projection: when a tool round fails, or recovery closes the batch,
+  the projection is rewritten with the committed record, and a row that was
+  already terminal keeps its status and result.
+- All three responses carry a top-level `server_now` (RFC 3339, UTC), so a
+  reloaded card computes time left the same way as a live one.
 
 Fixtures: `rest_session.json`, `rest_message_row.json`.
 
@@ -521,7 +549,11 @@ batch that was never released, and every call of a batch released before
 the interruption, get the plain text `interrupted, outcome unknown` instead,
 because the Session does not know whether it ran. No call runs again after a
 restart, and the batch's behavior controls (model-phase and wrapper
-controls) are not replayed.
+controls) are not replayed. When the recovering process reaches the user's
+clients (the Session process at its start or exit, the session plugin on its
+failure paths and in its scan of sessions left running), it publishes the
+`tool_approval` events of the records it closed and the cleared `activity`;
+otherwise clients read them through REST.
 
 `changed_before_run` is the model-facing name; the stored disposition reason is
 `intent_changed`. The word `stale` is not used for it.
@@ -536,3 +568,27 @@ error text (for example `Failed to parse arguments: ...`), as before this
 feature.
 
 Fixture: `model_result_not_run.json`.
+
+## 12. Artifact read
+
+`GET /api/v1/artifact/{id}` (the metadata a client loads before it mounts
+artifact content) carries the artifact's `session_id` and a `tool_approval`
+object copied from that session:
+
+```json
+{ "uuid": "0199...", "session_id": "0199...", "type": "inline", "content_type": "text/html",
+  "tool_approval": { "active": true } }
+```
+
+- `tool_approval.active` is `true` when the artifact's session is protected,
+  and `false` for an unprotected session or an artifact without a session.
+- A client isolates the content of an artifact whose `tool_approval.active` is
+  `true`, and mounts no content before this read. A missing `tool_approval`
+  (an older Session) means not protected: older Sessions can't protect a
+  session.
+- When the Session can't read the session's protection, the read fails with
+  status 500; it never reports `active: false` instead.
+- The artifact update event does not carry `tool_approval`; a client reads it
+  here.
+
+Fixture: `rest_artifact.json`.
