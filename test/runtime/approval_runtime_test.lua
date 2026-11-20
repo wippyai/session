@@ -1093,7 +1093,9 @@ local SIGNALS = { "stop", "revoke", "steering", "finish", "cancel", "deadline" }
 -- only the invariant holds (either order is correct).
 local EXPECTED_RUNS: {[string]: {[string]: boolean}} = {
     wake = { stop = false, steering = false, finish = false, cancel = false, deadline = true, revoke = true },
-    dispatch = { steering = true, finish = true, deadline = true, revoke = true },
+    -- Stop commits after the release and before caller:execute: the real tool
+    -- caller gets the closed cancellation channel and launches nothing.
+    dispatch = { stop = false, steering = true, finish = true, deadline = true, revoke = true },
     commit = { deadline = true }, projection = { deadline = true }, ack = { deadline = true },
 }
 
