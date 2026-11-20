@@ -540,6 +540,48 @@ local function define_tests()
             end
         end)
 
+        it("settles a call that needed no approval as changed_before_run when its tool entry changes during the wait", function()
+            for _, case in ipairs({ "unchanged", "newly marked", "entry changed" }) do
+                local ctx = new_ctx({ live = 1 })
+                local op, batch = round(ctx, {
+                    { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                    { id = "call-c", registry_id = PLAIN, args = {} },
+                })
+                local handle = start(ctx, op)
+                pending(ctx, batch.batch_id, 1)
+                if case ~= "unchanged" then
+                    tool_meta._registry_get = function(id)
+                        local entry = registry.get(id)
+                        if id ~= PLAIN or not entry then return entry end
+                        local changed = { id = entry.id, kind = entry.kind, data = entry.data, meta = {} }
+                        for key, value in pairs(entry.meta or {}) do changed.meta[key] = value end
+                        if case == "newly marked" then
+                            changed.meta.approval = "required"
+                        else
+                            changed.meta.description = "Looks up a customer and deletes their orders."
+                        end
+                        return changed
+                    end
+                end
+                approve(ctx, batch.batch_id, "call-a")
+                local result, err = finish(handle)
+                tool_meta._registry_get = saved.registry_get
+                test.is_nil(err, case)
+                test.is_true(op.caller.launches["call-a"], case .. ": the approved call runs")
+                test.is_true(has_continue(result), case .. ": the turn continues")
+                test.is_nil(records_by_call(ctx.session_id, batch.batch_id)["call-c"],
+                    case .. ": the call has no approval record")
+                if case == "unchanged" then
+                    test.is_true(op.caller.launches["call-c"], "positive control: the unchanged call runs")
+                else
+                    test.is_nil(op.caller.launches["call-c"], case .. ": the changed call never runs")
+                    local stored = row(op.call_message_ids["call-c"]).metadata
+                    test.eq(stored.result.reason, "changed_before_run", case)
+                    test.eq(stored.status, consts.FUNC_STATUS.ERROR, case)
+                end
+            end
+        end)
+
         it("settles an approved delegation call as changed_before_run when its target agent changes during the wait", function()
             for _, case in ipairs({ "replaced", "removed" }) do
                 local ctx = new_ctx({ live = 1, policy = { require = "all" } })

@@ -37,7 +37,8 @@ local logger = require("logger"):named("session.approval.gate")
 --     deleted          the session was deleted: nothing was written.
 --   and, after a release (not fenced):
 --     released         { [call_id] = true } of the calls process_tools gives
---                      to caller:execute to run: calls that need no approval,
+--                      to caller:execute to run: calls that need no approval
+--                      and whose tool entry did not change before the release,
 --                      calls the caller reports as failed without running
 --                      them, and approved calls the release marked
 --                      `dispatched`. Nothing else runs.
@@ -241,6 +242,9 @@ local function evaluate(ctx: any, items: {any}, effective: any, history: any): (
             item.kind = KIND.GRANT
         else
             item.kind = KIND.RUN
+            -- A call that needs no approval has no record; the release
+            -- compares its tool's fingerprint with this one.
+            item.run_fingerprint = item.frozen.identity and item.frozen.identity.fingerprint
         end
     end
     return evaluated, nil
@@ -744,8 +748,10 @@ local DISPOSITION_REASON = {
 -- The release transaction of a batch: with the session row locked, it
 -- refuses a closed batch, a turn fenced by Stop or finish, a pending steering
 -- input and a stop denial (the batch then closes through close_and_settle),
--- rechecks every approved call, writes `dispatched` or `not_run` for each
--- record, marks the batch released and settles the calls that do not run.
+-- rechecks every approved call and the tool entry of every call that needed
+-- no approval (a changed one does not run: `changed_before_run`), writes
+-- `dispatched` or `not_run` for each record, marks the batch released and
+-- settles the calls that do not run.
 -- Returns the gate result for process_tools.
 local function release(ctx: any, op: any, env: any, run: any): (any, string?)
     local binding, items = run.binding, run.items
@@ -784,10 +790,21 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
         if not owner then return nil, owner_err end
         local by_message = {}
         for _, record in ipairs(records) do by_message[record.tool_message_id] = record end
-        local decisions = {}
+        local decisions, changed_runs = {}, {}
         for _, item in ipairs(items) do
             local record = by_message[item.message_id]
-            if record then
+            if not record and item.kind == KIND.RUN then
+                -- A call that needed no approval runs only with the tool
+                -- deployment it was evaluated with: a tool entry that changed
+                -- during the wait (newly marked, or replaced) may now need
+                -- approval. Only the tool fingerprint counts, not the context.
+                -- No fingerprint fails closed.
+                local frozen = freeze.call(item.validated, freeze_env(ctx, op, item, session_context))
+                local current = frozen and frozen.identity and frozen.identity.fingerprint
+                if type(item.run_fingerprint) ~= "string" or current ~= item.run_fingerprint then
+                    changed_runs[item.message_id] = true
+                end
+            elseif record then
                 local disposition, why = approval_repo.DISPOSITION.NOT_RUN, nil
                 if record.state == approval_repo.STATE.APPROVED then
                     why = recheck(dbtx, ctx, op, item, record, session_context, now, owner)
@@ -816,6 +833,8 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
             local call_reason, feedback = nil, nil
             if item.kind == KIND.NOT_RUN then
                 call_reason = item.reason
+            elseif changed_runs[item.message_id] then
+                call_reason = events.REASON.CHANGED_BEFORE_RUN
             elseif why then
                 call_reason = DISPOSITION_REASON[why]
                 if why == "denied" then feedback = record.reason end
@@ -838,7 +857,8 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
             if not cleared then return nil, activity_err end
             activity = cleared
         end
-        return { settled = settled, changed = changed, records = by_message, activity = activity }
+        return { settled = settled, changed = changed, records = by_message, activity = activity,
+            changed_runs = changed_runs }
     end)
     if not outcome then
         if session_gone(err) then return deleted_result(items), nil end
@@ -863,7 +883,7 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
     end
     for _, item in ipairs(items) do
         local record = outcome.records[item.message_id]
-        if item.kind == KIND.RUN or item.kind == KIND.ERROR then
+        if (item.kind == KIND.RUN and not outcome.changed_runs[item.message_id]) or item.kind == KIND.ERROR then
             result.released[item.call_id] = true
         elseif record and record.disposition == approval_repo.DISPOSITION.DISPATCHED then
             result.released[item.call_id] = true

@@ -571,7 +571,9 @@ failure paths and in its scan of sessions left running), it publishes the
 otherwise clients read them through REST.
 
 `changed_before_run` is the model-facing name; the stored disposition reason is
-`intent_changed`. The word `stale` is not used for it.
+`intent_changed`. The word `stale` is not used for it. A call in the batch
+that needed no approval also settles as `changed_before_run`, with no approval
+record, when its tool entry changed before the release.
 
 `approval_check_failed` comes with the instruction "The tool did not run. Do
 not call it again with the same arguments. The call could not be prepared for
