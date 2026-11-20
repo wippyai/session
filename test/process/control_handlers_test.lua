@@ -966,6 +966,48 @@ local function define_tests()
             test.eq(artifact.title, "Report")
         end)
 
+        it("refuses number and boolean content in a protected session and checks them as before otherwise", function()
+            for _, value in ipairs({ 123, true, false }) do
+                local name = tostring(value)
+                local ctx = new_ctx(true)
+                local before = stored_count()
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
+                    { title = "Report", content = value, instructions = false },
+                } })
+                test.is_nil(err, name)
+                test.contains(rejected_text(result), "isolation_required: ", name .. ": new item")
+                test.eq(stored_count(), before, name .. ": no artifact row")
+
+                -- A stored package: the first item replaces its content with
+                -- the value, the second changes only the title.
+                local id = uuid.v7()
+                test.eq(ctx.writer:create_artifact(id, consts.ARTIFACT_TYPES.INLINE, "Data", IFRAME_TAG,
+                    { content_type = consts.CONTENT_TYPES.JSON }), id, name)
+                local updated, update_err = control_handlers.control_artifacts(ctx, { artifacts = {
+                    { id = id, content = value },
+                    { id = id, title = "Report" },
+                } })
+                test.is_nil(update_err, name)
+                test.contains(rejected_text(updated), "isolation_required: ", name .. ": two-item update")
+                local artifact: any = assert(artifact_repo.get(id))
+                test.eq(artifact.content, IFRAME_TAG, name)
+                test.eq(artifact.title, "Data", name)
+
+                -- Not protected: the isolation check refuses nothing.
+                local open_ctx = new_ctx(false)
+                local open_new = control_handlers.control_artifacts(open_ctx, { artifacts = {
+                    { title = "Report", content = value, instructions = false },
+                } })
+                test.is_nil(type(open_new) == "table" and open_new.rejected or nil, name .. ": new item not protected")
+                local open_result, open_err = control_handlers.control_artifacts(open_ctx, { artifacts = {
+                    { id = id, content = value },
+                    { id = id, title = "Report" },
+                } })
+                test.is_nil(open_err, name)
+                test.is_nil(open_result.rejected, name .. ": not protected")
+            end
+        end)
+
         it("stores a Session form tag without event props, HTML, markdown, a view_ref and a JSON string", function()
             local ctx = new_ctx(true)
             local before = stored_count()

@@ -280,8 +280,12 @@ local function needs_trusted_realm(content)
         local decoded, decode_err = json.decode(content)
         if decode_err ~= nil or type(decoded) == "string" then return false end
         pkg = decoded
-    elseif type(content) ~= "table" then
+    elseif content == nil then
         return false
+    elseif type(content) ~= "table" then
+        -- A number or boolean reaches the Host as a non-string value, which
+        -- it loads as a package and refuses while isolated.
+        return true
     end
     if type(pkg) ~= "table" or pkg.specification ~= form_artifact.SPECIFICATION or type(pkg.wippy) ~= "table"
         or pkg.wippy.tagName ~= form_artifact.TAG_NAME then
