@@ -546,19 +546,23 @@ approval IDs, digests or grant IDs.
 | `repeated_denied_call` | same call as one denied earlier in this turn | continues |
 | `approval_check_failed` | the Session could not prepare a valid call for the approval check (for example a value that is not JSON-shaped) | continues |
 
-After a crash or a process exit, recovery closes the unfinished batch
-(close reason `exit`): a pending request becomes `interrupted`, and a call
+After a crash, or when another process recovers the session (a session start,
+the session plugin's failure paths, the scan of sessions left running),
+recovery closes the unfinished batch (close reason `exit`): a pending request becomes `interrupted`, and a call
 that did not run gets the `interrupted` result above. An approved call of a
 batch that was never released, and every call of a batch released before
 the interruption, get the plain text `interrupted, outcome unknown` instead,
 because the Session does not know whether it ran. When the Session process
-itself settles a waiting batch at its exit (finish or a supervisor cancel), it
+itself settles a waiting batch at its exit (finish, a supervisor cancel, or an
+ingress or bus failure), it
 knows that nothing was dispatched, so an approved call without a disposition
 gets the structured `interrupted` result. `interrupted, outcome unknown` is for
-recovery after a crash, where the process that waited is gone. A call of a
-round that the exit cut before the gate stored any request gets the Stop
-result instead: status `cancelled` and the text
-`Session stopped before the call executed`. No call runs again after a
+recovery after a crash, where the process that waited is gone. A tool round
+that had not started when a supervisor cancel or a failure stopped the Session
+gets the Stop result instead: status `cancelled` and the text
+`Session stopped before the call executed`. A round already inside the
+gate, and a queued round under a finish, get the structured `interrupted`
+result. No call runs again after a
 restart, and the batch's behavior controls (model-phase and wrapper
 controls) are not replayed. When the recovering process reaches the user's
 clients (the Session process at its start or exit, the session plugin on its

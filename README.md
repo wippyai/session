@@ -815,8 +815,11 @@ traits:
 
 - With `require: marked`, only tools that set `approval` in their registry
   meta ask (`approval: required`, or `approval: { required: true,
-  approve_all: true }`). With `require: all`, every call asks, delegation
-  calls included. No tool is exempt because it only reads data.
+  approve_all: true }`). Delegation calls never ask under `marked`. With
+  `require: all`, every call needs approval, delegation calls included, but an
+  Approve all grant can cover a call, and a repeat of a call denied earlier in
+  the turn settles without a card. No tool is exempt because it only reads
+  data.
 - With `approve_all: "off"`, Approve all is offered only for a tool whose
   author set `approval.approve_all: true`.
 - An invalid context, including an unknown key, fails the turn with
@@ -826,9 +829,13 @@ traits:
   turn approval off, and the stricter `require` wins.
 
 `GET /api/v1/sessions/capabilities` reports `tool_approval: 1` when the Session
-supports it. A client sends approval commands only when that key is present.
-In a protected session, a call that needs a decision while no chat window can
-show a card settles as not run, and the turn ends with a notice.
+supports it. A chat client must declare an approval surface for the session
+(see the protocol document). With a client that does not support the
+capability, every call that needs approval settles at once as not run
+(`approval_ui_unavailable`), and the turn ends with a notice.
+
+If a client declared a surface before and none is live now, the request stays
+pending for a 120 second grace period, or until its deadline.
 
 ### Operator switch
 
@@ -836,7 +843,10 @@ The `tool_approval_enforcement` requirement of `wippy/session` (environment
 variable `SESSION_TOOL_APPROVAL_ENFORCEMENT`) is `enforce` by default. The
 value `off` skips the approval gate for every session and logs a warning for
 each skipped check. This is a security downgrade, meant for rollback. Any other
-value reads as `enforce`.
+value reads as `enforce`. It skips only the gate. The trait is still
+validated, so an invalid context still fails the turn. The activation is still
+stored, so the Web Host still isolates content and the `isolation_required`
+refusal below still applies.
 
 ```yaml
 - name: dep.wippy.session
@@ -850,9 +860,14 @@ value reads as `enforce`.
 ### Artifacts in protected sessions
 
 The Web Host cannot isolate JSON or packaged web content. In a protected
-session the Session refuses a new or updated `_control.artifacts` item with
-such content. The tool call fails with an error that starts with
-`isolation_required:`, and the model can return HTML or markdown instead.
+session the Session refuses a `_control.artifacts` item that holds such
+content, new or as an update leaves it. That includes a number or a boolean,
+and text that parses as a JSON number, boolean or null. It allows HTML,
+markdown, a JSON string, a Session form tag (`wippy-form`) without `on*`
+props, and `view_ref` items. One refused item refuses the whole
+`_control.artifacts` list of the call, and nothing is written. The tool call
+fails with an error that starts with `isolation_required:`, and the model can
+return HTML or markdown instead.
 
 ### Known limits
 
