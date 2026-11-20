@@ -598,7 +598,10 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                         -- Providers require a result for every call, including withdrawn results.
                         local notice = tool_result.withdrawal_notice(metadata.stale)
                         if notice then
-                            builder:add_function_result(func_name, notice, llm_call_id)
+                            builder:add_function_result(func_name, notice, llm_call_id, {
+                                metadata = type(metadata.loaded_traits) == "table"
+                                    and { loaded_traits = metadata.loaded_traits } or nil
+                            })
                         else
                             local result_content = metadata.result
                             if type(result_content) == "table" then
@@ -610,7 +613,9 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                             end
                             builder:add_function_result(func_name, tostring(result_content), llm_call_id, {
                                 is_error = metadata.status == consts.FUNC_STATUS.ERROR
-                                    or metadata.status == consts.FUNC_STATUS.CANCELLED
+                                    or metadata.status == consts.FUNC_STATUS.CANCELLED,
+                                metadata = type(metadata.loaded_traits) == "table"
+                                    and { loaded_traits = metadata.loaded_traits } or nil
                             })
                         end
                     end

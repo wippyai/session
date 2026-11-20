@@ -13,7 +13,7 @@ permissions:
 
 env:
   WIPPY_TEST_REQUIRE_ADMISSION: "1"
-  FRAMEWORK_REF: b000b42e07b8259e4f4423b9c2efc56e7d8ccb26
+  FRAMEWORK_REF: 17c1dde8150de2e8dd89988b4d1f1995c35e81e6
 
 jobs:
   lint:

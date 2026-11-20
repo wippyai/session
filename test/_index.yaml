@@ -493,7 +493,7 @@ entries:
     meta:
       description: LLM module, the session builds its prompts through it
     component: "wippy/llm"
-    version: ">=0.4.46"
+    version: ">=0.5.22"
     parameters:
       - name: process_host
         value: app:processes

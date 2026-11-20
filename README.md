@@ -357,6 +357,19 @@ refresh the dependency lock from the published packages.
   note is restored with it. The prompt builder renders system rows that carry
   `preserve_position` in place; other system rows (turn and agent-change notices)
   stay out of the prompt.
+- **Loaded traits.** A tool control that changes the trait list
+  (`_control.config.traits`) still replaces the whole list. When the control adds
+  traits, the session also stores `loaded_traits = { agent, keys }` on the tool
+  call row, next to `control_operations`: the agent the call ran under and the
+  keys of the traits that were not compiled before the control. The prompt
+  builder passes it to the function result. An agent that sets
+  `agent_options.trait_loading = "append"` uses it to render the trait where it
+  was loaded (see Loaded traits in the Agent module), so the request after the
+  load extends the previous one and keeps its thinking blocks. Nothing is
+  recorded when the control adds no trait, when it also switches the agent, or
+  with an Agent module that has no trait keys; such traits join the system
+  prompt as before. Traits set by the session start function are never recorded:
+  it leaves no call row.
 - **Thinking blocks.** Assistant rows store the step's `prefix_fingerprint`
   and immutable `generation_checkpoint_id` next to their `thinking_blocks`.
   The generation field records the checkpoint at response persistence, after any
