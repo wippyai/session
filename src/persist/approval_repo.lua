@@ -360,10 +360,11 @@ local function turn_batches(conn: any, session_id: string, turn_id: string?, sta
     return batches, nil
 end
 
--- The session's batches in `states` (every state when nil), in creation
--- order. Recovery reads the open ones.
-function approval_repo.list_batches(conn: any, session_id: string, states: {string}?)
+-- The session's batches in `states`, in creation order. Recovery reads the
+-- open ones.
+function approval_repo.list_batches(conn: any, session_id: string, states: {string})
     if not non_empty(session_id) then return nil, "Session ID is required" end
+    if type(states) ~= "table" or #states == 0 then return nil, "Batch states are required" end
     return with_connection(conn, function(c) return turn_batches(c, session_id, nil, states) end)
 end
 

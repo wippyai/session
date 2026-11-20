@@ -369,10 +369,9 @@ end
 -- the requests that operation may make) and returns the bus's error, if
 -- any. Then the bus settles what is left (command_bus:fail). Returns nil
 -- and the first error.
-local function settle_exit(bus: any, err: any, wait_stopped: (() -> any)?)
+local function settle_exit(bus: any, err: any, wait_stopped: () -> any)
     bus:begin_exit()
-    local stop_err = nil
-    if wait_stopped then stop_err = wait_stopped() end
+    local stop_err = wait_stopped()
     local _, settle_err = bus:fail(err)
     return nil, settle_err or stop_err
 end
