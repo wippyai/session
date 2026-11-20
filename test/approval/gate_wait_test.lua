@@ -209,6 +209,47 @@ local function define_tests()
             test.eq(captured.session_updates[#captured.session_updates].activity, json.null, "the activity is cleared")
         end)
 
+        it("releases a decision that commits during the wait's state read although the deadline passes then", function()
+            -- The gate's first read of the batch returns the request still
+            -- pending; during that read the decision commits (in time), the
+            -- clock moves past the deadline and the waiter is woken. The
+            -- decision wins: the clock was read before the state.
+            local ctx = new_ctx({ live = 1, policy = { timeout_seconds = 30 } })
+            local base, offset = time.now():unix(), 0
+            activation._now = function() return base + offset end
+            local op, batch = round(ctx, {
+                { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-c", registry_id = PLAIN, args = {} },
+            })
+            local saved_list = approval_repo.list_by_batch
+            local raced = false
+            approval_repo.list_by_batch = function(conn, session_id, batch_id)
+                local rows, err = saved_list(conn, session_id, batch_id)
+                local waiting = false
+                for _, record in ipairs(rows or {}) do
+                    if record.state == "pending" then waiting = true end
+                end
+                if conn == nil and waiting and not raced then
+                    raced = true
+                    assert(approve(ctx, batch.batch_id, "call-a", { quiet = true }))
+                    offset = 31
+                    ctx.approval_wake:notify("decision")
+                end
+                return rows, err
+            end
+            local ok, result, err = pcall(function() return finish(start(ctx, op)) end)
+            approval_repo.list_by_batch = saved_list
+            if not ok then error(result) end
+            test.is_nil(err)
+            test.is_true(raced, "the race ran in the gate's read")
+            test.is_true(op.caller.launches["call-a"], "the approved call runs")
+            test.is_true(op.caller.launches["call-c"])
+            local stored = assert(approval_repo.get_batch(nil, batch.batch_id))
+            test.eq(stored.state, "released", "not closed as deadline")
+            test.eq(records_by_call(ctx.session_id, batch.batch_id)["call-a"].disposition, "dispatched")
+            test.is_true(has_continue(result))
+        end)
+
         it("ends the wait on Stop within 10 s when Stop commits first, and refuses a later decision", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })

@@ -675,10 +675,13 @@ function gate._wait(ctx: any, run: any, waiting: any): (any, string?)
     while true do
         local reason = signalled(ctx)
         if reason then return { close_reason = reason }, nil end
+        -- The clock is read before the committed state: the decision command
+        -- refuses a decision at or after the deadline, so a decision that
+        -- commits during this read was in time and its release wins.
+        local now = activation.now()
         local outcome, err = committed_outcome(ctx, run)
         if err then return nil, err end
         if outcome then return outcome, nil end
-        local now = activation.now()
         if now >= waiting.deadline then return { close_reason = "deadline" }, nil end
         local cases = { waiting.waiter.channel:case_receive(), after(waiting.deadline - now):case_receive() }
         if activation.live_surfaces(ctx) == 0 then

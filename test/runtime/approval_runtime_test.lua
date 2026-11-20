@@ -1029,14 +1029,10 @@ local SIGNALS = { "stop", "revoke", "steering", "finish", "cancel", "deadline" }
 
 -- Calls that must run (true) or not (false) for a point and signal; nil:
 -- only the invariant holds (either order is correct).
--- The deadline at an inbox point has no fixed outcome: the gate's first
--- pass of its wait can read the request still pending (the decision not yet
--- committed) and then read the clock after the deadline moved, and so close
--- the batch as expired although the decision committed in time. Either way
--- nothing runs without its approval and each call has one result.
 local EXPECTED_RUNS: {[string]: {[string]: boolean}} = {
     wake = { stop = false, steering = false, finish = false, cancel = false, deadline = true, revoke = true },
     dispatch = { steering = true, finish = true, deadline = true, revoke = true },
+    commit = { deadline = true }, projection = { deadline = true }, ack = { deadline = true },
 }
 
 local function fire(handle: any, signal: string, grant: any)
