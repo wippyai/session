@@ -409,7 +409,8 @@ local function turn_boundary(ctx: any, bus: any): (boolean?, string?)
     return true
 end
 
-local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any)
+-- `sender` is the process the inbox message came from.
+local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any, sender: any?)
     payload_data = payload_data or {}
     if payload_data.conn_pid then ctx.upstream.conn_pid = payload_data.conn_pid end
     if topic == consts.TOPICS.STOP or
@@ -553,6 +554,11 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
     end
     if op then
         op.user_command = true
+        -- Sent by the session's user: the parent plugin stamps
+        -- sender_user_id only on what its authenticated relay forwards.
+        -- Only such a command may restore tool approval grants.
+        op.user_authenticated = sender ~= nil and sender == ctx.parent_pid
+            and type(payload_data.sender_user_id) == "string" and payload_data.sender_user_id == ctx.user_id
         local queued, queue_err = bus:queue_op(op)
         if not queued then
             ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), queue_err)
@@ -1132,7 +1138,7 @@ local function run(args: SessionArgs)
                         or approval_commands.handle(context, msg:from(), payload_data))
                 end
                 if not attention_handled then
-                    local _, route_err = route_input(context, bus, topic, payload_data, session_state)
+                    local _, route_err = route_input(context, bus, topic, payload_data, session_state, msg:from())
                     if route_err then
                         exit_err = "Session ingress failed: " .. route_err
                         break

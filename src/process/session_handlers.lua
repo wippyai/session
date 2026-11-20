@@ -545,10 +545,11 @@ function session_handlers.agent_change(ctx, op)
     local refreshed, refresh_err = ctx.reader:reset()
     input_policy.accept_committed(ctx, interaction)
 
-    -- A switch the user sent restores the tool approval grants an earlier
-    -- switch suspended, when the new agent permits them. A failure leaves
-    -- them suspended.
-    if op.user_command == true then
+    -- A switch the user sent through the authenticated relay
+    -- (op.user_authenticated, set in session.route_input) restores the tool
+    -- approval grants an earlier switch suspended, when the new agent
+    -- permits them. A failure leaves them suspended.
+    if op.user_authenticated == true then
         local _, restore_err = activation.restore_grants(ctx, next_agent)
         if restore_err then
             logger:warn("tool approval grants were not restored after the agent switch",

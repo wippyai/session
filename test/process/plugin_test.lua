@@ -3072,6 +3072,32 @@ local function define_tests()
             test.eq(#sent_to(run, "conn-1", consts.TOPIC_PREFIXES.SESSION .. first), 0, "no reply to the intruder")
         end)
 
+        it("stamps sender_user_id only on commands the relay sent, also on those queued for the session start", function()
+            local function agent_command(from: string, request_id: string, sender_user_id: string?): any
+                return { topic = consts.PLUGIN_TOPICS.COMMAND, from = from, data = { session_id = first,
+                    conn_pid = "conn-1", request_id = request_id,
+                    data = { command = "agent", name = "app:other_agent", sender_user_id = sender_user_id } } }
+            end
+            local actor = assert(security.actor(), "the test needs a security actor")
+            local actor_id = actor:id()
+            local run = run_plugin_script(actor, SURFACE_HUB, {
+                open(first, "conn-1"),
+                agent_command(SURFACE_HUB, "queued-relay", "forged-user"),
+                agent_command("intruder-pid", "queued-intruder", actor_id),
+                { topic = consts.TOPICS.SESSION_OPENED, from = "script-pid-1",
+                    data = { session_id = first, from_pid = "script-pid-1" } },
+                agent_command(SURFACE_HUB, "live-relay", nil),
+                agent_command("intruder-pid", "live-intruder", actor_id),
+            })
+            local stamped = {}
+            for _, command in ipairs(sent_to(run, "script-pid-1", consts.TOPICS.COMMAND)) do
+                stamped[#stamped + 1] = command.request_id .. "=" .. tostring(command.sender_user_id)
+            end
+            test.eq(table.concat(stamped, " "), string.format(
+                "queued-relay=%s queued-intruder=nil live-relay=%s live-intruder=nil", actor_id, actor_id),
+                "the relay's commands carry the plugin's user; other senders' carry none, not even a forged one")
+        end)
+
         it("keeps the live set across a Session process restart while the connection stays open", function()
             local run = run_surfaces({
                 open(second, "conn-keep"),

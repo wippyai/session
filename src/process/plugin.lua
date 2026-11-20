@@ -704,14 +704,16 @@ local function run(args)
         end
     end
 
-    local function queue_start_request(session_info: any, kind: string, payload_data: any)
+    -- relay: the request came from the authenticated relay (from_relay); it
+    -- is forwarded with that flag once the session process has started.
+    local function queue_start_request(session_info: any, kind: string, payload_data: any, relay: boolean?)
         session_info.pending_requests = session_info.pending_requests or {}
         if #session_info.pending_requests >= 256 then
             send_error(payload_data.conn_pid, "SESSION_BUSY",
                 "Pending startup request buffer is full", payload_data.request_id)
             return
         end
-        table.insert(session_info.pending_requests, { kind = kind, payload = payload_data })
+        table.insert(session_info.pending_requests, { kind = kind, payload = payload_data, relay = relay == true })
     end
 
     local function fail_start_requests(session_info, message)
@@ -737,7 +739,8 @@ local function run(args)
         end
     end
 
-    local function forward_request(session_info, session_id, topic_type, request_data)
+    -- relay: the request came from the authenticated relay (from_relay).
+    local function forward_request(session_info, session_id, topic_type, request_data, relay: boolean?)
         local conn_pid = request_data.conn_pid
         local request_id = request_data.request_id
         if topic_type == consts.HANDLER_TYPES.MESSAGE then
@@ -752,9 +755,10 @@ local function run(args)
             local cmd_data = request_data.data or {}
             cmd_data.conn_pid = conn_pid
             if request_id then cmd_data.request_id = request_id end
-            -- The authenticated user of this plugin, never a client value:
-            -- the session accepts approval commands only with it.
-            cmd_data.sender_user_id = state.user_id
+            -- The authenticated user of this plugin, never a client value,
+            -- and only on what the relay sent: the session accepts approval
+            -- commands, and restores grants on an agent switch, only with it.
+            cmd_data.sender_user_id = relay == true and state.user_id or nil
             if cmd_data.command == consts.COMMANDS.STOP then
                 cmd_data.stop_supervised = true
                 local stop_request_id = session_info.stop_request_id
@@ -1081,10 +1085,10 @@ local function run(args)
                 end
             end
             if not session_info.open_notified then
-                queue_start_request(session_info, topic_type, routed)
+                queue_start_request(session_info, topic_type, routed, relay)
                 return
             end
-            forward_request(session_info, session_id, topic_type, routed)
+            forward_request(session_info, session_id, topic_type, routed, relay)
         end
 
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
@@ -1471,7 +1475,7 @@ local function run(args)
                             notify_session_opened(started.session_id, request.payload.request_id)
                         else
                             forward_request(session_info, started.session_id,
-                                request.kind, request.payload)
+                                request.kind, request.payload, request.relay)
                         end
                     end
                 end
