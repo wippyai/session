@@ -3,6 +3,7 @@ local approval_repo = require("approval_repo")
 local message_repo = require("message_repo")
 local form_recovery = require("form_recovery")
 local events = require("approval_events")
+local approval_projection = require("approval_projection")
 
 -- Recovery of the calls an interrupted turn left pending, for every entry
 -- point: session start, bus failure and process exit (command_bus:fail), the
@@ -15,8 +16,14 @@ local events = require("approval_events")
 --    `interrupted`, calls that did not run get a not-run disposition, the
 --    controls of an open batch and of a batch released before the
 --    interruption become `cancelled`, released dispositions stay. The
---    session activity is cleared. Only for a protected session; the
---    approval tables of an unprotected one are not touched.
+--    session activity is cleared. Each record the closure changed gets its
+--    row projection (metadata.approval) rewritten in the same transaction,
+--    also on a call row that is already terminal (its status and result
+--    stay), so REST history never keeps a pending card. Only for a
+--    protected session; the approval tables of an unprotected one are not
+--    touched. With an upstream to the clients (the recovering process has
+--    one), the changed records and the cleared activity are published after
+--    the commit; otherwise clients read them through REST.
 -- 2. recover_pending settles the pending call rows. form_recovery is asked
 --    first. A row of a batch (metadata.batch_id) is written here, in a
 --    locked transaction and only while it is still pending, so it never
@@ -55,11 +62,85 @@ function recovery.write_call(session_id: string, message_id: string, metadata: a
     return result.updated == true, nil
 end
 
+-- Closes the batch `batch_id` as `exit` in `dbtx` (approval_repo.close_batch)
+-- and rewrites the row projection of every record the closure changed. A
+-- deleted call row is skipped. Returns the changed records, or nil and an
+-- error.
+local function close_as_exit(dbtx: any, session_id: string, batch_id: string): ({any}?, any)
+    local before, before_err = approval_repo.list_by_batch(dbtx, session_id, batch_id)
+    if not before then return nil, before_err end
+    local closed, close_err = approval_repo.close_batch(dbtx, batch_id, "exit")
+    if not closed then
+        if errors.is(close_err, errors.NOT_FOUND) then return {}, nil end
+        return nil, close_err
+    end
+    local after, after_err = approval_repo.list_by_batch(dbtx, session_id, batch_id)
+    if not after then return nil, after_err end
+    local revisions = {}
+    for _, record in ipairs(before) do revisions[record.approval_id] = record.revision end
+    local changed = {}
+    for _, record in ipairs(after) do
+        if record.revision ~= revisions[record.approval_id] then
+            local _, row_err = message_repo.update_metadata(record.tool_message_id,
+                { approval = approval_repo.projection(record) }, session_id, { tx = dbtx })
+            -- A deleted row reads as "Failed to get message: Message not found".
+            if row_err and not tostring(row_err):find("Message not found", 1, true) then return nil, row_err end
+            changed[#changed + 1] = record
+        end
+    end
+    return changed, nil
+end
+
+-- Publishes, after the commit, the tool_approval event of every changed
+-- record (a public call a grant allowed has none, as in the gate) and the
+-- cleared activity, when `upstream` reaches the clients.
+local function publish(upstream: any, records: {any}, activity: any)
+    if type(upstream) ~= "table" then return end
+    local server_now = approval_repo.now()
+    for _, record in ipairs(records) do
+        local public_grant = record.decided_via == "grant" and record.row_type == consts.MSG_TYPE.FUNCTION
+        if not public_grant then
+            events.publish_record(upstream, record, approval_projection.function_name(record), server_now)
+        end
+    end
+    events.publish_activity(upstream, activity)
+end
+
+-- The live path of a tool round that fails before its calls are settled
+-- (process_tools fail_remaining): an open batch closes as `exit` with its
+-- row projections and the activity cleared, in one transaction, and the
+-- changes are published to `upstream`. A released or closed batch keeps its
+-- state. Returns true, or nil and an error.
+function recovery.close_failed_batch(session_id: string, batch_id: string, upstream: any): (boolean?, string?)
+    local outcome, err = approval_repo.transact(session_id, function(dbtx)
+        local batch, batch_err = approval_repo.get_batch(dbtx, batch_id)
+        if not batch then return nil, batch_err end
+        if batch.state ~= approval_repo.BATCH_STATE.OPEN then return { records = {} } end
+        local changed, close_err = close_as_exit(dbtx, session_id, batch_id)
+        if not changed then return nil, close_err end
+        local current, read_err = approval_repo.read_activity(dbtx, session_id)
+        if not current then return nil, read_err end
+        local activity = nil
+        if current.activity ~= nil then
+            local cleared, clear_err = approval_repo.write_activity(dbtx, session_id, nil)
+            if not cleared then return nil, clear_err end
+            activity = cleared
+        end
+        return { records = changed, activity = activity }
+    end)
+    if not outcome then
+        if errors.is(err, errors.NOT_FOUND) then return true, nil end
+        return nil, tostring(err)
+    end
+    publish(upstream, outcome.records, outcome.activity)
+    return true, nil
+end
+
 -- Phase 1. Returns true, or nil and an error. A deleted session has nothing
--- to reconcile.
-function recovery.reconcile(session_id: string, protected: boolean?): (boolean?, string?)
+-- to reconcile. `upstream` (optional) reaches the user's clients.
+function recovery.reconcile(session_id: string, protected: boolean?, upstream: any?): (boolean?, string?)
     if not protected then return true, nil end
-    local _, err = approval_repo.transact(session_id, function(dbtx)
+    local outcome, err = approval_repo.transact(session_id, function(dbtx)
         local ids, seen = {}, {}
         local function add(batch_id: any)
             if type(batch_id) == "string" and batch_id ~= "" and not seen[batch_id] then
@@ -73,19 +154,24 @@ function recovery.reconcile(session_id: string, protected: boolean?): (boolean?,
         local rows, rows_err = message_repo.list_pending_calls(dbtx, session_id)
         if not rows then return nil, rows_err end
         for _, row in ipairs(rows) do add(row.metadata.batch_id) end
+        local changed = {}
         for _, batch_id in ipairs(ids) do
-            local closed, close_err = approval_repo.close_batch(dbtx, batch_id, "exit")
-            if not closed and not errors.is(close_err, errors.NOT_FOUND) then return nil, close_err end
+            local records, close_err = close_as_exit(dbtx, session_id, batch_id)
+            if not records then return nil, close_err end
+            for _, record in ipairs(records) do changed[#changed + 1] = record end
         end
         local current, read_err = approval_repo.read_activity(dbtx, session_id)
         if not current then return nil, read_err end
+        local activity = nil
         if current.activity ~= nil then
             local cleared, clear_err = approval_repo.write_activity(dbtx, session_id, nil)
             if not cleared then return nil, clear_err end
+            activity = cleared
         end
-        return true
+        return { records = changed, activity = activity }
     end)
     if err ~= nil and not session_gone(err) then return nil, tostring(err) end
+    if outcome then publish(upstream, outcome.records, outcome.activity) end
     return true, nil
 end
 
@@ -135,10 +221,13 @@ end
 
 -- Both phases for the session's rows after `anchor_id` (every row when nil).
 -- `protected`: the session has a stored tool approval activation
--- (config.tool_approval). Returns how many calls it settled, or nil and an
--- error; recovery then runs again later.
-function recovery.recover_calls(session_id: string, anchor_id: string?, protected: boolean?): (number?, string?)
-    local reconciled, reconcile_err = recovery.reconcile(session_id, protected)
+-- (config.tool_approval). `upstream` (optional): the recovering process's
+-- upstream to the user's clients, for the live updates of phase 1. Returns
+-- how many calls it settled, or nil and an error; recovery then runs again
+-- later.
+function recovery.recover_calls(session_id: string, anchor_id: string?, protected: boolean?,
+                                upstream: any?): (number?, string?)
+    local reconciled, reconcile_err = recovery.reconcile(session_id, protected, upstream)
     if not reconciled then return nil, reconcile_err end
     return message_repo.recover_pending(session_id, anchor_id, settle_for(session_id))
 end

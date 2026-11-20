@@ -11,6 +11,7 @@ local tool_meta = require("tool_meta")
 local activation = require("activation")
 local ui_action_broker = require("ui_action_broker")
 local events = require("approval_events")
+local approval_projection = require("approval_projection")
 local logger = require("logger"):named("session.approval.gate")
 
 -- The tool approval gate, called from message_handlers.process_tools after
@@ -249,6 +250,53 @@ local function call_title(item: any): string
     return (item.frozen and item.frozen.title) or tostring(item.name or item.registry_id or "")
 end
 
+-- Every tool of the current agent a session grant can cover, with its grant
+-- identity, in a stable order: its tools ({ registry_id, title, fingerprint })
+-- and its delegation targets ({ registry_id = the delegation function,
+-- target_agent_id, title = the target agent's title, fingerprint = the
+-- delegation grant fingerprint of the function and the target }, the identity
+-- freeze gives a delegation call). The agent's `tools` is the compiled
+-- name-keyed map (a list is read the same way); an entry with `agent_id` is a
+-- delegation. A tool that can't be fingerprinted can't be granted, so it is
+-- not disclosed either; neither is a tool or delegation function with
+-- approval.approve_all false.
+local function session_scope_tools(ctx: any): {any}
+    local agent = ctx.current_agent
+    local listed = type(agent) == "table" and type(agent.tools) == "table" and agent.tools or {}
+    local delegation_id = ctx.config and ctx.config.delegation_func_id
+    local tools = {}
+    for _, tool in pairs(listed) do
+        if type(tool) == "table" then
+            local target = tool.agent_id
+            if type(target) == "string" and target ~= "" then
+                local entry = tool_meta.entry(delegation_id)
+                local target_entry = tool_meta.entry(target)
+                local function_fingerprint = entry and fingerprint.of_entry(entry) or nil
+                local target_fingerprint = target_entry and fingerprint.of_entry(target_entry) or nil
+                local grant_fingerprint = function_fingerprint and target_fingerprint
+                    and fingerprint.delegation(function_fingerprint, target_fingerprint) or nil
+                if grant_fingerprint and tool_meta.approve_all(entry) ~= false then
+                    tools[#tools + 1] = { registry_id = delegation_id, title = tool_meta.title(target_entry, target),
+                        fingerprint = grant_fingerprint, target_agent_id = target }
+                end
+            else
+                local registry_id = tool.registry_id
+                local entry = tool_meta.entry(registry_id)
+                local tool_fingerprint = entry and fingerprint.of_entry(entry) or nil
+                if tool_fingerprint and tool_meta.approve_all(entry) ~= false then
+                    tools[#tools + 1] = { registry_id = registry_id, title = tool_meta.title(entry, registry_id),
+                        fingerprint = tool_fingerprint }
+                end
+            end
+        end
+    end
+    table.sort(tools, function(a, b)
+        if a.registry_id ~= b.registry_id then return tostring(a.registry_id) < tostring(b.registry_id) end
+        return tostring(a.target_agent_id or "") < tostring(b.target_agent_id or "")
+    end)
+    return tools
+end
+
 -- display.approve_all_scope: every tool in the scope of the offer, with the
 -- grant identity (registry ID, deployment fingerprint, delegate target), and
 -- every covered pending call. The tool list is immutable once stored: a
@@ -270,16 +318,8 @@ local function approve_all_disclosure(ctx: any, offered: any, covered_items: {an
         covered[#covered + 1] = { approval_id = item.approval_id, title = call_title(item) }
     end
     if offered.approve_all.scope == policy.SCOPE.SESSION then
-        local agent = ctx.current_agent
-        for _, tool in ipairs(type(agent) == "table" and type(agent.tools) == "table" and agent.tools or {}) do
-            local registry_id = type(tool) == "table" and tool.registry_id or nil
-            local entry = tool_meta.entry(registry_id)
-            local tool_fingerprint = entry and fingerprint.of_entry(entry) or nil
-            -- A tool that can't be fingerprinted can't be granted, so it is
-            -- not disclosed either.
-            if tool_fingerprint and tool_meta.approve_all(entry) ~= false then
-                add_tool(registry_id, tool_meta.title(entry, registry_id), tool_fingerprint, nil)
-            end
+        for _, tool in ipairs(session_scope_tools(ctx)) do
+            add_tool(tool.registry_id, tool.title, tool.fingerprint, tool.target_agent_id)
         end
     end
     return { scope = offered.approve_all.scope, tools = tools, covered = covered, covered_count = #covered }
@@ -440,7 +480,11 @@ local function publish_settlements(ctx: any, settled: {any})
                     function_name = item.name, error = tostring(item.error),
                 })
             end
-        else
+        elseif is_public(item) or type(entry.record) == "table" then
+            -- A private or delegation call gets its function_error only after
+            -- its tool_approval event (published first), which names its row
+            -- type: function events carry none. One without an approval
+            -- record gets no event, as before this feature.
             events.publish_not_run(ctx.upstream, item.call_id, events.not_run_payload(item.message_id,
                 item.call_id, item.name, entry.reason, entry.record, entry.cancelled))
         end
@@ -459,7 +503,10 @@ local function publish_records(ctx: any, run: any, records: {any}?)
     local server_now = approval_repo.now()
     for _, record in ipairs(records or {}) do
         local seen = run.published[record.approval_id]
-        if seen == nil or record.revision > seen then
+        -- A grant audit record is published once, with its disposition
+        -- (written by the release or the closure), not also when created.
+        local audit_unsettled = record.decided_via == "grant" and record.disposition == nil
+        if not audit_unsettled and (seen == nil or record.revision > seen) then
             run.published[record.approval_id] = record.revision
             local public_grant = record.decided_via == "grant" and record.row_type == consts.MSG_TYPE.FUNCTION
             if not public_grant then
@@ -467,6 +514,12 @@ local function publish_records(ctx: any, run: any, records: {any}?)
             end
         end
     end
+end
+
+-- After a commit that stored the evaluator's grant suspensions: the grants
+-- chip reads the new statuses from the session's tool_approval field.
+local function publish_suspensions(ctx: any, suspend: {any}?)
+    if type(suspend) == "table" and #suspend > 0 then approval_projection.publish(ctx) end
 end
 
 local function all_calls(items: {any}): {[string]: boolean}
@@ -543,6 +596,7 @@ local function close_and_settle(ctx: any, run: any, reason: string, requests: {a
         return nil, tostring(err)
     end
     run.had_activity = false
+    publish_suspensions(ctx, run.suspend)
     run.suspend = nil
 
     publish_records(ctx, run, outcome.records)
@@ -783,6 +837,7 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
         if session_gone(err) then return deleted_result(items), nil end
         return nil, tostring(err)
     end
+    publish_suspensions(ctx, run.suspend)
     run.suspend = nil
     if outcome.close_reason then return close_and_settle(ctx, run, outcome.close_reason) end
     run.had_activity = false
@@ -919,6 +974,7 @@ function gate.run(ctx: any, op: any, env: any): (any, string?)
         if session_gone(store_err) then return deleted_result(items), nil end
         return nil, tostring(store_err)
     end
+    publish_suspensions(ctx, run.suspend)
     run.suspend = nil
     if stored.closed then
         -- A closure committed between the read above and the write.

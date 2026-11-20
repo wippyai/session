@@ -3,9 +3,19 @@ local security = require("security")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local session_status = require("session_status")
+local approval_projection = require("approval_projection")
+local time = require("time")
+
+-- Test seams: the HTTP context and the actor.
+local api = {
+    _http = http,
+    _security = security,
+    _approval_projection = approval_projection,
+}
 
 type GetSessionResponse = {
     success: boolean,
+    server_now: string?,
     session: any?,
     latest_message: any?,
     message_count: number?,
@@ -13,14 +23,14 @@ type GetSessionResponse = {
 }
 
 local function handler()
-    local res = http.response()
-    local req = http.request()
+    local res = api._http.response()
+    local req = api._http.request()
 
     if not res or not req then
         return nil, "Failed to get HTTP context"
     end
 
-    local actor = security.actor()
+    local actor = api._security.actor()
     if not actor then
         res:set_status(http.STATUS.UNAUTHORIZED)
         res:write_json({
@@ -74,8 +84,21 @@ local function handler()
         session.current_model = session.config.model or ""
     end
 
+    -- The tool approval fields (docs/tool-approval-protocol.md section 10):
+    -- tool_approval, and activity as null when nothing waits.
+    local _, projection_err = api._approval_projection.apply_rest(session)
+    if projection_err then
+        res:set_status(http.STATUS.INTERNAL_ERROR)
+        res:write_json({
+            success = false,
+            error = "Failed to read the session"
+        })
+        return
+    end
+
     local response = {
         success = true,
+        server_now = time.now():utc():format(time.RFC3339),
         session = session
     }
 
@@ -92,6 +115,6 @@ local function handler()
     res:write_json(response)
 end
 
-return {
-    handler = handler
-}
+api.handler = handler
+
+return api

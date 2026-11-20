@@ -2589,6 +2589,14 @@ function message_handlers.process_tools(ctx, op)
 
     local function fail_remaining(start_index, reason)
         local failure = tostring(reason)
+        -- An approval batch the gate left open (a check that failed after
+        -- its requests were stored) closes first, with its row projections
+        -- and the activity, so no terminal row keeps a pending card.
+        local binding = op.approval
+        if type(binding) == "table" and type(binding.batch_id) == "string" then
+            local _, close_err = approval_recovery.close_failed_batch(ctx.session_id, binding.batch_id, ctx.upstream)
+            if close_err then failure = failure .. "; approval batch closure failed: " .. tostring(close_err) end
+        end
         for index = start_index, #op.tool_calls do
             local call = op.tool_calls[index]
             local _, mark_err = write_row(op.call_message_ids[call.id], {

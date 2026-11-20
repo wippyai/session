@@ -140,14 +140,17 @@ end
 
 -- Recovers the calls an interrupted turn of `session_id` left pending
 -- (approval_recovery: its unfinished approval batches first, then the call
--- rows after the current checkpoint).
-local function recover_session_calls(session_id)
+-- rows after the current checkpoint). `hub_pid` (optional) is the user's
+-- hub: the clients get the approval records and the activity recovery
+-- changed.
+local function recover_session_calls(session_id, hub_pid)
     local session_reader, open_err = reader.open(session_id)
     if open_err then return nil, open_err end
     local anchor = session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
     local config = session_reader:state().config
     return approval_recovery.recover_calls(session_id, anchor,
-        type(config) == "table" and config.tool_approval ~= nil)
+        type(config) == "table" and config.tool_approval ~= nil,
+        hub_pid and upstream.new(session_id, nil, hub_pid) or nil)
 end
 
 -- Admits, with no turn, the form answers a stopped turn left pending: the
@@ -189,7 +192,7 @@ local function settle_session(session_id: string, user_id: string, target_status
     end
     local recovery_err = nil
     if opts.recover_calls then
-        local _, err = recover_session_calls(session_id)
+        local _, err = recover_session_calls(session_id, opts.hub_pid)
         recovery_err = err
     end
     local admitted = {}
@@ -259,7 +262,7 @@ local function finalize_exit(session_id: string, user_id: string, session_info: 
     end
     local target_status = status_after_exit(session_info, result, exit_error)
     return settle_session(session_id, user_id, target_status,
-        { recover_calls = target_status == consts.STATUS.FAILED })
+        { recover_calls = target_status == consts.STATUS.FAILED, hub_pid = hub_pid })
 end
 
 local function run(args)
@@ -1277,7 +1280,8 @@ local function run(args)
                 local session_id = tostring(session.session_id)
                 if not state.active_sessions[session_id] and session_status.is_stale_running(session) then
                     local target_status, stored, status_err, recovery_err, interaction =
-                        settle_interrupted(session_id, state.user_id :: string, { recovery_boundary = true })
+                        settle_interrupted(session_id, state.user_id :: string,
+                            { recovery_boundary = true, hub_pid = state.user_hub_pid })
                     if recovery_err or status_err then
                         logger:warn("stale session status could not be settled", { session_id = session_id,
                             error = tostring(status_err or recovery_err) })

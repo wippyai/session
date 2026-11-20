@@ -9,6 +9,7 @@ local tool_meta = require("tool_meta")
 local activation = require("activation")
 local approval_gate = require("approval_gate")
 local events = require("approval_events")
+local approval_projection = require("approval_projection")
 local wake = require("wake")
 local logger = require("logger"):named("session.approval.commands")
 
@@ -108,14 +109,8 @@ local function valid_fields(data: any, record: any): boolean
     return data.approve_all_scope == nil
 end
 
-local function tool_title(registry_id: any): string?
-    if type(registry_id) ~= "string" then return nil end
-    return tool_meta.title(tool_meta.entry(registry_id), registry_id)
-end
-
 local function grant_reply(grant: any): any
-    if type(grant) ~= "table" then return nil end
-    return events.grant_object(grant, tool_title(grant.registry_id))
+    return approval_projection.grant(grant)
 end
 
 -- The grant an Approve all of scope tool or session creates. A tool grant
@@ -270,6 +265,7 @@ local function decide(dbtx: any, ctx: any, data: any, sender: string): (any, any
         },
         records = records,
         activity = activity,
+        grant_changed = grant ~= nil,
     }
 end
 
@@ -290,7 +286,7 @@ local function revoke(dbtx: any, ctx: any, data: any, sender: string): (any, any
     local revoked, revoke_err, current = approval_repo.revoke_grant(dbtx, ctx.session_id, grant.grant_id,
         grant.revision, sender)
     if not revoked then return nil, revoke_err, current end
-    return { response = { grant = grant_reply(revoked) } }
+    return { response = { grant = grant_reply(revoked) }, grant_changed = true }
 end
 
 -- Replies with an error code and the committed records that go with it.
@@ -303,12 +299,6 @@ local function refuse(ctx: any, request_id: any, code: string, outcome: any?)
         }
     end
     ctx.upstream:command_error(request_id, code, MESSAGE[code] or code, extra)
-end
-
--- The function name of a call row, for its tool_approval event.
-local function function_name(record: any): any
-    local row = message_repo.get(record.tool_message_id)
-    return type(row) == "table" and type(row.metadata) == "table" and row.metadata.function_name or nil
 end
 
 -- Handles a tool approval command that reached the session inbox from
@@ -395,9 +385,12 @@ function commands.handle(ctx: any, from: any, payload: any): boolean
 
     local server_now = approval_repo.now()
     for _, record in ipairs(outcome.records or {}) do
-        events.publish_record(ctx.upstream, record, function_name(record), server_now)
+        events.publish_record(ctx.upstream, record, approval_projection.function_name(record), server_now)
     end
     events.publish_activity(ctx.upstream, outcome.activity)
+    -- A grant was created or revoked: the grants chip reads the new list
+    -- from the session's tool_approval field.
+    if outcome.grant_changed then approval_projection.publish(ctx) end
     ctx.upstream:command_success(request_id, outcome.response)
     ctx.approval_wake:notify(payload.command == DECISION and wake.KIND.DECISION or wake.KIND.REVOKED)
     return true

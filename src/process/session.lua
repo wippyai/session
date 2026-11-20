@@ -20,6 +20,7 @@ local approval_repo = require("approval_repo")
 local approval_gate = require("approval_gate")
 local approval_commands = require("approval_commands")
 local activation = require("activation")
+local approval_projection = require("approval_projection")
 
 type SessionArgs = {
     session_id: string,
@@ -346,15 +347,18 @@ end
 -- (approval_recovery): reconcile_batches closes the unfinished approval
 -- batches, recover_calls does that and then settles the pending call rows
 -- after the current checkpoint. `protected` says whether the session has a
--- stored tool approval activation.
-local function recovery_hooks(session_id: string, session_reader: any, protected: () -> boolean): any
+-- stored tool approval activation. `session_upstream` reaches the user's
+-- clients, which get the approval records and the activity recovery changed.
+local function recovery_hooks(session_id: string, session_reader: any, protected: () -> boolean,
+                              session_upstream: any?): any
     return {
         reconcile_batches = function()
-            return approval_recovery.reconcile(session_id, protected())
+            return approval_recovery.reconcile(session_id, protected(), session_upstream)
         end,
         recover_calls = function()
             return approval_recovery.recover_calls(session_id,
-                session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), protected())
+                session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), protected(),
+                session_upstream)
         end,
     }
 end
@@ -631,7 +635,8 @@ local function run(args: SessionArgs)
         local config = (live_context and live_context.config) or session_config
         return type(config) == "table" and config.tool_approval ~= nil
     end
-    local hooks = recovery_hooks(args.session_id, session_reader, protected)
+    local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
+    local hooks = recovery_hooks(args.session_id, session_reader, protected, session_upstream)
 
     local recovered_calls = 0
     if not args.create then
@@ -649,7 +654,6 @@ local function run(args: SessionArgs)
         if not committed then error("Failed to persist recovery boundary: " .. tostring(commit_err)) end
     end
 
-    local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
     local policy_requests = channel.new(16)
     local boundary_reply: any = channel.new(1)
     local boundary_topic = "session.internal.turn_boundary"
@@ -994,6 +998,13 @@ local function run(args: SessionArgs)
         if not policies_ok then error("Failed to recover behavior policies: " .. tostring(policies_err)) end
     end
 
+    -- The open announcement carries the tool approval fields, read after
+    -- recovery, so a client knows whether the session is protected before it
+    -- renders the transcript (docs/tool-approval-protocol.md section 9).
+    local approval_fields, approval_fields_err = approval_projection.announcement(args.session_id, context.config)
+    if not approval_fields then
+        error("Failed to read the tool approval session fields: " .. tostring(approval_fields_err))
+    end
     session_upstream:update_session({
         agent = context.config.agent_id,
         model = context.config.model,
@@ -1002,6 +1013,9 @@ local function run(args: SessionArgs)
         public_meta = session_data.public_meta,
         interaction = context.interaction,
         attention_context = session_data.attention_context,
+        activity = approval_fields.activity,
+        activity_revision = approval_fields.activity_revision,
+        tool_approval = approval_fields.tool_approval,
     })
 
     -- Form answers accepted while no session process was running (or whose

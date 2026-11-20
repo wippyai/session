@@ -30,6 +30,7 @@ entries:
       tool_meta: wippy.session.approval:tool_meta
       approval_repo: wippy.session.persist:approval_repo
       consts: wippy.session:consts
+      approval_projection: wippy.session.approval:projection
 
   # wippy.session.approval:wake
   - name: wake
@@ -109,6 +110,21 @@ entries:
     imports:
       consts: wippy.session:consts
 
+  # wippy.session.approval:projection
+  - name: projection
+    kind: library.lua
+    meta:
+      comment: The session fields of tool approval as clients read them - tool_approval with grants, activity - for REST reads, the session list, the open announcement, live updates and the artifact read
+    source: file://projection.lua
+    modules:
+      - json
+      - logger
+    imports:
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      tool_meta: wippy.session.approval:tool_meta
+      approval_events: wippy.session.approval:events
+
   # wippy.session.approval:gate
   - name: gate
     kind: library.lua
@@ -131,6 +147,7 @@ entries:
       activation: wippy.session.approval:activation
       ui_action_broker: wippy.session.process:ui_action_broker
       approval_events: wippy.session.approval:events
+      approval_projection: wippy.session.approval:projection
 
   # wippy.session.approval:commands
   - name: commands
@@ -152,6 +169,7 @@ entries:
       activation: wippy.session.approval:activation
       approval_gate: wippy.session.approval:gate
       approval_events: wippy.session.approval:events
+      approval_projection: wippy.session.approval:projection
       wake: wippy.session.approval:wake
 
   # wippy.session.approval:recovery
@@ -166,3 +184,4 @@ entries:
       message_repo: wippy.session.persist:message_repo
       form_recovery: wippy.session.forms:form_recovery
       approval_events: wippy.session.approval:events
+      approval_projection: wippy.session.approval:projection

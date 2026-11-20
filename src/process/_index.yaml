@@ -272,6 +272,7 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       approval_gate: wippy.session.approval:gate
       approval_commands: wippy.session.approval:commands
+      approval_projection: wippy.session.approval:projection
     method: run
 
   # wippy.session.process:plugin

@@ -266,6 +266,7 @@ end
 function approval_repo.projection(record: any): any
     return {
         approval_id = record.approval_id,
+        batch_id = record.batch_id,
         call_id = record.call_id,
         state = record.state,
         decided_via = record.decided_via,
@@ -754,6 +755,20 @@ function approval_repo.session_owner(conn: any, session_id: string)
         local row, err = read_session_column(c, session_id, "user_id")
         if not row then return nil, err end
         return row.user_id
+    end)
+end
+
+-- The stored activation (config.tool_approval) of the session, or nil when
+-- it was never protected; nil and a NOT_FOUND error (code "session") when the
+-- session is gone, or nil and an error when the config can't be read.
+function approval_repo.read_activation(conn: any, session_id: string)
+    return with_connection(conn, function(c)
+        local row, err = read_session_column(c, session_id, "config")
+        if not row then return nil, err end
+        if type(row.config) ~= "string" or row.config == "" then return nil end
+        local config, decode_err = json.decode(row.config)
+        if decode_err or type(config) ~= "table" then return nil, "Stored session config is not a JSON object" end
+        return config.tool_approval
     end)
 end
 

@@ -30,6 +30,7 @@ local agent_registry = require("agent_registry")
 local policy = require("policy")
 local tool_meta = require("tool_meta")
 local approval_repo = require("approval_repo")
+local approval_projection = require("approval_projection")
 local consts = require("consts")
 local time = require("time")
 
@@ -179,12 +180,17 @@ function activation.persist(ctx: any, settings: any, declared_at: string?): (any
     if type(writer) ~= "table" or type(writer.update_tool_approval) ~= "function" then
         return nil, "The session writer cannot store the tool approval activation"
     end
+    local before = ctx.config and ctx.config.tool_approval
     local committed, err = writer:update_tool_approval(function(current)
         return activation.merge(current, settings, declared_at)
     end)
     if err then return nil, tostring(err) end
     ctx.config = ctx.config or {}
     ctx.config.tool_approval = committed
+    -- A changed activation (the session became protected, or a setting
+    -- moved) reaches the clients as the session's tool_approval field.
+    local before_revision = type(before) == "table" and before.revision or nil
+    if type(committed) == "table" and committed.revision ~= before_revision then approval_projection.publish(ctx) end
     return committed, nil
 end
 
@@ -242,6 +248,7 @@ local function suspend_unpermitted_grants(ctx: any, effective: any): (boolean?, 
         return approval_repo.suspend_grants(dbtx, ctx.session_id, suspend)
     end)
     if suspend_err then return nil, tostring(suspend_err) end
+    approval_projection.publish(ctx)
     return true, nil
 end
 
@@ -285,6 +292,7 @@ function activation.restore_grants(ctx: any, agent: any): (boolean?, string?)
         return true
     end)
     if restore_err then return nil, tostring(restore_err) end
+    approval_projection.publish(ctx)
     return true, nil
 end
 
