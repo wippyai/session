@@ -310,9 +310,9 @@ local function define_tests()
             test.eq(session_updates[1].activity, json.null)
             test.is_true(session_updates[1].activity_revision > 0)
 
-            local quiet = fx.crashed_batch()
+            local quiet, quiet_op = fx.crashed_batch()
             assert(approval_recovery.recover_calls(quiet.session_id, nil, true))
-            test.eq(row(op.call_message_ids["call-a"]).metadata.approval.state, "interrupted")
+            test.eq(row(quiet_op.call_message_ids["call-a"]).metadata.approval.state, "interrupted")
         end)
 
         it("discloses the agent's delegation targets in a session grant's scope; the grant runs that target", function()
