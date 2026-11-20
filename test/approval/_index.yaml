@@ -51,6 +51,7 @@ entries:
         session_error_limit.json: file://fixtures/session_error_limit.json
         rest_session.json: file://fixtures/rest_session.json
         rest_message_row.json: file://fixtures/rest_message_row.json
+        rest_artifact.json: file://fixtures/rest_artifact.json
         model_result_not_run.json: file://fixtures/model_result_not_run.json
 
   - name: protocol_fixtures_test
@@ -403,6 +404,74 @@ entries:
       command_bus: wippy.session.process:command_bus
       session: wippy.session.process:session
       reader: wippy.session.persist:reader
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: session_fields_test
+    kind: function.lua
+    meta:
+      name: Tool approval session fields
+      type: test
+      suite: session
+      comment: tool_approval and activity in REST reads, the session list, the open announcement and live updates; batch_id and no pending projection on terminal rows; recovery published live; delegation targets in a session grant; private and delegation events; capability, trait entry and the artifact read
+    source: file://session_fields_test.lua
+    modules:
+      - json
+      - sql
+      - uuid
+      - time
+      - security
+      - registry
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      approval_events: wippy.session.approval:events
+      approval_gate: wippy.session.approval:gate
+      approval_commands: wippy.session.approval:commands
+      approval_recovery: wippy.session.approval:recovery
+      approval_projection: wippy.session.approval:projection
+      activation: wippy.session.approval:activation
+      fingerprint: wippy.session.approval:fingerprint
+      message_handlers: wippy.session.process:message_handlers
+      message_repo: wippy.session.persist:message_repo
+      get_session: wippy.session.api:get_session
+      list_sessions: wippy.session.api:list_sessions
+      get_capabilities: wippy.session.api:get_capabilities
+      artifact_access: wippy.session.api:artifact_access
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: contract_test
+    kind: function.lua
+    meta:
+      name: Tool approval protocol contract
+      type: test
+      suite: session
+      comment: Every event, reply and REST projection the Session sends has exactly the keys of its protocol fixture; state events carry no client request_id
+    source: file://contract_test.lua
+    modules:
+      - json
+      - uuid
+      - sql
+      - time
+      - security
+      - registry
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      upstream: wippy.session.process:upstream
+      approval_repo: wippy.session.persist:approval_repo
+      approval_events: wippy.session.approval:events
+      approval_commands: wippy.session.approval:commands
+      message_handlers: wippy.session.process:message_handlers
+      get_session: wippy.session.api:get_session
+      list_sessions: wippy.session.api:list_sessions
+      session_messages: wippy.session.api:session_messages
+      get_capabilities: wippy.session.api:get_capabilities
+      artifact_access: wippy.session.api:artifact_access
       wait_for_boot: app:wait_for_boot
       gate_fixtures: app.approval:gate_fixtures
     method: run

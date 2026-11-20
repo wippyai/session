@@ -1,0 +1,14 @@
+{
+  "uuid": "01990a2b-0000-7000-8000-0000000000e1",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "type": "inline",
+  "kind": "inline",
+  "title": "Report",
+  "created_at": "2026-10-21T12:15:00Z",
+  "updated_at": "2026-10-21T12:15:00Z",
+  "content_version": 1,
+  "content_type": "text/html",
+  "tool_approval": {
+    "active": true
+  }
+}

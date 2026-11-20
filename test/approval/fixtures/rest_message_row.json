@@ -17,6 +17,7 @@
         "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
         "approval": {
           "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+          "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
           "call_id": "call_abc",
           "state": "pending",
           "decided_via": null,
@@ -25,7 +26,10 @@
           "then": null,
           "reason": null,
           "offered": {
-            "decisions": ["approve", "deny"],
+            "decisions": [
+              "approve",
+              "deny"
+            ],
             "approve_all": null
           },
           "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",

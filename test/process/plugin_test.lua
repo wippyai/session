@@ -816,7 +816,7 @@ end
 -- command bus never started, as "repairs pending calls before reopening
 -- without starting agent work" does. `before_cancel`, when given, runs in
 -- the session process after the start and before the cancel arrives.
-local function run_session_until_cancel(actor, session_id, before_cancel)
+local function run_session_until_cancel(actor, session_id, before_cancel, parent_pid)
     local cancel_events = channel.new(1)
     local bus_done = {
         case_receive = function(self) return self end,
@@ -845,7 +845,7 @@ local function run_session_until_cancel(actor, session_id, before_cancel)
         end
         return { ok = true, channel = bus_done, value = { error = nil } }
     end)
-    local ok, result = pcall(session.run, { session_id = session_id, user_id = actor:id() })
+    local ok, result = pcall(session.run, { session_id = session_id, user_id = actor:id(), parent_pid = parent_pid })
     restore_mock("channel.select")
     restore_mock("coroutine.spawn")
     restore_mock("channel.new")
@@ -2093,6 +2093,38 @@ local function define_tests()
             test.eq(result.status, "shutdown")
             test.eq(fx.recovery_summary(ctx, op, batch), APPROVAL_CRASHED)
             test.eq(fx.round_controls(ctx, op), "cancelled replayed=nil", "the start recovered the round without it")
+        end)
+
+        it("publishes what start recovery changed, then announces tool_approval and activity on open", function()
+            -- The first session payload carries tool_approval (EE2-2712) and
+            -- the cleared activity; recovery's updates reach the clients first.
+            local actor = security.actor()
+            local ctx = fx.crashed_batch({ session_id = fx.new_session({ config = {} }) })
+            local sent = {}
+            mock("process.send", function(pid, topic, payload)
+                table.insert(sent, { pid = pid, topic = topic, payload = payload })
+                return true, nil
+            end)
+            local ok, err = pcall(run_session_until_cancel, actor, ctx.session_id, nil, "approval-parent")
+            restore_mock("process.send")
+            if not ok then error(err) end
+            local announced_at, recovered_at = nil, nil
+            local announcement: any, recovered_payload: any = nil, nil
+            for index, item in ipairs(sent) do
+                local payload = item.payload
+                if type(payload) == "table" and payload.type == "update" and payload.status == consts.STATUS.IDLE
+                    and announced_at == nil then announced_at, announcement = index, payload end
+                if type(payload) == "table" and payload.type == "tool_approval" and payload.call_id == "call-a"
+                    and recovered_at == nil then recovered_at, recovered_payload = index, payload end
+            end
+            local announced = assert(announced_at, "the open announcement")
+            local recovered = assert(recovered_at, "the recovered request is published")
+            test.is_true(recovered < announced, "recovery's update first")
+            test.eq(recovered_payload.approval.state, "interrupted")
+            test.is_true(announcement.tool_approval.active)
+            test.eq(#announcement.tool_approval.grants, 0)
+            test.eq(announcement.activity, json.null, "nothing waits after recovery")
+            test.is_true(announcement.activity_revision > 0)
         end)
 
         it("recovers an approval batch interrupted by a process exit after the start", function()

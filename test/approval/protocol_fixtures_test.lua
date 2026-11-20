@@ -27,7 +27,7 @@ local REQUIRED = {
     ["tool_approval_event_decided.json"] = { "type", "session_id", "message_id", "call_id", "server_now",
         "approval.approval_id", "approval.state", "approval.revision", "approval.decided_via", "approval.decided_at" },
     ["tool_approval_event_grant.json"] = { "type", "row_type", "approval.state", "approval.decided_via",
-        "approval.grant_id" },
+        "approval.grant_id", "approval.disposition", null = { "approval.offered", "approval.expires_at" } },
     ["decision_approve.json"] = { "type", "session_id", "request_id", "data.command", "data.approval_id",
         "data.decision", "data.intent_digest", "data.expected_revision" },
     ["decision_approve_all.json"] = { "type", "request_id", "data.command", "data.decision",
@@ -61,11 +61,12 @@ local REQUIRED = {
     ["rest_session.json"] = { "success", "server_now", "session.session_id", "session.status", "session.activity",
         "session.activity_revision", "session.tool_approval.active", "session.tool_approval.grants" },
     ["rest_message_row.json"] = { "success", "server_now", "messages.1.message_id", "messages.1.type",
-        "messages.1.metadata.status", "messages.1.metadata.approval.approval_id",
+        "messages.1.metadata.status", "messages.1.metadata.approval.approval_id", "messages.1.metadata.approval.batch_id",
         "messages.1.metadata.approval.call_id", "messages.1.metadata.approval.state",
         "messages.1.metadata.approval.revision", "messages.1.metadata.approval.intent_digest",
         "messages.1.metadata.approval.offered", "messages.1.metadata.approval.display",
         "messages.1.metadata.approval.requested_at", "messages.1.metadata.approval.expires_at" },
+    ["rest_artifact.json"] = { "uuid", "session_id", "tool_approval.active" },
     ["model_result_not_run.json"] = { "executed", "reason", "instruction" },
 }
 
