@@ -918,6 +918,25 @@ local function define_tests()
             end
         end)
 
+        it("checks two updates of one artifact in a batch as the artifact they leave, in either order", function()
+            local ctx = new_ctx(true)
+            for _, order in ipairs({ "content type first", "content first" }) do
+                local id = uuid.v7()
+                test.eq(ctx.writer:create_artifact(id, consts.ARTIFACT_TYPES.INLINE, "Data", "x",
+                    { content_type = consts.CONTENT_TYPES.TEXT }), id, order)
+                local set_type = { id = id, content_type = consts.CONTENT_TYPES.JSON }
+                local set_content = { id = id, content = WEB_PAGE }
+                local items = order == "content first" and { set_content, set_type } or { set_type, set_content }
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = items })
+                test.is_nil(err, order)
+                test.contains(rejected_text(result), "isolation_required: ", order)
+                local artifact: any = assert(artifact_repo.get(id))
+                test.eq(artifact.content, "x", order)
+                test.eq(artifact.meta.content_type, consts.CONTENT_TYPES.TEXT, order)
+                test.eq(artifact.content_version, 1, order)
+            end
+        end)
+
         it("stores a Session form tag without event props, HTML, markdown, a view_ref and plain JSON", function()
             local ctx = new_ctx(true)
             local before = stored_count()

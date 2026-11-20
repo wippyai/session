@@ -298,7 +298,10 @@ function control_handlers.control_artifacts(ctx, op)
     local protected = type(ctx.config) == "table" and ctx.config.tool_approval ~= nil
 
     -- The whole batch is checked before anything is written, so a refused
-    -- item never leaves the earlier ones created and announced.
+    -- item never leaves the earlier ones created and announced. `pending`
+    -- holds what the earlier items of the batch leave of each updated
+    -- artifact, so two items for one artifact are checked as written.
+    local pending = {}
     for _, artifact_data in ipairs(op.artifacts) do
         local kind, content_type, content = artifact_data.type, artifact_data.content_type, artifact_data.content
         if artifact_data.id then
@@ -314,11 +317,15 @@ function control_handlers.control_artifacts(ctx, op)
             if form_meta.of(target.meta) then
                 return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
             end
-            -- An update is checked as the artifact it leaves behind.
+            -- An update is checked as the artifact it leaves behind: what an
+            -- earlier item of the batch leaves, else the stored row.
             local stored_meta = type(target.meta) == "table" and target.meta or {}
-            kind = target.kind
-            if content_type == nil then content_type = stored_meta.content_type end
-            if content == nil then content = target.content end
+            local before = pending[artifact_data.id]
+                or { kind = target.kind, content_type = stored_meta.content_type, content = target.content }
+            kind = before.kind
+            if content_type == nil then content_type = before.content_type end
+            if content == nil then content = before.content end
+            pending[artifact_data.id] = { kind = kind, content_type = content_type, content = content }
         end
         -- A view_ref renders an app page (isolated on the Host); its content is
         -- page parameters, not a package.
