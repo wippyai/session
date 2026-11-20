@@ -1000,7 +1000,8 @@ local function run(args: SessionArgs)
     -- The open announcement carries the tool approval fields, read after
     -- recovery, so a client knows whether the session is protected before it
     -- renders the transcript (docs/tool-approval-protocol.md section 9).
-    local approval_fields, approval_fields_err = approval_projection.announcement(args.session_id, context.config)
+    local approval_fields, approval_fields_err = approval_projection.announcement(args.session_id, context.config,
+        args.user_id)
     if not approval_fields then
         error("Failed to read the tool approval session fields: " .. tostring(approval_fields_err))
     end

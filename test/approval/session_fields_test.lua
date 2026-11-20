@@ -182,6 +182,37 @@ local function define_tests()
             test.eq(#published[3].grants, 0, "a revoked grant is not listed")
         end)
 
+        it("lists only the current owner's grants after the session changed owner", function()
+            local ctx, captured = new_ctx({ live = 1 })
+            assert(approval_repo.update_tool_approval(ctx.session_id, function() return ctx.config.tool_approval end))
+            local grant = fx.create_tool_grant(ctx, fx.GRANTED)
+            local _, body = rest(get_session, { session_id = ctx.session_id })
+            test.eq(#body.session.tool_approval.grants, 1, "positive control: the owner's grant is listed")
+            test.eq(body.session.tool_approval.grants[1].grant_id, grant.grant_id)
+
+            -- The new owner must be a user: PostgreSQL enforces the
+            -- sessions.user_id foreign key (SQLite does not).
+            wait_for_boot.ensure_user("new-owner")
+            local db = assert(sql.get(consts.get_db_resource()))
+            local _, update_err = db:execute("UPDATE sessions SET user_id = $1 WHERE session_id = $2",
+                { "new-owner", ctx.session_id })
+            db:release()
+            test.is_nil(update_err)
+
+            -- REST: the session as the new owner reads it.
+            local session = { session_id = ctx.session_id, user_id = "new-owner", config = ctx.config }
+            local projected = assert(approval_projection.apply_rest(session))
+            test.is_true(projected.tool_approval.active)
+            test.eq(#projected.tool_approval.grants, 0, "the old owner's grant is not listed")
+            -- The open announcement and a live update of a process of the new owner.
+            local fields = assert(approval_projection.announcement(ctx.session_id, ctx.config, "new-owner"))
+            test.eq(#fields.tool_approval.grants, 0)
+            ctx.user_id = "new-owner"
+            assert(approval_projection.publish(ctx))
+            local published = tool_approval_updates(captured)
+            test.eq(#published[#published].grants, 0)
+        end)
+
         it("publishes the tool_approval field live when the activation step or the gate suspends a grant", function()
             -- The activation step: a switch to an agent without the trait.
             local ctx, captured = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z" })

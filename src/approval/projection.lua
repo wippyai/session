@@ -36,17 +36,21 @@ function projection.grant(grant: any): any
     return events.grant_object(grant, title)
 end
 
--- The `tool_approval` field of a session whose decoded config is `config`:
--- { active, revision (the stored activation's revision), grants (active and
--- suspended; revoked grants are not listed) }. Reads the grants on `conn`
--- (nil for a pooled connection). Returns the field, or nil and an error.
-function projection.session_field(conn: any, session_id: string, config: any): (any, string?)
+-- The `tool_approval` field of a session whose decoded config is `config`
+-- and whose current owner is `owner_id`: { active, revision (the stored
+-- activation's revision), grants (active and suspended; revoked grants are
+-- not listed) }. A grant ends when the session gets another owner, so only
+-- the current owner's grants are listed. Reads the grants on `conn` (nil for
+-- a pooled connection). Returns the field, or nil and an error.
+function projection.session_field(conn: any, session_id: string, config: any, owner_id: any): (any, string?)
     local stored = type(config) == "table" and config.tool_approval or nil
     if type(stored) ~= "table" then return { active = false, revision = 0, grants = {} }, nil end
     local grants, err = approval_repo.list_grants(conn, session_id)
     if not grants then return nil, tostring(err) end
     local list = {}
-    for _, grant in ipairs(grants) do list[#list + 1] = projection.grant(grant) end
+    for _, grant in ipairs(grants) do
+        if grant.owner_id == owner_id then list[#list + 1] = projection.grant(grant) end
+    end
     return {
         active = stored.active == true,
         revision = math.tointeger(tonumber(stored.revision) or 0) or 0,
@@ -66,7 +70,7 @@ end
 -- columns projected): `tool_approval`, and `activity` as JSON null when
 -- nothing waits. Returns the session, or nil and an error.
 function projection.apply_rest(session: any): (any, string?)
-    local field, err = projection.session_field(nil, session.session_id, session.config)
+    local field, err = projection.session_field(nil, session.session_id, session.config, session.user_id)
     if not field then return nil, err end
     session.tool_approval = field
     session.activity = activity_value(session.activity)
@@ -76,11 +80,12 @@ end
 
 -- The approval fields of the open announcement (the first session update a
 -- Session process sends): `activity`, `activity_revision` and
--- `tool_approval`, read after recovery. Returns them, or nil and an error.
-function projection.announcement(session_id: string, config: any): (any, string?)
+-- `tool_approval`, read after recovery, for the session owner `owner_id`.
+-- Returns them, or nil and an error.
+function projection.announcement(session_id: string, config: any, owner_id: any): (any, string?)
     local current, read_err = approval_repo.read_activity(nil, session_id)
     if not current then return nil, tostring(read_err) end
-    local field, field_err = projection.session_field(nil, session_id, config)
+    local field, field_err = projection.session_field(nil, session_id, config, owner_id)
     if not field then return nil, field_err end
     return {
         activity = activity_value(current.activity),
@@ -99,7 +104,7 @@ function projection.publish(ctx: any): (boolean?, string?)
     if type(ctx) ~= "table" or type(ctx.upstream) ~= "table" or type(ctx.upstream.update_session) ~= "function" then
         return true, nil
     end
-    local field, err = projection.session_field(nil, ctx.session_id, ctx.config)
+    local field, err = projection.session_field(nil, ctx.session_id, ctx.config, ctx.user_id)
     if not field then
         logger:warn("tool approval session field was not published",
             { session_id = ctx.session_id, error = tostring(err) })
