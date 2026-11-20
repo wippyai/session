@@ -675,14 +675,18 @@ function gate._wait(ctx: any, run: any, waiting: any): (any, string?)
     while true do
         local reason = signalled(ctx)
         if reason then return { close_reason = reason }, nil end
-        -- The clock is read before the committed state: the decision command
-        -- refuses a decision at or after the deadline, so a decision that
-        -- commits during this read was in time and its release wins.
-        local now = activation.now()
+        -- The deadline is checked against the clock read before the committed
+        -- state: the decision command refuses a decision at or after the
+        -- deadline, so a decision that commits during this read was in time
+        -- and its release wins.
+        local checked_at = activation.now()
         local outcome, err = committed_outcome(ctx, run)
         if err then return nil, err end
         if outcome then return outcome, nil end
-        if now >= waiting.deadline then return { close_reason = "deadline" }, nil end
+        if checked_at >= waiting.deadline then return { close_reason = "deadline" }, nil end
+        -- The grace period and the timers use the clock after the read, so
+        -- the grace period starts no earlier than the gate saw no surface.
+        local now = activation.now()
         local cases = { waiting.waiter.channel:case_receive(), after(waiting.deadline - now):case_receive() }
         if activation.live_surfaces(ctx) == 0 then
             grace_from = grace_from or now

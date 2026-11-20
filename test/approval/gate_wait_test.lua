@@ -250,6 +250,51 @@ local function define_tests()
             test.is_true(has_continue(result))
         end)
 
+        it("starts the grace period when the gate sees no surface, not when its state read began", function()
+            -- During the gate's first state read the clock moves past the
+            -- grace period and the last surface goes away. The grace period
+            -- starts after that read; a decision that commits during the
+            -- second read then releases the batch on the third pass.
+            approval_gate.GRACE_SECONDS = 5
+            local ctx = new_ctx({ live = 1 })
+            local base, offset = time.now():unix(), 0
+            activation._now = function() return base + offset end
+            local op, batch = round(ctx, {
+                { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-c", registry_id = PLAIN, args = {} },
+            })
+            local saved_list = approval_repo.list_by_batch
+            local reads = 0
+            approval_repo.list_by_batch = function(conn, session_id, batch_id)
+                local rows, err = saved_list(conn, session_id, batch_id)
+                local waiting = false
+                for _, record in ipairs(rows or {}) do
+                    if record.state == "pending" then waiting = true end
+                end
+                if conn == nil and waiting and reads < 2 then
+                    reads = reads + 1
+                    if reads == 1 then
+                        offset = 6
+                        ctx.approval_surfaces = { live = 0, revision = 2 }
+                        ctx.approval_wake:notify("surfaces")
+                    else
+                        assert(approve(ctx, batch.batch_id, "call-a", { quiet = true }))
+                        ctx.approval_wake:notify("decision")
+                    end
+                end
+                return rows, err
+            end
+            local ok, result, err = pcall(function() return finish(start(ctx, op)) end)
+            approval_repo.list_by_batch = saved_list
+            if not ok then error(result) end
+            test.is_nil(err)
+            test.eq(reads, 2, "both reads ran in the gate")
+            local stored = assert(approval_repo.get_batch(nil, batch.batch_id))
+            test.eq(stored.state, "released", "the grace period had not ended")
+            test.is_true(op.caller.launches["call-a"], "the approved call runs")
+            test.is_true(has_continue(result))
+        end)
+
         it("ends the wait on Stop within 10 s when Stop commits first, and refuses a later decision", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
