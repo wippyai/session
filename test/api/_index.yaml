@@ -116,3 +116,81 @@ entries:
       context_staging: wippy.session.api:context_staging
       context_attachments: wippy.session:context_attachments
     method: run
+
+  # Web Host routes: GET /agents/details and GET /tools/by-name
+  - name: host_routes_test
+    kind: function.lua
+    meta:
+      name: Web Host agent details and tool names
+      type: test
+      suite: session
+      comment: GET /agents/details and GET /tools/by-name against the registry fixtures below (public, untitled and private agents, a non-agent id, titled, untitled and aliased tools)
+    source: file://host_routes_test.lua
+    modules:
+      - http
+      - json
+    imports:
+      test: wippy.test:test
+      agents_details: wippy.session.api:agents_details
+      tools_by_name: wippy.session.api:tools_by_name
+    method: run
+
+  - name: host_routes_public_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: host-routes-public
+      title: Host Routes Helper
+    model: gpt-4o
+    prompt: Test only.
+    start_prompts:
+      - Summarize this page
+      - text: not a string prompt
+      - Draft a reply
+
+  - name: host_routes_untitled_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: host-routes-untitled
+    model: gpt-4o
+    prompt: Test only.
+
+  - name: host_routes_private_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: host-routes-private
+      title: Hidden Helper
+      private: true
+    model: gpt-4o
+    prompt: Test only.
+    start_prompts:
+      - Hidden prompt
+
+  - name: host_routes_titled_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Titled Fixture Tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://host_routes_tool.lua
+    method: run
+
+  - name: host_routes_plain_tool
+    kind: function.lua
+    meta:
+      type: tool
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://host_routes_tool.lua
+    method: run
+
+  - name: host_routes_aliased_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Aliased Fixture Tool
+      llm_alias: host_routes_alias
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://host_routes_tool.lua
+    method: run

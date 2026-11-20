@@ -27,6 +27,59 @@ entries:
     func: get_capabilities
     path: /sessions/capabilities
 
+  # wippy.session.api:agents_details
+  - name: agents_details
+    kind: function.lua
+    meta:
+      comment: Returns one public agent's title and start prompts for the Web Host composer
+      router: app:api
+    source: file://agents_details.lua
+    modules:
+      - http
+      - security
+    imports:
+      agent_registry: wippy.agent.discovery:registry
+    method: handler
+    pool:
+      size: 2
+
+  # wippy.session.api:agents_details.endpoint
+  - name: agents_details.endpoint
+    kind: http.endpoint
+    meta:
+      comment: GET /agents/details?agent=<name or registry id>
+      router: app:api
+    method: GET
+    func: agents_details
+    path: /agents/details
+
+  # wippy.session.api:tools_by_name
+  - name: tools_by_name
+    kind: function.lua
+    meta:
+      comment: Returns tool titles by the names that tool calls carry, for the Web Host tool-call rows
+      router: app:api
+    source: file://tools_by_name.lua
+    modules:
+      - http
+      - security
+      - registry
+    imports:
+      tools: wippy.agent.discovery:tools
+    method: handler
+    pool:
+      size: 2
+
+  # wippy.session.api:tools_by_name.endpoint
+  - name: tools_by_name.endpoint
+    kind: http.endpoint
+    meta:
+      comment: GET /tools/by-name?tools=a,b,c
+      router: app:api
+    method: GET
+    func: tools_by_name
+    path: /tools/by-name
+
   - name: set_attention_context
     kind: function.lua
     meta:

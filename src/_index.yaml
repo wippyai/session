@@ -19,6 +19,14 @@ entries:
         path: .meta.router
       - entry: wippy.session.api:get_capabilities.endpoint
         path: .meta.router
+      - entry: wippy.session.api:agents_details
+        path: .meta.router
+      - entry: wippy.session.api:agents_details.endpoint
+        path: .meta.router
+      - entry: wippy.session.api:tools_by_name
+        path: .meta.router
+      - entry: wippy.session.api:tools_by_name.endpoint
+        path: .meta.router
       - entry: wippy.session.api:set_attention_context
         path: .meta.router
       - entry: wippy.session.api:set_attention_context.endpoint

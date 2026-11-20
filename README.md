@@ -669,6 +669,56 @@ Only the owner’s connected clients receive these events.
 - SQLite does not cascade artifact deletion with its session. Orphaned rows
   remain listable, and fetching one returns HTTP 404.
 
+## Agent details and tool names
+
+The module serves two `GET` routes for the Wippy Web Host. The chat composer
+reads an agent's start prompts from the first route. The tool-call rows read
+tool titles from the second route. Both routes are on the router that the
+`api_router` requirement names. They run as the signed-in user and answer 401
+without one.
+
+An app that already serves its own copy of either route must remove it. The
+runtime refuses to boot when two entries register the same route, and it
+reports `route pattern conflicts detected`.
+
+### `GET /agents/details?agent=<name or registry id>`
+
+An identifier that contains `:` is looked up as a registry id. Any other
+identifier is looked up by `meta.name`.
+
+```json
+{"success": true, "agent": {"id": "app:helper", "name": "helper", "title": "Helper", "start_prompts": ["Summarize this page"]}}
+```
+
+`title` is the agent's `meta.title`, or its name when the title is empty.
+`start_prompts` holds only the string items of the agent's `start_prompts`.
+
+When the agent does not exist, the entry is not a gen1 agent, or the agent has
+`meta.private: true`, the response is still 200 and `agent` is `null`. So the
+response does not show whether a private agent exists.
+
+```json
+{"success": true, "agent": null}
+```
+
+A missing or empty `agent` parameter returns 400 with
+`{"success": false, "error": "..."}`.
+
+### `GET /tools/by-name?tools=a,b,c`
+
+Names are separated by commas. Spaces around a name are removed, and empty
+items are skipped. A name matches a tool by its LLM name (`meta.llm_alias`, or
+the sanitized id name) or by its full registry id. Unknown names are left out.
+When no name matches, `tools` is the empty object `{}`.
+
+```json
+{"success": true, "tools": {"search": {"name": "search", "title": "Web Search"}}}
+```
+
+`title` is the tool's `meta.title`, or its LLM name when it has no title. A
+missing or empty `tools` parameter returns 400 with
+`{"success": false, "error": "..."}`.
+
 ## Session Forms
 
 Session forms let an agent ask the user structured choice questions with the
