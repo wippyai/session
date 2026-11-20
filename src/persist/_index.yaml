@@ -95,6 +95,8 @@ entries:
     imports:
       tx: wippy.session.persist:tx
       message_order: wippy.session.persist:message_order
+      artifact_events: wippy.session.persist:artifact_events
+      owner_events: wippy.session.process:owner_events
 
   # wippy.session.persist:context_repo
   - name: context_repo

@@ -4,6 +4,7 @@ local security = require("security")
 
 type ArtifactMetadataResponse = {
     uuid: string,
+    session_id: string?,
     type: string,
     kind: string,
     display_type: string?,
@@ -13,6 +14,7 @@ type ArtifactMetadataResponse = {
     content_version: number,
     content_type: string?,
     description: string?,
+    preview: string?,
     icon: string?,
     status: string?,
     page_id: string?,

@@ -881,6 +881,103 @@ local function run_parallel_handoff_scenario()
     end)
 end
 
+local function loaded_trait_script()
+    return {
+        { content = "Loading the pack.", calls = {{ id = "call-load", name = "load_pack", arguments = "{}" }},
+            metadata = { thinking_blocks = {{ type = "thinking", thinking = "Reasoning 1.", signature = "signature-1" }} } },
+        { content = "Packing.", calls = {{ id = "call-pack", name = "pack_tool", arguments = "{}" }} },
+        { content = "The document is packed." },
+    }
+end
+
+local function system_text(request)
+    local first = request.messages[1]
+    test.eq(first.role, "system")
+    return first.content[1].text
+end
+
+local function replayed_thinking(request)
+    local count = 0
+    for _, message in ipairs(request.messages) do
+        local metadata = type(message.metadata) == "table" and message.metadata or {}
+        if metadata.thinking_blocks then count = count + #metadata.thinking_blocks end
+    end
+    return count
+end
+
+local function run_loaded_trait_scenario()
+    with_session("Loaded trait", { agent_id = "app.runtime:loader_agent", model = "session-runtime-prefix" },
+        { script = loaded_trait_script() }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "load-first", "Pack the document.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3, "the load, the pack tool and the answer")
+
+        local base = "Load the pack when the task needs it, then use its tool."
+        for index, request in ipairs(requests) do
+            test.eq(system_text(request), base, "the system prompt of request " .. index .. " holds no loaded trait")
+            test.is_true(request.expect_tool_additions)
+        end
+        test.eq(table.concat(requests[1].tool_names, ","), "load_pack")
+        test.eq(table.concat(requests[2].tool_names, ","), "load_pack,pack_tool")
+
+        local views = {}
+        for index, request in ipairs(requests) do views[index] = provider_view(request.messages) end
+        assert_prefix(views[1], views[2], "the request after the load")
+        assert_prefix(views[2], views[3], "the request after the pack tool")
+
+        local loaded_at = nil
+        for index, message in ipairs(requests[2].messages) do
+            if message.role == "function_result" and message.name == "load_pack" then loaded_at = index end
+        end
+        test.not_nil(loaded_at, "the load result is sent")
+        local result = requests[2].messages[loaded_at]
+        test.eq(table.concat(result.metadata.tool_additions, ","), "pack_tool",
+            "a tool the agent already had is not announced again")
+        test.eq(result.metadata.loaded_traits.agent, "app.runtime:loader_agent")
+        test.eq(result.metadata.loaded_traits.keys[1], "app.runtime:pack_trait")
+        local marker = requests[2].messages[loaded_at + 1]
+        test.eq(marker.role, "cache_marker")
+        test.eq(marker.marker_id, "history_tail")
+        local note = requests[2].messages[loaded_at + 2]
+        test.eq(note.role, "system")
+        test.is_true(note.metadata.preserve_position)
+        test.eq(note.content[1].text, "Pack guidance. Use pack_tool for packed documents.")
+        test.eq(replayed_thinking(requests[3]), 1, "the thinking produced before the load is replayed once its round is over")
+
+        local fingerprints, load_row = {}, nil
+        for _, row in ipairs(rows_of(session_id)) do
+            local metadata = row.metadata or {}
+            if row.type == consts.MSG_TYPE.ASSISTANT then fingerprints[#fingerprints + 1] = metadata.prefix_fingerprint end
+            if row.type == consts.MSG_TYPE.FUNCTION and metadata.call_id == "call-load" then load_row = row end
+        end
+        test.eq(#fingerprints, 3)
+        test.eq(fingerprints[1], fingerprints[2], "loading a trait keeps the prefix fingerprint")
+        test.eq(fingerprints[2], fingerprints[3])
+        test.not_nil(load_row)
+        test.eq(load_row.metadata.loaded_traits.keys[1], "app.runtime:pack_trait")
+    end)
+end
+
+local function run_rebuilt_trait_scenario()
+    with_session("Rebuilt trait", { agent_id = "app.runtime:rebuilding_loader_agent", model = "session-runtime-prefix" },
+        { script = loaded_trait_script() }, function(pid, session_id, storage)
+        send_and_settle(pid, session_id, "rebuild-first", "Pack the document.")
+        local requests = storage:get("requests")
+        test.eq(#requests, 3)
+        local base = "Load the pack when the task needs it, then use its tool."
+        test.eq(system_text(requests[1]), base)
+        test.eq(system_text(requests[2]), base .. "\n\nPack guidance. Use pack_tool for packed documents.")
+        test.is_nil(requests[2].expect_tool_additions)
+        for _, message in ipairs(requests[2].messages) do
+            local metadata = type(message.metadata) == "table" and message.metadata or {}
+            test.is_nil(metadata.tool_additions)
+            test.is_false(message.role == "system" and metadata.preserve_position == true
+                and message.content[1].text == "Pack guidance. Use pack_tool for packed documents.")
+        end
+        test.eq(replayed_thinking(requests[3]), 0, "the thinking produced under the old prefix is stripped once its round is over")
+    end)
+end
+
 local function define_stable_prefix_tests()
     test.describe("Session stable request prefix through the runtime", function()
         test.before_all(function() wait_for_boot.run() end)
@@ -892,6 +989,9 @@ local function define_stable_prefix_tests()
         test.it("replays turn, lifecycle and recall notes so each request extends the previous one",
             run_stable_prefix_scenario)
         test.it("strips thinking produced under another prefix and keeps the current round", run_stale_thinking_scenario)
+        test.it("renders a trait loaded by a tool where it was loaded and keeps the request prefix", run_loaded_trait_scenario)
+        test.it("rebuilds the system prompt for a loaded trait unless the agent appends loaded traits",
+            run_rebuilt_trait_scenario)
     end)
 end
 

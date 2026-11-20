@@ -89,6 +89,35 @@ local function define_tests()
             test.is_nil(err)
         end)
 
+        it("sends inactive changes and deletions only to the owner's relay", function()
+            local sent = {}
+            mock("process.registry", { lookup = function(name)
+                if name == "user.owner-1" then return "owner-hub" end
+                test.eq(name, "session.s1")
+                return nil
+            end })
+            mock("process.send", function(pid, topic, payload)
+                sent[#sent + 1] = { pid = pid, topic = topic, payload = payload }
+                return true
+            end)
+            local updated = upstream.notify_external("s1", { title = "Stale" }, "owner-1")
+            local deleted = upstream.notify_external("s1", { deleted = true }, "owner-1")
+            restore_mock("process.send")
+            restore_mock("process.registry")
+
+            test.is_true(updated)
+            test.is_true(deleted)
+            test.eq(#sent, 2)
+            test.eq(sent[1].pid, "owner-hub")
+            test.eq(sent[1].topic, "session:s1")
+            test.eq(sent[1].payload.session_id, "s1")
+            test.eq(sent[1].payload.type, "update")
+            test.is_true(sent[1].payload.refresh)
+            test.is_nil(sent[1].payload.title)
+            test.is_true(sent[2].payload.deleted)
+            test.is_nil(sent[2].payload.refresh)
+        end)
+
         it("does not hide a delivery failure while the owner is still mounted", function()
             mock("process.registry", { lookup = function() return "live-owner" end })
             mock("process.send", function() return nil, "delivery failed" end)

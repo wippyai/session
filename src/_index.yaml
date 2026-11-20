@@ -1,4 +1,4 @@
-version: "0.7.0" # x-release-please-version
+version: "0.7.2" # x-release-please-version
 namespace: wippy.session
 
 entries:
@@ -395,6 +395,7 @@ entries:
       - uuid
     imports:
       consts: wippy.session:consts
+      owner_events: wippy.session.process:owner_events
       session_repo: wippy.session.persist:session_repo
       context_repo: wippy.session.persist:context_repo
       upstream: wippy.session.process:upstream
@@ -472,7 +473,7 @@ entries:
   - name: dep.wippy.llm
     kind: ns.dependency
     component: wippy/llm
-    version: ">=v0.5.13"
+    version: ">=v0.5.22"
 
   - name: migration
     kind: ns.dependency
@@ -485,7 +486,7 @@ entries:
   - name: dep.wippy.agent
     kind: ns.dependency
     component: wippy/agent
-    version: ">=v0.5.10"
+    version: ">=v0.5.14"
 
   - name: dep.wippy.views
     kind: ns.dependency

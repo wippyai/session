@@ -2453,6 +2453,35 @@ message_handlers._approval_gate = function(ctx, op, env)
     return approval_gate.run(ctx, op, env)
 end
 
+local function loaded_traits(ctx: any, control: any): table?
+    local config = control.config
+    if type(config) ~= "table" or config.traits == nil or config.agent ~= nil then
+        return nil
+    end
+    if not ctx.agent_ctx or type(ctx.agent_ctx.trait_keys) ~= "function" then
+        return nil
+    end
+    local agent = current_agent(ctx)
+    if type(agent) ~= "table" or type(agent.trait_keys) ~= "table" then
+        return nil
+    end
+    local compiled = {}
+    for _, key in ipairs(agent.trait_keys) do
+        compiled[key] = true
+    end
+    local added = {}
+    for _, key in ipairs(ctx.agent_ctx:trait_keys(config.traits)) do
+        if not compiled[key] then
+            compiled[key] = true
+            table.insert(added, key)
+        end
+    end
+    if #added == 0 then
+        return nil
+    end
+    return { agent = agent.id, keys = added }
+end
+
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
@@ -2724,7 +2753,8 @@ function message_handlers.process_tools(ctx, op)
                 and tool_result._control or nil
             if control then
                 local _, control_err = ctx.writer:update_message_meta(message_id, {
-                    control_operations = control
+                    control_operations = control,
+                    loaded_traits = loaded_traits(ctx, control)
                 })
                 if control_err then return fail_remaining(index, control_err) end
                 tool_result._control = nil

@@ -3635,6 +3635,111 @@ local function define_tests()
             test.eq(((function_row or {}).metadata.control_operations or {}).config.tools[1], "app:tool")
         end)
 
+        describe("loaded traits", function()
+            local function keys_of(traits)
+                local keys = {}
+                for _, trait in ipairs(traits or {}) do
+                    keys[#keys + 1] = type(trait) == "table" and trait.id or trait
+                end
+                return keys
+            end
+
+            local function fixture(compiled_keys)
+                local ctx, captured, calls, ids, validated = call_fixture()
+                local agent = ctx.agent_ctx:get_current_agent()
+                agent.trait_keys = compiled_keys
+                ctx.agent_ctx.trait_keys = function(_self, traits) return keys_of(traits) end
+                ctx.agent_ctx.set_active_traits = function(_self, traits)
+                    agent.trait_keys = keys_of(traits)
+                    return true
+                end
+                return ctx, captured, calls, ids, validated
+            end
+
+            local function caller_returning(controls)
+                return {
+                    set_strategy = function() end,
+                    execute = function(_self, _context, tools)
+                        local results = {}
+                        for call_id, control in pairs(controls) do
+                            results[call_id] = { result = { value = "loaded", _control = control }, tool_call = tools[call_id] }
+                        end
+                        return results
+                    end
+                }
+            end
+
+            local function row_of(captured, id)
+                for _, row in ipairs(captured.stored) do
+                    if row.id == id then return row end
+                end
+                return nil
+            end
+
+            it("records the traits a tool control added on its call", function()
+                local ctx, captured, calls, ids, validated = fixture({ "trait:base" })
+                local result, err = message_handlers.process_tools(ctx, {
+                    tool_calls = { calls[1] }, call_message_ids = ids,
+                    caller = caller_returning({ ["function"] = { config = { traits = { "trait:base", { id = "trait:pack" } } } } }),
+                    validated_tools = { ["function"] = validated["function"] },
+                    message_id = "user", agent = { id = "agent:documents" }
+                })
+                test.is_nil(err)
+                test.not_nil(result)
+                local row = assert(row_of(captured, ids["function"]))
+                test.eq(row.metadata.status, consts.FUNC_STATUS.SUCCESS)
+                test.eq(row.metadata.loaded_traits.agent, "agent:documents")
+                test.eq(#row.metadata.loaded_traits.keys, 1)
+                test.eq(row.metadata.loaded_traits.keys[1], "trait:pack")
+                test.eq(row.metadata.control_operations.config.traits[1], "trait:base")
+            end)
+
+            it("compares each control of a round with the traits the previous one left", function()
+                local ctx, captured, calls, ids, validated = fixture({ "trait:base" })
+                local result, err = message_handlers.process_tools(ctx, {
+                    tool_calls = { calls[1], calls[2] }, call_message_ids = ids,
+                    caller = caller_returning({
+                        ["function"] = { config = { traits = { "trait:base", "trait:first" } } },
+                        ["private"] = { config = { traits = { "trait:base", "trait:first", "trait:second" } } },
+                    }),
+                    validated_tools = { ["function"] = validated["function"], ["private"] = validated["private"] },
+                    message_id = "user", agent = { id = "agent:documents" }
+                })
+                test.is_nil(err)
+                test.not_nil(result)
+                local first = assert(row_of(captured, ids["function"]))
+                local second = assert(row_of(captured, ids["private"]))
+                test.eq(table.concat(first.metadata.loaded_traits.keys, ","), "trait:first")
+                test.eq(table.concat(second.metadata.loaded_traits.keys, ","), "trait:second")
+            end)
+
+            it("records nothing when the control adds no trait or cannot be compared", function()
+                local cases = {
+                    { control = { config = { traits = { "trait:base" } } } },
+                    { control = { config = { traits = { "trait:base", "trait:pack" }, agent = "agent:other" } } },
+                    { control = { config = { tools = { "app:tool" } } } },
+                    { control = { config = { traits = { "trait:base", "trait:pack" } } }, without_method = true },
+                    { control = { config = { traits = { "trait:base", "trait:pack" } } }, without_keys = true },
+                }
+                for _, case in ipairs(cases) do
+                    local ctx, captured, calls, ids, validated = fixture({ "trait:base" })
+                    ctx.agent_ctx.set_active_tools = function() return true end
+                    ctx.agent_ctx.switch_to_agent = function() return true end
+                    if case.without_method then ctx.agent_ctx.trait_keys = nil end
+                    if case.without_keys then ctx.agent_ctx:get_current_agent().trait_keys = nil end
+                    message_handlers.process_tools(ctx, {
+                        tool_calls = { calls[1] }, call_message_ids = ids,
+                        caller = caller_returning({ ["function"] = case.control }),
+                        validated_tools = { ["function"] = validated["function"] },
+                        message_id = "user", agent = { id = "agent:documents" }
+                    })
+                    local row = assert(row_of(captured, ids["function"]))
+                    test.not_nil(row.metadata.control_operations)
+                    test.is_nil(row.metadata.loaded_traits)
+                end
+            end)
+        end)
+
         it("fails the turn when the state refresh after a durable control write fails", function()
             local ctx, _captured, calls, ids, validated = call_fixture()
             local persisted = 0

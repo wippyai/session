@@ -20,7 +20,7 @@ end
 
 -- Send to the hub pid (isolated so tests can mock it).
 function artifact_events._send(pid, topic, payload)
-    process.send(pid, topic, payload)
+    return process.send(pid, topic, payload)
 end
 
 -- Publish an "artifact:<artifact_id>" event carrying the same projection the
@@ -41,7 +41,8 @@ function artifact_events.publish_updated(artifact)
     end
 
     local payload = artifact_projection.build(artifact)
-    artifact_events._send(pid, "artifact:" .. artifact.artifact_id, payload)
+    local _, err = artifact_events._send(pid, "artifact:" .. artifact.artifact_id, payload)
+    if err then return false, err end
     return true
 end
 

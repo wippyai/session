@@ -14,7 +14,10 @@ end
 local function generate(args)
     local storage = state()
     local requests = storage:get("requests") or {}
-    requests[#requests + 1] = { model = args.model, messages = args.messages }
+    local tool_names = {}
+    for _, tool in ipairs(args.tools or {}) do tool_names[#tool_names + 1] = tool.name end
+    requests[#requests + 1] = { model = args.model, messages = args.messages, tool_names = tool_names,
+        expect_tool_additions = type(args.options) == "table" and args.options.expect_tool_additions or nil }
     storage:set("requests", requests)
     local scenario = storage:get("scenario")
     if args.model == "stream" then
@@ -184,4 +187,8 @@ return {
         return { memories = {{ id = "style", content = "Use the usual handout style.", metadata = {} }} }
     end,
     fail = function() error("Expected mixed-result failure") end,
+    load_pack = function()
+        return { message = "Pack loaded.", _control = { config = { traits = { "app.runtime:pack_trait" } } } }
+    end,
+    pack_tool = function() return "The document is packed." end,
 }
