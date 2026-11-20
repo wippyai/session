@@ -183,7 +183,7 @@ reads filters this way is noted in the Makefile above the `test` target.
 
 `make test-postgres` checks the
 affected persistence paths, the forms suites, real handoffs and the tool
-approval runtime suites against PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
+approval unit and runtime suites against PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
 `PGDATABASE`, `PGUSER`, and `PGPASSWORD`; the target never drops it.
 `make test-postgres-full` runs every normal suite and leaves opt-in benchmarks
 to `make bench`. CI uses this full gate with PostgreSQL 17. The harness

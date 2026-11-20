@@ -16,6 +16,7 @@ local tool_caller = require("tool_caller")
 local activation = require("activation")
 local tool_meta = require("tool_meta")
 local wait_for_boot = require("wait_for_boot")
+local prompt_builder = require("prompt_builder")
 local fx = require("gate_fixtures")
 
 -- The approval gate's wait, release and end of turn. process_tools runs in
@@ -807,6 +808,265 @@ local function define_tests()
             test.is_true(op.caller.launches["call-c"])
             test.is_true(has_continue(result))
             test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).state, "released")
+        end)
+
+        -- AC 4: approved private and delegation calls run without a
+        -- function_call or function_success event; the public peer gets both.
+        it("emits no function_call or function_success for a user-approved private or delegation call", function()
+            local ctx, captured = new_ctx({ live = 1, policy = { require = "all" } })
+            local op, batch = round(ctx, {
+                { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-p", registry_id = PRIVATE, type = consts.MSG_TYPE.PRIVATE_FUNCTION, args = { q = 1 } },
+                { id = "call-d", registry_id = fx.DELEGATE, type = consts.MSG_TYPE.DELEGATION,
+                    args = { task = "Refund order 7" }, context = { to_agent_id = fx.TARGET } },
+            })
+            local handle = start(ctx, op)
+            pending(ctx, batch.batch_id, 3)
+            approve(ctx, batch.batch_id, "call-a", { quiet = true })
+            approve(ctx, batch.batch_id, "call-p", { quiet = true })
+            approve(ctx, batch.batch_id, "call-d")
+            local _, err = finish(handle)
+            test.is_nil(err)
+            local function count(call_id: string, kind: string): number
+                local n = 0
+                for _, update in ipairs(captured.updates) do
+                    if update.id == call_id and update.type == kind then n = n + 1 end
+                end
+                return n
+            end
+            test.is_true(op.caller.launches["call-a"])
+            test.eq(count("call-a", consts.UPSTREAM_TYPES.FUNCTION_CALL), 1, "positive control: the public call")
+            test.eq(count("call-a", consts.UPSTREAM_TYPES.FUNCTION_SUCCESS), 1, "positive control: the public call")
+            for _, call_id in ipairs({ "call-p", "call-d" }) do
+                test.is_true(op.caller.launches[call_id], call_id .. " ran")
+                test.eq(records_by_call(ctx.session_id, batch.batch_id)[call_id].decided_via, "user", call_id)
+                test.eq(count(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL), 0, call_id .. ": no function_call")
+                test.eq(count(call_id, consts.UPSTREAM_TYPES.FUNCTION_SUCCESS), 0, call_id .. ": no function_success")
+            end
+        end)
+
+        -- AC 35: a checkpoint forced before the requests are created, or after
+        -- the release settled the batch (while the calls run).
+        it("keeps every call paired with one result and the checkpoint binding when a checkpoint is forced around the wait", function()
+            for _, case in ipairs({ "before requests", "after settlement" }) do
+                local ctx = new_ctx({ live = 1 })
+                local requested = case == "before requests"
+                ctx.reader.get_context = function(_self, key)
+                    return key == consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED and requested or nil
+                end
+                ctx.agent_ctx = { get_current_agent = function() return { id = fx.AGENT, model = "m",
+                    bindings = { checkpoint = { binding = "app:checkpoint" } }, agent_options = {} } end }
+                local caller = fx.fake_caller()
+                local execute = caller.execute
+                caller.execute = function(self, context, tools, cancel)
+                    if case == "after settlement" then requested = true end
+                    return execute(self, context, tools, cancel)
+                end
+                local op, batch = round(ctx, {
+                    { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                    { id = "call-c", registry_id = PLAIN, args = {} },
+                }, caller)
+                local handle = start(ctx, op)
+                pending(ctx, batch.batch_id, 1)
+                test.eq(caller.runs, 0, case .. ": nothing is dispatched while the request waits")
+                approve(ctx, batch.batch_id, "call-a")
+                local result, err = finish(handle)
+                test.is_nil(err, case)
+                test.eq(caller.runs, 1, case)
+                local checkpoint = nil
+                for _, next_op in ipairs(result.next_ops or {}) do
+                    if next_op.type == consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS then checkpoint = next_op end
+                end
+                test.not_nil(checkpoint, case .. ": the requested checkpoint runs")
+                test.eq(checkpoint and checkpoint.checkpoint_bindings.binding, "app:checkpoint", case)
+                test.eq(checkpoint and checkpoint.checkpoint_anchor_id, op.checkpoint_anchor_id, case)
+                -- The prompt the next step builds: each call once, then its one result.
+                local builder = assert(prompt_builder.from_session(assert(reader.open(ctx.session_id)),
+                    { include_contexts = false, include_files = false, cache_markers = false }))
+                local messages = builder:get_messages()
+                for _, call_id in ipairs({ "call-a", "call-c" }) do
+                    local calls, results = {}, {}
+                    for index, message in ipairs(messages) do
+                        if type(message.function_call) == "table" and message.function_call.id == call_id then
+                            calls[#calls + 1] = index
+                        elseif message.function_call_id == call_id then
+                            results[#results + 1] = index
+                        end
+                    end
+                    test.eq(#calls, 1, case .. ": one call " .. call_id)
+                    test.eq(#results, 1, case .. ": one result for " .. call_id)
+                    test.is_true((calls[1] or 0) < (results[1] or 0), case .. ": " .. call_id .. " result after its call")
+                end
+            end
+        end)
+
+        -- AC 41: a closure committed after the atomic call-and-batch write and
+        -- before the gate's first transaction.
+        it("runs and asks nothing when Stop, finish or steering commits after the batch write and before the gate", function()
+            for _, case in ipairs({ "stop", "finish", "steering" }) do
+                local ctx = new_ctx({ live = 1 })
+                local op, batch = round(ctx, {
+                    { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                    { id = "call-c", registry_id = PLAIN, args = {} },
+                })
+                test.eq(batch.state, "open", case .. ": the write stored the batch open")
+                if case == "stop" then
+                    stop(ctx)
+                elseif case == "finish" then
+                    session._close_approvals_for_finish(ctx)
+                    ctx.approval_wake:notify("finish")
+                else
+                    steer(ctx)
+                end
+                local _, err = finish(start(ctx, op))
+                test.is_nil(err, case)
+                test.eq(op.caller.runs, 0, case .. ": nothing is dispatched")
+                test.eq(launches(op.caller), 0, case)
+                for _, call_id in ipairs({ "call-a", "call-c" }) do
+                    test.is_true(row(op.call_message_ids[call_id]).metadata.status ~= consts.FUNC_STATUS.PENDING,
+                        case .. ": " .. call_id .. " has its result")
+                end
+                local stored = assert(approval_repo.get_batch(nil, batch.batch_id))
+                test.eq(stored.state, "closed", case)
+                if case ~= "steering" then
+                    test.eq(next(records_by_call(ctx.session_id, batch.batch_id)), nil,
+                        case .. ": no request for a batch closed before the gate")
+                end
+            end
+        end)
+
+        -- AC 41: Stop waits for the session lock that the release holds; the
+        -- release commits, then Stop completes before caller:execute.
+        it("runs nothing when Stop waits on the release lock and commits after the release, before dispatch", function()
+            local ctx = new_ctx({ live = 1 })
+            local caller = slow_caller()
+            local op, batch = round(ctx, {
+                { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-b", registry_id = MARKED, args = { n = 2 } },
+            }, caller)
+            local order, stopped = {}, channel.new(1)
+            local stop_outcome: any = nil
+            local saved_release = approval_repo.release_batch
+            approval_repo.release_batch = function(...)
+                order[#order + 1] = "release:start"
+                -- Inside the release transaction: Stop starts now and waits
+                -- for the session lock.
+                coroutine.spawn(function()
+                    local ok, failure = pcall(stop, ctx)
+                    order[#order + 1] = "stop:committed"
+                    stopped:send({ ok = ok, failure = failure })
+                end)
+                local released, release_err, latest = saved_release(...)
+                order[#order + 1] = "release:written"
+                return released, release_err, latest
+            end
+            local slow_execute = caller.execute
+            caller.execute = function(self, context, tools, cancel)
+                local selected = channel.select({ stopped:case_receive(), time.after("10s"):case_receive() })
+                stop_outcome = selected.value
+                order[#order + 1] = "execute"
+                return slow_execute(self, context, tools, cancel)
+            end
+            local ok, failure = pcall(function()
+                local handle = start(ctx, op)
+                pending(ctx, batch.batch_id, 2)
+                approve(ctx, batch.batch_id, "call-a", { quiet = true })
+                approve(ctx, batch.batch_id, "call-b")
+                local _, err = finish(handle)
+                test.is_nil(err)
+            end)
+            approval_repo.release_batch = saved_release
+            if not ok then error(failure) end
+            test.is_true(stop_outcome ~= nil and stop_outcome.ok == true, "Stop committed: " .. tostring(stop_outcome
+                and stop_outcome.failure))
+            test.eq(table.concat(order, " "), "release:start release:written stop:committed execute")
+            test.eq(launches(caller), 0, "no call launches")
+            test.eq(caller.cancel, ctx.coordinator.cancel, "the caller got the closed cancellation channel")
+            local records = records_by_call(ctx.session_id, batch.batch_id)
+            test.eq(records["call-a"].disposition, "dispatched", "the release committed")
+            for _, call_id in ipairs({ "call-a", "call-b" }) do
+                test.eq(row(op.call_message_ids[call_id]).metadata.status, consts.FUNC_STATUS.CANCELLED, call_id)
+            end
+        end)
+
+        -- AC 41: a protected response with notes and no calls stores no batch.
+        it("stores no batch for a protected response that has only notes", function()
+            local ctx = new_ctx({ live = 1 })
+            local options = approval_gate.response_options(ctx)
+            test.not_nil(options, "the session enforces approvals")
+            local assistant_id, _ids, err, _date, batch = ctx.writer:add_response("Noted.", {}, {},
+                { { type = consts.MSG_TYPE.DEVELOPER, content = "A note for the next step.", metadata = {} } },
+                nil, options)
+            test.is_nil(err)
+            test.not_nil(assistant_id)
+            test.is_nil(batch)
+            test.eq(fx.count("session_tool_approval_batches", ctx.session_id), 0)
+            -- Positive control: a response with a call stores its batch.
+            round(ctx, { { id = "call-c", registry_id = PLAIN, args = {} } })
+            test.eq(fx.count("session_tool_approval_batches", ctx.session_id), 1)
+        end)
+
+        -- AC 41: every request approved, then finish commits between the
+        -- gate's wake-up and its release transaction.
+        it("refuses the release when finish commits after every request was approved", function()
+            local ctx = new_ctx({ live = 1 })
+            local op, batch = round(ctx, {
+                { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-c", registry_id = PLAIN, args = {} },
+            })
+            local saved_wait = approval_gate._wait
+            local woke = false
+            approval_gate._wait = function(wait_ctx, run, waiting)
+                local outcome, wait_err = saved_wait(wait_ctx, run, waiting)
+                if type(outcome) == "table" and outcome.release then
+                    woke = true
+                    -- Committed, but the hub is not told: only the release
+                    -- transaction can see it.
+                    session._close_approvals_for_finish(wait_ctx)
+                end
+                return outcome, wait_err
+            end
+            local ok, failure = pcall(function()
+                local handle = start(ctx, op)
+                pending(ctx, batch.batch_id, 1)
+                approve(ctx, batch.batch_id, "call-a")
+                local _, err = finish(handle)
+                test.is_nil(err)
+            end)
+            approval_gate._wait = saved_wait
+            if not ok then error(failure) end
+            test.is_true(woke, "the gate woke to every request approved")
+            test.eq(launches(op.caller), 0)
+            local stored = assert(approval_repo.get_batch(nil, batch.batch_id))
+            test.eq(stored.state .. ":" .. tostring(stored.close_reason), "closed:finish")
+            local record = records_by_call(ctx.session_id, batch.batch_id)["call-a"]
+            test.eq(record.state, "approved")
+            test.eq(record.disposition, "not_run")
+            test.eq(row(op.call_message_ids["call-a"]).metadata.result.reason, "interrupted")
+        end)
+
+        -- AC 43: the merged session context names another agent than the
+        -- validated delegation target.
+        it("settles a delegation call whose session context names another agent as changed_before_run", function()
+            for _, case in ipairs({ "same target", "other target" }) do
+                local ctx = new_ctx({ live = 1 })
+                local named = case == "same target" and fx.TARGET or fx.AGENT
+                ctx.reader.get_full_context = function() return { to_agent_id = named }, nil end
+                local op, batch = round(ctx, {
+                    { id = "call-d", registry_id = fx.DELEGATE, type = consts.MSG_TYPE.DELEGATION,
+                        args = { task = "Refund order 7" }, context = { to_agent_id = fx.TARGET } },
+                })
+                local result, err = finish(start(ctx, op))
+                test.is_nil(err, case)
+                test.is_nil(records_by_call(ctx.session_id, batch.batch_id)["call-d"], case .. ": no request")
+                if case == "same target" then
+                    test.is_true(op.caller.launches["call-d"], "positive control: the delegation runs")
+                else
+                    test.is_nil(op.caller.launches["call-d"], "nothing is dispatched to either agent")
+                    test.eq(row(op.call_message_ids["call-d"]).metadata.result.reason, "changed_before_run")
+                    test.is_true(has_continue(result), "the turn continues")
+                end
+            end
         end)
     end)
 end

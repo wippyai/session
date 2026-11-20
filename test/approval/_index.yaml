@@ -334,6 +334,7 @@ entries:
       activation: wippy.session.approval:activation
       tool_meta: wippy.session.approval:tool_meta
       wait_for_boot: app:wait_for_boot
+      prompt_builder: wippy.session:prompt_builder
       gate_fixtures: app.approval:gate_fixtures
     modules:
       - time
