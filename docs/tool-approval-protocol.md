@@ -510,7 +510,7 @@ approval IDs, digests or grant IDs.
 | `approval_ui_unavailable` | no live surface after the grace period, or never declared | ends, with a notice |
 | `limit` | per-turn cap | ends, with a notice |
 | `changed_before_run` | tool entry, browser binding, context or digest changed before release | continues |
-| `revoked` | the grant that allowed the call was revoked before release | continues |
+| `revoked` | the grant that allowed the call was revoked, or the session changed owner, before release | continues |
 | `repeated_denied_call` | same call as one denied earlier in this turn | continues |
 | `approval_check_failed` | the Session could not prepare a valid call for the approval check (for example a value that is not JSON-shaped) | continues |
 
