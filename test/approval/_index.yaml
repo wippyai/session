@@ -349,6 +349,7 @@ entries:
       comment: Decisions and grant revocations through the session inbox - sender and owner checks, receipts, one committed decision, Approve all scopes and covered lists, the batch fence, grant lifetime, revocation around the release, restoring suspended grants
     source: file://commands_test.lua
     modules:
+      - json
       - uuid
       - time
       - sql

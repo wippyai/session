@@ -1,4 +1,5 @@
 local test = require("test")
+local json = require("json")
 local uuid = require("uuid")
 local time = require("time")
 local sql = require("sql")
@@ -211,6 +212,22 @@ local function define_tests()
             test.eq(launches(op.caller), 0)
         end)
 
+        it("accepts a 2,000-character reason that JSON escapes to six bytes per character", function()
+            local ctx, captured = new_ctx({ live = 1 })
+            local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
+            local handle = start(ctx, op)
+            pending(ctx, batch.batch_id, 1)
+            -- U+0001 encodes as \u0001: 12,000 bytes of reason.
+            local control = string.rep("\1", 2000)
+            test.eq(#json.encode(control), 12002, "six bytes per character, plus the quotes")
+            local reply = send(ctx, captured, decision(record_of(ctx, batch, "call-a"), { decision = "deny",
+                ["then"] = "continue", reason = control }))
+            test.is_true(reply.success, "2,000 escaped characters: " .. tostring(reply.code))
+            test.eq(record_of(ctx, batch, "call-a").reason, control)
+            finish(handle)
+            test.eq(launches(op.caller), 0)
+        end)
+
         it("answers approval_not_found, approval_expired, invalid_decision and approval_stale and changes nothing", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
@@ -234,7 +251,7 @@ local function define_tests()
                     reason = "why" }) },
                 -- Without the cap this would be approval_not_found.
                 { code = "invalid_decision", data = decision(record, { decision = "approve",
-                    approval_id = string.rep("x", 11000) }), name = "client fields over 10 KB" },
+                    approval_id = string.rep("x", 16500) }), name = "client fields over 16 KB" },
                 { code = "approval_stale", data = decision(record, { decision = "approve",
                     intent_digest = "sha256:" .. string.rep("0", 64) }) },
                 { code = "approval_stale", data = decision(record, { decision = "approve", expected_revision = 2 }) },

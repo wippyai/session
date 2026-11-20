@@ -29,9 +29,10 @@ local logger = require("logger"):named("session.approval.commands")
 local commands = {}
 
 -- The cap on the client fields of a command (body_of), encoded as JSON. A
--- maximal valid body fits: a reason of MAX_REASON_CHARS four-byte characters
--- (8,000 bytes) plus the other client fields. Transport fields do not count.
-commands.MAX_BODY_BYTES = 10240
+-- maximal valid body fits: a reason of MAX_REASON_CHARS characters that the
+-- encoder escapes to six bytes each (`\u0001`, or `<` when it escapes HTML;
+-- 12,000 bytes) plus the other client fields. Transport fields do not count.
+commands.MAX_BODY_BYTES = 16384
 commands.MAX_REASON_CHARS = 2000
 
 commands.CODE = {
