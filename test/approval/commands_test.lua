@@ -59,6 +59,14 @@ local function grants_of(session_id: string): number
     return count("session_tool_approval_grants", session_id)
 end
 
+-- Receives from `ch` within 10 s, so a gate that never wakes fails the test
+-- instead of hanging the suite.
+local function receive_within(ch: any, what: string): any
+    local selected = channel.select({ ch:case_receive(), time.after("10s"):case_receive() })
+    if selected.channel ~= ch then error(what .. " did not happen within 10 s") end
+    return selected.value
+end
+
 -- A caller that stops at the start of caller:execute, after the release
 -- committed and before any call launched, until the test lets it go.
 local function held_caller(): any
@@ -68,7 +76,7 @@ local function held_caller(): any
     local run_calls = caller.execute
     function caller:execute(context, tools, cancel)
         self.entered:send(true)
-        self.go:receive()
+        receive_within(self.go, "the test's go signal")
         return run_calls(self, context, tools, cancel)
     end
     return caller
@@ -514,7 +522,7 @@ local function define_tests()
             local handle = start(ctx, op)
             pending(ctx, batch.batch_id, 1)
             send(ctx, captured, decision(record_of(ctx, batch, "call-m"), { decision = "approve" }))
-            caller.entered:receive()
+            receive_within(caller.entered, "the release")
             test.eq(launches(caller), 0, "released, nothing launched yet")
             test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).state, "released")
             local reply = send(ctx, captured, revocation(grant))
@@ -622,8 +630,10 @@ local function define_tests()
 
         it("restores a grant an agent switch suspended only on a user agent switch, never for a changed deployment", function()
             local ctx = new_ctx({ live = 1, declared = "2026-11-19T10:00:00Z" })
+            -- Both grants are for a tool the new agent permits; only the
+            -- reason they were suspended differs.
             local granted = fx.create_tool_grant(ctx, GRANTED)
-            local changed = fx.create_tool_grant(ctx, MARKED)
+            local changed = fx.create_tool_grant(ctx, GRANTED)
             assert(approval_repo.transact(ctx.session_id, function(dbtx)
                 return approval_repo.suspend_grant(dbtx, ctx.session_id, changed.grant_id, nil, "deployment_changed")
             end))
