@@ -651,14 +651,17 @@ end
 
 -- The release recheck of one approved call. Returns nil when the call may
 -- run, else the disposition reason: `revoked` when the grant that allowed it
--- is no longer active, `intent_changed` when the tool entry, the effective
--- context, the delegate target or the browser binding differ from what was
--- approved.
-local function recheck(dbtx: any, ctx: any, op: any, item: any, record: any, session_context: any, now: number): string?
+-- is no longer active or no longer belongs to the session's current owner
+-- (`owner`, read in the release transaction), session and epoch,
+-- `intent_changed` when the tool entry, the effective context, the delegate
+-- target or the browser binding differ from what was approved.
+local function recheck(dbtx: any, ctx: any, op: any, item: any, record: any, session_context: any, now: number,
+                       owner: string): string?
     if record.decided_via == "grant" then
         local grant = approval_repo.get_grant(dbtx, record.grant_id)
-        if type(grant) ~= "table" or grant.session_id ~= ctx.session_id
-            or grant.status ~= consts.GRANT_STATUS.ACTIVE then
+        local scope = gate.grant_scope(ctx)
+        if type(grant) ~= "table" or grant.session_id ~= scope.session_id or grant.owner_id ~= owner
+            or grant.epoch ~= scope.epoch or grant.status ~= consts.GRANT_STATUS.ACTIVE then
             return "revoked"
         end
     end
@@ -714,6 +717,10 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
         if reason_err then return nil, reason_err end
         if close_reason then return { close_reason = close_reason } end
 
+        -- The owner now, under the session lock: a grant of an earlier owner
+        -- allows nothing, also when the owner changed during the wait.
+        local owner, owner_err = approval_repo.session_owner(dbtx, ctx.session_id)
+        if not owner then return nil, owner_err end
         local by_message = {}
         for _, record in ipairs(records) do by_message[record.tool_message_id] = record end
         local decisions = {}
@@ -722,7 +729,7 @@ local function release(ctx: any, op: any, env: any, run: any): (any, string?)
             if record then
                 local disposition, why = approval_repo.DISPOSITION.NOT_RUN, nil
                 if record.state == approval_repo.STATE.APPROVED then
-                    why = recheck(dbtx, ctx, op, item, record, session_context, now)
+                    why = recheck(dbtx, ctx, op, item, record, session_context, now, owner)
                     if not why then disposition = approval_repo.DISPOSITION.DISPATCHED end
                 elseif record.state == approval_repo.STATE.DENIED then
                     why = "denied"

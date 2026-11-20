@@ -1,4 +1,5 @@
 local test = require("test")
+local sql = require("sql")
 local uuid = require("uuid")
 local json = require("json")
 local time = require("time")
@@ -669,6 +670,39 @@ local function define_tests()
             assert(message_handlers.process_tools(ctx, op))
             test.eq(launches(op.caller), 0, "the call asks again instead of running on the old grant")
             test.eq(records_by_call(ctx.session_id, batch.batch_id)["call-1"].state, "interrupted")
+        end)
+
+        it("runs nothing on the previous owner's grant when the owner changes between evaluation and release", function()
+            local ctx = new_ctx({ live = 1 })
+            create_tool_grant(ctx, GRANTED)
+            -- The new owner is a real user, so the PostgreSQL foreign key on
+            -- sessions.user_id holds.
+            local new_owner = "approval-owner-" .. uuid.v7()
+            wait_for_boot.ensure_user(new_owner)
+            -- The release reads the context after evaluation and before its
+            -- transaction: the owner changes there.
+            local reads = 0
+            ctx.reader.get_full_context = function()
+                reads = reads + 1
+                if reads == 2 then
+                    local db = assert(sql.get(consts.get_db_resource()))
+                    local _, update_err = db:execute("UPDATE sessions SET user_id = $1 WHERE session_id = $2",
+                        { new_owner, ctx.session_id })
+                    db:release()
+                    if update_err then error(update_err) end
+                end
+                return {}, nil
+            end
+            local op, batch = round(ctx, { { id = "call-1", registry_id = GRANTED, args = { invoice = 7 } } })
+            local _, err = message_handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            test.eq(reads, 2, "the owner changed after evaluation")
+            test.eq(launches(op.caller), 0, "nothing dispatches on the previous owner's grant")
+            local record = records_by_call(ctx.session_id, batch.batch_id)["call-1"]
+            test.eq(record.decided_via, "grant", "the evaluation matched the grant")
+            test.eq(record.disposition, "not_run")
+            test.eq(record.disposition_reason, "revoked")
+            test.eq(row(op.call_message_ids["call-1"]).metadata.result.reason, "revoked")
         end)
 
         it("runs nothing when a finish is accepted while the release reads the context", function()

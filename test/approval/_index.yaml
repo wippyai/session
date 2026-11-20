@@ -288,6 +288,7 @@ entries:
       comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit and release, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, grant suspensions, fail closed
     source: file://gate_test.lua
     modules:
+      - sql
       - uuid
       - json
       - time
