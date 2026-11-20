@@ -593,11 +593,12 @@ object copied from that session:
   here.
 
 In a protected session the Session refuses a new or updated
-`_control.artifacts` item whose content type is `application/json` and whose
-content is a Wippy package other than a `wippy-form` tag without `on*` props
-(such a package runs with the user's token or in the Host realm, so it can't
-be isolated), before it writes any item of the batch. The call becomes a tool
-error that starts with `isolation_required:` and asks the model for HTML or
-markdown instead; the turn goes on.
+`_control.artifacts` item (not a `view_ref`) whose content parses as JSON to
+anything other than a string or a `wippy-form` tag without `on*` props,
+whatever its content type, before it writes any item of the batch. A client
+parses such content as a package, which runs with the user's token or in the
+Host realm and can't be isolated. The call becomes a tool error that starts
+with `isolation_required:` and asks the model for HTML or markdown instead;
+the turn goes on.
 
 Fixture: `rest_artifact.json`.

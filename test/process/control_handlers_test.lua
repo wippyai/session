@@ -22,8 +22,19 @@ local IFRAME_TAG = '{"specification":"wippy-component-tag-1.0","wippy":{"tagName
 local SAFE_FORM = '{"specification":"wippy-component-tag-1.0","wippy":{"tagName":"wippy-form"},'
     .. '"props":{"title":"Form"}}'
 local PLAIN_JSON = '{"rows":[1,2,3]}'
+-- The Host parses any content that parses as JSON, whatever its content
+-- type, and mounts no value other than a string or a safe form while isolated.
 local NOT_ISOLATABLE = {
     { name = "web-page package", content = WEB_PAGE },
+    { name = "web-page package as text/html", content = WEB_PAGE, content_type = "text/html" },
+    { name = "web-page package with a charset", content = WEB_PAGE,
+        content_type = "application/json; charset=utf-8" },
+    { name = "plain JSON object", content = PLAIN_JSON },
+    { name = "plain JSON object as text/plain", content = PLAIN_JSON, content_type = "text/plain" },
+    { name = "JSON array", content = '[{"a":1}]' },
+    { name = "JSON number as text/markdown", content = "123", content_type = "text/markdown" },
+    { name = "JSON boolean", content = "true" },
+    { name = "JSON null", content = "null" },
     { name = "ES module package", content = ES_MODULE },
     { name = "w-iframe tag", content = IFRAME_TAG },
     { name = "wippy-form with onclick", content = '{"specification":"wippy-component-tag-1.0",'
@@ -856,19 +867,22 @@ local function define_tests()
             return assert(artifact_repo.count_by_session(session_id))
         end
 
-        local function json_artifact(content: string): any
-            return { title = "Report", content = content, content_type = consts.CONTENT_TYPES.JSON, instructions = false }
+        local function json_artifact(content: string, content_type: string?): any
+            return { title = "Report", content = content, content_type = content_type or consts.CONTENT_TYPES.JSON,
+                instructions = false }
         end
 
         local function rejected_text(result: any): string
             return tostring(type(result) == "table" and result.rejected or nil)
         end
 
-        it("refuses each package that cannot run isolated and writes nothing", function()
+        it("refuses each content that cannot run isolated, whatever its content type, and writes nothing", function()
             for _, case in ipairs(NOT_ISOLATABLE) do
                 local ctx = new_ctx(true)
                 local before = stored_count()
-                local result, err = control_handlers.control_artifacts(ctx, { artifacts = { json_artifact(case.content) } })
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
+                    json_artifact(case.content, case.content_type),
+                } })
                 test.is_nil(err, case.name)
                 local text = rejected_text(result)
                 test.contains(text, "isolation_required: ", case.name)
@@ -880,7 +894,7 @@ local function define_tests()
                 local batch, batch_err = control_handlers.control_artifacts(ctx, { artifacts = {
                     { title = "Notes", content = "<p>Notes</p>", content_type = consts.CONTENT_TYPES.HTML,
                         instructions = false },
-                    json_artifact(case.content),
+                    json_artifact(case.content, case.content_type),
                 } })
                 test.is_nil(batch_err, case.name)
                 test.contains(rejected_text(batch), "isolation_required: ", case.name)
@@ -935,9 +949,24 @@ local function define_tests()
                 test.eq(artifact.meta.content_type, consts.CONTENT_TYPES.TEXT, order)
                 test.eq(artifact.content_version, 1, order)
             end
+
+            -- A stored package that an earlier item replaces with HTML: a
+            -- later item that changes only the title leaves HTML behind.
+            local id = uuid.v7()
+            test.eq(ctx.writer:create_artifact(id, consts.ARTIFACT_TYPES.INLINE, "Data", IFRAME_TAG,
+                { content_type = consts.CONTENT_TYPES.JSON }), id)
+            local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
+                { id = id, content = "<p>Report</p>", content_type = consts.CONTENT_TYPES.HTML },
+                { id = id, title = "Report" },
+            } })
+            test.is_nil(err)
+            test.is_nil(result.rejected)
+            local artifact: any = assert(artifact_repo.get(id))
+            test.eq(artifact.content, "<p>Report</p>")
+            test.eq(artifact.title, "Report")
         end)
 
-        it("stores a Session form tag without event props, HTML, markdown, a view_ref and plain JSON", function()
+        it("stores a Session form tag without event props, HTML, markdown, a view_ref and a JSON string", function()
             local ctx = new_ctx(true)
             local before = stored_count()
             local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
@@ -948,7 +977,8 @@ local function define_tests()
                 { title = "App page", type = consts.ARTIFACT_TYPES.VIEW_REF, page_id = "app:report_page",
                     content_type = consts.CONTENT_TYPES.JSON, params = { specification = "wippy-component-1.0" },
                     instructions = false },
-                json_artifact(PLAIN_JSON),
+                -- A JSON string renders as text.
+                json_artifact('"hello"'),
             } })
             test.is_nil(err)
             test.is_nil(result.rejected)
@@ -970,7 +1000,9 @@ local function define_tests()
             local ctx = new_ctx(false)
             for _, case in ipairs(NOT_ISOLATABLE) do
                 local before = stored_count()
-                local result, err = control_handlers.control_artifacts(ctx, { artifacts = { json_artifact(case.content) } })
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
+                    json_artifact(case.content, case.content_type),
+                } })
                 test.is_nil(err, case.name)
                 test.is_nil(result.rejected, case.name)
                 test.eq(#result.created_artifacts, 1, case.name)

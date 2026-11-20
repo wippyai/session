@@ -267,17 +267,23 @@ function control_handlers.announce_artifact(ctx, record)
     })
 end
 
--- True when JSON content is a Wippy package that can't run isolated. A
--- web-page package runs with the user's token, and an ES module or a
--- component tag runs in the Host realm. Only a Session form tag without
--- event-handler props is safe: every prop becomes an attribute, so `onclick`
--- would run script. Same rule as the Host's isIsolationSafePackage.
-local function needs_trusted_realm(content_type, content)
-    if content_type ~= consts.CONTENT_TYPES.JSON then return false end
+-- True when the content can't run isolated. The Host does not decide from
+-- the content type: it parses any body that parses as JSON and sends every
+-- value other than a string to the package loader, which, while isolated,
+-- mounts only a Session form tag without event-handler props (every prop
+-- becomes an attribute, so `onclick` would run script). Same rule as the
+-- Host's isIsolationSafePackage. Content that doesn't parse as JSON, or
+-- parses to a string, renders as text, HTML or markdown.
+local function needs_trusted_realm(content)
     local pkg = content
-    if type(content) == "string" then pkg = json.decode(content) end
-    if type(pkg) ~= "table" or pkg.specification == nil then return false end
-    if pkg.specification ~= form_artifact.SPECIFICATION or type(pkg.wippy) ~= "table"
+    if type(content) == "string" then
+        local decoded, decode_err = json.decode(content)
+        if decode_err ~= nil or type(decoded) == "string" then return false end
+        pkg = decoded
+    elseif type(content) ~= "table" then
+        return false
+    end
+    if type(pkg) ~= "table" or pkg.specification ~= form_artifact.SPECIFICATION or type(pkg.wippy) ~= "table"
         or pkg.wippy.tagName ~= form_artifact.TAG_NAME then
         return true
     end
@@ -303,7 +309,7 @@ function control_handlers.control_artifacts(ctx, op)
     -- artifact, so two items for one artifact are checked as written.
     local pending = {}
     for _, artifact_data in ipairs(op.artifacts) do
-        local kind, content_type, content = artifact_data.type, artifact_data.content_type, artifact_data.content
+        local kind, content = artifact_data.type, artifact_data.content
         if artifact_data.id then
             local target, lookup_err = artifact_repo.find(artifact_data.id)
             if lookup_err then
@@ -319,19 +325,16 @@ function control_handlers.control_artifacts(ctx, op)
             end
             -- An update is checked as the artifact it leaves behind: what an
             -- earlier item of the batch leaves, else the stored row.
-            local stored_meta = type(target.meta) == "table" and target.meta or {}
-            local before = pending[artifact_data.id]
-                or { kind = target.kind, content_type = stored_meta.content_type, content = target.content }
+            local before = pending[artifact_data.id] or { kind = target.kind, content = target.content }
             kind = before.kind
-            if content_type == nil then content_type = before.content_type end
             if content == nil then content = before.content end
-            pending[artifact_data.id] = { kind = kind, content_type = content_type, content = content }
+            pending[artifact_data.id] = { kind = kind, content = content }
         end
         -- A view_ref renders an app page (isolated on the Host); its content is
         -- page parameters, not a package.
-        if protected and kind ~= consts.ARTIFACT_TYPES.VIEW_REF and needs_trusted_realm(content_type, content) then
-            return reject("isolation_required", "This session requires tool approval, so packaged web content "
-                .. "can't be shown. You can return the content as HTML or markdown instead.")
+        if protected and kind ~= consts.ARTIFACT_TYPES.VIEW_REF and needs_trusted_realm(content) then
+            return reject("isolation_required", "This session requires tool approval, so JSON or packaged web "
+                .. "content can't be shown. You can return the content as HTML or markdown instead.")
         end
     end
 
