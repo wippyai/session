@@ -341,11 +341,12 @@ function approval_repo.list_by_batch(conn: any, session_id: string, batch_id: st
     end)
 end
 
--- The batches of the turn `turn_id` on `conn`, optionally only those in
--- `states`, in creation order.
-local function turn_batches(conn: any, session_id: string, turn_id: string, states: {string}?): ({any}?, string?)
+-- The batches of the turn `turn_id` (every turn of the session when nil) on
+-- `conn`, optionally only those in `states`, in creation order.
+local function turn_batches(conn: any, session_id: string, turn_id: string?, states: {string}?): ({any}?, string?)
     local query = sql.builder.select(table.unpack(BATCH_COLUMNS)):from("session_tool_approval_batches")
-        :where("session_id = ?", session_id):where("turn_id = ?", turn_id)
+        :where("session_id = ?", session_id)
+    if turn_id ~= nil then query = query:where("turn_id = ?", turn_id) end
     if states then
         local marks = {}
         for _ in ipairs(states) do marks[#marks + 1] = "?" end
@@ -356,6 +357,13 @@ local function turn_batches(conn: any, session_id: string, turn_id: string, stat
     local batches = {}
     for _, row in ipairs(rows) do batches[#batches + 1] = batch_from_row(row) end
     return batches, nil
+end
+
+-- The session's batches in `states` (every state when nil), in creation
+-- order. Recovery reads the open ones.
+function approval_repo.list_batches(conn: any, session_id: string, states: {string}?)
+    if not non_empty(session_id) then return nil, "Session ID is required" end
+    return with_connection(conn, function(c) return turn_batches(c, session_id, nil, states) end)
 end
 
 -- The approval records of every batch of the turn `turn_id` (the batch
@@ -798,7 +806,7 @@ end
 -- Session activity (sessions.activity, sessions.activity_revision)
 ---------------------------------------------------------------------------
 
--- Returns (activity or nil, revision).
+-- Returns { activity (or nil), revision }, or nil and an error.
 local function read_activity(conn: any, session_id: string)
     return with_connection(conn, function(c)
         local rows, err = select_rows(c, sql.builder.select("activity", "activity_revision"):from("sessions")
@@ -808,6 +816,8 @@ local function read_activity(conn: any, session_id: string)
         return { activity = decode(rows[1].activity), revision = tonumber(rows[1].activity_revision) or 0 }
     end)
 end
+
+approval_repo.read_activity = read_activity
 
 -- Sets the activity (a table with `kind`, or nil to clear) and moves
 -- activity_revision up by one. expected_revision is optional. Returns

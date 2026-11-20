@@ -196,6 +196,28 @@ function message_repo.list_behavior_rounds(session_id)
     return pending
 end
 
+-- The session's call rows (function, private function, delegation) whose
+-- status is still pending, metadata decoded, on `conn` (a transaction or a
+-- connection). Recovery reads them to find the approval batches an
+-- interruption cut off.
+function message_repo.list_pending_calls(conn: any, session_id: string): ({any}?, string?)
+    local rows, read_err = sql.builder.select("message_id", "type", "metadata"):from("messages")
+        :where("session_id = ?", session_id)
+        :where(sql.builder.expr("type IN (?, ?, ?)", consts.MSG_TYPE.FUNCTION,
+            consts.MSG_TYPE.PRIVATE_FUNCTION, consts.MSG_TYPE.DELEGATION))
+        :where("metadata LIKE ?", '%"status":"pending"%')
+        :run_with(conn):query()
+    if read_err then return nil, tostring(read_err) end
+    local pending = {}
+    for _, row in ipairs(rows or {}) do
+        decode_json_metadata(row)
+        if type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
+            pending[#pending + 1] = row
+        end
+    end
+    return pending, nil
+end
+
 -- The result of a call recovery settled without knowing its outcome.
 message_repo.INTERRUPTED_RESULT = "interrupted, outcome unknown"
 
@@ -205,8 +227,11 @@ message_repo.INTERRUPTED_RESULT = "interrupted, outcome unknown"
 -- settle (optional): settle(row) is asked first about each pending call row
 -- and returns the metadata that settles it when the call's effect is known
 -- to have completed, nil when it is not, or nil and an error, which stops
--- recovery so that it runs again later. A call nothing settles is reported
--- as interrupted with an unknown outcome.
+-- recovery so that it runs again later. A third return value `written` says
+-- that settle already wrote the row itself (approval_recovery writes
+-- approval-bearing rows in a locked transaction), so it is not written
+-- again. A call nothing settles is reported as interrupted with an unknown
+-- outcome.
 function message_repo.recover_pending(session_id, anchor_id, settle)
     local recovered = 0
     local function recover_rows(rows)
@@ -214,17 +239,19 @@ function message_repo.recover_pending(session_id, anchor_id, settle)
             if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
                 or row.type == consts.MSG_TYPE.DELEGATION)
                 and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
-                local update = nil
+                local update, written = nil, false
                 if settle then
                     local settle_err
-                    update, settle_err = settle(row)
+                    update, settle_err, written = settle(row)
                     if settle_err then return nil, settle_err end
                 end
-                local _, update_err = message_repo.update_metadata(row.message_id, update or {
-                    status = consts.FUNC_STATUS.ERROR,
-                    result = message_repo.INTERRUPTED_RESULT
-                })
-                if update_err then return nil, update_err end
+                if not written then
+                    local _, update_err = message_repo.update_metadata(row.message_id, update or {
+                        status = consts.FUNC_STATUS.ERROR,
+                        result = message_repo.INTERRUPTED_RESULT
+                    })
+                    if update_err then return nil, update_err end
+                end
                 recovered = recovered + 1
             end
         end
@@ -970,7 +997,7 @@ end
 -- on a pooled connection or on the transaction). With
 -- expected_session_id the row must belong to that session; the third return
 -- value then names a failure: "read" or "ownership".
-local function merge_metadata(read, exec, message_id, metadata, expected_session_id)
+local function merge_metadata(read, exec, message_id, metadata, expected_session_id, if_pending)
     local row, read_err = read(message_id)
     if not row or read_err then
         if expected_session_id ~= nil then
@@ -980,6 +1007,9 @@ local function merge_metadata(read, exec, message_id, metadata, expected_session
     end
     if expected_session_id ~= nil and row.session_id ~= expected_session_id then
         return nil, "Message belongs to different session", "ownership"
+    end
+    if if_pending and not (type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING) then
+        return { message_id = message_id, updated = false }
     end
 
     if type(row.metadata) == "table" and type(metadata) == "table" then
@@ -1011,13 +1041,19 @@ end
 
 -- Merges `metadata` into the row's metadata. opts.tx (optional): run on this
 -- caller-supplied transaction, whose session row lock keeps the read and the
--- write together; otherwise on a pooled connection.
+-- write together; otherwise on a pooled connection. opts.if_pending (with
+-- opts.tx): write only while the row's status is still pending; otherwise
+-- nothing is written and the result has updated = false. A call row then
+-- never gets a second terminal result.
 function message_repo.update_metadata(message_id, metadata, expected_session_id, opts)
     if not message_id or message_id == "" then
         return nil, "Message ID is required"
     end
     if not metadata then
         return nil, "Metadata is required"
+    end
+    if opts and opts.if_pending and not opts.tx then
+        return nil, "A pending-only metadata write needs a transaction"
     end
     if opts and opts.tx then
         local function read_in_tx(id)
@@ -1028,7 +1064,7 @@ function message_repo.update_metadata(message_id, metadata, expected_session_id,
             return decode_json_metadata(rows[1]), nil
         end
         local function exec_in_tx(query) return query:run_with(opts.tx):exec() end
-        return merge_metadata(read_in_tx, exec_in_tx, message_id, metadata, expected_session_id)
+        return merge_metadata(read_in_tx, exec_in_tx, message_id, metadata, expected_session_id, opts.if_pending)
     end
     local function exec_pooled(query)
         local db, err = get_db()

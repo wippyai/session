@@ -412,8 +412,8 @@ local function settlement(item: any, reason: string?, feedback: string?, record:
         metadata.status = consts.FUNC_STATUS.ERROR
         metadata.result = tostring(item.error)
     else
-        metadata.status = cancelled and consts.FUNC_STATUS.CANCELLED or consts.FUNC_STATUS.ERROR
-        metadata.result = events.model_result(reason :: string, feedback)
+        local not_run = events.not_run_settlement(reason :: string, feedback, cancelled)
+        metadata.status, metadata.result = not_run.status, not_run.result
     end
     if type(record) == "table" then metadata.approval = approval_repo.projection(record) end
     return metadata

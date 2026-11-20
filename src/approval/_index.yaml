@@ -153,3 +153,16 @@ entries:
       approval_gate: wippy.session.approval:gate
       approval_events: wippy.session.approval:events
       wake: wippy.session.approval:wake
+
+  # wippy.session.approval:recovery
+  - name: recovery
+    kind: library.lua
+    meta:
+      comment: Recovery of interrupted tool rounds at every entry point - closes unfinished approval batches first, then settles the pending call rows, writing batch rows only while they are still pending
+    source: file://recovery.lua
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      form_recovery: wippy.session.forms:form_recovery
+      approval_events: wippy.session.approval:events

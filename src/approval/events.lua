@@ -117,6 +117,15 @@ function events.model_result(reason: string, feedback: string?): any
     return result
 end
 
+-- The status and result of a call row that did not run: status `cancelled`
+-- when Stop ended it (`cancelled`), else `error`, with the model result.
+function events.not_run_settlement(reason: string, feedback: string?, cancelled: boolean?): any
+    return {
+        status = cancelled and consts.FUNC_STATUS.CANCELLED or consts.FUNC_STATUS.ERROR,
+        result = events.model_result(reason, feedback),
+    }
+end
+
 -- The human-readable "Not run" text of a reason.
 function events.not_run_text(reason: string): string
     local text = TEXT[reason]
