@@ -711,20 +711,26 @@ local function define_wait_tests()
                     "call-a=superseded/error/not_run:superseded_by_user_message call-b=%s/error/not_run:superseded_by_user_message"
                         .. " batch=closed:steering:cancelled activity=nil",
                     case == "peer approved first" and "approved" or "superseded"), case)
-                local prompt = assert(json.encode(second.messages))
-                -- One superseded result per call, both before the steering text.
-                local results = {}
-                local cursor = 1
-                while true do
-                    local found = prompt:find("because the user sent a new message", cursor, true)
-                    if not found then break end
-                    results[#results + 1], cursor = found, found + 1
+                -- Exactly one superseded result per call ID, each before the
+                -- steering message.
+                local results, steering_at = { ["call-a"] = {}, ["call-b"] = {} }, nil
+                for index, message in ipairs(second.messages) do
+                    local text = tostring(json.encode(message.content))
+                    local call_id = message.function_call_id
+                    if call_id ~= nil and message.function_call == nil then
+                        results[call_id] = results[call_id] or {}
+                        table.insert(results[call_id], index)
+                        test.contains(text, "because the user sent a new message",
+                            case .. ": " .. tostring(call_id) .. " gets the superseded result")
+                    elseif text:find("Use record 9 instead.", 1, true) then
+                        steering_at = steering_at or index
+                    end
                 end
-                local steering_at = prompt:find("Use record 9 instead.", 1, true)
-                test.eq(#results, 2, case .. ": the model gets both superseded results")
                 test.not_nil(steering_at, case .. ": the model gets the steering message")
-                for _, result_at in ipairs(results) do
-                    test.is_true(result_at < steering_at, case .. ": results first, then the steering message")
+                for _, call_id in ipairs({ "call-a", "call-b" }) do
+                    test.eq(#results[call_id], 1, case .. ": one result for " .. call_id)
+                    test.is_true(results[call_id][1] < steering_at,
+                        case .. ": the result of " .. call_id .. " comes before the steering message")
                 end
                 close(handle)
             end
