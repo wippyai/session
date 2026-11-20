@@ -93,6 +93,15 @@ function recovery.close_batch(dbtx: any, session_id: string, batch_id: string, r
     return changed, nil
 end
 
+-- Clears the session activity in `dbtx` when it is set. Returns the cleared
+-- activity row (nil when nothing was set), or nil and an error.
+local function clear_activity(dbtx: any, session_id: string): (any, any)
+    local current, read_err = approval_repo.read_activity(dbtx, session_id)
+    if not current then return nil, read_err end
+    if current.activity == nil then return nil, nil end
+    return approval_repo.write_activity(dbtx, session_id, nil)
+end
+
 -- Publishes, after the commit, the tool_approval event of every changed
 -- record (a public call a grant allowed has none, as in the gate) and the
 -- cleared activity (if any), when `upstream` reaches the clients.
@@ -120,14 +129,8 @@ function recovery.close_failed_batch(session_id: string, batch_id: string, upstr
     local outcome, err = approval_repo.transact(session_id, function(dbtx)
         local changed, close_err = recovery.close_batch(dbtx, session_id, batch_id, "exit")
         if not changed then return nil, close_err end
-        local current, read_err = approval_repo.read_activity(dbtx, session_id)
-        if not current then return nil, read_err end
-        local activity = nil
-        if current.activity ~= nil then
-            local cleared, clear_err = approval_repo.write_activity(dbtx, session_id, nil)
-            if not cleared then return nil, clear_err end
-            activity = cleared
-        end
+        local activity, clear_err = clear_activity(dbtx, session_id)
+        if clear_err ~= nil then return nil, clear_err end
         return { records = changed, activity = activity }
     end)
     if not outcome then
@@ -162,14 +165,8 @@ function recovery.reconcile(session_id: string, protected: boolean?, upstream: a
             if not records then return nil, close_err end
             for _, record in ipairs(records) do changed[#changed + 1] = record end
         end
-        local current, read_err = approval_repo.read_activity(dbtx, session_id)
-        if not current then return nil, read_err end
-        local activity = nil
-        if current.activity ~= nil then
-            local cleared, clear_err = approval_repo.write_activity(dbtx, session_id, nil)
-            if not cleared then return nil, clear_err end
-            activity = cleared
-        end
+        local activity, clear_err = clear_activity(dbtx, session_id)
+        if clear_err ~= nil then return nil, clear_err end
         return { records = changed, activity = activity }
     end)
     if err ~= nil and not session_gone(err) then return nil, tostring(err) end

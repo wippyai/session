@@ -182,6 +182,26 @@ local function define_tests()
             test.eq(#published[3].grants, 0, "a revoked grant is not listed")
         end)
 
+        it("REST read and list fail with 500 when the approval fields can't be read", function()
+            local session_id = fx.new_session({ config = { agent_id = fx.AGENT } })
+            local failing = { apply_rest = function() return nil, "database gone" end }
+            for _, case in ipairs({
+                { api = get_session, query = { session_id = session_id } },
+                { api = list_sessions, query = { limit = "100" } },
+            }) do
+                local saved_projection = case.api._approval_projection
+                case.api._approval_projection = failing
+                local outcome: any = { pcall(rest, case.api, case.query) }
+                case.api._approval_projection = saved_projection
+                test.is_true(outcome[1], tostring(outcome[2]))
+                test.eq(outcome[2], 500)
+                local body: any = outcome[3]
+                test.is_false(body.success)
+                test.is_nil(body.session)
+                test.is_nil(body.sessions)
+            end
+        end)
+
         it("lists only the current owner's grants after the session changed owner", function()
             local ctx, captured = new_ctx({ live = 1 })
             assert(approval_repo.update_tool_approval(ctx.session_id, function() return ctx.config.tool_approval end))

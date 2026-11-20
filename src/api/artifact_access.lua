@@ -62,7 +62,7 @@ function artifact_access.serve_metadata(req: any, res: any, user_id: string)
     -- (docs/tool-approval-protocol.md section 12): the Host isolates the
     -- content of a protected session and mounts nothing before this read.
     -- A failed read fails closed, never as "not protected".
-    local protection = artifact_access._approval_projection.artifact_field(nil, artifact.session_id)
+    local protection = artifact_access._approval_projection.artifact_field(artifact.session_id)
     if not protection then
         res:set_content_type(http.CONTENT.JSON)
         res:set_status(http.STATUS.INTERNAL_ERROR)

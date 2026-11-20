@@ -117,7 +117,6 @@ entries:
       comment: The session fields of tool approval as clients read them - tool_approval with grants, activity - for REST reads, the session list, the open announcement, live updates and the artifact read
     source: file://projection.lua
     modules:
-      - json
       - logger
     imports:
       approval_repo: wippy.session.persist:approval_repo

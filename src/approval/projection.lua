@@ -1,4 +1,3 @@
-local json = require("json")
 local approval_repo = require("approval_repo")
 local message_repo = require("message_repo")
 local tool_meta = require("tool_meta")
@@ -40,12 +39,12 @@ end
 -- and whose current owner is `owner_id`: { active, revision (the stored
 -- activation's revision), grants (active and suspended; revoked grants are
 -- not listed) }. A grant ends when the session gets another owner, so only
--- the current owner's grants are listed. Reads the grants on `conn` (nil for
--- a pooled connection). Returns the field, or nil and an error.
-function projection.session_field(conn: any, session_id: string, config: any, owner_id: any): (any, string?)
+-- the current owner's grants are listed. Returns the field, or nil and an
+-- error.
+function projection.session_field(session_id: string, config: any, owner_id: any): (any, string?)
     local stored = type(config) == "table" and config.tool_approval or nil
     if type(stored) ~= "table" then return { active = false, revision = 0, grants = {} }, nil end
-    local grants, err = approval_repo.list_grants(conn, session_id)
+    local grants, err = approval_repo.list_grants(nil, session_id)
     if not grants then return nil, tostring(err) end
     local list = {}
     for _, grant in ipairs(grants) do
@@ -58,22 +57,15 @@ function projection.session_field(conn: any, session_id: string, config: any, ow
     }, nil
 end
 
--- A cleared activity as JSON null: a client keeps a key that a message
--- leaves out, so `activity` is always sent.
-local function activity_value(activity: any): any
-    if activity == nil then return json.null end
-    return activity
-end
-
 -- Adds the approval fields to a session object of a REST read or the session
 -- list (session_repo.get or list_by_user, with config decoded and the activity
 -- columns projected): `tool_approval`, and `activity` as JSON null when
 -- nothing waits. Returns the session, or nil and an error.
 function projection.apply_rest(session: any): (any, string?)
-    local field, err = projection.session_field(nil, session.session_id, session.config, session.user_id)
+    local field, err = projection.session_field(session.session_id, session.config, session.user_id)
     if not field then return nil, err end
     session.tool_approval = field
-    session.activity = activity_value(session.activity)
+    session.activity = events.activity_value(session.activity)
     session.activity_revision = tonumber(session.activity_revision) or 0
     return session, nil
 end
@@ -85,10 +77,10 @@ end
 function projection.announcement(session_id: string, config: any, owner_id: any): (any, string?)
     local current, read_err = approval_repo.read_activity(nil, session_id)
     if not current then return nil, tostring(read_err) end
-    local field, field_err = projection.session_field(nil, session_id, config, owner_id)
+    local field, field_err = projection.session_field(session_id, config, owner_id)
     if not field then return nil, field_err end
     return {
-        activity = activity_value(current.activity),
+        activity = events.activity_value(current.activity),
         activity_revision = current.revision,
         tool_approval = field,
     }, nil
@@ -104,7 +96,7 @@ function projection.publish(ctx: any): (boolean?, string?)
     if type(ctx) ~= "table" or type(ctx.upstream) ~= "table" or type(ctx.upstream.update_session) ~= "function" then
         return true, nil
     end
-    local field, err = projection.session_field(nil, ctx.session_id, ctx.config, ctx.user_id)
+    local field, err = projection.session_field(ctx.session_id, ctx.config, ctx.user_id)
     if not field then
         logger:warn("tool approval session field was not published",
             { session_id = ctx.session_id, error = tostring(err) })
@@ -119,9 +111,9 @@ end
 -- the artifact's session. An artifact without a session is not protected.
 -- Returns the object, or nil and an error (a read failure; the caller fails
 -- closed).
-function projection.artifact_field(conn: any, session_id: any): (any, string?)
+function projection.artifact_field(session_id: any): (any, string?)
     if type(session_id) ~= "string" or session_id == "" then return { active = false }, nil end
-    local stored, err = approval_repo.read_activation(conn, session_id)
+    local stored, err = approval_repo.read_activation(nil, session_id)
     if err then return nil, tostring(err) end
     return { active = type(stored) == "table" and stored.active == true }, nil
 end

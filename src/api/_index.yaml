@@ -267,12 +267,12 @@ entries:
     modules:
       - http
       - security
-      - time
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
       session_status: wippy.session.process:session_status
       approval_projection: wippy.session.approval:projection
+      approval_repo: wippy.session.persist:approval_repo
     method: handler
     pool:
       size: 4
@@ -323,11 +323,11 @@ entries:
     modules:
       - http
       - security
-      - time
     imports:
       session_repo: wippy.session.persist:session_repo
       session_status: wippy.session.process:session_status
       approval_projection: wippy.session.approval:projection
+      approval_repo: wippy.session.persist:approval_repo
     method: handler
     pool:
       size: 4
@@ -381,6 +381,7 @@ entries:
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
+      approval_repo: wippy.session.persist:approval_repo
     method: handler
     pool:
       size: 4

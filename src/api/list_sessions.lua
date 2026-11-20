@@ -3,7 +3,7 @@ local security = require("security")
 local session_repo = require("session_repo")
 local session_status = require("session_status")
 local approval_projection = require("approval_projection")
-local time = require("time")
+local approval_repo = require("approval_repo")
 
 -- Test seams: the HTTP context, the actor and the session store.
 local api = {
@@ -98,7 +98,7 @@ local function handler()
     res:set_status(http.STATUS.OK)
     res:write_json({
         success = true,
-        server_now = time.now():utc():format(time.RFC3339),
+        server_now = approval_repo.now(),
         count = total_count,
         sessions = sessions
     })

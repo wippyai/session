@@ -277,13 +277,18 @@ function events.publish_not_run(upstream: any, call_id: string, payload: any)
     upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, payload)
 end
 
--- Publishes the session activity with its revision. A cleared activity is
--- sent as an explicit JSON null: a client keeps a key the update leaves out.
+-- The session activity as clients get it: a cleared activity is an explicit
+-- JSON null, because a client keeps a key that a message leaves out.
+function events.activity_value(activity: any): any
+    if activity == nil then return json.null end
+    return activity
+end
+
+-- Publishes the session activity with its revision.
 function events.publish_activity(upstream: any, activity: any)
     if type(activity) ~= "table" then return end
-    local value = activity.activity
-    if value == nil then value = json.null end
-    upstream:update_session({ activity = value, activity_revision = activity.revision })
+    upstream:update_session({ activity = events.activity_value(activity.activity),
+        activity_revision = activity.revision })
 end
 
 -- Publishes a session notice. Each notice ends the turn, so a turn sends it

@@ -4,7 +4,7 @@ local session_repo = require("session_repo")
 local message_repo = require("message_repo")
 local session_status = require("session_status")
 local approval_projection = require("approval_projection")
-local time = require("time")
+local approval_repo = require("approval_repo")
 
 -- Test seams: the HTTP context and the actor.
 local api = {
@@ -98,7 +98,7 @@ local function handler()
 
     local response = {
         success = true,
-        server_now = time.now():utc():format(time.RFC3339),
+        server_now = approval_repo.now(),
         session = session
     }
 
