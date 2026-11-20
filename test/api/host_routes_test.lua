@@ -56,6 +56,19 @@ local function define_tests()
                 test.eq(entry.data.path, path)
             end
         end)
+
+        it("puts both routes on the router that api_router names", function()
+            local reference = registry.get("wippy.session.api:get_capabilities.endpoint")
+            test.not_nil(reference)
+            for _, id in ipairs({
+                "wippy.session.api:agents_details",
+                "wippy.session.api:agents_details.endpoint",
+                "wippy.session.api:tools_by_name",
+                "wippy.session.api:tools_by_name.endpoint",
+            }) do
+                test.eq(registry.get(id).meta.router, reference.meta.router)
+            end
+        end)
     end)
 
     describe("GET /agents/details", function()
