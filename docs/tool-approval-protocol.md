@@ -592,4 +592,12 @@ object copied from that session:
 - The artifact update event does not carry `tool_approval`; a client reads it
   here.
 
+In a protected session the Session refuses a new or updated
+`_control.artifacts` item whose content type is `application/json` and whose
+content is a Wippy package other than a `wippy-form` tag without `on*` props
+(such a package runs with the user's token or in the Host realm, so it can't
+be isolated), before it writes any item of the batch. The call becomes a tool
+error that starts with `isolation_required:` and asks the model for HTML or
+markdown instead; the turn goes on.
+
 Fixture: `rest_artifact.json`.
