@@ -169,6 +169,16 @@ entries:
     start_prompts:
       - Hidden prompt
 
+  # Its name is another agent's registry id: an id lookup must still win.
+  - name: host_routes_shadow_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: app.api:host_routes_untitled_agent
+      title: Shadow Helper
+    model: gpt-4o
+    prompt: Test only.
+
   - name: host_routes_colon_name_agent
     kind: registry.entry
     meta:

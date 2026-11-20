@@ -99,6 +99,7 @@ local function define_tests()
         end)
 
         it("returns an agent by registry id and uses its name when it has no title", function()
+            -- host_routes_shadow_agent has this id as its meta.name; the id lookup must win.
             local result = install(agents_details, { agent = "app.api:host_routes_untitled_agent" })
             agents_details.handler()
             test.eq(result.status, 200)
@@ -182,11 +183,24 @@ local function define_tests()
         local original = {
             http = tools_by_name._http,
             security = tools_by_name._security,
+            registry = tools_by_name._registry,
         }
 
         after_each(function()
             tools_by_name._http = original.http
             tools_by_name._security = original.security
+            tools_by_name._registry = original.registry
+        end)
+
+        it("answers a registry failure with 500", function()
+            tools_by_name._registry = {
+                find = function() return nil, "lookup failed" end,
+            }
+            local result = install(tools_by_name, { tools = "host_routes_titled_tool" })
+            tools_by_name.handler()
+            test.eq(result.status, 500)
+            test.is_false(result.body.success)
+            test.is_nil(result.body.tools)
         end)
 
         it("finds tools by LLM name and by registry id", function()
