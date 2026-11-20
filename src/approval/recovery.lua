@@ -62,14 +62,16 @@ function recovery.write_call(session_id: string, message_id: string, metadata: a
     return result.updated == true, nil
 end
 
--- Closes the batch `batch_id` as `exit` in `dbtx` (approval_repo.close_batch)
--- and rewrites the row projection of every record the closure changed. A
--- deleted call row is skipped. Returns the changed records, or nil and an
--- error.
-local function close_as_exit(dbtx: any, session_id: string, batch_id: string): ({any}?, any)
+-- Closes the batch `batch_id` with `reason` in `dbtx`
+-- (approval_repo.close_batch) and rewrites the row projection of every
+-- record the closure changed, so it commits with the closure. A deleted call
+-- row is skipped. Recovery, a stop denial and the decision fence close
+-- batches this way. Returns the changed records, which the caller publishes
+-- after the commit (recovery.publish), or nil and an error.
+function recovery.close_batch(dbtx: any, session_id: string, batch_id: string, reason: string): ({any}?, any)
     local before, before_err = approval_repo.list_by_batch(dbtx, session_id, batch_id)
     if not before then return nil, before_err end
-    local closed, close_err = approval_repo.close_batch(dbtx, batch_id, "exit")
+    local closed, close_err = approval_repo.close_batch(dbtx, batch_id, reason)
     if not closed then
         if errors.is(close_err, errors.NOT_FOUND) then return {}, nil end
         return nil, close_err
@@ -93,8 +95,8 @@ end
 
 -- Publishes, after the commit, the tool_approval event of every changed
 -- record (a public call a grant allowed has none, as in the gate) and the
--- cleared activity, when `upstream` reaches the clients.
-local function publish(upstream: any, records: {any}, activity: any)
+-- cleared activity (if any), when `upstream` reaches the clients.
+function recovery.publish(upstream: any, records: {any}, activity: any)
     if type(upstream) ~= "table" then return end
     local server_now = approval_repo.now()
     for _, record in ipairs(records) do
@@ -116,7 +118,7 @@ end
 -- nil and an error.
 function recovery.close_failed_batch(session_id: string, batch_id: string, upstream: any): (boolean?, string?)
     local outcome, err = approval_repo.transact(session_id, function(dbtx)
-        local changed, close_err = close_as_exit(dbtx, session_id, batch_id)
+        local changed, close_err = recovery.close_batch(dbtx, session_id, batch_id, "exit")
         if not changed then return nil, close_err end
         local current, read_err = approval_repo.read_activity(dbtx, session_id)
         if not current then return nil, read_err end
@@ -132,7 +134,7 @@ function recovery.close_failed_batch(session_id: string, batch_id: string, upstr
         if errors.is(err, errors.NOT_FOUND) then return true, nil end
         return nil, tostring(err)
     end
-    publish(upstream, outcome.records, outcome.activity)
+    recovery.publish(upstream, outcome.records, outcome.activity)
     return true, nil
 end
 
@@ -156,7 +158,7 @@ function recovery.reconcile(session_id: string, protected: boolean?, upstream: a
         for _, row in ipairs(rows) do add(row.metadata.batch_id) end
         local changed = {}
         for _, batch_id in ipairs(ids) do
-            local records, close_err = close_as_exit(dbtx, session_id, batch_id)
+            local records, close_err = recovery.close_batch(dbtx, session_id, batch_id, "exit")
             if not records then return nil, close_err end
             for _, record in ipairs(records) do changed[#changed + 1] = record end
         end
@@ -171,7 +173,7 @@ function recovery.reconcile(session_id: string, protected: boolean?, upstream: a
         return { records = changed, activity = activity }
     end)
     if err ~= nil and not session_gone(err) then return nil, tostring(err) end
-    if outcome then publish(upstream, outcome.records, outcome.activity) end
+    if outcome then recovery.publish(upstream, outcome.records, outcome.activity) end
     return true, nil
 end
 

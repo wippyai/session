@@ -170,6 +170,7 @@ entries:
       approval_gate: wippy.session.approval:gate
       approval_events: wippy.session.approval:events
       approval_projection: wippy.session.approval:projection
+      approval_recovery: wippy.session.approval:recovery
       wake: wippy.session.approval:wake
 
   # wippy.session.approval:recovery

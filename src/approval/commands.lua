@@ -10,6 +10,7 @@ local activation = require("activation")
 local approval_gate = require("approval_gate")
 local events = require("approval_events")
 local approval_projection = require("approval_projection")
+local approval_recovery = require("approval_recovery")
 local wake = require("wake")
 local logger = require("logger"):named("session.approval.commands")
 
@@ -172,11 +173,11 @@ local function decide(dbtx: any, ctx: any, data: any, sender: string): (any, any
         message_repo.has_pending_input, nil)
     if fence_err then return nil, fence_err end
     if fence then
-        local closed, close_err = approval_repo.close_batch(dbtx, batch.batch_id, fence)
+        local closed, close_err = approval_recovery.close_batch(dbtx, ctx.session_id, batch.batch_id, fence)
         if not closed then return nil, close_err end
         local current, current_err = approval_repo.get(dbtx, record.approval_id)
         if not current then return nil, current_err end
-        return { error = CODE.NOT_PENDING, approval = current, closed = true }
+        return { error = CODE.NOT_PENDING, approval = current, closed = true, closed_records = closed }
     end
 
     -- The current policy must still allow a grant of the offered scope.
@@ -192,7 +193,7 @@ local function decide(dbtx: any, ctx: any, data: any, sender: string): (any, any
     end
 
     local now = approval_repo.now()
-    local changed, grant = {}, nil
+    local changed, grant, closed_records = {}, nil, {}
     if data.decision == "approve_all" then
         if scope == SCOPE.TOOL or scope == SCOPE.SESSION then
             local built, build_err = new_grant(ctx, record, scope, sender)
@@ -230,10 +231,15 @@ local function decide(dbtx: any, ctx: any, data: any, sender: string): (any, any
         if not decided then return nil, decide_err, current end
         changed[1] = decided.approval_id
         -- A stop denial closes the batch in the same transaction: no call of
-        -- it runs.
+        -- it runs. The other requests it closed get their row projection in
+        -- this commit and their event from this command.
         if denial and data["then"] == "stop" then
-            local closed, close_err = approval_repo.close_batch(dbtx, batch.batch_id, "stop_denial")
+            local closed, close_err = approval_recovery.close_batch(dbtx, ctx.session_id, batch.batch_id,
+                "stop_denial")
             if not closed then return nil, close_err end
+            for _, other in ipairs(closed) do
+                if other.approval_id ~= decided.approval_id then closed_records[#closed_records + 1] = other end
+            end
         end
     end
 
@@ -265,6 +271,7 @@ local function decide(dbtx: any, ctx: any, data: any, sender: string): (any, any
             grant = grant_reply(grant),
         },
         records = records,
+        closed_records = closed_records,
         activity = activity,
         grant_changed = grant ~= nil,
     }
@@ -378,8 +385,10 @@ function commands.handle(ctx: any, from: any, payload: any): boolean
         return true
     end
     if outcome.error then
+        -- A fence closure was committed: its records are published before
+        -- the reply, and the waiting gate settles the batch.
+        if outcome.closed_records then approval_recovery.publish(ctx.upstream, outcome.closed_records, nil) end
         refuse(ctx, request_id, outcome.error, outcome)
-        -- A fence closure was committed: the waiting gate settles the batch.
         if outcome.closed then ctx.approval_wake:notify(wake.KIND.DECISION) end
         return true
     end
@@ -388,6 +397,8 @@ function commands.handle(ctx: any, from: any, payload: any): boolean
     for _, record in ipairs(outcome.records or {}) do
         events.publish_record(ctx.upstream, record, approval_projection.function_name(record), server_now)
     end
+    -- Every other request a stop denial closed.
+    approval_recovery.publish(ctx.upstream, outcome.closed_records or {}, nil)
     events.publish_activity(ctx.upstream, outcome.activity)
     -- A grant was created or revoked: the grants chip reads the new list
     -- from the session's tool_approval field.

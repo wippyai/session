@@ -307,6 +307,28 @@ local function define_tests()
             test.eq(row(op.call_message_ids["call-a"]).metadata.result.reason, "stopped_by_user")
         end)
 
+        it("projects and publishes every request a stop denial closes, in the command's commit", function()
+            -- No gate runs here: every change comes from the command alone.
+            local ctx, op, batch, captured = fx.crashed_batch({ no_controls = true,
+                requests = { ["call-a"] = "pending", ["call-b"] = "pending" },
+                offered = { decisions = { "approve", "deny" } } })
+            local reply = send(ctx, captured, decision(record_of(ctx, batch, "call-a"),
+                { decision = "deny", ["then"] = "stop" }))
+            test.is_true(reply.success, json.encode(reply))
+            local other = record_of(ctx, batch, "call-b")
+            test.eq(other.state, "cancelled")
+            local projected = row(op.call_message_ids["call-b"]).metadata.approval
+            test.eq(projected.state, "cancelled", "B's row projection committed with the decision")
+            test.eq(projected.revision, other.revision)
+            local published = {}
+            for _, update in ipairs(captured.updates) do
+                if update.id == "call-b" and update.type == "tool_approval" then published[#published + 1] = update end
+            end
+            test.eq(#published, 1, "the command publishes B's event")
+            test.eq(published[1].payload.approval.state, "cancelled")
+            test.eq(published[1].payload.approval.revision, other.revision)
+        end)
+
         it("publishes the committed state, the activity, then the reply, and wakes the waiting gate", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, {

@@ -295,10 +295,11 @@ end
 -- waiting batch and, unless opts.no_controls, a pending behavior round on
 -- the assistant row whose control would set the session context key
 -- `replayed`. opts.calls replaces the default calls (call-a and call-b
--- marked, call-c plain). Returns ctx, op and the batch record.
+-- marked, call-c plain). opts.offered is the offer of every request. Returns ctx, op, the batch
+-- record and what ctx's upstream captured.
 local function crashed_batch(opts: any?): (any, any, any)
     opts = opts or {}
-    local ctx = new_ctx({ live = 1, session_id = opts.session_id })
+    local ctx, captured = new_ctx({ live = 1, session_id = opts.session_id })
     assert(approval_repo.update_tool_approval(ctx.session_id, function() return ctx.config.tool_approval end))
     local op, batch = round(ctx, opts.calls or {
         { id = "call-a", registry_id = MARKED, args = { n = 1 } },
@@ -317,7 +318,7 @@ local function crashed_batch(opts: any?): (any, any, any)
                     tool_message_id = op.call_message_ids[call.id], row_type = consts.MSG_TYPE.FUNCTION,
                     call_id = call.id, registry_id = call.registry_id,
                     intent_digest = "sha256:" .. string.rep("0", 64), display = { title = call.id },
-                    expires_at = expires_at,
+                    expires_at = expires_at, offered = opts.offered,
                 })
                 if not record then return nil, create_err end
                 local decision = type(wanted) == "table" and wanted or nil
@@ -352,7 +353,7 @@ local function crashed_batch(opts: any?): (any, any, any)
     end
     assert(ctx.writer:update_meta({ status = consts.STATUS.RUNNING,
         meta = { behavior_controls_pending = not opts.no_controls } }))
-    return ctx, op, batch
+    return ctx, op, batch, captured
 end
 
 -- One line that describes what recovery left of a crashed_batch: per call
