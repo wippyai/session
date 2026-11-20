@@ -27,7 +27,10 @@ local logger = require("logger"):named("session.approval.commands")
 -- and the waiting gate woken.
 local commands = {}
 
-commands.MAX_BODY_BYTES = 4096
+-- The cap on the client fields of a command (body_of), encoded as JSON. A
+-- maximal valid body fits: a reason of MAX_REASON_CHARS four-byte characters
+-- (8,000 bytes) plus the other client fields. Transport fields do not count.
+commands.MAX_BODY_BYTES = 10240
 commands.MAX_REASON_CHARS = 2000
 
 commands.CODE = {
@@ -315,8 +318,8 @@ function commands.handle(ctx: any, from: any, payload: any): boolean
     if type(payload) ~= "table" or FIELDS[payload.command] == nil then return false end
     local request_id = payload.request_id
 
-    -- 1. Body size.
-    local encoded = json.encode(payload)
+    -- 1. Body size, of the client fields only.
+    local encoded = json.encode(body_of(payload))
     if type(encoded) ~= "string" or #encoded > commands.MAX_BODY_BYTES then
         refuse(ctx, request_id, CODE.INVALID)
         return true

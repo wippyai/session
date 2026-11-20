@@ -23,7 +23,7 @@ client reads. Clients may copy the JSON files as test data.
 | Agent `approve_all` mode | `off` | `off`, `batch`, `tool`, `session` |
 | Requests per turn (`max_requests_per_turn`) | 10 | 1 to 50 |
 | Grace period with no approval surface | 120 s | fixed |
-| Decision and revocation body cap | 4 KB | fixed |
+| Decision and revocation body cap (fields of `data`, section 7) | 10 KB | fixed |
 | Deny reason length (`then = "continue"`) | 1 to 2,000 characters | fixed |
 
 With `approve_all: off`, Approve all is offered only for a tool whose author
@@ -375,7 +375,12 @@ Errors use the existing `error` frame on the session topic:
 | `approval_not_pending` | The request is already decided or closed, or its batch was closed (by Stop, finish, a stop denial or a message sent meanwhile). Carries `approval` with the committed state. Checked before the revision, so a competing decision always gets the committed state. |
 | `approval_stale` | Digest or revision mismatch (or a missing one) on a pending request, or an expected grant revision that does not match on a revocation (carries `grant`). Nothing changed. |
 | `approval_expired` | The deadline passed. Carries `approval`. |
-| `invalid_decision` | The decision is not offered, the scope differs from the offered scope, `then` or `reason` is missing or not allowed, the reason length is out of range, the current agent policy no longer allows a grant of the offered scope, `request_id` is missing or longer than 160 characters, or the body is over 4 KB. A revocation uses this code for the last two cases too. |
+| `invalid_decision` | The decision is not offered, the scope differs from the offered scope, `then` or `reason` is missing or not allowed, the reason length is out of range, the current agent policy no longer allows a grant of the offered scope, `request_id` is missing or longer than 160 characters, or the body is over 10 KB. A revocation uses this code for the last two cases too. |
+
+The body cap counts only the body as defined above (the fields of `data`
+listed in sections 5 and 6, encoded as JSON). Transport fields such as
+`request_id` and `conn_pid` do not count. 10 KB holds a reason of 2,000
+characters of four bytes each with the other fields.
 | `grant_not_found` | No such grant in this session, or the grant is already revoked (carries `grant`). |
 | `request_conflict` | The same `request_id` was used with a different body. |
 | `forbidden` | The command did not come through the session owner's authenticated connection. Checked before the receipt, so another user never gets the owner's stored response. Carries no records. |

@@ -187,6 +187,30 @@ local function define_tests()
             test.eq(launches(op.caller), 0)
         end)
 
+        it("accepts a 2,000-character reason in Cyrillic and in emoji; transport fields do not count", function()
+            local ctx, captured = new_ctx({ live = 1 })
+            local op, batch = round(ctx, {
+                { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+                { id = "call-b", registry_id = MARKED, args = { n = 2 } },
+            })
+            local handle = start(ctx, op)
+            pending(ctx, batch.batch_id, 2)
+            -- U+0436 (2 bytes in UTF-8) and U+1F600 (4 bytes).
+            local cyrillic, emoji = string.rep("\208\182", 2000), string.rep("\240\159\152\128", 2000)
+            local first = send(ctx, captured, decision(record_of(ctx, batch, "call-a"), { decision = "deny",
+                ["then"] = "continue", reason = cyrillic }), { request_id = string.rep("r", 160) })
+            test.is_true(first.success, "2,000 Cyrillic characters: " .. tostring(first.code))
+            -- A long transport field (conn_pid) next to a maximal body: only
+            -- the client fields count toward the cap.
+            local second = send(ctx, captured, decision(record_of(ctx, batch, "call-b"), { decision = "deny",
+                ["then"] = "continue", reason = emoji, conn_pid = string.rep("c", 3000) }))
+            test.is_true(second.success, "2,000 emoji: " .. tostring(second.code))
+            test.eq(record_of(ctx, batch, "call-a").reason, cyrillic)
+            test.eq(record_of(ctx, batch, "call-b").reason, emoji)
+            finish(handle)
+            test.eq(launches(op.caller), 0)
+        end)
+
         it("answers approval_not_found, approval_expired, invalid_decision and approval_stale and changes nothing", function()
             local ctx, captured = new_ctx({ live = 1 })
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
@@ -208,8 +232,9 @@ local function define_tests()
                     reason = string.rep("a", 2001) }), name = "2,001 characters" },
                 { code = "invalid_decision", data = decision(record, { decision = "deny", ["then"] = "stop",
                     reason = "why" }) },
+                -- Without the cap this would be approval_not_found.
                 { code = "invalid_decision", data = decision(record, { decision = "approve",
-                    padding = string.rep("x", 4096) }), name = "over 4 KB" },
+                    approval_id = string.rep("x", 11000) }), name = "client fields over 10 KB" },
                 { code = "approval_stale", data = decision(record, { decision = "approve",
                     intent_digest = "sha256:" .. string.rep("0", 64) }) },
                 { code = "approval_stale", data = decision(record, { decision = "approve", expected_revision = 2 }) },
