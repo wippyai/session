@@ -267,14 +267,40 @@ function control_handlers.announce_artifact(ctx, record)
     })
 end
 
+-- True when JSON content is a Wippy package that can't run isolated. A
+-- web-page package runs with the user's token, and an ES module or a
+-- component tag runs in the Host realm. Only a Session form tag without
+-- event-handler props is safe: every prop becomes an attribute, so `onclick`
+-- would run script. Same rule as the Host's isIsolationSafePackage.
+local function needs_trusted_realm(content_type, content)
+    if content_type ~= consts.CONTENT_TYPES.JSON then return false end
+    local pkg = content
+    if type(content) == "string" then pkg = json.decode(content) end
+    if type(pkg) ~= "table" or pkg.specification == nil then return false end
+    if pkg.specification ~= form_artifact.SPECIFICATION or type(pkg.wippy) ~= "table"
+        or pkg.wippy.tagName ~= form_artifact.TAG_NAME then
+        return true
+    end
+    if pkg.props == nil then return false end
+    if type(pkg.props) ~= "table" then return true end
+    for name in pairs(pkg.props) do
+        if type(name) == "string" and string.match(name, "^[oO][nN]") then return true end
+    end
+    return false
+end
+
 function control_handlers.control_artifacts(ctx, op)
     if not op.artifacts or #op.artifacts == 0 then
         return nil, "No artifacts provided"
     end
 
+    -- A protected session (tool approval active) shows model content isolated.
+    local protected = type(ctx.config) == "table" and ctx.config.tool_approval ~= nil
+
     -- The whole batch is checked before anything is written, so a refused
     -- item never leaves the earlier ones created and announced.
     for _, artifact_data in ipairs(op.artifacts) do
+        local kind, content_type, content = artifact_data.type, artifact_data.content_type, artifact_data.content
         if artifact_data.id then
             local target, lookup_err = artifact_repo.find(artifact_data.id)
             if lookup_err then
@@ -288,6 +314,17 @@ function control_handlers.control_artifacts(ctx, op)
             if form_meta.of(target.meta) then
                 return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
             end
+            -- An update is checked as the artifact it leaves behind.
+            local stored_meta = type(target.meta) == "table" and target.meta or {}
+            kind = target.kind
+            if content_type == nil then content_type = stored_meta.content_type end
+            if content == nil then content = target.content end
+        end
+        -- A view_ref renders an app page (isolated on the Host); its content is
+        -- page parameters, not a package.
+        if protected and kind ~= consts.ARTIFACT_TYPES.VIEW_REF and needs_trusted_realm(content_type, content) then
+            return reject("isolation_required", "This session requires tool approval, so packaged web content "
+                .. "can't be shown. You can return the content as HTML or markdown instead.")
         end
     end
 

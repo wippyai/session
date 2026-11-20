@@ -9,6 +9,30 @@ local session_repo = require("session_repo")
 local artifact_repo = require("artifact_repo")
 local writer = require("writer")
 local wait_for_boot = require("wait_for_boot")
+local message_handlers = require("message_handlers")
+local fx = require("gate_fixtures")
+
+-- Artifact content for the packaged-content cases (EE2-2712).
+local WEB_PAGE = '{"name":"@app/report","version":"1.0.0","specification":"wippy-component-1.0",'
+    .. '"wippy":{"type":"page","path":"index.html"}}'
+local ES_MODULE = '{"name":"@app/widget","version":"1.0.0","specification":"wippy-component-1.0",'
+    .. '"browser":"index.js","wippy":{"tagName":"app-widget"}}'
+local IFRAME_TAG = '{"specification":"wippy-component-tag-1.0","wippy":{"tagName":"w-iframe"},'
+    .. '"props":{"src":"https://example.com"}}'
+local SAFE_FORM = '{"specification":"wippy-component-tag-1.0","wippy":{"tagName":"wippy-form"},'
+    .. '"props":{"title":"Form"}}'
+local PLAIN_JSON = '{"rows":[1,2,3]}'
+local NOT_ISOLATABLE = {
+    { name = "web-page package", content = WEB_PAGE },
+    { name = "ES module package", content = ES_MODULE },
+    { name = "w-iframe tag", content = IFRAME_TAG },
+    { name = "wippy-form with onclick", content = '{"specification":"wippy-component-tag-1.0",'
+        .. '"wippy":{"tagName":"wippy-form"},"props":{"title":"Form","onclick":"parent.approve()"}}' },
+    { name = "wippy-form with ONCLICK", content = '{"specification":"wippy-component-tag-1.0",'
+        .. '"wippy":{"tagName":"wippy-form"},"props":{"title":"Form","ONCLICK":"parent.approve()"}}' },
+}
+local PROTECTED_ACTIVATION = { active = true, require = "all", approve_all = "off", timeout_seconds = 900,
+    max_requests_per_turn = 10, revision = 1 }
 
 -- Builds a ctx whose agent_ctx records the declarative overlay calls. control_config
 -- reads session state for the agent/model path; a traits/tools-only directive leaves
@@ -793,6 +817,198 @@ local function define_tests()
             test.is_nil(result)
             test.contains(tostring(err), "disk unavailable")
             test.eq(send_calls, 0)
+        end)
+    end)
+
+    -- EE2-2712: a package runs with the user's token or in the Host realm,
+    -- so it cannot be isolated. A protected session refuses it before
+    -- anything is written; an unprotected session stores it as before.
+    describe("packaged content and tool approval (real writer + DB)", function()
+        local session_id = uuid.v7()
+        local context_id = uuid.v7()
+
+        before_all(function()
+            wait_for_boot.run()
+            local actor = security.actor()
+            local user_id = actor and actor:id() or uuid.v7()
+            local _, context_err = context_repo.create(context_id, "primary", "Packaged content context")
+            test.is_nil(context_err)
+            local _, session_err = session_repo.create(session_id, user_id, context_id, "Packaged content", "test")
+            test.is_nil(session_err)
+        end)
+
+        after_all(function()
+            session_repo.delete(session_id)
+            context_repo.delete(context_id)
+        end)
+
+        local function new_ctx(protected: boolean): any
+            local session_writer, writer_err = writer.new(session_id)
+            test.is_nil(writer_err)
+            return {
+                writer = session_writer,
+                config = protected and { tool_approval = PROTECTED_ACTIVATION } or {},
+                upstream = { update_session = function() end, send_message_update = function() end },
+            }
+        end
+
+        local function stored_count(): number
+            return assert(artifact_repo.count_by_session(session_id))
+        end
+
+        local function json_artifact(content: string): any
+            return { title = "Report", content = content, content_type = consts.CONTENT_TYPES.JSON, instructions = false }
+        end
+
+        local function rejected_text(result: any): string
+            return tostring(type(result) == "table" and result.rejected or nil)
+        end
+
+        it("refuses each package that cannot run isolated and writes nothing", function()
+            for _, case in ipairs(NOT_ISOLATABLE) do
+                local ctx = new_ctx(true)
+                local before = stored_count()
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = { json_artifact(case.content) } })
+                test.is_nil(err, case.name)
+                local text = rejected_text(result)
+                test.contains(text, "isolation_required: ", case.name)
+                test.contains(text, "requires tool approval", case.name)
+                test.contains(text, "HTML or markdown", case.name)
+                test.eq(stored_count(), before, case.name .. ": no artifact row")
+
+                -- The second item of a batch whose first item is fine.
+                local batch, batch_err = control_handlers.control_artifacts(ctx, { artifacts = {
+                    { title = "Notes", content = "<p>Notes</p>", content_type = consts.CONTENT_TYPES.HTML,
+                        instructions = false },
+                    json_artifact(case.content),
+                } })
+                test.is_nil(batch_err, case.name)
+                test.contains(rejected_text(batch), "isolation_required: ", case.name)
+                test.eq(stored_count(), before, case.name .. ": the first item of the batch is not created")
+            end
+        end)
+
+        it("refuses an update that makes the stored artifact a package and leaves it unchanged", function()
+            local ctx = new_ctx(true)
+            local cases = {
+                -- New content type and new content.
+                { name = "plain JSON into a package", stored_type = consts.CONTENT_TYPES.TEXT,
+                    stored = PLAIN_JSON, update = { content_type = consts.CONTENT_TYPES.JSON, content = WEB_PAGE } },
+                -- The stored content type, new content.
+                { name = "new content only", stored_type = consts.CONTENT_TYPES.JSON,
+                    stored = PLAIN_JSON, update = { content = ES_MODULE } },
+                -- The stored package, a title change only.
+                { name = "stored package", stored_type = consts.CONTENT_TYPES.JSON,
+                    stored = IFRAME_TAG, update = { title = "Renamed" } },
+            }
+            for _, case in ipairs(cases) do
+                local id = uuid.v7()
+                test.eq(ctx.writer:create_artifact(id, consts.ARTIFACT_TYPES.INLINE, "Data", case.stored,
+                    { content_type = case.stored_type }), id, case.name)
+                local update: any = { id = id }
+                for key, value in pairs(case.update) do update[key] = value end
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = { update } })
+                test.is_nil(err, case.name)
+                test.contains(rejected_text(result), "isolation_required: ", case.name)
+                local artifact: any = assert(artifact_repo.get(id))
+                test.eq(artifact.title, "Data", case.name)
+                test.eq(artifact.content, case.stored, case.name)
+                test.eq(artifact.meta.content_type, case.stored_type, case.name)
+                test.eq(artifact.content_version, 1, case.name)
+            end
+        end)
+
+        it("stores a Session form tag without event props, HTML, markdown, a view_ref and plain JSON", function()
+            local ctx = new_ctx(true)
+            local before = stored_count()
+            local result, err = control_handlers.control_artifacts(ctx, { artifacts = {
+                json_artifact(SAFE_FORM),
+                { title = "Page", content = "<p>Hello</p>", content_type = consts.CONTENT_TYPES.HTML },
+                { title = "Notes", content = "# Notes", content_type = consts.CONTENT_TYPES.MARKDOWN },
+                -- The Host renders a view_ref isolated; its params are not a package.
+                { title = "App page", type = consts.ARTIFACT_TYPES.VIEW_REF, page_id = "app:report_page",
+                    content_type = consts.CONTENT_TYPES.JSON, params = { specification = "wippy-component-1.0" },
+                    instructions = false },
+                json_artifact(PLAIN_JSON),
+            } })
+            test.is_nil(err)
+            test.is_nil(result.rejected)
+            test.eq(#result.created_artifacts, 5)
+            test.eq(stored_count() - before, 5)
+
+            -- An update of a stored Session form tag without event props.
+            local form_id = result.created_artifacts[1].artifact_id
+            local updated, update_err = control_handlers.control_artifacts(ctx, { artifacts = {
+                { id = form_id, title = "Form, revised" },
+            } })
+            test.is_nil(update_err)
+            test.is_nil(updated.rejected)
+            local revised: any = assert(artifact_repo.get(form_id))
+            test.eq(revised.title, "Form, revised")
+        end)
+
+        it("stores every package as before when the session is not protected", function()
+            local ctx = new_ctx(false)
+            for _, case in ipairs(NOT_ISOLATABLE) do
+                local before = stored_count()
+                local result, err = control_handlers.control_artifacts(ctx, { artifacts = { json_artifact(case.content) } })
+                test.is_nil(err, case.name)
+                test.is_nil(result.rejected, case.name)
+                test.eq(#result.created_artifacts, 1, case.name)
+                test.eq(stored_count() - before, 1, case.name)
+                local artifact: any = assert(artifact_repo.get(result.created_artifacts[1].artifact_id))
+                test.eq(artifact.content, case.content, case.name)
+            end
+        end)
+    end)
+
+    describe("isolation_required as the model sees it", function()
+        after_all(function()
+            fx.cleanup()
+        end)
+
+        -- One round of the plain test tool (no approval needed) whose result
+        -- asks for a web-page package artifact.
+        local function package_round(ctx: any): (any, any, any)
+            local caller = fx.fake_caller()
+            function caller:execute(_context, tools)
+                self.runs = self.runs + 1
+                local results = {}
+                for call_id, tool in pairs(tools or {}) do
+                    self.launches[call_id] = true
+                    results[call_id] = { tool_call = tool, result = { ok = true, _control = { artifacts = {
+                        { title = "Report", content = WEB_PAGE, content_type = consts.CONTENT_TYPES.JSON,
+                            instructions = false },
+                    } } } }
+                end
+                return results
+            end
+            local op = fx.round(ctx, { { id = "call-1", registry_id = fx.PLAIN, name = "lookup_customer", args = {} } },
+                caller)
+            local result, err = message_handlers.process_tools(ctx, op)
+            return result, err, fx.row(op.call_message_ids["call-1"])
+        end
+
+        it("turns the refusal into a tool error of that call, and the turn goes on", function()
+            wait_for_boot.run()
+            local ctx, captured = fx.new_ctx({ live = 1 })
+            local result, err, call_row = package_round(ctx)
+            test.is_nil(err)
+            test.eq(call_row.metadata.status, consts.FUNC_STATUS.ERROR)
+            test.contains(tostring(call_row.metadata.result), "isolation_required: ")
+            local errors = fx.updates_of(captured, consts.UPSTREAM_TYPES.FUNCTION_ERROR)
+            test.eq(#errors, 1, "the call is announced as failed")
+            test.contains(tostring(errors[1].payload.error), "isolation_required: ")
+            test.is_true(fx.has_continue(result), "the agent gets a step to answer in another form")
+            test.eq(assert(artifact_repo.count_by_session(ctx.session_id)), 0)
+
+            -- Positive control: the same round in an unprotected session.
+            local open_ctx = fx.new_ctx({ protected = false })
+            local open_result, open_err, open_row = package_round(open_ctx)
+            test.is_nil(open_err)
+            test.eq(open_row.metadata.status, consts.FUNC_STATUS.SUCCESS)
+            test.is_true(fx.has_continue(open_result))
+            test.eq(assert(artifact_repo.count_by_session(open_ctx.session_id)), 1)
         end)
     end)
 end
