@@ -691,7 +691,8 @@ identifier is looked up by `meta.name`.
 ```
 
 `title` is the agent's `meta.title`, or its name when the title is empty.
-`start_prompts` holds only the string items of the agent's `start_prompts`.
+`start_prompts` holds only the string items of the agent's `start_prompts`. It
+is empty when the agent's `start_prompts` is not a list.
 
 When the agent does not exist, the entry is not a gen1 agent, or the agent has
 `meta.private: true`, the response is still 200 and `agent` is `null`. So the
@@ -709,13 +710,15 @@ A missing or empty `agent` parameter returns 400 with
 Names are separated by commas. Spaces around a name are removed, and empty
 items are skipped. A name matches a tool by its LLM name (`meta.llm_alias`, or
 the sanitized id name) or by its full registry id. Unknown names are left out.
-When no name matches, `tools` is the empty object `{}`.
+Tools with `meta.private: true` are also left out, because Session does not
+show their calls. When no name matches, `tools` is the empty object `{}`.
 
 ```json
 {"success": true, "tools": {"search": {"name": "search", "title": "Web Search"}}}
 ```
 
-`title` is the tool's `meta.title`, or its LLM name when it has no title. A
+`title` is the tool's `meta.title`, or its LLM name when the title is missing
+or empty. A
 missing or empty `tools` parameter returns 400 with
 `{"success": false, "error": "..."}`.
 

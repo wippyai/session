@@ -77,6 +77,14 @@ local function define_tests()
             test.eq(#agent.start_prompts, 0)
         end)
 
+        it("returns no start prompts when start_prompts is not a list", function()
+            local result = install(agents_details, { agent = "host-routes-scalar-prompts" })
+            agents_details.handler()
+            test.eq(result.status, 200)
+            test.eq(result.body.agent.title, "Scalar Prompts Helper")
+            test.eq(#result.body.agent.start_prompts, 0)
+        end)
+
         it("answers an unknown agent with 200 and a null agent", function()
             local by_name = install(agents_details, { agent = "host-routes-missing" })
             agents_details.handler()
@@ -169,6 +177,21 @@ local function define_tests()
             local result = install(tools_by_name, { tools = "host_routes_plain_tool" })
             tools_by_name.handler()
             test.eq(result.body.tools["host_routes_plain_tool"].title, "host_routes_plain_tool")
+        end)
+
+        it("uses the LLM name as the title when the title is empty", function()
+            local result = install(tools_by_name, { tools = "host_routes_empty_title_tool" })
+            tools_by_name.handler()
+            test.eq(result.body.tools["host_routes_empty_title_tool"].title, "host_routes_empty_title_tool")
+        end)
+
+        it("leaves out private tools by LLM name and by registry id", function()
+            local result = install(tools_by_name, {
+                tools = "host_routes_private_alias,app.api:host_routes_private_tool",
+            })
+            tools_by_name.handler()
+            test.eq(result.status, 200)
+            test.eq(json.encode(result.body.tools), "{}")
         end)
 
         it("trims names, skips empty items and leaves out unknown names", function()

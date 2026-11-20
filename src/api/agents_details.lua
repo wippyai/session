@@ -23,8 +23,12 @@ local function find_agent(identifier: string)
 end
 
 -- The Web Host renders start prompts as text, so only strings are returned.
+-- A start_prompts value that is not a list gives no prompts.
 local function start_prompts_of(spec): {string}
     local prompts: {string} = {}
+    if type(spec.start_prompts) ~= "table" then
+        return prompts
+    end
     for _, item in ipairs(spec.start_prompts) do
         if type(item) == "string" then
             prompts[#prompts + 1] = item

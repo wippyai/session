@@ -124,7 +124,7 @@ entries:
       name: Web Host agent details and tool names
       type: test
       suite: session
-      comment: GET /agents/details and GET /tools/by-name against the registry fixtures below (public, untitled and private agents, a non-agent id, titled, untitled and aliased tools)
+      comment: GET /agents/details and GET /tools/by-name against the registry fixtures below (public, untitled, private and scalar-prompt agents, a non-agent id, titled, untitled, empty-title, aliased and private tools)
     source: file://host_routes_test.lua
     modules:
       - http
@@ -167,6 +167,36 @@ entries:
     prompt: Test only.
     start_prompts:
       - Hidden prompt
+
+  - name: host_routes_scalar_prompts_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: host-routes-scalar-prompts
+      title: Scalar Prompts Helper
+    model: gpt-4o
+    prompt: Test only.
+    start_prompts: true
+
+  - name: host_routes_private_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Private Fixture Tool
+      llm_alias: host_routes_private_alias
+      private: true
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://host_routes_tool.lua
+    method: run
+
+  - name: host_routes_empty_title_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: ""
+      input_schema: '{"type":"object","properties":{},"additionalProperties":false}'
+    source: file://host_routes_tool.lua
+    method: run
 
   - name: host_routes_titled_tool
     kind: function.lua

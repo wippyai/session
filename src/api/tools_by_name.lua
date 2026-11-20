@@ -53,17 +53,22 @@ local function handler()
 
     -- A tool call carries the name the model used: meta.llm_alias, or the
     -- sanitized id name when there is no alias. The registry id also matches.
+    -- Private tools are left out: Session does not show their calls.
     local by_name = {}
     for _, entry in ipairs(entries or {}) do
-        local llm_name = api._tools.get_tool_name(entry)
-        local found = {
-            name = llm_name,
-            title = (entry.meta and entry.meta.title) or llm_name
-        }
-        if by_name[llm_name] == nil then
-            by_name[llm_name] = found
+        local meta = entry.meta or {}
+        if not meta.private then
+            local llm_name = api._tools.get_tool_name(entry)
+            local title = meta.title
+            if not title or title == "" then
+                title = llm_name
+            end
+            local found = { name = llm_name, title = title }
+            if by_name[llm_name] == nil then
+                by_name[llm_name] = found
+            end
+            by_name[entry.id] = found
         end
-        by_name[entry.id] = found
     end
 
     -- Unknown names are left out. An empty result must still encode as {}.
