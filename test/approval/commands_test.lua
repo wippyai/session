@@ -171,6 +171,9 @@ local function define_tests()
             local op, batch = round(ctx, { { id = "call-a", registry_id = MARKED, args = { n = 1 } } })
             local handle = start(ctx, op)
             pending(ctx, batch.batch_id, 1)
+            -- The new owner must be a user: PostgreSQL enforces the
+            -- sessions.user_id foreign key (SQLite does not).
+            wait_for_boot.ensure_user("new-owner")
             local db = assert(sql.get(consts.get_db_resource()))
             local _, update_err = db:execute("UPDATE sessions SET user_id = $1 WHERE session_id = $2",
                 { "new-owner", ctx.session_id })
