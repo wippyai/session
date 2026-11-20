@@ -67,6 +67,21 @@ local function run(args: any)
         if selected.channel ~= resume then error("the injected pause at " .. point .. " was never resumed") end
     end
 
+    -- Every pass of the gate's wait that finds no closure reports
+    -- `approval:parked` { session_id }. While a request is still pending, the
+    -- gate's next step is to wait on its wake-up channel with no I/O in
+    -- between, so a signal the test sends after this report reaches a waiting
+    -- gate (without the clock seam, whose store read could yield). Only the
+    -- gate's wait reads the closure outside a transaction (conn nil).
+    local close_reason = approval_repo.close_reason
+    approval_repo.close_reason = function(conn, ...)
+        local reason, err = close_reason(conn, ...)
+        if conn == nil and reason == nil and err == nil and reply then
+            process.send(reply, "approval:parked", { session_id = session_id })
+        end
+        return reason, err
+    end
+
     local point = fixture.inject
     -- The pause points fire only once the test set armed:<session_id>, so
     -- a setup decision before it passes untouched.

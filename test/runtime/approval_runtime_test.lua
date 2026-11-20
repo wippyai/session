@@ -462,6 +462,15 @@ local function pending(session_id: string, call_id: string, since: number?): any
     return assert(approval_repo.get(nil, data.approval.approval_id))
 end
 
+-- Waits for the gate's wait pass after index `since` (approval_session_worker
+-- reports it): a signal sent after it reaches a gate that is waiting, not
+-- one still in its first read.
+local function parked(session_id: string, since: number)
+    await(function(topic: any, data: any)
+        return topic == "approval:parked" and data.session_id == session_id
+    end, "the waiting gate", since)
+end
+
 -- Sends a decision and waits for its reply. Returns the reply.
 local function decide(handle: any, record: any, decision: string, extra: any?): any
     local request_id = handle:command(decision_fields(record, decision, extra))
@@ -565,6 +574,7 @@ local function define_wait_tests()
             local since = mark()
             handle:message("Delete record 1.")
             local record = pending(session_id, "call-a", since)
+            parked(session_id, since)
             local started = now()
             stop(handle)
             await(function(_topic: any, data: any) return is_type(data, TYPES.FUNCTION_ERROR, "call-a") end,
@@ -590,6 +600,7 @@ local function define_wait_tests()
                 local since = mark()
                 handle:message("Delete record 1.")
                 pending(session_id, "call-a", since)
+                parked(session_id, since)
                 local started = now()
                 if case == "finish" then
                     handle:finish()
@@ -632,6 +643,7 @@ local function define_wait_tests()
             local since = mark()
             handle:message("Delete record 1.")
             pending(session_id, "call-a", since)
+            parked(session_id, since)
             -- The rows go without the deletion signal; the finish then wakes
             -- the gate, whose teardown finds nothing to write.
             assert(session_repo.delete(session_id))
@@ -658,8 +670,12 @@ local function define_wait_tests()
                 handle:message("Delete records 1 and 2.")
                 pending(session_id, "call-a", since)
                 local peer = pending(session_id, "call-b", since)
+                parked(session_id, since)
                 if case == "peer approved first" then
+                    local decided = mark()
                     test.is_true(decide(handle, peer, "approve").success, case)
+                    -- The decision woke the gate; call-a still waits.
+                    parked(session_id, decided)
                 end
                 handle:message("Use record 9 instead.")
                 local second = await(function(topic: any, data: any)
