@@ -1,5 +1,5 @@
 import type { Ref } from 'vue'
-import type { FieldError, FormAnswers, SubmitAccepted, SubmitEnvelope, SubmitResult } from '../lib/definition'
+import type { FieldError, FormAnswers, SubmitAccepted, SubmitEnvelope } from '../lib/definition'
 import type { SubmitErrorCode } from '../lib/submit-error'
 import { ref, watch } from 'vue'
 import { hostExport } from '../lib/host-proxy'
@@ -101,11 +101,11 @@ export function useFormSubmit(artifactId: Ref<string | null>) {
       expected_content_version: expectedContentVersion,
       answers,
     }
-    const send = (): Promise<SubmitResult> => artifactState(id).submit(envelope)
+    const send = (): Promise<SubmitAccepted> => artifactState(id).submit(envelope)
 
     submitting.value = true
     try {
-      let result: SubmitResult
+      let result: SubmitAccepted
       try {
         result = await send()
       }

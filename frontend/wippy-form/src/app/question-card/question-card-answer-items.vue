@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { AnswerDisplayItem } from '../../lib/answers'
 import { Icon } from '@iconify/vue'
-import { trimAnswerText } from '../../lib/answers'
 import { partAttrs } from '../../lib/part-attrs'
+import { trimAnswerText } from '../../lib/text'
 import { textLines } from '../../lib/rich-text'
 import QuestionCardRichText from './question-card-rich-text.vue'
 

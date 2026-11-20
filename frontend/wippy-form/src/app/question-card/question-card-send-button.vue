@@ -11,14 +11,20 @@ import { partAttrs } from '../../lib/part-attrs'
  * `disabled` attribute, because a focused button that becomes disabled hands
  * focus to <body>. Activation is ignored then. When there is nothing to send
  * it is a real disabled button, and focus is on a row.
+ *
+ * The fields form uses it as its `submit` button, with `sending` set while a
+ * send is in flight: a spinner then takes the place of the send icon (it
+ * stands still under reduced motion), and the part gets its `sending` state.
  */
 const props = defineProps<{
   /** The part, the class and the `data-focus` value of the button. */
   name: 'send' | 'send-all'
   label: string
   blocked?: boolean
-  nothingToSend: boolean
+  nothingToSend?: boolean
   describedBy?: string
+  type?: 'button' | 'submit'
+  sending?: boolean
 }>()
 
 const emit = defineEmits<{ send: [] }>()
@@ -31,8 +37,8 @@ function onClick() {
 
 <template>
   <Button
-    type="button"
-    v-bind="partAttrs(name)"
+    :type="type ?? 'button'"
+    v-bind="partAttrs(name, sending && 'sending')"
     :class="blocked && 'p-disabled'"
     :data-focus="name"
     :aria-describedby="describedBy"
@@ -42,8 +48,9 @@ function onClick() {
   >
     {{ label }}
     <Icon
-      icon="tabler:send-2"
+      :icon="sending ? 'tabler:loader-2' : 'tabler:send-2'"
       aria-hidden="true"
+      :class="sending && 'animate-spin motion-reduce:animate-none'"
     />
   </Button>
 </template>
