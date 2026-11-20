@@ -17,6 +17,8 @@ local start_tokens = require("start_tokens")
 local control_handlers = require("control_handlers")
 local definition = require("definition")
 local state_service = require("state_service")
+local approval_repo = require("approval_repo")
+local fx = require("gate_fixtures")
 
 local function plugin_message(topic, data, sender)
     return {
@@ -810,6 +812,55 @@ local function recovery_boundaries(session_id)
     return count
 end
 
+-- Runs session.run for `session_id` until a supervisor cancel, with the
+-- command bus never started, as "repairs pending calls before reopening
+-- without starting agent work" does. `before_cancel`, when given, runs in
+-- the session process after the start and before the cancel arrives.
+local function run_session_until_cancel(actor, session_id, before_cancel)
+    local cancel_events = channel.new(1)
+    local bus_done = {
+        case_receive = function(self) return self end,
+        send = function() return true end,
+        receive = function() return nil end,
+    }
+    local original_channel_new = channel.new
+    cancel_events:send({ kind = process.event.CANCEL })
+    mock("process.events", function() return cancel_events end)
+    local bus_done_issued = false
+    mock("channel.new", function(capacity)
+        -- session.run creates bus_done once; later unbuffered channels are real.
+        if capacity == nil and not bus_done_issued then
+            bus_done_issued = true
+            return bus_done
+        end
+        return original_channel_new(capacity)
+    end)
+    mock("coroutine.spawn", function() end)
+    local selection = 0
+    mock("channel.select", function()
+        selection = selection + 1
+        if selection == 1 then
+            if before_cancel then before_cancel() end
+            return { ok = true, channel = cancel_events, value = { kind = process.event.CANCEL } }
+        end
+        return { ok = true, channel = bus_done, value = { error = nil } }
+    end)
+    local ok, result = pcall(session.run, { session_id = session_id, user_id = actor:id() })
+    restore_mock("channel.select")
+    restore_mock("coroutine.spawn")
+    restore_mock("channel.new")
+    restore_mock("process.events")
+    if not ok then error(result) end
+    return result
+end
+
+-- What recovery leaves of gate_fixtures.crashed_batch (AC 24): the waiting
+-- request interrupted and its call not run, the approved call with outcome
+-- unknown, the unmarked call not run, the batch closed with its controls
+-- cancelled, no activity.
+local APPROVAL_CRASHED = "call-a=interrupted/error/not_run:interrupted call-b=approved/error/unknown"
+    .. " call-c=-/error/not_run:interrupted batch=closed:exit:cancelled activity=nil"
+
 -- One stale scan by a plugin that sees only `session_id`.
 local function scan_for_stale_session(actor, session_id)
     local original_list = session_repo.list_by_user_status
@@ -1195,6 +1246,9 @@ local function define_tests()
         end)
     end)
     describe("plugin exit and recovery", function()
+        -- The approval sessions of gate_fixtures.
+        after_all(function() fx.cleanup() end)
+
         it("answers requests already in the inbox when the last start is refused", function()
             local actor = security.actor()
             local session_id, context_id = create_session_fixture(actor, "Inbox refusal")
@@ -2029,6 +2083,63 @@ local function define_tests()
             -- Terminated to enforce the user's Stop: stopped, not failed.
             test.eq(session_repo.get(session_id, actor:id()).status, consts.STATUS.IDLE)
             cleanup_session_fixture(session_id, context_id)
+        end)
+
+        it("recovers an interrupted approval batch at session start and does not replay its controls", function()
+            local actor = security.actor()
+            -- No stored agent: session.run then loads none.
+            local ctx, op, batch = fx.crashed_batch({ session_id = fx.new_session({ config = {} }) })
+            local result = run_session_until_cancel(actor, ctx.session_id)
+            test.eq(result.status, "shutdown")
+            test.eq(fx.recovery_summary(ctx, op, batch), APPROVAL_CRASHED)
+            test.eq(fx.round_controls(ctx, op), "cancelled replayed=nil", "the start recovered the round without it")
+        end)
+
+        it("recovers an approval batch interrupted by a process exit after the start", function()
+            local actor = security.actor()
+            local base = fx.new_ctx({ live = 1, session_id = fx.new_session({ config = {} }) })
+            assert(approval_repo.update_tool_approval(base.session_id, function() return base.config.tool_approval end))
+            local ctx, op, batch
+            run_session_until_cancel(actor, base.session_id, function()
+                ctx, op, batch = fx.crashed_batch({ session_id = base.session_id })
+            end)
+            test.eq(fx.recovery_summary(ctx, op, batch), APPROVAL_CRASHED, "exit settlement recovered it")
+            test.eq(fx.round_controls(ctx, op, true), "cancelled replayed=nil")
+        end)
+
+        it("recovers an interrupted approval batch on the plugin's failure path", function()
+            local actor = security.actor()
+            local ctx, op, batch = fx.crashed_batch()
+            local run = run_plugin_lifecycle(actor, ctx.session_id, "approval-hub", {}, { error = "tool crashed" })
+            test.is_nil(run.error)
+            test.eq(session_repo.get(ctx.session_id, actor:id()).status, consts.STATUS.FAILED)
+            test.eq(fx.recovery_summary(ctx, op, batch), APPROVAL_CRASHED)
+            test.eq(fx.round_controls(ctx, op, true), "cancelled replayed=nil")
+        end)
+
+        it("recovers an interrupted approval batch after a Stop the plugin had to enforce", function()
+            local actor = security.actor()
+            local ctx, op, batch = fx.crashed_batch()
+            local run = run_plugin_lifecycle(actor, ctx.session_id, "approval-stop-hub", {
+                { topic = consts.TOPICS.STOP_ESCALATION, data = { session_id = ctx.session_id,
+                    from_pid = "plugin-lifecycle-session", stop_request_id = "approval-stop" } },
+                { topic = consts.TOPICS.STOP_DEADLINE, data = { session_id = ctx.session_id,
+                    session_pid = "plugin-lifecycle-session", stop_request_id = "approval-stop", level = 1 } },
+            }, { status = "shutdown", session_id = ctx.session_id, interrupted = true, intentional_exit = false })
+            test.is_nil(run.error)
+            test.eq(run.cancelled, 1, "the plugin enforced the Stop")
+            test.eq(session_repo.get(ctx.session_id, actor:id()).status, consts.STATUS.IDLE)
+            test.eq(fx.recovery_summary(ctx, op, batch), APPROVAL_CRASHED)
+            test.eq(fx.round_controls(ctx, op, true), "cancelled replayed=nil")
+        end)
+
+        it("recovers an interrupted approval batch in the stale-running scan", function()
+            local actor = security.actor()
+            local ctx, op, batch = fx.crashed_batch()
+            scan_for_stale_session(actor, ctx.session_id)
+            test.eq(session_repo.get(ctx.session_id, actor:id()).status, consts.STATUS.IDLE)
+            test.eq(fx.recovery_summary(ctx, op, batch), APPROVAL_CRASHED)
+            test.eq(fx.round_controls(ctx, op, true), "cancelled replayed=nil")
         end)
 
         it("settles a Stop it had to enforce as idle with input, not as failed", function()

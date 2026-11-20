@@ -218,6 +218,8 @@ entries:
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
       writer: wippy.session.persist:writer
+      approval_repo: wippy.session.persist:approval_repo
+      gate_fixtures: app.approval:gate_fixtures
     method: run_tests
 
   - name: approval_surfaces_test

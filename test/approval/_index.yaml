@@ -255,7 +255,7 @@ entries:
   - name: gate_fixtures
     kind: library.lua
     meta:
-      comment: Shared fixtures of the gate suites - a protected session context, a fake caller that records launches, a stored response with its PROCESS_TOOLS op
+      comment: Shared fixtures of the gate suites - a protected session context, a fake caller that records launches, a stored response with its PROCESS_TOOLS op, the stored state of a batch interrupted by a crash
     source: file://gate_fixtures.lua
     modules:
       - sql
@@ -264,6 +264,7 @@ entries:
       - security
       - time
     imports:
+      reader: wippy.session.persist:reader
       message_handlers: wippy.session.process:message_handlers
       session: wippy.session.process:session
       consts: wippy.session:consts
@@ -380,4 +381,28 @@ entries:
       test: wippy.test:test
       approval_events: wippy.session.approval:events
       approval_repo: wippy.session.persist:approval_repo
+    method: run
+
+  - name: recovery_test
+    kind: function.lua
+    meta:
+      name: Tool approval recovery
+      type: test
+      suite: session
+      comment: Batch reconciliation before call settlement, one terminal result per call, outcome unknown for approved calls, the batch controls marker, the exit order of the command bus
+    source: file://recovery_test.lua
+    modules:
+      - time
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      approval_recovery: wippy.session.approval:recovery
+      message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
+      command_bus: wippy.session.process:command_bus
+      session: wippy.session.process:session
+      reader: wippy.session.persist:reader
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
     method: run

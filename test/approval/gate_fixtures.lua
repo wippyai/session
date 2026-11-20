@@ -10,6 +10,7 @@ local message_repo = require("message_repo")
 local fingerprint = require("fingerprint")
 local wake = require("wake")
 local writer = require("writer")
+local reader = require("reader")
 local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local trait_config = require("trait_config")
@@ -284,6 +285,117 @@ local function steer(ctx: any, quiet: boolean?)
     if not quiet then ctx.approval_wake:notify("steering") end
 end
 
+-- The stored state of a protected session whose process stopped while a
+-- tool round of the approval gate was under way: the activation stored, the
+-- status running, the batch and its call rows, one approval record per entry
+-- of opts.requests ({ [call_id] = "pending" | "approved" | { state, then,
+-- reason } }, default call-a pending and call-b approved), the activity of a
+-- waiting batch and, unless opts.no_controls, a pending behavior round on
+-- the assistant row whose control would set the session context key
+-- `replayed`. opts.calls replaces the default calls (call-a and call-b
+-- marked, call-c plain). Returns ctx, op and the batch record.
+local function crashed_batch(opts: any?): (any, any, any)
+    opts = opts or {}
+    local ctx = new_ctx({ live = 1, session_id = opts.session_id })
+    assert(approval_repo.update_tool_approval(ctx.session_id, function() return ctx.config.tool_approval end))
+    local op, batch = round(ctx, opts.calls or {
+        { id = "call-a", registry_id = MARKED, args = { n = 1 } },
+        { id = "call-b", registry_id = MARKED, args = { n = 2 } },
+        { id = "call-c", registry_id = PLAIN, args = {} },
+    })
+    local requests = opts.requests or { ["call-a"] = "pending", ["call-b"] = "approved" }
+    local expires_at = approval_repo.timestamp(time.now():unix() + 900)
+    assert(approval_repo.transact(ctx.session_id, function(dbtx)
+        local pending_ids = {}
+        for _, call in ipairs(op.tool_calls) do
+            local wanted = requests[call.id]
+            if wanted then
+                local record, create_err = approval_repo.create_request(dbtx, {
+                    approval_id = uuid.v7(), session_id = ctx.session_id, batch_id = batch.batch_id,
+                    tool_message_id = op.call_message_ids[call.id], row_type = consts.MSG_TYPE.FUNCTION,
+                    call_id = call.id, registry_id = call.registry_id,
+                    intent_digest = "sha256:" .. string.rep("0", 64), display = { title = call.id },
+                    expires_at = expires_at,
+                })
+                if not record then return nil, create_err end
+                local decision = type(wanted) == "table" and wanted or nil
+                if wanted == "approved" then decision = { state = "approved" } end
+                if decision then
+                    local decided, decide_err = approval_repo.decide(dbtx, ctx.session_id, record.approval_id,
+                        record.revision, { state = decision.state, decided_via = "user",
+                            ["then"] = decision["then"], reason = decision.reason, decided_by = ctx.user_id })
+                    if not decided then return nil, decide_err end
+                    record = decided
+                else
+                    pending_ids[#pending_ids + 1] = record.approval_id
+                end
+                local _, projection_err = message_repo.update_metadata(record.tool_message_id,
+                    { approval = approval_repo.projection(record) }, ctx.session_id, { tx = dbtx })
+                if projection_err then return nil, projection_err end
+            end
+        end
+        if #pending_ids > 0 then
+            local written, activity_err = approval_repo.write_activity(dbtx, ctx.session_id,
+                { kind = "awaiting_tool_approval", approval_ids = pending_ids })
+            if not written then return nil, activity_err end
+        end
+        return true
+    end))
+    if not opts.no_controls then
+        assert(ctx.writer:update_message_meta(op.checkpoint_anchor_id, {
+            behavior_controls = { { context = { session = { set = { replayed = "yes" } } } } },
+            behavior_control_state = "pending",
+            behavior_call_message_ids = op.call_message_ids,
+        }))
+    end
+    assert(ctx.writer:update_meta({ status = consts.STATUS.RUNNING,
+        meta = { behavior_controls_pending = not opts.no_controls } }))
+    return ctx, op, batch
+end
+
+-- One line that describes what recovery left of a crashed_batch: per call
+-- "<call>=<record state or ->/<row status>/<outcome>" (outcome
+-- not_run:<reason>, unknown for "interrupted, outcome unknown", or the
+-- result text), then the batch "state:close_reason:controls" and the
+-- activity kind.
+local function recovery_summary(ctx: any, op: any, batch: any): string
+    local records = records_by_call(ctx.session_id, batch.batch_id)
+    local parts = {}
+    for _, call in ipairs(op.tool_calls) do
+        local record = records[call.id]
+        local metadata = row(op.call_message_ids[call.id]).metadata
+        local result = metadata.result
+        local outcome = tostring(result)
+        if type(result) == "table" then
+            outcome = result.executed == false and ("not_run:" .. tostring(result.reason)) or "result"
+        elseif result == message_repo.INTERRUPTED_RESULT then
+            outcome = "unknown"
+        end
+        parts[#parts + 1] = string.format("%s=%s/%s/%s", call.id, record and record.state or "-",
+            tostring(metadata.status), outcome)
+    end
+    local stored = assert(approval_repo.get_batch(nil, batch.batch_id))
+    parts[#parts + 1] = string.format("batch=%s:%s:%s", stored.state, tostring(stored.close_reason), stored.controls)
+    local activity = assert(approval_repo.read_activity(nil, ctx.session_id))
+    parts[#parts + 1] = "activity=" .. tostring(type(activity.activity) == "table" and activity.activity.kind or nil)
+    return table.concat(parts, " ")
+end
+
+-- The behavior round of a crashed_batch as stored: "<round state>
+-- replayed=<session context value>". With `recover`, the next session
+-- start's behavior control recovery runs first, on the stored session.
+local function round_controls(ctx: any, op: any, recover: boolean?): string
+    if recover then
+        assert(message_handlers.recover_behavior_controls({
+            session_id = ctx.session_id, config = ctx.config, upstream = ctx.upstream,
+            reader = assert(reader.open(ctx.session_id)), writer = assert(writer.new(ctx.session_id)),
+        }))
+    end
+    local state = row(op.checkpoint_anchor_id).metadata.behavior_control_state
+    local replayed = assert(reader.open(ctx.session_id)):get_context("replayed")
+    return tostring(state) .. " replayed=" .. tostring(replayed)
+end
+
 -- Deletes every session the fixtures created.
 local function cleanup()
     for _, fixture in ipairs(fixtures) do
@@ -301,4 +413,5 @@ return {
     has_continue = has_continue, launches = launches, records_by_call = records_by_call,
     create_tool_grant = create_tool_grant, start = start, finish = finish, pending = pending,
     stop = stop, steer = steer, cleanup = cleanup,
+    crashed_batch = crashed_batch, recovery_summary = recovery_summary, round_controls = round_controls,
 }
