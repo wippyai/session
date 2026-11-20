@@ -43,17 +43,19 @@ end
 
 local function define_tests()
     describe("Web Host route registration", function()
-        it("registers the exact GET paths the Web Host calls", function()
+        it("registers the exact GET paths the Web Host calls, each on its own handler", function()
             local expected = {
-                ["wippy.session.api:agents_details.endpoint"] = "/agents/details",
-                ["wippy.session.api:tools_by_name.endpoint"] = "/tools/by-name",
+                ["wippy.session.api:agents_details.endpoint"] = { path = "/agents/details", func = "agents_details" },
+                ["wippy.session.api:tools_by_name.endpoint"] = { path = "/tools/by-name", func = "tools_by_name" },
             }
-            for id, path in pairs(expected) do
+            for id, want in pairs(expected) do
                 local entry, err = registry.get(id)
                 test.is_nil(err)
                 test.eq(entry.kind, "http.endpoint")
                 test.eq(entry.data.method, "GET")
-                test.eq(entry.data.path, path)
+                test.eq(entry.data.path, want.path)
+                local func = tostring(entry.data.func)
+                test.eq(func:sub(-#want.func), want.func)
             end
         end)
 
