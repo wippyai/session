@@ -168,7 +168,7 @@ data and must be shown escaped, never as HTML):
 | `target_agent` | string | Delegation calls only: the target agent title. |
 | `approve_all_scope` | object | Present when `approve_all` is offered: the disclosure for the Details view. |
 | `approve_all_scope.scope` | string | Same as `offered.approve_all.scope`. |
-| `approve_all_scope.tools` | array of object | Every tool in the grant scope: `{ "registry_id", "title" }`, plus `target_agent_id` for delegation. |
+| `approve_all_scope.tools` | array of object | Every tool in the grant scope: `{ "registry_id", "title", "fingerprint" }`, plus `target_agent_id` for delegation. `fingerprint` is the tool's deployment fingerprint when the card was built. The list never changes, and a session grant covers exactly these tools at these fingerprints. |
 | `approve_all_scope.covered` | array of object | Every covered pending call: `{ "approval_id", "title" }`. |
 | `approve_all_scope.covered_count` | integer | Number of covered calls. |
 
@@ -264,18 +264,38 @@ Sent on the socket. The reply comes on the session topic.
 | `intent_digest` | string | From the event. |
 | `expected_revision` | integer | The revision the card shows. |
 
-`approve` and `approve_all` take no `then` or `reason`. `request_id` is
-required; a retry reuses it.
+`approve` and `approve_all` take no `then` or `reason`, and a `stop` denial
+takes no `reason`. `request_id` is required (at most 160 characters); a retry
+reuses it.
 
 An `approve_all` decision approves, in one commit, every request in
-`offered.approve_all.covers` that is still pending. With scope `tool` or
-`session` it also creates a grant: later calls in the scope run without a card
-for the rest of the session. With scope `batch` no grant is created.
+`offered.approve_all.covers` that is still pending, and no other request. With
+scope `tool` or `session` it also creates a grant: later calls in the scope run
+without a card for the rest of the session. A tool grant covers the tool of the
+request at its deployment fingerprint (for a delegation call, also the target
+agent). A session grant covers exactly the tools in
+`display.approve_all_scope.tools`. With scope `batch` no grant is created. A
+deny with `then = "stop"` closes the batch in the same commit: no call of the
+batch runs.
 
 The Session checks, in this order: body size, that the sender owns the
 session, the stored receipt for `request_id`, that the request exists, that it
 is still pending, the deadline, the decision fields, the digest and the
-revision, and finally that the batch is still open.
+revision, and finally, in the commit, that the batch is still open and that the
+current agent policy still allows a grant of the offered scope. A batch that a
+message sent meanwhile has superseded is closed by that check: the decision
+gets `approval_not_pending` with the request in state `superseded`, and no
+grant is created.
+
+Authority comes only from the connection. The session plugin forwards these
+commands only when they arrive through the user's authenticated relay, and it
+sets `sender_user_id` to that user itself, replacing any value the client
+sent. The Session accepts them only from its plugin and only when that user
+owns the session. Nothing in `data` counts as identity.
+
+After the commit, the Session publishes a `tool_approval` event for every
+request the decision changed, the session `activity` (section 9), and then
+the `command_response`.
 
 Fixtures: `decision_approve.json`, `decision_approve_all.json`,
 `decision_deny_stop.json`, `decision_deny_continue.json`.
@@ -287,9 +307,27 @@ Fixtures: `decision_approve.json`, `decision_approve_all.json`,
   "data": { "command": "tool_approval_grant_revoke", "grant_id": "0199...", "expected_revision": 1 } }
 ```
 
+`expected_revision` is the grant revision the client shows (section 9). The
+Session checks, in this order: body size, that the sender owns the session
+(as for a decision), the stored receipt for `request_id`, that the grant
+belongs to this session and is not already revoked, and the revision.
+
 A revocation committed before a batch is released stops the calls that the
-grant allowed in that batch; they settle as not run. A revocation never
-reverses calls already released. Later calls ask again.
+grant allowed in that batch; they settle as not run with the model reason
+`revoked`, and their approval records keep their decision. A revocation never
+reverses calls already released, also calls that have not started yet. Later
+calls ask again.
+
+Grant lifetime. A grant lasts for the rest of the session: it survives new
+turns and Session process restarts. It ends when it is revoked, when the
+session is deleted, or when the session gets another owner. A new, copied or
+forked session starts with no grants. A grant that an agent switch suspends
+(`suspension_reason` `agent_without_trait` or `mode_not_permitted`) becomes
+active again only when the user switches to an agent that permits it, or a new
+Approve all creates a new grant. Nothing the model does restores it. A grant
+suspended because its tool changed (`deployment_changed`) or because the tool
+no longer offers Approve all (`tool_approve_all_false`) stays suspended; only
+a new Approve all, once offered again, gives the authority back.
 
 Fixture: `grant_revoke.json`.
 
@@ -309,9 +347,12 @@ with the same `request_id` and the committed records:
 | `grant` | object or null | The grant created or revoked, as in section 9. |
 
 A retry with the same `request_id` and the same body returns the stored
-response again. A card shows a decided state only from committed data: a
-`command_response`, a `tool_approval` event, or REST. Sending a command alone
-never marks it decided.
+response again and changes nothing; the same `request_id` with another body
+gets `request_conflict`. "Body" means the fields of `data` listed in sections 5
+and 6. Only a committed command is stored. A refused one is not, so its retry
+is checked again. Receipts belong to the session owner and the session. A card
+shows a decided state only from committed data: a `command_response`, a
+`tool_approval` event, or REST. Sending a command alone never marks it decided.
 
 Errors use the existing `error` frame on the session topic:
 
@@ -331,13 +372,14 @@ Errors use the existing `error` frame on the session topic:
 | Code | When |
 | --- | --- |
 | `approval_not_found` | No such request in this session. |
-| `approval_not_pending` | The request is already decided or closed. Carries `approval` with the committed state. Checked before the revision, so a competing decision always gets the committed state. |
-| `approval_stale` | Digest or revision mismatch on a pending request, or an expected grant revision that does not match on a revocation. Nothing changed. |
-| `approval_expired` | The deadline passed. |
-| `invalid_decision` | The decision is not offered, the scope differs from the offered scope, `then` or `reason` is missing or not allowed, the reason length is out of range, or the body is over 4 KB. |
+| `approval_not_pending` | The request is already decided or closed, or its batch was closed (by Stop, finish, a stop denial or a message sent meanwhile). Carries `approval` with the committed state. Checked before the revision, so a competing decision always gets the committed state. |
+| `approval_stale` | Digest or revision mismatch (or a missing one) on a pending request, or an expected grant revision that does not match on a revocation (carries `grant`). Nothing changed. |
+| `approval_expired` | The deadline passed. Carries `approval`. |
+| `invalid_decision` | The decision is not offered, the scope differs from the offered scope, `then` or `reason` is missing or not allowed, the reason length is out of range, the current agent policy no longer allows a grant of the offered scope, `request_id` is missing or longer than 160 characters, or the body is over 4 KB. A revocation uses this code for the last two cases too. |
 | `grant_not_found` | No such grant in this session, or the grant is already revoked (carries `grant`). |
 | `request_conflict` | The same `request_id` was used with a different body. |
-| `forbidden` | The sender does not own the session. |
+| `forbidden` | The command did not come through the session owner's authenticated connection. Checked before the receipt, so another user never gets the owner's stored response. Carries no records. |
+| `storage_error` | The command could not be stored. Nothing changed; retry with the same `request_id`. |
 | `SESSION_FINISHING` | The session is finishing; every command gets this. |
 
 Fixtures: `command_response_decision.json`, `command_response_revoke.json`,
@@ -403,7 +445,7 @@ session `update` events:
   `activity: null` with a higher `activity_revision`. Apply only a higher
   revision.
 - `activity.kind` is `awaiting_tool_approval`; `activity.approval_ids` lists the
-  pending requests.
+  pending requests. Each committed decision updates it.
 - `tool_approval.active` is `true` once the session is protected.
 - Each grant carries `grant_id`, `revision`, `scope` (`tool` or `session`),
   `status` (`active` or `suspended`), `suspension_reason`, `registry_id` and
