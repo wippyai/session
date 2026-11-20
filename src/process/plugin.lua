@@ -8,7 +8,7 @@ local start_tokens = require("start_tokens")
 local consts = require("consts")
 local input_policy = require("input_policy")
 local session_status = require("session_status")
-local form_recovery = require("form_recovery")
+local approval_recovery = require("approval_recovery")
 local interruption_boundary = require("interruption_boundary")
 local funcs = require("funcs")
 local ui_action_broker = require("ui_action_broker")
@@ -138,11 +138,16 @@ local function needs_crash_reset(session)
     return session and session.status and session.status ~= consts.STATUS.IDLE
 end
 
+-- Recovers the calls an interrupted turn of `session_id` left pending
+-- (approval_recovery: its unfinished approval batches first, then the call
+-- rows after the current checkpoint).
 local function recover_session_calls(session_id)
     local session_reader, open_err = reader.open(session_id)
     if open_err then return nil, open_err end
     local anchor = session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
-    return message_repo.recover_pending(session_id, anchor, form_recovery.settle_call)
+    local config = session_reader:state().config
+    return approval_recovery.recover_calls(session_id, anchor,
+        type(config) == "table" and config.tool_approval ~= nil)
 end
 
 -- Admits, with no turn, the form answers a stopped turn left pending: the

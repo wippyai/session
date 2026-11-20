@@ -32,6 +32,7 @@ function command_bus.new(context)
     self.wake_pending = false
     self.handlers = {}
     self.pending_ops = 0
+    self.exiting = false
     self.turn_state = { steps = 0, repeated_calls = 0,
         id = nil, stop_request_id = nil } :: any
     context.turn_state = self.turn_state
@@ -211,8 +212,18 @@ function command_bus:flush_held(run_agent, phase)
     return self.context.flush_held(run_agent, phase)
 end
 
+-- Settles what a failed or exiting bus leaves: first the approval batches
+-- (context.reconcile_batches closes every unfinished batch before any call
+-- row is settled), then the queued tool rounds in cancel_only mode and the
+-- held messages, then the remaining pending calls (context.settle_intents)
+-- and the held input. Runs only when no operation is active: from run after
+-- an operation returned, or after run has stopped (begin_exit).
 function command_bus:fail(err, held_already_flushed)
     local failures = {}
+    if self.context.reconcile_batches then
+        local _, reconcile_err = self.context.reconcile_batches()
+        if reconcile_err then table.insert(failures, tostring(reconcile_err)) end
+    end
     for _, op in ipairs(self.ops) do
         if op.type == consts.OP_TYPE.PROCESS_TOOLS and op.round_effect then
             op.cancel_only = true
@@ -318,8 +329,18 @@ function command_bus:run_initial_ops()
     return true
 end
 
+-- The session process is exiting (supervisor cancel, ingress failure):
+-- run takes no further operation and returns once the active one has
+-- returned. The active operation keeps the settlement of its own calls until
+-- then; exit settlement (fail) runs after run has returned.
+function command_bus:begin_exit()
+    if self.exiting then return end
+    self.exiting = true
+    self:wake_loop()
+end
+
 function command_bus:run()
-    while self.state ~= "closed" do
+    while self.state ~= "closed" and not self.exiting do
         local op = table.remove(self.ops :: {table}, 1)
         if op then
             self.pending_ops = self.pending_ops - 1

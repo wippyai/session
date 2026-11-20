@@ -11,8 +11,7 @@ local session_handlers = require("session_handlers")
 local session_repo = require("session_repo")
 local agent_context = require("agent_context")
 local tools = require("tools")
-local message_repo = require("message_repo")
-local form_recovery = require("form_recovery")
+local approval_recovery = require("approval_recovery")
 local interruption_boundary = require("interruption_boundary")
 local uuid = require("uuid")
 local input_policy = require("input_policy")
@@ -343,8 +342,35 @@ local function commit_held_before_form(ctx: any, written: any)
     end
 end
 
-local function settle_exit(bus: any, err: any)
-    return bus:fail(err)
+-- The recovery of the session's interrupted tool rounds
+-- (approval_recovery): reconcile_batches closes the unfinished approval
+-- batches, recover_calls does that and then settles the pending call rows
+-- after the current checkpoint. `protected` says whether the session has a
+-- stored tool approval activation.
+local function recovery_hooks(session_id: string, session_reader: any, protected: () -> boolean): any
+    return {
+        reconcile_batches = function()
+            return approval_recovery.reconcile(session_id, protected())
+        end,
+        recover_calls = function()
+            return approval_recovery.recover_calls(session_id,
+                session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), protected())
+        end,
+    }
+end
+
+-- Exit settlement. The bus takes no further operation (begin_exit); the
+-- operation it runs keeps the settlement of its own calls until it returns.
+-- wait_stopped waits for the bus to stop (while the caller keeps answering
+-- the requests that operation may make) and returns the bus's error, if
+-- any. Then the bus settles what is left (command_bus:fail). Returns nil
+-- and the first error.
+local function settle_exit(bus: any, err: any, wait_stopped: (() -> any)?)
+    bus:begin_exit()
+    local stop_err = nil
+    if wait_stopped then stop_err = wait_stopped() end
+    local _, settle_err = bus:fail(err)
+    return nil, settle_err or stop_err
 end
 
 -- The live approval UI surfaces of this session, pushed by the parent session
@@ -598,16 +624,18 @@ local function run(args: SessionArgs)
         error("Failed to create session writer: " .. writer_err)
     end
 
-    -- Settles the calls an interrupted turn left pending; a call whose form
-    -- was committed counts as created (form_recovery).
-    local function recover_calls()
-        return message_repo.recover_pending(args.session_id,
-            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
+    -- Whether the session is protected: its stored tool approval activation,
+    -- in the live config once the session context exists.
+    local live_context: any = nil
+    local function protected(): boolean
+        local config = (live_context and live_context.config) or session_config
+        return type(config) == "table" and config.tool_approval ~= nil
     end
+    local hooks = recovery_hooks(args.session_id, session_reader, protected)
 
     local recovered_calls = 0
     if not args.create then
-        local count, recovery_err = recover_calls()
+        local count, recovery_err = hooks.recover_calls()
         if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
         recovered_calls = count
     end
@@ -737,7 +765,11 @@ local function run(args: SessionArgs)
     context.flush_held = function(run_agent, phase) return flush_held(context, run_agent, phase) end
     context.write_held_before_form = function(write_opts) return write_held_before_form(context, write_opts) end
     context.commit_held_before_form = function(written) return commit_held_before_form(context, written) end
-    context.settle_intents = recover_calls
+    live_context = context
+    -- command_bus:fail closes the unfinished approval batches first, then
+    -- settles the queued rounds and the remaining pending calls.
+    context.reconcile_batches = hooks.reconcile_batches
+    context.settle_intents = hooks.recover_calls
 
     local attention_control: any = attention_control_runtime.new({
         connection_id = args.conn_pid,
@@ -1177,9 +1209,12 @@ local function run(args: SessionArgs)
         bus:cancel_turn()
         context.approval_wake:notify(wake.KIND.EXITING)
     end
-    local _, settle_err = settle_exit(bus, exit_err)
-
-    if not session_state.bus_done_received then
+    -- Waits for the command bus to stop, answering meanwhile the policy and
+    -- turn boundary requests its last operation may still make. Returns the
+    -- bus's error.
+    local function wait_bus_done(): any
+        if session_state.bus_done_received then return nil end
+        local bus_err = nil
         local shutdown_cases = {
             bus_done:case_receive(), policy_requests:case_receive(), inbox:case_receive(),
         }
@@ -1188,7 +1223,7 @@ local function run(args: SessionArgs)
             if not pending.ok then break end
             if pending.channel == bus_done then
                 session_state.bus_done_received = true
-                settle_err = settle_err or (pending.value and pending.value.error)
+                bus_err = pending.value and pending.value.error
             elseif pending.channel == policy_requests then
                 (pending.value :: any).reply:send({ error = "Session is closing" })
             elseif pending.channel == inbox then
@@ -1203,7 +1238,12 @@ local function run(args: SessionArgs)
                 end
             end
         end
+        return bus_err
     end
+    -- Exit recovery runs only after the bus has stopped: the active
+    -- operation (a waiting approval gate, released calls, a result that waits
+    -- for a policy reply) settles its own calls first.
+    local _, settle_err = settle_exit(bus, exit_err, wait_bus_done)
     attention_control:invalidate()
 
     if settle_err then error(settle_err) end
@@ -1226,6 +1266,7 @@ end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
     settle_exit = settle_exit, turn_boundary = turn_boundary, run_in_background = run_in_background,
+    _recovery_hooks = recovery_hooks,
     accept_surfaces = accept_surfaces,
     write_held_before_form = write_held_before_form,
     commit_held_before_form = commit_held_before_form,

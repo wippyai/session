@@ -187,6 +187,7 @@ entries:
       turn_context: wippy.agent:turn_context
       activation: wippy.session.approval:activation
       approval_gate: wippy.session.approval:gate
+      approval_recovery: wippy.session.approval:recovery
 
   - name: input_policy
     kind: library.lua
@@ -264,8 +265,7 @@ entries:
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
       input_policy: wippy.session.process:input_policy
-      message_repo: wippy.session.persist:message_repo
-      form_recovery: wippy.session.forms:form_recovery
+      approval_recovery: wippy.session.approval:recovery
       interruption_boundary: wippy.session.process:interruption_boundary
       wake: wippy.session.approval:wake
       activation: wippy.session.approval:activation
@@ -303,7 +303,7 @@ entries:
       prompt_builder: wippy.session:prompt_builder
       input_policy: wippy.session.process:input_policy
       session_status: wippy.session.process:session_status
-      form_recovery: wippy.session.forms:form_recovery
+      approval_recovery: wippy.session.approval:recovery
       interruption_boundary: wippy.session.process:interruption_boundary
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer

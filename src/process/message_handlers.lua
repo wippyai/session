@@ -19,6 +19,7 @@ local time = require("time")
 local llm = require("llm")
 local activation = require("activation")
 local approval_gate = require("approval_gate")
+local approval_recovery = require("approval_recovery")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -734,10 +735,29 @@ local function is_turn_stopped(ctx: any): boolean
         or (state and state.failed) or false)
 end
 
-local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason)
+-- The writer of a tool round's call rows: write(message_id, metadata,
+-- correction) returns whether it wrote, or nil and an error. A round of an
+-- approval batch (op.approval.batch_id) writes each row in a transaction
+-- with the session row locked and, unless `correction` (a row the round
+-- settled itself), only while the row is still pending
+-- (approval_recovery.write_call), so a row never gets a second terminal
+-- result from another writer. Other rounds write as before.
+local function call_row_writer(ctx: any, op: any): any
+    local binding = type(op) == "table" and op.approval or nil
+    if type(binding) == "table" and type(binding.batch_id) == "string" then
+        return function(message_id, metadata, correction)
+            return approval_recovery.write_call(ctx.session_id, message_id, metadata,
+                { correction = correction == true })
+        end
+    end
+    return function(message_id, metadata) return ctx.writer:update_message_meta(message_id, metadata) end
+end
+
+local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason, write)
     call_type = call_type or call.type
     reason = reason or "Session stopped before the call executed"
-    local _, err = ctx.writer:update_message_meta(message_id, {
+    write = write or call_row_writer(ctx, nil)
+    local _, err = write(message_id, {
         status = consts.FUNC_STATUS.CANCELLED, result = reason,
     })
     if err then return nil, err end
@@ -2486,6 +2506,19 @@ function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
     end
+    -- The call row writes from the approval gate on (results, failures).
+    -- Rows this round settled itself it may still correct (a rejected
+    -- effect, a later failure). In an approval batch every other row is
+    -- written only while it is pending, so a row the gate settled keeps its
+    -- one result. Before the gate nothing else writes the rows: cancel_only
+    -- and the guards below write as before.
+    local write_call_row = call_row_writer(ctx, op)
+    local owned = {}
+    local function write_row(message_id, metadata)
+        local written, err = write_call_row(message_id, metadata, owned[message_id] == true)
+        if written and metadata.status ~= nil then owned[message_id] = true end
+        return written, err
+    end
 
     if op.cancel_only or is_turn_blocked(ctx) then
         for _, call in ipairs(op.tool_calls) do
@@ -2558,7 +2591,7 @@ function message_handlers.process_tools(ctx, op)
         local failure = tostring(reason)
         for index = start_index, #op.tool_calls do
             local call = op.tool_calls[index]
-            local _, mark_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
+            local _, mark_err = write_row(op.call_message_ids[call.id], {
                 status = consts.FUNC_STATUS.ERROR,
                 result = failure
             })
@@ -2702,7 +2735,7 @@ function message_handlers.process_tools(ctx, op)
             calls_cancelled = true
             local _, cancel_err = settle_cancelled_call(ctx, call, message_id,
                 op.call_message_types and op.call_message_types[call_id],
-                validated_tools and validated_tools[call_id], "Session stopped while the call was running")
+                validated_tools and validated_tools[call_id], "Session stopped while the call was running", write_row)
             if cancel_err then return fail_remaining(index, cancel_err) end
             goto continue_call
         end
@@ -2734,7 +2767,7 @@ function message_handlers.process_tools(ctx, op)
         end
 
         if result_data.error then
-            local _, update_err = ctx.writer:update_message_meta(message_id, {
+            local _, update_err = write_row(message_id, {
                 result = error_text(result_data.error),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
@@ -2752,7 +2785,7 @@ function message_handlers.process_tools(ctx, op)
             local control = not is_delegation and type(tool_result) == "table"
                 and tool_result._control or nil
             if control then
-                local _, control_err = ctx.writer:update_message_meta(message_id, {
+                local _, control_err = write_row(message_id, {
                     control_operations = control,
                     loaded_traits = loaded_traits(ctx, control)
                 })
@@ -2773,7 +2806,7 @@ function message_handlers.process_tools(ctx, op)
             -- Every other call is settled before its effects run.
             local settle_late = control and type(control.forms) == "table" and #control.forms > 0
             if not settle_late then
-                local _, update_err = ctx.writer:update_message_meta(message_id, settled)
+                local _, update_err = write_row(message_id, settled)
                 if update_err then return fail_remaining(index, update_err) end
             end
 
@@ -2841,7 +2874,7 @@ function message_handlers.process_tools(ctx, op)
                 settled.status = consts.FUNC_STATUS.ERROR
             end
             if settle_late or rejected then
-                local _, settle_err = ctx.writer:update_message_meta(message_id, settled)
+                local _, settle_err = write_row(message_id, settled)
                 if settle_err then return fail_from(settle_err) end
             end
 
@@ -2920,8 +2953,17 @@ function message_handlers.recover_behavior_controls(ctx)
     if not (state.meta and state.meta.behavior_controls_pending) then return true end
     local rounds, read_err = ctx.reader:list_behavior_rounds()
     if not rounds then return nil, read_err end
+    -- In a protected session the round's approval batch (the assistant row
+    -- is the batch) says whether its controls were cancelled: a fenced batch
+    -- and one interrupted after release are never replayed.
+    local protected = type(ctx.config) == "table" and ctx.config.tool_approval ~= nil
     for _, round in ipairs(rounds) do
         local cancelled = false
+        if protected then
+            local batch_cancelled, batch_err = approval_recovery.controls_cancelled(round.message_id)
+            if batch_cancelled == nil then return nil, batch_err end
+            cancelled = batch_cancelled
+        end
         for _, message_id in pairs(round.metadata.behavior_call_message_ids or {}) do
             local call, call_err = ctx.reader:get_behavior_call(message_id)
             if not call then return nil, call_err end
