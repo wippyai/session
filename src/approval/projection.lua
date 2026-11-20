@@ -102,7 +102,13 @@ function projection.publish(ctx: any): (boolean?, string?)
             { session_id = ctx.session_id, error = tostring(err) })
         return nil, "Failed to publish the tool approval session field: " .. tostring(err)
     end
-    ctx.upstream:update_session({ tool_approval = field })
+    -- The revision counts as published only once the update was delivered.
+    local sent, send_err = ctx.upstream:update_session({ tool_approval = field })
+    if not sent then
+        logger:warn("tool approval session field was not delivered",
+            { session_id = ctx.session_id, error = tostring(send_err) })
+        return nil, "Failed to publish the tool approval session field: " .. tostring(send_err or "not delivered")
+    end
     ctx.tool_approval_published_revision = field.revision
     return true, nil
 end

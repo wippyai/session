@@ -88,7 +88,10 @@ local function new_ctx(opts: any?): (any, any)
             send_message_update = function(_self, id, kind, payload)
                 table.insert(captured.updates, { id = id, type = kind, payload = payload })
             end,
-            update_session = function(_self, changes) table.insert(captured.session_updates, changes) end,
+            update_session = function(_self, changes)
+                table.insert(captured.session_updates, changes)
+                return true
+            end,
             session_error = function(_self, code, message)
                 table.insert(captured.notices, { code = code, message = message })
             end,

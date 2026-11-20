@@ -173,7 +173,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
             message_error = function(_self, id, code, message)
                 table.insert(captured.message_errors, { id = id, code = code, message = message })
             end,
-            update_session = function() end,
+            update_session = function() return true end,
             session_error = function(_self, code, message)
                 table.insert(captured.session_errors, { code = code, message = message })
             end,
@@ -5751,7 +5751,7 @@ local function define_tests()
             ctx.agent_ctx.load_agent = function() return successor, nil end
             ctx.agent_ctx.active_traits = {}
             ctx.turn_state = { active = true, steps = 1, repeated_calls = 0, message_id = "msg-user", handoff = true }
-            ctx.upstream.update_session = function() end
+            ctx.upstream.update_session = function() return true end
             ctx.request_input_policy = function() return {}, nil end
             local _, err = continue_step(ctx)
             test.is_nil(err)
@@ -5766,6 +5766,7 @@ local function define_tests()
             local published = {}
             ctx.upstream.update_session = function(_self, update)
                 if update.tool_approval ~= nil then table.insert(published, update.tool_approval) end
+                return true
             end
             -- The grants read of the publish fails once, after the activation commits.
             local saved_list = approval_repo.list_grants
@@ -5793,6 +5794,32 @@ local function define_tests()
             test.eq(#published, 1, "the next step publishes the activation")
             test.is_true(published[1].active)
             test.eq(published[1].revision, ctx.config.tool_approval.revision)
+        end)
+
+        it("fails the step when the activation update is not delivered, and publishes it at the next step", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx = approval_ctx(agent, { TRAIT })
+            local attempts, delivered = 0, {}
+            ctx.upstream.update_session = function(_self, update)
+                if update.tool_approval == nil then return true end
+                attempts = attempts + 1
+                if attempts == 1 then return nil, "delivery failed" end
+                table.insert(delivered, update.tool_approval)
+                return true
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.contains(tostring(err), "delivery failed")
+            test.eq(calls.steps, 0, "no model call, so no gated call runs")
+            test.is_nil(ctx.tool_approval_published_revision, "an undelivered update is not counted as published")
+
+            local _, retry_err = user_step(ctx)
+            test.is_nil(retry_err)
+            test.eq(calls.steps, 1)
+            test.eq(attempts, 2, "the next step sends the activation again")
+            test.eq(#delivered, 1)
+            test.is_true(delivered[1].active)
+            test.eq(ctx.tool_approval_published_revision, ctx.config.tool_approval.revision)
         end)
 
         it("treats a failed activation write as a storage failure of the step", function()

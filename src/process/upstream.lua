@@ -81,7 +81,8 @@ end
 
 -- SESSION-LEVEL UPDATES --
 
--- Update session state (status, agent, model, etc.)
+-- Update session state (status, agent, model, etc.). Returns true, or nil
+-- and an error when the update was not delivered.
 function session_upstream:update_session(changes)
     -- Title writes can originate in the command-bus coroutine or an API.
     -- Only the owner's inbox loop publishes their authoritative stored value.
@@ -89,7 +90,7 @@ function session_upstream:update_session(changes)
         return session_upstream.notify_external(self.session_id, changes)
     end
     changes["session_id"] = self.session_id
-    self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, changes)
+    return self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, changes)
 end
 
 -- Report session-level error
@@ -172,7 +173,7 @@ end
 
 -- PRIVATE METHODS --
 
--- Send session-level update
+-- Send session-level update. Returns what _send_message returns.
 function session_upstream:_send_session_update(type, payload)
     local topic = self:get_session_topic()
     local message = { type = type, session_id = self.session_id }
@@ -182,7 +183,7 @@ function session_upstream:_send_session_update(type, payload)
         message[k] = v
     end
 
-    self:_send_message(topic, message)
+    return self:_send_message(topic, message)
 end
 
 -- Send message-level update
@@ -198,12 +199,14 @@ function session_upstream:send_message_update(message_id, type, payload)
     self:_send_message(topic, message)
 end
 
--- Send message to appropriate recipients
+-- Send message to appropriate recipients. Returns true, or nil and an error
+-- when the send raised or process.send did not deliver.
 function session_upstream:_send_message(topic, message)
     -- Send to parent process (which can relay to all connections)
     if self.parent_pid then
-        local ok, err = pcall(process.send, self.parent_pid :: string, topic, message)
-        if not ok then return nil, tostring(err) end
+        local ok, sent, send_err = pcall(process.send, self.parent_pid :: string, topic, message)
+        if not ok then return nil, tostring(sent) end
+        if not sent then return nil, tostring(send_err or "process.send did not deliver") end
     end
     return true
 end

@@ -1005,7 +1005,7 @@ local function run(args: SessionArgs)
     if not approval_fields then
         error("Failed to read the tool approval session fields: " .. tostring(approval_fields_err))
     end
-    session_upstream:update_session({
+    local announced = session_upstream:update_session({
         agent = context.config.agent_id,
         model = context.config.model,
         status = consts.STATUS.IDLE,
@@ -1017,7 +1017,9 @@ local function run(args: SessionArgs)
         activity_revision = approval_fields.activity_revision,
         tool_approval = approval_fields.tool_approval,
     })
-    context.tool_approval_published_revision = approval_fields.tool_approval.revision
+    -- An announcement that was not delivered leaves the marker unset, so the
+    -- first agent step publishes the activation.
+    if announced then context.tool_approval_published_revision = approval_fields.tool_approval.revision end
 
     -- Form answers accepted while no session process was running (or whose
     -- wake-up was lost) are admitted first, in acceptance order, and start a
