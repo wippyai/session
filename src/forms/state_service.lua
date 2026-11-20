@@ -3,6 +3,7 @@ local uuid = require("uuid")
 local security = require("security")
 local consts = require("consts")
 local definition = require("definition")
+local field_values = require("field_values")
 local form_artifact = require("form_artifact")
 local form_meta = require("form_meta")
 local answer_text = require("answer_text")
@@ -266,7 +267,7 @@ function state_service.get_state(user_id, artifact_id)
     end
 
     return 200, ordered_json.object({
-        { "form_version", definition.FORM_VERSION },
+        { "form_version", form.version },
         { "artifact_id", artifact.artifact_id },
         { "session_id", artifact.session_id },
         { "status", submission and consts.ARTIFACT_STATUS.IDLE or consts.ARTIFACT_STATUS.ACTIVE },
@@ -285,28 +286,29 @@ end
 -- POST
 ---------------------------------------------------------------------------
 
-local function is_integer_number(value)
-    return type(value) == "number" and value == math.floor(value) and value >= 1
-end
+local UNSUPPORTED_FORM_VERSION = "Unsupported form_version"
 
--- Checks the versioned envelope. Returns the envelope or (nil, message).
-local function parse_envelope(raw_body)
+-- Checks the versioned envelope. The request carries the version of the form
+-- it answers (form.version), as read from GET. Returns the envelope or
+-- (nil, message).
+local function parse_envelope(raw_body, form_version)
     if raw_body == "" then return nil, "Request body is required" end
     local body, decode_err = json.decode(raw_body)
     if decode_err or type(body) ~= "table" or not definition.is_object(body) or next(body) == nil then
         return nil, "Request body must be a JSON object"
     end
-    if body.form_version ~= definition.FORM_VERSION then
-        return nil, "Unsupported form_version"
+    if body.form_version ~= form_version then
+        return nil, UNSUPPORTED_FORM_VERSION
     end
     local request_id = body.request_id
     if type(request_id) ~= "string" or not string.find(request_id, "%S")
         or #request_id > state_service.MAX_REQUEST_ID then
-        return nil, "request_id must be a non-empty string of at most 128 characters"
+        -- The limit counts UTF-8 bytes (#request_id), so the message says bytes.
+        return nil, "request_id must be a non-empty string of at most 128 bytes"
     end
     -- Optional: without it only the revision check is skipped.
     if body.expected_content_version ~= nil then
-        if not is_integer_number(body.expected_content_version) then
+        if not field_values.is_whole(body.expected_content_version) or body.expected_content_version < 1 then
             return nil, "expected_content_version must be a positive integer"
         end
         body.expected_content_version = math.floor(body.expected_content_version)
@@ -341,7 +343,8 @@ end
 -- The canonical encoding of valid answers, or nil when they are not valid.
 local function canonical_of(form, answers)
     local normalized = definition.validate_answers(form.definition, answers)
-    return normalized and definition.encode_answers(form.definition, normalized) or nil
+    if not normalized then return nil end
+    return definition.encode_answers(form.definition, normalized)
 end
 
 -- Classifies a request against an already accepted submission: an exact
@@ -389,7 +392,7 @@ local function validation_body(field_errors, form_errors)
     })
 end
 
-function state_service.submit(user_id, artifact_id, raw_body)
+local function submit_answers(user_id, artifact_id, raw_body)
     if type(raw_body) ~= "string" then raw_body = "" end
     if #raw_body > state_service.MAX_BODY_BYTES then
         return failure(413, "payload_too_large", "The submission is larger than 64 KiB.")
@@ -402,7 +405,7 @@ function state_service.submit(user_id, artifact_id, raw_body)
         return failure(403, "forbidden", "You cannot answer forms in this session.")
     end
 
-    local envelope, envelope_err = parse_envelope(raw_body)
+    local envelope, envelope_err = parse_envelope(raw_body, form.version)
     if not envelope then return failure(400, "invalid_request", tostring(envelope_err)) end
     local request_id = envelope.request_id
 
@@ -437,6 +440,10 @@ function state_service.submit(user_id, artifact_id, raw_body)
         end
         local current_form, parse_err = form_artifact.parse(current)
         if not current_form then return nil, tostring(parse_err) end
+        -- The envelope was checked against the form read before the lock.
+        if current_form.version ~= envelope.form_version then
+            return nil, { unsupported_version = true }
+        end
         if form_meta.submission(current_form.meta) then
             return nil, { existing = current, form = current_form }
         end
@@ -506,6 +513,9 @@ function state_service.submit(user_id, artifact_id, raw_body)
     if not accepted then
         if type(accept_err) == "table" then
             if accept_err.status == 404 then return failure(404, "not_found", "Form not found") end
+            if accept_err.unsupported_version then
+                return failure(400, "invalid_request", UNSUPPORTED_FORM_VERSION)
+            end
             if accept_err.validation_failed then
                 return 422, validation_body(accept_err.field_errors, accept_err.form_errors)
             end
@@ -547,6 +557,14 @@ function state_service.submit(user_id, artifact_id, raw_body)
         content_version = accepted.content_version, late = accepted.late,
         delivery = "pending", replayed = false,
     })
+end
+
+-- A raised error (such as a stored pattern that no longer compiles) is logged
+-- and answered as the API's JSON 500, not as the runtime's plain-text one.
+function state_service.submit(user_id, artifact_id, raw_body)
+    local ok, status, body = pcall(submit_answers, user_id, artifact_id, raw_body)
+    if not ok then return internal_failure("The answer could not be saved.", status) end
+    return status, body
 end
 
 -- Sends `form_answer` to the session's registered process. When none runs

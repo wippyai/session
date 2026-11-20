@@ -1,7 +1,7 @@
-import type { FormDefinition, FormField, FormState, SubmitAccepted } from '../lib/definition'
+import type { ChoiceFormDefinition, ChoiceFormField, FormDefinition, FormField, FormState, SubmitAccepted } from '../lib/definition'
 
 /** A single-answer choice question with two options, unrequired and without Other. */
-export function choiceField(overrides: Partial<FormField> = {}): FormField {
+export function choiceField(overrides: Partial<ChoiceFormField> = {}): ChoiceFormField {
   return {
     id: 'f1',
     type: 'choice',
@@ -14,13 +14,16 @@ export function choiceField(overrides: Partial<FormField> = {}): FormField {
   }
 }
 
-export function definitionOf(...fields: FormField[]): FormDefinition {
+export function definitionOf<F extends FormField>(...fields: F[]): FormDefinition<F> {
   return { title: 'Question', fields }
 }
 
-/** An open form with one question. Pass `status: 'idle'` and `data` for an answered one. */
-export function formState(overrides: Partial<FormState> = {}): FormState {
-  return {
+/**
+ * An open form with one choice question. Pass `status: 'idle'` and `data` for
+ * an answered one, and a `definition` with a standard field for a fields form.
+ */
+export function formState<D extends FormDefinition = ChoiceFormDefinition>(overrides: Partial<FormState<D>> = {}): FormState<D> {
+  const base: FormState<ChoiceFormDefinition> = {
     form_version: 1,
     artifact_id: 'artifact-1',
     session_id: 'session-1',
@@ -33,8 +36,8 @@ export function formState(overrides: Partial<FormState> = {}): FormState {
     submitted_at: null,
     answer_message_id: null,
     delivery: null,
-    ...overrides,
   }
+  return { ...base, ...overrides } as FormState<D>
 }
 
 /** The 200 response of an accepted submit. */

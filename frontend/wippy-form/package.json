@@ -4,7 +4,7 @@
   "private": true,
   "specification": "wippy-component-1.0",
   "title": "Session Form",
-  "description": "Renders a session ask_user form (single/multiple choice with Other) and submits the answer back to the owning session.",
+  "description": "Renders one Session form and submits the answer back to the owning session: a choice-only form as a question card, a form with standard fields (text, textarea, number, email, date, checkbox, alone or mixed with choices) as one fields form.",
   "browser": "dist/index.js",
   "files": [
     "dist/",
@@ -19,6 +19,8 @@
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.5",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/user-event": "^14.6.7",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
     "@vitejs/plugin-vue": "^5.0.0",
@@ -51,19 +53,19 @@
   "wippy": {
     "tagName": "wippy-form",
     "type": "widget",
-    "description": "Renders one Session `ask_user` form as a question card and sends the answer back to the owning session through the Host's artifact-state API. Each question supports per-answer notes and, when the definition allows it, an Other free-text row. A form with several questions shows one at a time, with a counter and a review step before sending. Once the answer is accepted, the card becomes a read-only summary. The inputs are `definition` (the questions and options), `form-version` (a version other than 1 disables submission), and `state` (`active` while the form can be answered, `idle` after it was answered). The component loads and submits by itself, so the tag only needs these attributes. Agents must never write the `<wippy-form>` tag, because it is created only through the Session `ask_user` tool.",
+    "description": "Renders one Session form (from the `ask_user` or `ask_user_fields` tool) and sends the answer back to the owning session through the Host's artifact-state API. A form of choice questions only (form version 1) renders as a question card: each question supports per-answer notes and, when the definition allows it, an Other free-text row, and a form with several questions shows one at a time, with a counter and a review step before sending. A form with at least one standard field (form version 2: `text`, `textarea`, `number`, `email`, `date` or `checkbox`, alone or with choices) renders as a fields form: a labelled control for every field, each error tied to its control, and one Submit button. Once the answer is accepted, either becomes a read-only summary. The inputs are `definition` (the questions), `form-version` (1 and 2 render; a higher version, or a field type this version does not know, disables submission), and `state` (`active` while the form can be answered, `idle` after it was answered). The component loads and submits by itself, so the tag only needs these attributes. Agents must never write the `<wippy-form>` tag, because it is created only through the Session `ask_user` and `ask_user_fields` tools.",
     "props": {
       "type": "object",
       "properties": {
         "form-version": {
           "type": "number",
           "default": 1,
-          "description": "Form definition schema version (currently 1). A value other than 1, from this prop or from the loaded state's own `form_version`, disables the interactive form and shows the notice \"This form needs a newer version of the app.\" instead."
+          "description": "Form definition schema version: 1 is a choice-only form, 2 is a form with at least one standard field (`text`, `textarea`, `number`, `email`, `date`, `checkbox`). A higher value, from this prop or from the loaded state's own `form_version`, disables the interactive form and shows the notice \"This form needs a newer version of the app.\" instead, and so does a field whose type this version does not know."
         },
         "definition": {
           "type": "object",
           "default": null,
-          "description": "The questions to ask: `title`, optional `description`, and `fields`, a list of choice questions, each `{ id, type: \"choice\", label, description?, required, options: [{value, label, description?}], multiple, allow_other }`. Optional `submit_label` and `answered_message` are accepted and not shown. A definition with no fields shows an error message."
+          "description": "The questions to ask: `title`, optional `description`, and `fields`. Every field is `{ id, type, label, description?, required }` plus the keys of its type: `choice` adds `options: [{value, label, description?}]`, `multiple` and `allow_other`; `text` and `textarea` add `min_length`, `max_length`, `placeholder` and `default` (`text` also `pattern`, a full-match expression that only the server checks, answering a mismatch with a 422 `pattern_mismatch` on the field); `number` adds `min`, `max`, `step`, `integer` and `default`; `email` adds `default`; `date` adds `min`, `max` (`YYYY-MM-DD`) and `default`; `checkbox` adds `default` (only `false`). Optional `submit_label` is the fields form's Submit button text (the question card does not show it), and optional `answered_message` is accepted and not shown. When every field is a choice the question card renders, otherwise the fields form. A definition with no fields shows an error message."
         },
         "state": {
           "type": "string",
