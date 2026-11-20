@@ -182,8 +182,8 @@ reads filters this way is noted in the Makefile above the `test` target.
 ## Runtime tests and benchmarks
 
 `make test-postgres` checks the
-affected persistence paths, the forms suites and real handoffs against
-PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
+affected persistence paths, the forms suites, real handoffs and the tool
+approval runtime suites against PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
 `PGDATABASE`, `PGUSER`, and `PGPASSWORD`; the target never drops it.
 `make test-postgres-full` runs every normal suite and leaves opt-in benchmarks
 to `make bench`. CI uses this full gate with PostgreSQL 17. The harness
@@ -197,7 +197,9 @@ On Unix, `make install test` runs the suite against the locked dependencies.
 `make test-runtime` exercises
 registered tools, agent compilation, the Session
 process, and SQLite persistence with deterministic model responses. It covers
-handoff history, persisted control operations, mixed tool results, and Stop.
+handoff history, persisted control operations, mixed tool results, Stop, and
+tool approval in real Session processes and the session plugin (the wait, the
+recovery entry points, approval UI surfaces and failure injection).
 Required runtime checks fail if a selected suite executes no cases. Set
 `FRAMEWORK_DIR=/absolute/path/to/framework` to use local Agent, LLM, and test
 sources instead of the locked published dependencies. CI checks both modes.

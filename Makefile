@@ -37,7 +37,7 @@ TEST_BACKUP_DIR ?= $(TEST_ARTIFACTS)/backups
 TEST_FILTER ?=
 TEST_TIMEZONE ?= UTC
 POSTGRES_TEST_OVERRIDES ?=
-POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.persist:approval_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test app.forms:
+POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.persist:approval_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app.runtime:approval_runtime app:lifecycle_disconnect_test app.forms:
 FRAMEWORK_DIR ?=
 PGHOST ?= localhost
 PGPORT ?= 5433
@@ -73,7 +73,7 @@ test: clean
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
 		$(if $(strip $(TEST_FILTER)),-- $(TEST_FILTER))
 
-test-runtime: TEST_FILTER = app.runtime:handoff_runtime
+test-runtime: TEST_FILTER = app.runtime:handoff_runtime app.runtime:approval_runtime
 test-runtime:
 	$(MAKE) install
 	WIPPY_TEST_REQUIRE_CASES=1 $(MAKE) test TEST_FILTER="$(TEST_FILTER)"

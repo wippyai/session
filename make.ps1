@@ -53,7 +53,7 @@ $testFilter = Get-Setting 'TEST_FILTER'
 $frameworkDir = Get-Setting 'FRAMEWORK_DIR'
 $testTimezone = Get-Setting 'TEST_TIMEZONE' 'UTC'
 # The suites test-postgres runs (see POSTGRES_TEST_FILTER in the Makefile).
-$postgresFilter = Get-Setting 'POSTGRES_TEST_FILTER' 'app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.persist:approval_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test app.forms:'
+$postgresFilter = Get-Setting 'POSTGRES_TEST_FILTER' 'app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.persist:approval_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app.runtime:approval_runtime app:lifecycle_disconnect_test app.forms:'
 $postgresOverrides = Get-Setting 'POSTGRES_TEST_OVERRIDES'
 $uiDir = Join-Path $repo (Get-Setting 'UI_DIR' 'frontend/wippy-form')
 $uiAnswersDir = Join-Path $repo (Get-Setting 'UI_ANSWERS_DIR' 'frontend/wippy-form-answers')
@@ -214,7 +214,7 @@ function Invoke-Test {
     Invoke-WippyTest $testFilter
 }
 
-function Invoke-TestRuntime([string]$Filter = 'app.runtime:handoff_runtime') {
+function Invoke-TestRuntime([string]$Filter = 'app.runtime:handoff_runtime app.runtime:approval_runtime') {
     Invoke-Install
     Invoke-WithEnvironment @{ WIPPY_TEST_REQUIRE_CASES = '1' } {
         Invoke-Clean
