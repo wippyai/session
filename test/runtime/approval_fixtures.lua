@@ -53,15 +53,30 @@ local function status()
     return { success = true, status = "healthy" }
 end
 
--- Every tool of the approval agent. It records its launch under the call's
--- `n` argument and reports `approval:tool_ran` to the test.
+-- Every tool of the approval agent. At launch it reads its call's committed
+-- approval record (outside any transaction) and stores that snapshot under
+-- the call's `n` argument: { call_id, state, disposition }, state and
+-- disposition nil for a call without a record. Then it reports
+-- `approval:tool_ran` to the test.
 local function tool(args)
+    local consts = require("consts")
+    local sql = require("sql")
     local run = ctx.get("agent_run")
     local host = type(run) == "table" and run.host or {}
     local session_id = tostring(host.session_id)
+    local call_id = ctx.get("call_id")
+    local snapshot: any = { call_id = call_id }
+    local db = assert(sql.get(consts.get_db_resource()))
+    local rows, err = db:query("SELECT state, disposition FROM session_tool_approvals"
+        .. " WHERE session_id = $1 AND call_id = $2", { session_id, tostring(call_id) })
+    db:release()
+    if err then error(tostring(err)) end
+    if rows and rows[1] then
+        snapshot.state, snapshot.disposition = rows[1].state, rows[1].disposition
+    end
     local storage = state()
     local n = type(args) == "table" and args.n or nil
-    storage:set("launch:" .. session_id .. ":" .. tostring(n), true)
+    storage:set("launch:" .. session_id .. ":" .. tostring(n), snapshot)
     local reply = storage:get("reply:" .. session_id)
     if reply then process.send(reply, "approval:tool_ran", { session_id = session_id, n = n }) end
     return { ok = true, n = n }

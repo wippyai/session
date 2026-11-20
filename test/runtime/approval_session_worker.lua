@@ -9,6 +9,7 @@ local approval_commands = require("approval_commands")
 local approval_events = require("approval_events")
 local upstream = require("upstream")
 local message_handlers = require("message_handlers")
+local approval_recovery = require("approval_recovery")
 
 -- The Session process of the tool approval runtime suites: session.run with
 -- the scripted model (approval_fixtures.generate) and, from
@@ -29,6 +30,12 @@ local message_handlers = require("message_handlers")
 --   or one fault of the gate's wait:
 --     hang         the wait ignores every wake for 60 s (a stuck turn)
 --     fail_wait    the wait fails at its first wake (a failed tool round)
+--   fail_live_settlement  while a tool round (process_tools) runs, its own
+--                  settlement of a failed round fails: the batch closure
+--                  (approval_recovery.close_failed_batch) and the call row
+--                  writes (approval_recovery.write_call). The batch and the
+--                  rows stay open for command_bus:fail, whose recovery
+--                  writes normally once the round returned.
 
 local STATE = "app.runtime:approval_state"
 
@@ -49,6 +56,26 @@ local function run(args: any)
         end,
     }
     if fixture.grace_seconds then approval_gate.GRACE_SECONDS = fixture.grace_seconds end
+    if fixture.fail_live_settlement then
+        local in_round = false
+        local process_tools = message_handlers.process_tools
+        message_handlers.process_tools = function(...)
+            in_round = true
+            local result = pack(process_tools(...))
+            in_round = false
+            return table.unpack(result, 1, result.n)
+        end
+        local close_failed_batch = approval_recovery.close_failed_batch
+        approval_recovery.close_failed_batch = function(...)
+            if in_round then return nil, "injected batch closure failure" end
+            return close_failed_batch(...)
+        end
+        local write_call = approval_recovery.write_call
+        approval_recovery.write_call = function(...)
+            if in_round then return nil, "injected call row failure" end
+            return write_call(...)
+        end
+    end
     if fixture.clock then
         activation._now = function()
             local offset = storage:get("clock:" .. tostring(session_id))
@@ -80,6 +107,16 @@ local function run(args: any)
             process.send(reply, "approval:parked", { session_id = session_id })
         end
         return reason, err
+    end
+
+    -- Every read of the live approval UI surfaces reports `approval:live`
+    -- { session_id, live }. While the gate waits, only its wait reads them,
+    -- and a read of 0 starts the grace period.
+    local live_surfaces = activation.live_surfaces
+    activation.live_surfaces = function(ctx)
+        local live = live_surfaces(ctx)
+        if reply then process.send(reply, "approval:live", { session_id = session_id, live = live }) end
+        return live
     end
 
     local point = fixture.inject

@@ -189,11 +189,13 @@ local function track(pid: any): any
     return pid
 end
 
--- The tool calls that started, by their `n` argument.
-local function launches(session_id: string): {[number]: boolean}
+-- The tool calls that started, by their `n` argument: each one's launch
+-- snapshot { call_id, state, disposition } (approval_fixtures.tool).
+local function launches(session_id: string): {[number]: any}
     local state, out = storage(), {}
     for n = 1, 9 do
-        if state:get("launch:" .. session_id .. ":" .. tostring(n)) then out[n] = true end
+        local snapshot = state:get("launch:" .. session_id .. ":" .. tostring(n))
+        if snapshot then out[n] = snapshot end
     end
     return out
 end
@@ -314,11 +316,25 @@ local function summary(session_id: string, call_ids: {string}): string
     return table.concat(parts, " ")
 end
 
+-- Moves every message already in the inbox into the log, without waiting:
+-- after an exit event (events channel) the process's last messages may still
+-- sit in the inbox.
+local function drain()
+    local inbox = process.inbox()
+    while true do
+        local selected = channel.select({ inbox:case_receive(), default = true })
+        if selected.default then return end
+        log[#log + 1] = { topic = selected.value:topic(), data = selected.value:payload():data() }
+    end
+end
+
 -- AC 30: every call has exactly one stored result and at most one live
--- terminal event, and every gated call that started has a committed
--- approved record with disposition dispatched, released before it ran. A
--- dispatched call is never reported as not run.
+-- terminal event, and every gated call that started had, at its launch, a
+-- committed approved record with disposition dispatched (the tool's own
+-- snapshot, approval_fixtures.tool). A dispatched call is never reported as
+-- not run.
 local function assert_one_result_each(session_id: string, calls: {any}, label: string)
+    drain()
     local rows, by_call, ran = call_rows(session_id), records(session_id), launches(session_id)
     for _, call in ipairs(calls) do
         local list = rows[call.id] or {}
@@ -338,9 +354,11 @@ local function assert_one_result_each(session_id: string, calls: {any}, label: s
         test.is_true(#terminal <= 1, label .. ": at most one terminal event for " .. call.id .. ": "
             .. table.concat(terminal, "; "))
         local record = by_call[call.id]
-        if ran[call.n] and call.gated then
-            test.is_true(record ~= nil and record.state == "approved" and record.disposition == "dispatched",
-                label .. ": " .. call.id .. " ran only after a committed approval and its release")
+        local launched = ran[call.n]
+        if launched and call.gated then
+            test.eq(launched.call_id, call.id, label .. ": the launch snapshot names its call")
+            test.eq(tostring(launched.state) .. ":" .. tostring(launched.disposition), "approved:dispatched",
+                label .. ": " .. call.id .. " started only after its approval and its release had committed")
         end
         if record and record.disposition == "dispatched" then
             test.is_false(type(metadata.result) == "table" and metadata.result.executed == false,
@@ -557,7 +575,10 @@ local function define_wait_tests()
             test.eq(table.concat(order, " "),
                 "tool_approval:pending tool_approval:approved function_call:approved function_success")
             test.eq(dispositions[#dispositions], "dispatched", "the last approval event carries the disposition")
-            test.is_true(launches(session_id)[1] and launches(session_id)[3], "the approved call and its peer ran")
+            local ran = launches(session_id)
+            test.is_true(ran[1] ~= nil and ran[3] ~= nil, "the approved call and its peer ran")
+            test.eq(ran[1].state .. ":" .. ran[1].disposition, "approved:dispatched",
+                "the approved call started after its release committed")
             test.eq(summary(session_id, { "call-a", "call-c" }),
                 "call-a=approved/success/ran call-c=-/success/ran batch=released:nil:kept activity=nil")
             test.eq(round_controls(session_id), "applied")
@@ -577,10 +598,13 @@ local function define_wait_tests()
             parked(session_id, since)
             local started = now()
             stop(handle)
-            await(function(_topic: any, data: any) return is_type(data, TYPES.FUNCTION_ERROR, "call-a") end,
-                "the settlement of call-a", since)
-            test.is_true(now() - started < TEARDOWN_SECONDS, "the wait ended within 10 s")
-            await(status_of(session_id, STATUS.IDLE), "stopped turn", since)
+            -- The wait has ended and the turn is torn down when the stopped
+            -- turn reaches idle after the call's settlement.
+            local _, settled = await(function(_topic: any, data: any)
+                return is_type(data, TYPES.FUNCTION_ERROR, "call-a")
+            end, "the settlement of call-a", since)
+            await(status_of(session_id, STATUS.IDLE), "stopped turn", settled)
+            test.is_true(now() - started < TEARDOWN_SECONDS, "the wait ended and the turn is idle within 10 s")
             local late = decide(handle, record, "approve")
             test.eq(late.code, "approval_not_pending")
             test.eq(late.approval.state, "cancelled")
@@ -688,17 +712,20 @@ local function define_wait_tests()
                         .. " batch=closed:steering:cancelled activity=nil",
                     case == "peer approved first" and "approved" or "superseded"), case)
                 local prompt = assert(json.encode(second.messages))
-                local result_at = nil
+                -- One superseded result per call, both before the steering text.
+                local results = {}
                 local cursor = 1
                 while true do
                     local found = prompt:find("because the user sent a new message", cursor, true)
                     if not found then break end
-                    result_at, cursor = found, found + 1
+                    results[#results + 1], cursor = found, found + 1
                 end
                 local steering_at = prompt:find("Use record 9 instead.", 1, true)
-                test.not_nil(result_at, case .. ": the model gets the superseded results")
+                test.eq(#results, 2, case .. ": the model gets both superseded results")
                 test.not_nil(steering_at, case .. ": the model gets the steering message")
-                test.is_true(result_at < steering_at, case .. ": results first, then the steering message")
+                for _, result_at in ipairs(results) do
+                    test.is_true(result_at < steering_at, case .. ": results first, then the steering message")
+                end
                 close(handle)
             end
         end)
@@ -762,7 +789,7 @@ local function define_recovery_tests()
             assert_recovered(session_id, owner, CRASHED, "session start", true)
         end)
 
-        it("recovers through the process exit after a supervisor cancel", function()
+        it("settles the waiting batch in the live gate at a process exit after a supervisor cancel", function()
             local owner = new_user()
             local session_id = new_session(owner, CRASH_SCRIPT)
             local handle = direct(session_id, owner, nil, true)
@@ -778,7 +805,7 @@ local function define_recovery_tests()
                 .. " batch=closed:exit:cancelled activity=nil", "process exit")
         end)
 
-        it("recovers through the command bus failure of a tool round that fails while waiting", function()
+        it("settles the calls of a failed approval check in the live round before the bus fails", function()
             local owner = new_user()
             local session_id = new_session(owner, CRASH_SCRIPT)
             local handle = direct(session_id, owner, { inject = "fail_wait" }, true)
@@ -797,6 +824,25 @@ local function define_recovery_tests()
                     .. " call-b=approved/error/Tool approval check failed: Injected approval wait failure"
                     .. " call-c=-/error/Tool approval check failed: Injected approval wait failure"
                     .. " batch=closed:exit:cancelled activity=nil", "bus failure")
+        end)
+
+        it("recovers through the command bus failure when the failed round cannot settle its own calls", function()
+            -- The round's own settlement fails (worker seam), so the batch
+            -- and the rows are still open when command_bus:fail runs the
+            -- session's recovery hooks (reconcile_batches, settle_intents).
+            local owner = new_user()
+            local session_id = new_session(owner, CRASH_SCRIPT)
+            local handle = direct(session_id, owner, { inject = "fail_wait", fail_live_settlement = true }, true)
+            handle:surfaces(1, 1)
+            local since = mark()
+            handle:message("Delete records 1 and 2.")
+            pending(session_id, "call-a", since)
+            local approved = pending(session_id, "call-b", since)
+            await(paused("fail_wait"), "the wait started", since)
+            test.is_true(decide(handle, approved, "approve").success)
+            local exit = await(exit_of(handle.pid), "failed session", since)
+            test.not_nil(exit.result and exit.result.error, "the bus failure ends the process")
+            assert_recovered(session_id, owner, CRASHED, "bus failure recovery")
         end)
 
         it("recovers on the plugin's failure path when the Session process dies while waiting", function()
@@ -942,7 +988,17 @@ local function define_surface_tests()
             local since = mark()
             handle:message("Delete record 1.")
             local record = pending(session_id, "call-a", since)
+            parked(session_id, since)
+            -- The gate waits and nothing else signals it, so its next pass is
+            -- the wake-up for the live set the plugin pushes when it drops
+            -- the closed connection. That pass reads 0 live surfaces, which
+            -- starts the grace period; the reload comes after it.
+            local dropped = mark()
             process.terminate(handle.conn)
+            parked(session_id, dropped)
+            await(function(topic: any, data: any)
+                return topic == "approval:live" and data.session_id == session_id and data.live == 0
+            end, "the gate reads no live surface", dropped)
             local reloaded = new_connection()
             handle.conn = reloaded
             handle:open(reloaded)
@@ -952,7 +1008,7 @@ local function define_surface_tests()
             test.eq(record_of(session_id, "call-a").state, "pending")
             test.is_true(decide(handle, record, "approve").success)
             turn_end(session_id, 2, since)
-            test.is_true(launches(session_id)[1], "the approved call ran")
+            test.is_true(launches(session_id)[1] ~= nil, "the approved call ran")
         end)
 
         it("gives a restarted Session process the plugin's live set", function()
@@ -981,7 +1037,7 @@ local function define_surface_tests()
                 tostring((GRACE + 2) * 1000) .. "ms")
             test.is_true(decide(handle, record, "approve").success)
             turn_end(session_id, 3, since)
-            test.is_true(launches(session_id)[1], "the approved call ran")
+            test.is_true(launches(session_id)[1] ~= nil, "the approved call ran")
         end)
 
         it("runs a batch covered entirely by grants with no surface", function()
@@ -1006,7 +1062,7 @@ local function define_surface_tests()
             local second = mark()
             handle:message("Send invoice 8.")
             turn_end(session_id, 4, second)
-            test.is_true(launches(session_id)[8], "the grant-covered call ran")
+            test.is_true(launches(session_id)[8] ~= nil, "the grant-covered call ran")
             test.eq(count_logged(approval_event("pending", "call-g2", session_id), second), 0, "no request")
             test.eq(notices(session_id, second), 0, "no notice")
             local audit = record_of(session_id, "call-g2")
@@ -1113,13 +1169,13 @@ local function run_injection(point: string, signal: string)
     local expected = EXPECTED_RUNS[point] and EXPECTED_RUNS[point][signal]
     local ran = launches(session_id)
     if expected == true then
-        test.is_true(ran[1] == true, label .. ": the approved call runs; "
+        test.is_true(ran[1] ~= nil, label .. ": the approved call runs; "
             .. summary(session_id, { calls[1].id, calls[2].id }))
         if revoke and point == "wake" then
             test.is_nil(ran[8], label .. ": a grant revoked before the release allows nothing")
             test.eq(record_of(session_id, "call-g").disposition_reason, "revoked", label)
         elseif revoke then
-            test.is_true(ran[8] == true, label .. ": a revocation after the release does not reverse it")
+            test.is_true(ran[8] ~= nil, label .. ": a revocation after the release does not reverse it")
         end
     elseif expected == false then
         test.eq(launch_count(session_id), 0, label .. ": no call of the batch runs")

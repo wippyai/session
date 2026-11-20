@@ -532,13 +532,17 @@ entries:
     kind: function.lua
     source: file://approval_fixtures.lua
     method: generate
-    modules: [ctx, store, time]
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
 
   - name: approval_status
     kind: function.lua
     source: file://approval_fixtures.lua
     method: status
-    modules: [ctx, store, time]
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
 
   - name: approval_driver
     kind: contract.binding
@@ -569,7 +573,9 @@ entries:
       input_schema: '{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false}'
     source: file://approval_fixtures.lua
     method: tool
-    modules: [ctx, store, time]
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
 
   - name: approval_plain_tool
     kind: function.lua
@@ -579,7 +585,9 @@ entries:
       input_schema: '{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false}'
     source: file://approval_fixtures.lua
     method: tool
-    modules: [ctx, store, time]
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
 
   - name: approval_granted_tool
     kind: function.lua
@@ -592,7 +600,9 @@ entries:
       input_schema: '{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false}'
     source: file://approval_fixtures.lua
     method: tool
-    modules: [ctx, store, time]
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
 
   - name: approval_agent
     kind: registry.entry
@@ -617,7 +627,9 @@ entries:
     kind: process.lua
     source: file://approval_fixtures.lua
     method: connection
-    modules: [ctx, store, time]
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
 
   - name: approval_session_worker
     kind: process.lua
@@ -634,6 +646,7 @@ entries:
       approval_events: wippy.session.approval:events
       upstream: wippy.session.process:upstream
       message_handlers: wippy.session.process:message_handlers
+      approval_recovery: wippy.session.approval:recovery
 
   - name: approval_plugin_worker
     kind: process.lua
