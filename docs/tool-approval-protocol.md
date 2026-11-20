@@ -229,7 +229,10 @@ covers the same decoded value.
 
 State events never carry a client `request_id`. Event order for an approved
 public call: `tool_approval` (pending), `tool_approval` (approved),
-`function_call`, then `function_success` or `function_error`. A public call that
+`function_call`, then `function_success` or `function_error`. This order lists
+states, not events: the release publishes the approved record again with
+`disposition: "dispatched"`, so a client sees two `approved` events for a
+released call. A public call that
 a grant allows has no pending event; its `function_call` carries
 `decided_via: "grant"`. Approved private and delegation calls get no
 `function_call` or `function_success`. When a grant allows one of them, the
@@ -548,7 +551,14 @@ After a crash or a process exit, recovery closes the unfinished batch
 that did not run gets the `interrupted` result above. An approved call of a
 batch that was never released, and every call of a batch released before
 the interruption, get the plain text `interrupted, outcome unknown` instead,
-because the Session does not know whether it ran. No call runs again after a
+because the Session does not know whether it ran. When the Session process
+itself settles a waiting batch at its exit (finish or a supervisor cancel), it
+knows that nothing was dispatched, so an approved call without a disposition
+gets the structured `interrupted` result. `interrupted, outcome unknown` is for
+recovery after a crash, where the process that waited is gone. A call of a
+round that the exit cut before the gate stored any request gets the Stop
+result instead: status `cancelled` and the text
+`Session stopped before the call executed`. No call runs again after a
 restart, and the batch's behavior controls (model-phase and wrapper
 controls) are not replayed. When the recovering process reaches the user's
 clients (the Session process at its start or exit, the session plugin on its
@@ -562,6 +572,11 @@ otherwise clients read them through REST.
 `approval_check_failed` comes with the instruction "The tool did not run. Do
 not call it again with the same arguments. The call could not be prepared for
 the approval check." No request is created for such a call, and it never runs.
+
+When the approval check itself fails (an internal error), the round fails like
+any failed tool round: every call of the round gets the plain error text
+`Tool approval check failed: <error>`, the batch closes as `exit`, and no call
+runs. This is not one of the structured reasons above.
 
 A call that `validate` marks invalid, or whose arguments don't decode, gets no
 approval request and no structured result: it keeps the caller's existing
