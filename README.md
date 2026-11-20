@@ -683,8 +683,8 @@ reports `route pattern conflicts detected`.
 
 ### `GET /agents/details?agent=<name or registry id>`
 
-An identifier that contains `:` is looked up as a registry id. Any other
-identifier is looked up by `meta.name`.
+The identifier is looked up as a registry id first and then by `meta.name`,
+the same way the agent loader resolves a session's agent.
 
 ```json
 {"success": true, "agent": {"id": "app:helper", "name": "helper", "title": "Helper", "start_prompts": ["Summarize this page"]}}

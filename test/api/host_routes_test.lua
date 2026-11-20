@@ -77,6 +77,14 @@ local function define_tests()
             test.eq(#agent.start_prompts, 0)
         end)
 
+        it("finds an agent by a name that contains a colon", function()
+            local result = install(agents_details, { agent = "host-routes:colon" })
+            agents_details.handler()
+            test.eq(result.status, 200)
+            test.eq(result.body.agent.id, "app.api:host_routes_colon_name_agent")
+            test.eq(result.body.agent.title, "Colon Name Helper")
+        end)
+
         it("returns no start prompts when start_prompts is not a list", function()
             local result = install(agents_details, { agent = "host-routes-scalar-prompts" })
             agents_details.handler()
@@ -163,7 +171,7 @@ local function define_tests()
         end)
 
         it("matches a tool by its llm_alias", function()
-            local result = install(tools_by_name, { tools = "host_routes_alias" })
+            local result = install(tools_by_name, { tools = "host_routes_alias,host_routes_aliased_tool" })
             tools_by_name.handler()
             test.eq(result.status, 200)
             local found = result.body.tools["host_routes_alias"]

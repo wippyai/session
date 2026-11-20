@@ -124,7 +124,7 @@ entries:
       name: Web Host agent details and tool names
       type: test
       suite: session
-      comment: GET /agents/details and GET /tools/by-name against the registry fixtures below (public, untitled, private and scalar-prompt agents, a non-agent id, titled, untitled, empty-title, aliased and private tools)
+      comment: GET /agents/details and GET /tools/by-name against the registry fixtures below (public, untitled, private, colon-name and scalar-prompt agents, a non-agent id, titled, untitled, empty-title, aliased and private tools)
     source: file://host_routes_test.lua
     modules:
       - http
@@ -167,6 +167,15 @@ entries:
     prompt: Test only.
     start_prompts:
       - Hidden prompt
+
+  - name: host_routes_colon_name_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: host-routes:colon
+      title: Colon Name Helper
+    model: gpt-4o
+    prompt: Test only.
 
   - name: host_routes_scalar_prompts_agent
     kind: registry.entry

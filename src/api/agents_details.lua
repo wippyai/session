@@ -14,10 +14,12 @@ local api = {
 -- no null value, so the body is written as text.
 api.NO_AGENT_BODY = '{"success":true,"agent":null}'
 
--- Finds a gen1 agent by registry id ("ns:name") or by meta.name.
+-- Finds a gen1 agent the way the agent loader does: registry id first, then
+-- meta.name.
 local function find_agent(identifier: string)
-    if identifier:find(":", 1, true) then
-        return api._agent_registry.get_by_id(identifier)
+    local spec = api._agent_registry.get_by_id(identifier)
+    if spec then
+        return spec
     end
     return api._agent_registry.get_by_name(identifier)
 end
