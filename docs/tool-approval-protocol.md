@@ -514,6 +514,15 @@ approval IDs, digests or grant IDs.
 | `repeated_denied_call` | same call as one denied earlier in this turn | continues |
 | `approval_check_failed` | the Session could not prepare a valid call for the approval check (for example a value that is not JSON-shaped) | continues |
 
+After a crash or a process exit, recovery closes the unfinished batch
+(close reason `exit`): a pending request becomes `interrupted`, and a call
+that did not run gets the `interrupted` result above. An approved call of a
+batch that was never released, and every call of a batch released before
+the interruption, get the plain text `interrupted, outcome unknown` instead,
+because the Session does not know whether it ran. No call runs again after a
+restart, and the batch's behavior controls (model-phase and wrapper
+controls) are not replayed.
+
 `changed_before_run` is the model-facing name; the stored disposition reason is
 `intent_changed`. The word `stale` is not used for it.
 
