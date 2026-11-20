@@ -1,6 +1,7 @@
 local test = require("test")
 local http = require("http")
 local json = require("json")
+local registry = require("registry")
 local agents_details = require("agents_details")
 local tools_by_name = require("tools_by_name")
 
@@ -41,6 +42,22 @@ local function install(api, query: {[string]: string}, authenticated: boolean?):
 end
 
 local function define_tests()
+    describe("Web Host route registration", function()
+        it("registers the exact GET paths the Web Host calls", function()
+            local expected = {
+                ["wippy.session.api:agents_details.endpoint"] = "/agents/details",
+                ["wippy.session.api:tools_by_name.endpoint"] = "/tools/by-name",
+            }
+            for id, path in pairs(expected) do
+                local entry, err = registry.get(id)
+                test.is_nil(err)
+                test.eq(entry.kind, "http.endpoint")
+                test.eq(entry.data.method, "GET")
+                test.eq(entry.data.path, path)
+            end
+        end)
+    end)
+
     describe("GET /agents/details", function()
         local original = {
             http = agents_details._http,

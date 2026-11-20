@@ -129,6 +129,7 @@ entries:
     modules:
       - http
       - json
+      - registry
     imports:
       test: wippy.test:test
       agents_details: wippy.session.api:agents_details
