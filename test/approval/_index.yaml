@@ -401,6 +401,7 @@ entries:
       approval_recovery: wippy.session.approval:recovery
       message_repo: wippy.session.persist:message_repo
       message_handlers: wippy.session.process:message_handlers
+      control_handlers: wippy.session.process:control_handlers
       command_bus: wippy.session.process:command_bus
       session: wippy.session.process:session
       reader: wippy.session.persist:reader

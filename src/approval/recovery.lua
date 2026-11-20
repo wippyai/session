@@ -107,15 +107,15 @@ local function publish(upstream: any, records: {any}, activity: any)
 end
 
 -- The live path of a tool round that fails before its calls are settled
--- (process_tools fail_remaining): an open batch closes as `exit` with its
--- row projections and the activity cleared, in one transaction, and the
--- changes are published to `upstream`. A released or closed batch keeps its
--- state. Returns true, or nil and an error.
+-- (process_tools fail_remaining): the batch closes as `exit`
+-- (approval_repo.close_batch) in one transaction. An open batch closes with
+-- its row projections and the activity cleared; a released batch keeps its
+-- dispositions and gets controls `cancelled`, so recovery never replays the
+-- behavior controls of a round that failed after its release; a closed batch
+-- keeps its state. The changes are published to `upstream`. Returns true, or
+-- nil and an error.
 function recovery.close_failed_batch(session_id: string, batch_id: string, upstream: any): (boolean?, string?)
     local outcome, err = approval_repo.transact(session_id, function(dbtx)
-        local batch, batch_err = approval_repo.get_batch(dbtx, batch_id)
-        if not batch then return nil, batch_err end
-        if batch.state ~= approval_repo.BATCH_STATE.OPEN then return { records = {} } end
         local changed, close_err = close_as_exit(dbtx, session_id, batch_id)
         if not changed then return nil, close_err end
         local current, read_err = approval_repo.read_activity(dbtx, session_id)

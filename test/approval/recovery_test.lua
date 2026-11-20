@@ -5,6 +5,7 @@ local approval_repo = require("approval_repo")
 local approval_recovery = require("approval_recovery")
 local message_repo = require("message_repo")
 local message_handlers = require("message_handlers")
+local control_handlers = require("control_handlers")
 local command_bus = require("command_bus")
 local session = require("session")
 local reader = require("reader")
@@ -152,6 +153,41 @@ local function define_tests()
             test.eq(assert(approval_repo.get_batch(nil, batch.batch_id)).controls, "kept")
             test.eq(fx.round_controls(ctx, op, true), "applied replayed=yes",
                 "the round's controls apply as they would without approval")
+        end)
+
+        it("cancels the controls of a released batch whose round fails after the release; a restart does not replay them", function()
+            local ctx = fx.new_ctx({ live = 1 })
+            assert(approval_repo.update_tool_approval(ctx.session_id, function() return ctx.config.tool_approval end))
+            -- The released call returns a context control; storing it fails.
+            local caller = fx.fake_caller()
+            function caller:execute(_context, tools, _cancel)
+                local results = {}
+                for call_id, tool in pairs(tools or {}) do
+                    self.launches[call_id] = true
+                    results[call_id] = { tool_call = tool,
+                        result = { ok = true, _control = { context = { session = { set = { from_tool = "x" } } } } } }
+                end
+                return results
+            end
+            local op, batch = fx.round(ctx, { { id = "call-c", registry_id = PLAIN, args = {} } }, caller)
+            assert(ctx.writer:update_message_meta(op.checkpoint_anchor_id, {
+                behavior_controls = { { context = { session = { set = { replayed = "yes" } } } } },
+                behavior_control_state = "pending",
+                behavior_call_message_ids = op.call_message_ids,
+            }))
+            assert(ctx.writer:update_meta({ status = consts.STATUS.RUNNING, meta = { behavior_controls_pending = true } }))
+            local saved = control_handlers.control_context
+            control_handlers.control_context = function() return nil, "context store failed" end
+            local ok, result, err = pcall(message_handlers.process_tools, ctx, op)
+            control_handlers.control_context = saved
+            if not ok then error(result) end
+            test.contains(tostring(err), "context store failed", "the round fails after the release")
+            test.is_true(caller.launches["call-c"], "the call ran")
+            local stored = assert(approval_repo.get_batch(nil, batch.batch_id))
+            test.eq(stored.state .. ":" .. stored.controls, "released:cancelled")
+            -- The restart: recovery, then behavior control recovery.
+            assert(approval_recovery.recover_calls(ctx.session_id, nil, true))
+            test.eq(fx.round_controls(ctx, op, true), "cancelled replayed=nil")
         end)
 
         it("writes a batch row only while it is pending, so a running round never overwrites recovery", function()
