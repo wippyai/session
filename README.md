@@ -785,6 +785,90 @@ answers, and how an answer is admitted into the conversation, and
 for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
 from the browser side.
 
+## Tool approval
+
+Tool approval asks the user before a tool call runs. The user approves the
+call, approves all calls of a kind, or denies it. The messages between the
+Session and a chat client are in
+[docs/tool-approval-protocol.md](docs/tool-approval-protocol.md).
+
+### Turn it on
+
+Add the trait to an agent. Every option is optional:
+
+```yaml
+traits:
+  - id: wippy.session.traits:tool_approval
+    context:
+      require: marked
+      approve_all: "off"
+      timeout_seconds: 900
+      max_requests_per_turn: 10
+```
+
+| Option | Default | Values |
+| --- | --- | --- |
+| `require` | `marked` | `marked`, `all` |
+| `approve_all` | `off` | `off`, `batch`, `tool`, `session` |
+| `timeout_seconds` | 900 | 30 to 3600 |
+| `max_requests_per_turn` | 10 | 1 to 50 |
+
+- With `require: marked`, only tools that set `approval` in their registry
+  meta ask (`approval: required`, or `approval: { required: true,
+  approve_all: true }`). With `require: all`, every call asks, delegation
+  calls included. No tool is exempt because it only reads data.
+- With `approve_all: "off"`, Approve all is offered only for a tool whose
+  author set `approval.approve_all: true`.
+- An invalid context, including an unknown key, fails the turn with
+  `tool_approval_config_invalid` before any model call.
+- Activation is sticky. The first agent step with the trait stores the settings in
+  the session. Switching to an agent without the trait does not
+  turn approval off, and the stricter `require` wins.
+
+`GET /api/v1/sessions/capabilities` reports `tool_approval: 1` when the Session
+supports it. A client sends approval commands only when that key is present.
+In a protected session, a call that needs a decision while no chat window can
+show a card settles as not run, and the turn ends with a notice.
+
+### Operator switch
+
+The `tool_approval_enforcement` requirement of `wippy/session` (environment
+variable `SESSION_TOOL_APPROVAL_ENFORCEMENT`) is `enforce` by default. The
+value `off` skips the approval gate for every session and logs a warning for
+each skipped check. This is a security downgrade, meant for rollback. Any other
+value reads as `enforce`.
+
+```yaml
+- name: dep.wippy.session
+  kind: ns.dependency
+  component: wippy/session
+  parameters:
+    - name: tool_approval_enforcement
+      value: "off"
+```
+
+### Artifacts in protected sessions
+
+The Web Host cannot isolate JSON or packaged web content. In a protected
+session the Session refuses a new or updated `_control.artifacts` item with
+such content. The tool call fails with an error that starts with
+`isolation_required:`, and the model can return HTML or markdown instead.
+
+### Known limits
+
+- Only tool calls of chat sessions are checked. Dataflow, Temporal, CLI loops
+  and direct `funcs.call` are not.
+- Tools that a delegated child agent calls are not checked.
+- A pending approval does not survive a Session process restart. Recovery
+  reports the call as not run or as an unknown outcome. No call runs again.
+- Approval protects against the model, tool results and other users. It does
+  not protect against code that already runs as the user in the browser, such
+  as an app page.
+- Where the registry cannot pin a tool version, a small race remains between
+  the recheck at release and the start of the call.
+- Deleting a session while its process runs ends that process with an error.
+  This was already so before tool approval.
+
 ## Upgrading to 0.7.0
 
 Session 0.7.0 adds Session Forms. Check these points before you upgrade.
