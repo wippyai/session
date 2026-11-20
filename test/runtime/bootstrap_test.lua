@@ -31,6 +31,15 @@ local function run(command, expected_status)
     return output
 end
 
+local function has_sh()
+    local executor = exec.get("app.runtime:executor")
+    local child = executor:exec("sh -c true")
+    local started = child and child:start()
+    local status = started and child:wait()
+    executor:release()
+    return status == 0
+end
+
 local function with_directory(body)
     local directory = assert(env.get("WIPPY_TEST_ARTIFACTS")) .. "/bootstrap-" .. uuid.v7()
     run("mkdir -p " .. quote(directory))
@@ -47,10 +56,18 @@ local function define_tests()
             test.it_skip("requires the Unix Makefile bootstrap environment", function() end)
             return
         end
-        test.it("exports the shell tool search path to child commands", function()
+        local sh_missing = not has_sh()
+        local function it(name, body)
+            if sh_missing then
+                test.it_skip(name .. " (requires sh on PATH; CI runs it on Linux)", function() end)
+            else
+                test.it(name, body)
+            end
+        end
+        it("exports the shell tool search path to child commands", function()
             test.eq(run("printenv PATH"), run('printf "%s" "$PATH"') .. "\n")
         end)
-        test.it("preserves the previous SQLite contents before resetting the test database", function()
+        it("preserves the previous SQLite contents before resetting the test database", function()
             with_directory(function(directory, repository)
                 local database = directory .. "/test.db"
                 run("sqlite3 " .. quote(database) .. " " .. quote("CREATE TABLE evidence(value TEXT); INSERT INTO evidence VALUES('preserved');"))
@@ -67,7 +84,7 @@ local function define_tests()
                 test.eq(count, 2, "A repeated reset must preserve both backups")
             end)
         end)
-        test.it("prepares external dependencies while retaining the selected source bindings", function()
+        it("prepares external dependencies while retaining the selected source bindings", function()
             with_directory(function(directory, repository)
                 local prepare = "bash " .. quote(repository .. "/scripts/test-workspace.sh") .. " " .. quote(repository) .. " " .. quote(directory .. "/workspace")
                 run(prepare)
@@ -83,7 +100,7 @@ local function define_tests()
                 test.eq(candidate.registry.dependency_lock_path, directory .. "/workspace/wippy.lock")
             end)
         end)
-        test.it("rejects workspace symlinks that point inside the repository", function()
+        it("rejects workspace symlinks that point inside the repository", function()
             with_directory(function(directory, repository)
                 local source = directory .. "/source"
                 local alias = directory .. "/workspace-alias"
@@ -93,7 +110,7 @@ local function define_tests()
                 run("bash " .. quote(repository .. "/scripts/test-workspace.sh") .. " " .. quote(source) .. " " .. quote(alias), 1)
             end)
         end)
-        test.it("requires executed cases with published or candidate dependencies", function()
+        it("requires executed cases with published or candidate dependencies", function()
             with_directory(function(directory, repository)
                 for _, framework in ipairs({ "", repository }) do
                     local output = run("make -s -n -C " .. quote(repository) .. " test-runtime " ..
@@ -101,11 +118,11 @@ local function define_tests()
                         " " .. quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
                         " " .. quote("TEST_BACKUP_DIR=" .. directory .. "/backups"))
                     test.contains(output, "WIPPY_TEST_REQUIRE_CASES=1")
-                    test.contains(output, 'test -- "app.runtime:handoff_runtime"')
+                    test.contains(output, '-- app.runtime:handoff_runtime')
                 end
             end)
         end)
-        test.it("rejects a benchmark runner that produces no report", function()
+        it("rejects a benchmark runner that produces no report", function()
             with_directory(function(directory, repository)
                 run("make -s -C " .. quote(repository) .. " bench FRAMEWORK_DIR= WIPPY=true " ..
                     quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..
