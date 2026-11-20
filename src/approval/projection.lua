@@ -90,19 +90,24 @@ function projection.announcement(session_id: string, config: any): (any, string?
 end
 
 -- Publishes the `tool_approval` field of the session `ctx` serves as a live
--- session update, after a commit that changed the activation or a grant. A
--- failed read is logged; the next update or a REST read carries the field.
-function projection.publish(ctx: any)
+-- session update, after a commit that changed the activation or a grant, and
+-- records its revision in ctx.tool_approval_published_revision (the open
+-- announcement sets it too). Returns true, or nil and an error after a
+-- failed read, which is also logged. A ctx with no upstream to the clients
+-- publishes nothing.
+function projection.publish(ctx: any): (boolean?, string?)
     if type(ctx) ~= "table" or type(ctx.upstream) ~= "table" or type(ctx.upstream.update_session) ~= "function" then
-        return
+        return true, nil
     end
     local field, err = projection.session_field(nil, ctx.session_id, ctx.config)
     if not field then
         logger:warn("tool approval session field was not published",
             { session_id = ctx.session_id, error = tostring(err) })
-        return
+        return nil, "Failed to publish the tool approval session field: " .. tostring(err)
     end
     ctx.upstream:update_session({ tool_approval = field })
+    ctx.tool_approval_published_revision = field.revision
+    return true, nil
 end
 
 -- The `tool_approval` object of an artifact read: { active } copied from

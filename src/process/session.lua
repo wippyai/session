@@ -1016,6 +1016,7 @@ local function run(args: SessionArgs)
         activity_revision = approval_fields.activity_revision,
         tool_approval = approval_fields.tool_approval,
     })
+    context.tool_approval_published_revision = approval_fields.tool_approval.revision
 
     -- Form answers accepted while no session process was running (or whose
     -- wake-up was lost) are admitted first, in acceptance order, and start a

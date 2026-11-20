@@ -172,25 +172,34 @@ function activation.merge(stored: any, settings: any, declared_at: string?): any
     return base
 end
 
+-- Publishes the session's tool_approval field when the activation in
+-- ctx.config has a revision the clients have not seen
+-- (ctx.tool_approval_published_revision). The Host isolates mounted content
+-- only from that field, so a failed publish is returned as an error: the
+-- step fails closed and the next step publishes again.
+local function publish_activation(ctx: any): (boolean?, string?)
+    local stored = ctx.config and ctx.config.tool_approval
+    if type(stored) ~= "table" or stored.revision == ctx.tool_approval_published_revision then return true, nil end
+    return approval_projection.publish(ctx)
+end
+
 -- Stores the merge of the committed activation with `settings` and
--- `declared_at` (row locked, writer:update_tool_approval) and adopts the
--- committed value into ctx.config. Returns the value in force.
+-- `declared_at` (row locked, writer:update_tool_approval), adopts the
+-- committed value into ctx.config and publishes it when its revision is new
+-- to the clients. Returns the value in force, or nil and an error.
 function activation.persist(ctx: any, settings: any, declared_at: string?): (any, string?)
     local writer = ctx.writer
     if type(writer) ~= "table" or type(writer.update_tool_approval) ~= "function" then
         return nil, "The session writer cannot store the tool approval activation"
     end
-    local before = ctx.config and ctx.config.tool_approval
     local committed, err = writer:update_tool_approval(function(current)
         return activation.merge(current, settings, declared_at)
     end)
     if err then return nil, tostring(err) end
     ctx.config = ctx.config or {}
     ctx.config.tool_approval = committed
-    -- A changed activation (the session became protected, or a setting
-    -- moved) reaches the clients as the session's tool_approval field.
-    local before_revision = type(before) == "table" and before.revision or nil
-    if type(committed) == "table" and committed.revision ~= before_revision then approval_projection.publish(ctx) end
+    local published, publish_err = publish_activation(ctx)
+    if not published then return nil, publish_err end
     return committed, nil
 end
 
@@ -322,6 +331,9 @@ function activation.apply(ctx: any, agent: any): (boolean?, string?, string?)
         stored = committed
     end
     if stored == nil then return true, nil, nil end
+    -- A step without a new write retries a publish an earlier step failed.
+    local published, publish_err = publish_activation(ctx)
+    if not published then return nil, publish_err, activation.FAILURE.STORAGE end
 
     local effective, policy_err = trait_config.effective(stored, settings, activation.enforcement())
     if not effective then return nil, policy_err, activation.FAILURE.INVALID end

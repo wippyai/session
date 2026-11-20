@@ -147,7 +147,9 @@ local function define_tests()
         it("publishes the tool_approval field live when the session becomes protected and when a grant changes", function()
             -- AC 37: live updates; committed responses and updates move the grants chip.
             local ctx, captured = new_ctx({ live = 1 })
+            -- An unprotected session: its open announcement had revision 0.
             ctx.config.tool_approval = nil
+            ctx.tool_approval_published_revision = 0
             local agent = { id = fx.AGENT, agent_options = { tool_approval = { schema = 1 } } }
             ctx.agent_ctx = { active_traits = { { id = TRAIT, context = { approve_all = "tool" } } } }
             assert(activation.apply(ctx, agent))

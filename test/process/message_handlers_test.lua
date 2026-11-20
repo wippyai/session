@@ -17,6 +17,7 @@ local bedrock_mapper = require("bedrock_mapper")
 local checkpoint = require("checkpoint")
 local llm = require("llm")
 local reader = require("reader")
+local approval_repo = require("approval_repo")
 
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
@@ -5757,6 +5758,41 @@ local function define_tests()
             test.eq(successor_calls.steps, 1)
             test.is_true(ctx.config.tool_approval.active)
             test.is_true(ctx.tool_approval_policy.active)
+        end)
+
+        it("fails the step when the new activation is not published, and publishes it at the next step", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx = approval_ctx(agent, { TRAIT })
+            local published = {}
+            ctx.upstream.update_session = function(_self, update)
+                if update.tool_approval ~= nil then table.insert(published, update.tool_approval) end
+            end
+            -- The grants read of the publish fails once, after the activation commits.
+            local saved_list = approval_repo.list_grants
+            local failed = 0
+            approval_repo.list_grants = function(...)
+                if failed == 0 then
+                    failed = 1
+                    return nil, "grants read failed"
+                end
+                return saved_list(...)
+            end
+            local ran, result, err = pcall(user_step, ctx)
+            approval_repo.list_grants = saved_list
+            test.is_true(ran, tostring(result))
+            test.is_nil(result)
+            test.contains(tostring(err), "grants read failed")
+            test.eq(failed, 1)
+            test.eq(calls.steps, 0, "no model call, so no gated call runs")
+            test.eq(#published, 0)
+            test.is_true(ctx.config.tool_approval.active, "the activation is committed")
+
+            local _, retry_err = user_step(ctx)
+            test.is_nil(retry_err)
+            test.eq(calls.steps, 1)
+            test.eq(#published, 1, "the next step publishes the activation")
+            test.is_true(published[1].active)
+            test.eq(published[1].revision, ctx.config.tool_approval.revision)
         end)
 
         it("treats a failed activation write as a storage failure of the step", function()

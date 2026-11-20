@@ -118,6 +118,8 @@ local function new_ctx(opts: any?): (any, any)
         for _, key in ipairs(trait_config.SETTING_KEYS) do context[key] = policy[key] end
         local settings = assert(trait_config.normalize(context))
         config.tool_approval = activation.merge(nil, settings, opts.declared)
+        -- A running process announced this activation when it opened.
+        ctx.tool_approval_published_revision = config.tool_approval.revision
         ctx.tool_approval_policy = assert(trait_config.effective(config.tool_approval,
             policy.agent_opted_in ~= false and settings or nil, policy.enforcement or "enforce"))
     end

@@ -291,6 +291,7 @@ entries:
       bedrock_mapper: wippy.llm.bedrock:mapper
       google_mapper: wippy.llm.google:mapper
       reader: wippy.session.persist:reader
+      approval_repo: wippy.session.persist:approval_repo
       session: wippy.session.process:session
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
