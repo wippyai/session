@@ -577,7 +577,7 @@ local function define_wait_tests()
             test.eq(dispositions[#dispositions], "dispatched", "the last approval event carries the disposition")
             local ran = launches(session_id)
             test.is_true(ran[1] ~= nil and ran[3] ~= nil, "the approved call and its peer ran")
-            test.eq(ran[1].state .. ":" .. ran[1].disposition, "approved:dispatched",
+            test.eq(tostring(ran[1].state) .. ":" .. tostring(ran[1].disposition), "approved:dispatched",
                 "the approved call started after its release committed")
             test.eq(summary(session_id, { "call-a", "call-c" }),
                 "call-a=approved/success/ran call-c=-/success/ran batch=released:nil:kept activity=nil")
