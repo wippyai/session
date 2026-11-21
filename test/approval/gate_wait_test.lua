@@ -1000,7 +1000,7 @@ local function define_tests()
                 { id = "call-a", registry_id = MARKED, args = { n = 1 } },
                 { id = "call-b", registry_id = MARKED, args = { n = 2 } },
             }, caller)
-            local order, stopped, attempted = {}, channel.new(1), channel.new(1)
+            local order, stopped, attempted, entered = {}, channel.new(1), channel.new(1), channel.new(1)
             local stop_outcome: any = nil
             local stop_co, gate_co = nil, nil
             local saved_release, saved_lock = approval_repo.release_batch, message_date.lock_session
@@ -1017,9 +1017,16 @@ local function define_tests()
                     return fn(dbtx)
                 end)
             end
+            -- Stop holds the session lock once lock_session returns: on SQLite
+            -- it can't get there while the release transaction is open (its
+            -- transaction start waits), on PostgreSQL the row lock waits.
             message_date.lock_session = function(conn, session_id)
-                if stop_co ~= nil and coroutine.running() == stop_co then order[#order + 1] = "stop:lock" end
-                return saved_lock(conn, session_id)
+                if stop_co == nil or coroutine.running() ~= stop_co then return saved_lock(conn, session_id) end
+                order[#order + 1] = "stop:lock"
+                local locked, lock_err = saved_lock(conn, session_id)
+                order[#order + 1] = "stop:locked"
+                entered:send(true)
+                return locked, lock_err
             end
             approval_repo.transact = function(...)
                 local result = { saved_transact(...) }
@@ -1042,6 +1049,15 @@ local function define_tests()
                 end)
                 local selected = channel.select({ attempted:case_receive(), time.after("5s"):case_receive() })
                 if selected.channel ~= attempted then order[#order + 1] = "stop:no_attempt" end
+                -- The release transaction stays open for 300 ms while this
+                -- coroutine waits, so Stop can run: it must not get the session
+                -- lock while the release holds it.
+                local window = channel.select({ entered:case_receive(), time.after("300ms"):case_receive() })
+                if window.channel == entered then
+                    order[#order + 1] = "stop:not_blocked"
+                else
+                    order[#order + 1] = "stop:blocked"
+                end
                 return saved_release(...)
             end
             local slow_execute = caller.execute
@@ -1064,16 +1080,20 @@ local function define_tests()
             if not ok then error(failure) end
             test.is_true(stop_outcome ~= nil and stop_outcome.ok == true, "Stop committed: " .. tostring(stop_outcome
                 and stop_outcome.failure))
-            -- Stop tried before the release committed, and committed after it.
-            -- Where it waited (transaction start or row lock) is in between.
+            -- Stop tried before the release committed, stayed blocked while
+            -- the release transaction was open (at its transaction start on
+            -- SQLite, at the session lock on PostgreSQL), and committed after
+            -- the release.
             local at = {}
             for index, event in ipairs(order) do at[event] = at[event] or index end
             local observed = table.concat(order, " ")
             test.eq(order[1], "release:start", observed)
             test.eq(order[2], "stop:begin", observed)
-            test.is_true(at["release:committed"] ~= nil and at["stop:lock"] ~= nil
-                and at["stop:lock"] < at["stop:committed"] and at["release:committed"] < at["stop:committed"]
-                and at["stop:committed"] < at["execute"], observed)
+            test.is_nil(at["stop:not_blocked"], "Stop was blocked while the release held the database: " .. observed)
+            test.is_true(at["stop:blocked"] ~= nil and at["release:committed"] ~= nil
+                and at["stop:blocked"] < at["release:committed"], observed)
+            test.is_true(at["stop:locked"] ~= nil and at["release:committed"] < at["stop:locked"]
+                and at["stop:locked"] < at["stop:committed"] and at["stop:committed"] < at["execute"], observed)
             test.eq(order[#order], "execute", observed)
             test.eq(caller.cancel, ctx.coordinator.cancel, "the caller got the turn's cancellation channel")
             test.is_false(channel.select({ ctx.coordinator.cancel:case_receive(), default = true }).default == true,
