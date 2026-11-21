@@ -24,6 +24,11 @@ function api.describe()
         -- Input sent while a turn runs is stored as pending and applied at the next
         -- step; session updates carry `interaction`; Stop accepts a stop_request_id.
         steering = 1,
+        -- Native tool-call approval (docs/tool-approval-protocol.md): the
+        -- tool_approval events, the decision and revocation commands, the
+        -- surface declaration, and the session fields activity and
+        -- tool_approval.
+        tool_approval = 1,
         attention = {
             -- Per-session attention_context state, attention_context_set and the PATCH route.
             context = 1,

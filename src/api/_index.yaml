@@ -132,6 +132,7 @@ entries:
       artifact_repo: wippy.session.persist:artifact_repo
       artifact_projection: wippy.session.persist:artifact_projection
       renderer: wippy.views:renderer
+      approval_projection: wippy.session.approval:projection
 
   # wippy.session.api:request_body
   - name: request_body
@@ -270,6 +271,8 @@ entries:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
       session_status: wippy.session.process:session_status
+      approval_projection: wippy.session.approval:projection
+      approval_repo: wippy.session.persist:approval_repo
     method: handler
     pool:
       size: 4
@@ -323,6 +326,8 @@ entries:
     imports:
       session_repo: wippy.session.persist:session_repo
       session_status: wippy.session.process:session_status
+      approval_projection: wippy.session.approval:projection
+      approval_repo: wippy.session.persist:approval_repo
     method: handler
     pool:
       size: 4
@@ -376,6 +381,7 @@ entries:
     imports:
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
+      approval_repo: wippy.session.persist:approval_repo
     method: handler
     pool:
       size: 4

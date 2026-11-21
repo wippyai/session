@@ -1,0 +1,163 @@
+local test = require("test")
+local trait_config = require("trait_config")
+local tool_meta = require("tool_meta")
+
+local function expect_invalid(context: any, fragment: string)
+    local out, err = trait_config.normalize(context)
+    test.is_nil(out, "rejected: " .. fragment)
+    test.not_nil(err, "error for: " .. fragment)
+    test.is_true(tostring(err):find("^tool_approval_config_invalid: ") ~= nil, "error code: " .. tostring(err))
+    test.is_true(tostring(err):find(fragment, 1, true) ~= nil, "error names " .. fragment .. ": " .. tostring(err))
+end
+
+local function define_tests()
+    describe("Tool approval trait settings", function()
+        it("fills the owner defaults: marked, off, 900 s, 10 requests", function()
+            for _, context in ipairs({ {}, false }) do
+                local out, err = trait_config.normalize(context ~= false and context or nil)
+                test.is_nil(err)
+                test.eq(out.require, "marked")
+                test.eq(out.approve_all, "off")
+                test.eq(out.timeout_seconds, 900)
+                test.eq(out.max_requests_per_turn, 10)
+            end
+        end)
+
+        it("accepts every listed value and the range ends", function()
+            for _, mode in ipairs({ "off", "batch", "tool", "session" }) do
+                local out = trait_config.normalize({ approve_all = mode })
+                test.eq(out.approve_all, mode)
+            end
+            local low = trait_config.normalize({ require = "all", timeout_seconds = 30, max_requests_per_turn = 1 })
+            test.eq(low.require, "all")
+            test.eq(low.timeout_seconds, 30)
+            test.eq(low.max_requests_per_turn, 1)
+            local high = trait_config.normalize({ timeout_seconds = 3600, max_requests_per_turn = 50 })
+            test.eq(high.timeout_seconds, 3600)
+            test.eq(high.max_requests_per_turn, 50)
+            test.eq(math.type(high.timeout_seconds), "integer")
+            local float_whole = trait_config.normalize({ timeout_seconds = 120.0 })
+            test.eq(math.type(float_whole.timeout_seconds), "integer")
+        end)
+
+        it("rejects invalid values instead of defaulting them", function()
+            expect_invalid("all", "must be an object")
+            expect_invalid({ require = "some" }, "require must be marked or all")
+            expect_invalid({ require = true }, "require must be marked or all")
+            expect_invalid({ approve_all = "always" }, "approve_all must be off, batch, tool or session")
+            expect_invalid({ approve_all = false }, "approve_all must be off, batch, tool or session")
+            expect_invalid({ timeout_seconds = 29 }, "timeout_seconds must be an integer from 30 to 3600")
+            expect_invalid({ timeout_seconds = 3601 }, "timeout_seconds must be an integer from 30 to 3600")
+            expect_invalid({ timeout_seconds = 900.5 }, "timeout_seconds must be an integer from 30 to 3600")
+            expect_invalid({ timeout_seconds = "900" }, "timeout_seconds must be an integer from 30 to 3600")
+            expect_invalid({ max_requests_per_turn = 0 }, "max_requests_per_turn must be an integer from 1 to 50")
+            expect_invalid({ max_requests_per_turn = 51 }, "max_requests_per_turn must be an integer from 1 to 50")
+            expect_invalid({ requre = "all" }, "unknown key requre")
+        end)
+
+        it("keeps the stricter require and takes the other settings from the current agent", function()
+            local stored = { active = true, require = "all", approve_all = "off", timeout_seconds = 60,
+                max_requests_per_turn = 5, revision = 3 }
+            local effective = trait_config.effective(stored, { require = "marked", approve_all = "session" })
+            test.eq(effective.require, "all", "stored all beats current marked")
+            test.eq(effective.approve_all, "session")
+            test.eq(effective.timeout_seconds, 900)
+            test.is_true(effective.agent_opted_in)
+            test.eq(effective.enforcement, "enforce")
+
+            local tightened = trait_config.effective({ active = true, require = "marked", approve_all = "tool",
+                timeout_seconds = 900, max_requests_per_turn = 10 }, { require = "all" })
+            test.eq(tightened.require, "all", "current all beats stored marked")
+            test.eq(tightened.approve_all, "off")
+        end)
+
+        it("keeps the gate on with the stored values when the current agent lacks the trait", function()
+            local stored = { active = true, require = "marked", approve_all = "session", timeout_seconds = 120,
+                max_requests_per_turn = 7 }
+            local effective = trait_config.effective(stored, nil, "enforce")
+            test.is_true(effective.active)
+            test.is_false(effective.agent_opted_in)
+            test.eq(effective.approve_all, "session")
+            test.eq(effective.timeout_seconds, 120)
+            test.eq(effective.max_requests_per_turn, 7)
+        end)
+
+        it("refuses a stored activation with a missing setting instead of filling the default", function()
+            for _, key in ipairs({ "require", "approve_all", "timeout_seconds", "max_requests_per_turn" }) do
+                local stored = { active = true, require = "all", approve_all = "off", timeout_seconds = 60,
+                    max_requests_per_turn = 5 }
+                stored[key] = nil
+                local effective, err = trait_config.effective(stored, nil)
+                test.is_nil(effective, key)
+                test.contains(tostring(err), "the stored activation has no " .. key)
+                local with_agent, agent_err = trait_config.effective(stored, { require = "all" })
+                test.is_nil(with_agent, key .. " with an opted-in agent")
+                test.not_nil(agent_err)
+            end
+        end)
+
+        it("is not protected without a stored activation or an opted-in agent", function()
+            local effective, err = trait_config.effective(nil, nil)
+            test.is_nil(effective)
+            test.is_nil(err)
+        end)
+
+        it("fails closed on a broken stored activation or operator setting", function()
+            local _, err1 = trait_config.effective({ active = true, require = "none" }, nil)
+            test.not_nil(err1)
+            local _, err2 = trait_config.effective({ active = false }, nil)
+            test.not_nil(err2)
+            local _, err3 = trait_config.effective(nil, {}, "disabled")
+            test.not_nil(err3)
+            local off = trait_config.effective(nil, {}, "off")
+            test.eq(off.enforcement, "off")
+        end)
+    end)
+
+    describe("Tool meta approval", function()
+        it("reads the short form and booleans", function()
+            test.is_false(tool_meta.read(nil).required)
+            test.is_false(tool_meta.read({ type = "tool" }).required)
+            local short = tool_meta.read({ approval = "required" })
+            test.is_true(short.required)
+            test.is_nil(short.approve_all)
+            test.eq(#short.warnings, 0)
+            test.is_true(tool_meta.read({ approval = true }).required)
+            test.is_false(tool_meta.read({ approval = false }).required)
+        end)
+
+        it("reads the object form", function()
+            local marked = tool_meta.read({ approval = { required = true, approve_all = true } })
+            test.is_true(marked.required)
+            test.is_true(marked.approve_all)
+            local restricted = tool_meta.read({ approval = { approve_all = false } })
+            test.is_false(restricted.required, "an object without required: true does not mark the tool")
+            test.is_false(restricted.approve_all)
+            local absent = tool_meta.read({ approval = { required = true } })
+            test.is_nil(absent.approve_all, "absent approve_all is the 'tool option absent' column")
+        end)
+
+        it("ignores unknown object keys with a warning and still asks", function()
+            local later = tool_meta.read({ approval = { required = true, scope = "arguments", notify = "admin" } })
+            test.is_true(later.required)
+            test.eq(#later.warnings, 2)
+            test.is_true(later.warnings[1]:find("meta.approval.notify", 1, true) ~= nil)
+            test.is_true(later.warnings[2]:find("meta.approval.scope", 1, true) ~= nil)
+        end)
+
+        it("fails closed on malformed values", function()
+            local odd = tool_meta.read({ approval = "always" })
+            test.is_true(odd.required)
+            test.eq(#odd.warnings, 1)
+            local bad_required = tool_meta.read({ approval = { required = "yes" } })
+            test.is_true(bad_required.required)
+            local bad_option = tool_meta.read({ approval = { required = true, approve_all = "yes" } })
+            test.is_false(bad_option.approve_all)
+            test.eq(#bad_option.warnings, 1)
+            local number = tool_meta.read({ approval = 1 })
+            test.is_true(number.required)
+        end)
+    end)
+end
+
+return test.run_cases(define_tests)

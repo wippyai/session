@@ -20,6 +20,9 @@ type ArtifactMetadataResponse = {
     page_id: string?,
     is_view_reference: boolean?,
     params: {[string]: any}?,
+    -- Copied from the artifact's session (docs/tool-approval-protocol.md
+    -- section 12); false for an artifact without a session.
+    tool_approval: { active: boolean },
 }
 
 local function handler()

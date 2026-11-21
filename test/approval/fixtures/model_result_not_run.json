@@ -1,0 +1,6 @@
+{
+  "executed": false,
+  "reason": "denied_by_user",
+  "user_feedback": "Use the staging customer instead.",
+  "instruction": "The tool did not run. Do not call it again with the same arguments. Follow the user's feedback."
+}

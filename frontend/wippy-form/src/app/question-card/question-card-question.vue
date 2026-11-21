@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import type { QuestionCardController } from '../../composables/use-question-card'
-import type { FormField } from '../../lib/definition'
+import type { ChoiceFormField } from '../../lib/definition'
 import { computed, ref, watch } from 'vue'
 import { MAX_KEYED_ROWS } from '../../composables/use-question-card'
-import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX, trimAnswerText } from '../../lib/answers'
+import { exceedsLength, NOTE_TEXT_MAX, OTHER_TEXT_MAX } from '../../lib/answers'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf } from '../../lib/focus-key'
+import { STALE_MESSAGE } from '../../lib/messages'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
+import { trimAnswerText } from '../../lib/text'
 import FormMessage from '../form-message.vue'
 import QuestionCardComposer from './question-card-composer.vue'
 import QuestionCardLengthAlert from './question-card-length-alert.vue'
@@ -16,7 +18,7 @@ import QuestionCardSendButton from './question-card-send-button.vue'
 
 /** One question: the notice, description and hint, the answer rows with Other, the send button, the error and the keyboard hint. */
 const props = defineProps<{
-  question: FormField
+  question: ChoiceFormField
   controller: QuestionCardController
   qid: string
   stale: boolean
@@ -43,6 +45,11 @@ function keyLabelFor(index: number): string | null {
   return index < MAX_KEYED_ROWS ? String(index + 1) : null
 }
 const otherKeyLabel = computed(() => keyLabelFor(props.question.options.length))
+
+// The note typed for an option, or an empty text.
+function noteOf(value: string): string {
+  return answer.value.notes.get(value) ?? ''
+}
 
 const otherSelected = computed(() => props.question.multiple ? trimAnswerText(answer.value.other) !== '' : (answer.value.useOther && answer.value.done))
 const otherEnabled = computed(() => trimAnswerText(answer.value.other) !== '' || (props.question.multiple && answer.value.chosen.length > 0))
@@ -102,8 +109,7 @@ function onOptionsFocusIn(event: FocusEvent) {
     v-if="stale"
     v-bind="partAttrs('notice')"
   >
-    Asked earlier. You can still answer; the assistant uses it as context and asks again before acting on the
-    earlier request.
+    {{ STALE_MESSAGE }}
   </p>
   <p
     v-if="question.description"
@@ -133,11 +139,11 @@ function onOptionsFocusIn(event: FocusEvent) {
       :index="i"
       :multiple="question.multiple"
       :selected="question.multiple ? answer.chosen.includes(option.value) : (!answer.useOther && answer.chosen[0] === option.value)"
-      :note="trimAnswerText(answer.notes[option.value] || '')"
+      :note="trimAnswerText(noteOf(option.value))"
       :editing="answer.noteOpen === option.value"
-      :note-draft="answer.notes[option.value] || ''"
+      :note-draft="noteOf(option.value)"
       :key-label="keyLabelFor(i)"
-      :note-too-long="exceedsLength(answer.notes[option.value] || '', NOTE_TEXT_MAX)"
+      :note-too-long="exceedsLength(noteOf(option.value), NOTE_TEXT_MAX)"
       :disabled="!!disabled"
       :described-by="errorIds"
       :invalid="!!displayError"

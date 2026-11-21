@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Features
+
+* Add native tool-call approval. When an agent lists the trait `wippy.session.traits:tool_approval`, the Session asks the user before a call runs. By default (`require: marked`) this covers calls to tools that set `approval` in their registry meta; `require: all` covers every call. The user approves, approves all, or denies each call. The setting is sticky for the session. The capability `tool_approval: 1` tells clients that the Session supports it. See the "Tool approval" section of the README for the options and [docs/tool-approval-protocol.md](docs/tool-approval-protocol.md) for the messages.
+* In a protected session, refuse `_control.artifacts` items that hold JSON or packaged web content, which the Web Host cannot isolate. The call fails with an error that starts with `isolation_required:`.
+
+### Rollback
+
+* Downgrading the Session drops enforcement and content isolation. The old Session ignores the trait and the approval tables, and it sends no `tool_approval` in artifact reads, so the Web Host reads the session as not protected. The migrations only add tables and columns, so a downgrade needs no schema change. An old Session leaves approval rows behind when it deletes a session. These rows are harmless.
+* The operator switch `tool_approval_enforcement: off` is the safer rollback. It keeps the new Session and logs every skipped check. It skips only the gate: the trait is still validated, so an invalid context still fails the turn, and the activation is still stored, so the Web Host still isolates content and the `isolation_required` refusal still applies.
+* Grants stay with their session. A rollback (`off` or a downgrade) does not remove them, and they apply again when enforcement returns.
+
 ### Bug Fixes
 
 * Preserve manual session names during automatic title generation. Running sessions publish both title paths through the existing owner using the stored title; renaming a stopped session persists without starting it.

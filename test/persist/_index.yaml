@@ -351,3 +351,23 @@ entries:
       consts: wippy.session:consts
       wait_for_boot: app:wait_for_boot
       test: wippy.test:test
+
+  - name: approval_repo_test
+    kind: function.lua
+    meta:
+      name: Tool approval store
+      type: test
+      suite: session
+      comment: Conditional writes, receipts, batch fence, grants, turn fence, activity, create_batch descriptor and session deletion
+    source: file://approval_repo_test.lua
+    method: run
+    modules: [uuid]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      session_repo: wippy.session.persist:session_repo
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures

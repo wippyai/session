@@ -17,6 +17,8 @@ type Session = {
     start_date: string,
     last_message_date: string,
     attention_context: {[string]: any},
+    activity: {[string]: any}?,
+    activity_revision: number?,
 }
 
 type SessionUpdates = {
@@ -53,6 +55,20 @@ local function attention_context_from_row(session: any): any
     session.attention_revision = nil
     session.attention_updated_at = nil
     session.attention_updated_by = nil
+    return session
+end
+
+-- Projects the tool approval activity columns: `activity` (the decoded
+-- object, nil when nothing waits) and `activity_revision` (0 for sessions
+-- that never had one).
+local function activity_from_row(session: any): any
+    local activity = nil
+    if type(session.activity) == "string" and session.activity ~= "" then
+        local decoded, decode_err = json.decode(session.activity :: string)
+        if not decode_err and type(decoded) == "table" then activity = decoded end
+    end
+    session.activity = activity
+    session.activity_revision = tonumber(session.activity_revision) or 0
     return session
 end
 
@@ -214,6 +230,7 @@ function session_repo.get(session_id, user_id)
             "session_id", "user_id", "status", "primary_context_id",
             "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
             , "attention_enabled", "attention_revision", "attention_updated_at", "attention_updated_by"
+            , "activity", "activity_revision"
         )
         :from("sessions")
         :where("session_id = ?", session_id)
@@ -238,7 +255,7 @@ function session_repo.get(session_id, user_id)
         return nil, "Session not found"
     end
 
-    return attention_context_from_row(decode_json_fields(session))
+    return activity_from_row(attention_context_from_row(decode_json_fields(session)))
 end
 
 -- List sessions by user ID
@@ -256,6 +273,7 @@ function session_repo.list_by_user(user_id, limit, offset)
             "session_id", "user_id", "status", "primary_context_id",
             "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
             , "attention_enabled", "attention_revision", "attention_updated_at", "attention_updated_by"
+            , "activity", "activity_revision"
         )
         :from("sessions")
         :where("user_id = ?", user_id)
@@ -281,6 +299,7 @@ function session_repo.list_by_user(user_id, limit, offset)
     for i, session in ipairs(sessions) do
         decode_json_fields(session)
         attention_context_from_row(session)
+        activity_from_row(session)
     end
 
     return sessions
@@ -324,7 +343,8 @@ function session_repo.list_by_user_status(user_id, status, limit, opts)
 
     local sessions, query_err = sql.builder.select(
             "session_id", "user_id", "status", "primary_context_id",
-            "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date"
+            "title", "kind", "meta", "config", "public_meta", "start_date", "last_message_date",
+            "activity", "activity_revision"
         )
         :from("sessions")
         :where(sql.builder.and_(filters))
@@ -344,6 +364,7 @@ function session_repo.list_by_user_status(user_id, status, limit, opts)
     end
     for _, session in ipairs(sessions) do
         decode_json_fields(session)
+        activity_from_row(session)
     end
 
     return {
@@ -621,6 +642,20 @@ function session_repo.delete(session_id)
         local _, contexts_err = contexts_delete_query:run_with(dbtx):exec()
         if contexts_err then
             return nil, "Failed to delete session contexts: " .. contexts_err
+        end
+
+        -- Delete the tool approval store: requests, batch fences, grants and
+        -- command receipts. Grants end with the session.
+        for _, approval_table in ipairs({
+            "session_tool_approvals", "session_tool_approval_batches",
+            "session_tool_approval_grants", "session_command_receipts",
+        }) do
+            local _, approval_err = sql.builder.delete(approval_table)
+                :where("session_id = ?", session_id)
+                :run_with(dbtx):exec()
+            if approval_err then
+                return nil, "Failed to delete " .. approval_table .. ": " .. approval_err
+            end
         end
 
         -- Delete messages

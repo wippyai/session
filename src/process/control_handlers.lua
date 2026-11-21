@@ -267,14 +267,53 @@ function control_handlers.announce_artifact(ctx, record)
     })
 end
 
+-- True when the content can't run isolated. The Host does not decide from
+-- the content type: it parses any body that parses as JSON and sends every
+-- value other than a string to the package loader, which, while isolated,
+-- mounts only a Session form tag without event-handler props (every prop
+-- becomes an attribute, so `onclick` would run script). Same rule as the
+-- Host's isIsolationSafePackage. Content that doesn't parse as JSON, or
+-- parses to a string, renders as text, HTML or markdown.
+local function needs_trusted_realm(content)
+    local pkg = content
+    if type(content) == "string" then
+        local decoded, decode_err = json.decode(content)
+        if decode_err ~= nil or type(decoded) == "string" then return false end
+        pkg = decoded
+    elseif content == nil then
+        return false
+    elseif type(content) ~= "table" then
+        -- A number or boolean reaches the Host as a non-string value, which
+        -- it loads as a package and refuses while isolated.
+        return true
+    end
+    if type(pkg) ~= "table" or pkg.specification ~= form_artifact.SPECIFICATION or type(pkg.wippy) ~= "table"
+        or pkg.wippy.tagName ~= form_artifact.TAG_NAME then
+        return true
+    end
+    if pkg.props == nil then return false end
+    if type(pkg.props) ~= "table" then return true end
+    for name in pairs(pkg.props) do
+        if type(name) == "string" and string.match(name, "^[oO][nN]") then return true end
+    end
+    return false
+end
+
 function control_handlers.control_artifacts(ctx, op)
     if not op.artifacts or #op.artifacts == 0 then
         return nil, "No artifacts provided"
     end
 
+    -- A protected session (tool approval active) shows model content isolated.
+    local protected = type(ctx.config) == "table" and ctx.config.tool_approval ~= nil
+
     -- The whole batch is checked before anything is written, so a refused
-    -- item never leaves the earlier ones created and announced.
+    -- item never leaves the earlier ones created and announced. `pending`
+    -- holds what the earlier items of the batch leave of each updated
+    -- artifact, so two items for one artifact are checked as written.
+    local pending = {}
     for _, artifact_data in ipairs(op.artifacts) do
+        local kind, content = artifact_data.type, artifact_data.content
         if artifact_data.id then
             local target, lookup_err = artifact_repo.find(artifact_data.id)
             if lookup_err then
@@ -288,6 +327,18 @@ function control_handlers.control_artifacts(ctx, op)
             if form_meta.of(target.meta) then
                 return reject("session_form", "Session forms cannot be edited. Ask a new form instead.")
             end
+            -- An update is checked as the artifact it leaves behind: what an
+            -- earlier item of the batch leaves, else the stored row.
+            local before = pending[artifact_data.id] or { kind = target.kind, content = target.content }
+            kind = before.kind
+            if content == nil then content = before.content end
+            pending[artifact_data.id] = { kind = kind, content = content }
+        end
+        -- A view_ref renders an app page (isolated on the Host); its content is
+        -- page parameters, not a package.
+        if protected and kind ~= consts.ARTIFACT_TYPES.VIEW_REF and needs_trusted_realm(content) then
+            return reject("isolation_required", "This session requires tool approval, so JSON or packaged web "
+                .. "content can't be shown. You can return the content as HTML or markdown instead.")
         end
     end
 
@@ -617,6 +668,13 @@ end
 function control_handlers.control_config(ctx, op)
     if not op.config_changes then
         return nil, "No config changes provided"
+    end
+    -- Tool approval activation and grants are not agent controlled
+    -- (sticky activation): a `_control` or behavior control that
+    -- names tool_approval is refused as a whole and changes nothing. A trait,
+    -- tool or agent change still leaves the stored activation in force.
+    if type(op.config_changes) == "table" and op.config_changes.tool_approval ~= nil then
+        return reject("tool_approval_forbidden", "Tool approval settings cannot be changed by a control")
     end
 
     local session_data = ctx.reader:state()

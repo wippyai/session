@@ -1,0 +1,66 @@
+{
+  "type": "command_response",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "request_id": "req_46",
+  "success": true,
+  "approval": {
+    "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+    "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
+    "call_id": "call_abc",
+    "state": "approved",
+    "decided_via": "approve_all",
+    "revision": 2,
+    "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",
+    "requested_at": "2026-10-21T12:15:00Z",
+    "expires_at": "2026-10-21T12:30:00Z",
+    "decided_at": "2026-10-21T12:16:10Z",
+    "then": null,
+    "reason": null,
+    "grant_id": "01990a2b-0000-7000-8000-0000000000d1",
+    "disposition": null
+  },
+  "approvals": [
+    {
+      "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+      "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
+      "call_id": "call_abc",
+      "state": "approved",
+      "decided_via": "approve_all",
+      "revision": 2,
+      "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",
+      "requested_at": "2026-10-21T12:15:00Z",
+      "expires_at": "2026-10-21T12:30:00Z",
+      "decided_at": "2026-10-21T12:16:10Z",
+      "then": null,
+      "reason": null,
+      "grant_id": "01990a2b-0000-7000-8000-0000000000d1",
+      "disposition": null
+    },
+    {
+      "approval_id": "01990a2b-0000-7000-8000-0000000000a2",
+      "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
+      "call_id": "call_xyz",
+      "state": "approved",
+      "decided_via": "approve_all",
+      "revision": 2,
+      "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",
+      "requested_at": "2026-10-21T12:15:00Z",
+      "expires_at": "2026-10-21T12:30:00Z",
+      "decided_at": "2026-10-21T12:16:10Z",
+      "then": null,
+      "reason": null,
+      "grant_id": "01990a2b-0000-7000-8000-0000000000d1",
+      "disposition": null
+    }
+  ],
+  "grant": {
+    "grant_id": "01990a2b-0000-7000-8000-0000000000d1",
+    "revision": 1,
+    "scope": "tool",
+    "status": "active",
+    "suspension_reason": null,
+    "registry_id": "app.tools:delete_customer",
+    "title": "Delete customer",
+    "created_at": "2026-10-21T12:16:10Z"
+  }
+}

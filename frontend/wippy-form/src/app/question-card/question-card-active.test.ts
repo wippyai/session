@@ -1,11 +1,11 @@
-import type { FormDefinition } from '../../lib/definition'
+import type { ChoiceFormDefinition } from '../../lib/definition'
 import { mount } from '@vue/test-utils'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { describe, expect, it } from 'vitest'
 import { formState } from '../../test-support/fixtures'
 import QuestionCardActive from './question-card-active.vue'
 
-const singleQuestionDef: FormDefinition = {
+const singleQuestionDef: ChoiceFormDefinition = {
   title: 'Deploy',
   fields: [{
     id: 'f1',
@@ -18,7 +18,7 @@ const singleQuestionDef: FormDefinition = {
   }],
 }
 
-const twoQuestionDef: FormDefinition = {
+const twoQuestionDef: ChoiceFormDefinition = {
   title: 'Release',
   fields: [
     { id: 'f1', type: 'choice', label: 'Widen the peer range?', required: true, options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }], multiple: false, allow_other: false },
@@ -27,7 +27,7 @@ const twoQuestionDef: FormDefinition = {
 }
 
 /** Mounts the card with the form's props, which `props` can override. `global` adds mounting options. */
-function mountCard(definition: FormDefinition, props: { offline?: boolean, submitting?: boolean } = {}, global: Record<string, unknown> = {}) {
+function mountCard(definition: ChoiceFormDefinition, props: { offline?: boolean, submitting?: boolean } = {}, global: Record<string, unknown> = {}) {
   return mount(QuestionCardActive, {
     props: { state: formState({ definition }), submitting: false, banner: null, ...props },
     attachTo: document.body,
@@ -204,7 +204,7 @@ describe('QuestionCardActive: form title and description', () => {
   })
 
   it('shows the form-level description, in the muted style, with backticks rendered as inline code', () => {
-    const withFormDescription: FormDefinition = {
+    const withFormDescription: ChoiceFormDefinition = {
       ...singleQuestionDef,
       description: 'Uses the `staging` cluster only.',
     }
@@ -223,7 +223,7 @@ describe('QuestionCardActive: form title and description', () => {
 })
 
 describe('QuestionCardActive: field description', () => {
-  const withDescription: FormDefinition = {
+  const withDescription: ChoiceFormDefinition = {
     title: 'Deploy',
     fields: [{
       id: 'f1',
@@ -258,6 +258,25 @@ describe('QuestionCardActive: 422 field errors', () => {
     vm.setServerErrors({ f1: [{ code: 'invalid', message: 'That choice is no longer available.' }] })
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('That choice is no longer available.')
+  })
+
+  // A note is part of the answer, so editing it is a change that drops the
+  // question's server error, as choosing another option does.
+  it('drops the server error of a question once its open note is edited', async () => {
+    const wrapper = mountCard(singleQuestionDef)
+    // Shift+1 opens the note of the first option.
+    await wrapper.find('.w-form').trigger('keydown', { code: 'Digit1', key: '!', shiftKey: true })
+    await wrapper.vm.$nextTick()
+    const note = wrapper.find('textarea.w-form__note-input')
+    await note.setValue('leave at the door')
+    const vm = wrapper.vm as unknown as { setServerErrors: (e?: Record<string, { code: string, message: string }[]>) => void }
+    vm.setServerErrors({ f1: [{ code: 'too_long', message: 'The note is too long.' }] })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('The note is too long.')
+
+    await wrapper.find('textarea.w-form__note-input').setValue('door')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('The note is too long.')
   })
 })
 

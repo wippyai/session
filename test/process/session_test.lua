@@ -1,6 +1,7 @@
 local test = require("test")
 local consts = require("consts")
 local session = require("session")
+local wake = require("wake")
 local command_bus = require("command_bus")
 local message_handlers = require("message_handlers")
 local control_handlers = require("control_handlers")
@@ -11,7 +12,7 @@ local function fixture(): (any, any, {any}, {any}, {any}, {any})
     local errors = {} :: {any}
     local successes = {} :: {any}
     local ctx: any = {
-        session_id = "session-1", held = {}, status = consts.STATUS.IDLE,
+        session_id = "session-1", held = {}, status = consts.STATUS.IDLE, approval_wake = wake.new(),
         reader = {
             list_pending_inputs = function() return {}, nil end,
             list_pending_answers = function() return {}, nil end,

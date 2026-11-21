@@ -8,7 +8,9 @@ local form_meta = {}
 form_meta.KEY = "session_form"
 
 -- The version of the stored record. The form definition has its own version
--- (definition.FORM_VERSION); both are 1 today and change independently.
+-- (definition.VERSIONS, read with definition.version_of: 1 for a form of
+-- choices only, 2 with a standard field); the two versions change
+-- independently.
 form_meta.VERSION = 1
 
 -- The metadata key of the marker a form answer's message row carries:

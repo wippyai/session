@@ -112,6 +112,7 @@ entries:
       suite: session
     source: file://session_test.lua
     imports:
+      wake: wippy.session.approval:wake
       consts: wippy.session:consts
       session: wippy.session.process:session
       message_handlers: wippy.session.process:message_handlers
@@ -126,12 +127,14 @@ entries:
       name: Control config overlays
       type: test
       suite: session
-      comment: Unit tests for control_config trait/tool overlay routing, plus a real-DB artifact meta_patch/publish test
+      comment: Unit tests for control_config trait/tool overlay routing, a real-DB artifact meta_patch/publish test, and the refusal of packaged content in protected sessions
     source: file://control_handlers_test.lua
     modules:
       - uuid
       - security
     imports:
+      message_handlers: wippy.session.process:message_handlers
+      gate_fixtures: app.approval:gate_fixtures
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       control_handlers: wippy.session.process:control_handlers
@@ -159,6 +162,7 @@ entries:
       - security
       - time
     imports:
+      wake: wippy.session.approval:wake
       consts: wippy.session:consts
       command_bus: wippy.session.process:command_bus
       message_handlers: wippy.session.process:message_handlers
@@ -171,6 +175,7 @@ entries:
       artifact_repo: wippy.session.persist:artifact_repo
       message_repo: wippy.session.persist:message_repo
       form_recovery: wippy.session.forms:form_recovery
+      compiler: wippy.agent.compiler:compiler
       context_repo: wippy.session.persist:context_repo
       session_repo: wippy.session.persist:session_repo
       reader: wippy.session.persist:reader
@@ -215,8 +220,26 @@ entries:
       test: wippy.test:test
       wait_for_boot: app:wait_for_boot
       writer: wippy.session.persist:writer
+      approval_repo: wippy.session.persist:approval_repo
+      gate_fixtures: app.approval:gate_fixtures
     method: run_tests
 
+  - name: approval_surfaces_test
+    kind: function.lua
+    meta:
+      name: Approval UI surfaces
+      type: test
+      suite: session
+      comment: The surface tracker, the Session topic sender check and the inbox wake signals (the plugin cases are in plugin_test)
+    source: file://approval_surfaces_test.lua
+    imports:
+      approval_surfaces: wippy.session.process:approval_surfaces
+      session: wippy.session.process:session
+      message_handlers: wippy.session.process:message_handlers
+      wake: wippy.session.approval:wake
+      consts: wippy.session:consts
+      test: wippy.test:test
+    method: run_tests
   - name: session_handlers_test
     kind: function.lua
     meta:
@@ -240,6 +263,7 @@ entries:
       context_repo: wippy.session.persist:context_repo
       message_repo: wippy.session.persist:message_repo
       wait_for_boot: app:wait_for_boot
+      activation: wippy.session.approval:activation
       test: wippy.test:test
     method: run_tests
 
@@ -267,6 +291,7 @@ entries:
       bedrock_mapper: wippy.llm.bedrock:mapper
       google_mapper: wippy.llm.google:mapper
       reader: wippy.session.persist:reader
+      approval_repo: wippy.session.persist:approval_repo
       session: wippy.session.process:session
       session_handlers: wippy.session.process:session_handlers
       test: wippy.test:test
@@ -286,6 +311,7 @@ entries:
       - uuid
       - security
     imports:
+      wake: wippy.session.approval:wake
       command_bus: wippy.session.process:command_bus
       consts: wippy.session:consts
       context_repo: wippy.session.persist:context_repo

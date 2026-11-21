@@ -14,6 +14,7 @@ local session_writer = {
     _artifact_repo = require("artifact_repo"),
     _context_repo = require("context_repo"),
     _session_contexts_repo = require("session_contexts_repo"),
+    _approval_repo = require("approval_repo"),
     session_id = nil :: string?,
     user_id = nil :: string?,
     actor = nil :: any,
@@ -71,14 +72,25 @@ function session_writer:update_meta(updates)
     self._meta_lock:receive()
     local prepared = {}
     for key, value in pairs(updates) do prepared[key] = value end
-    if updates.meta ~= nil then
+    local replaces_config = type(updates.config) == "table"
+    if updates.meta ~= nil or replaces_config then
         local current, read_err = session_writer._session_repo.get(self.session_id, self.user_id)
         if not current then
             self._meta_lock:send(true)
             return nil, read_err or "Failed to read current session metadata"
         end
-        prepared.meta = current.meta or {}
-        for key, value in pairs(updates.meta) do prepared.meta[key] = value end
+        if updates.meta ~= nil then
+            prepared.meta = current.meta or {}
+            for key, value in pairs(updates.meta) do prepared.meta[key] = value end
+        end
+        if replaces_config then
+            -- Only update_tool_approval writes config.tool_approval
+            -- (sticky activation). A whole-config writer keeps the
+            -- stored value, also when its copy of the config is older or
+            -- names another one. The caller's table is updated too, because
+            -- callers then adopt it as ctx.config.
+            updates.config.tool_approval = (current.config or {}).tool_approval
+        end
     end
     local result, err = session_writer._session_repo.update_session_meta(self.session_id, prepared)
     self._meta_lock:send(true)
@@ -87,6 +99,19 @@ function session_writer:update_meta(updates)
     end
 
     return true
+end
+
+-- Changes config.tool_approval, the stored tool approval activation, in one
+-- transaction with the session row locked (approval_repo.update_tool_approval;
+-- mutate gets the committed value and returns the new one, or nil to keep
+-- it). Takes the metadata lock before the transaction, so it never
+-- interleaves with update_meta in this process. Returns the value in force.
+function session_writer:update_tool_approval(mutate)
+    self._meta_lock:receive()
+    local ok, value, err = pcall(session_writer._approval_repo.update_tool_approval, self.session_id, mutate)
+    self._meta_lock:send(true)
+    if not ok then return nil, "Failed to store the tool approval activation: " .. tostring(value) end
+    return value, err
 end
 
 function session_writer:update_title(title)
@@ -254,7 +279,7 @@ end
 
 -- Commits one step atomically: the notes the request sent, in order, then the
 -- assistant row, its pending calls, and any rows that follow the output.
-function session_writer:add_response(content, metadata, calls, notes, trailing)
+function session_writer:add_response(content, metadata, calls, notes, trailing, options)
     calls = calls or {}
     local seen_call_ids = {}
     for _, call in ipairs(calls) do
@@ -301,11 +326,24 @@ function session_writer:add_response(content, metadata, calls, notes, trailing)
     local trailing_err = append_note_rows(rows, trailing)
     if trailing_err then return nil, nil, trailing_err end
     if metadata and metadata.behavior_control_state == "pending" then metadata.behavior_call_message_ids = call_ids end
-    local _, err, dates: any = session_writer._message_repo.create_batch(self.session_id, rows)
+    -- A protected response with calls (options.approval_batch = { turn_id },
+    -- the approval gate enforces): the batch record is stored in the same
+    -- transaction as the rows, its ID is the assistant row ID and its members
+    -- are the call rows in model order.
+    local batch_descriptor = nil
+    local approval_batch = type(options) == "table" and options.approval_batch or nil
+    if type(approval_batch) == "table" and #calls > 0 then
+        local members = {}
+        for _, call in ipairs(calls) do members[#members + 1] = call_ids[call.id] end
+        batch_descriptor = { batch_id = assistant_id, members = members, turn_id = approval_batch.turn_id }
+    end
+    local _, err, dates: any, batch: any = session_writer._message_repo.create_batch(self.session_id, rows,
+        batch_descriptor)
     if err then return nil, nil, err end
     -- The fourth value is the assistant row's stored date: a live update of
     -- the reply carries it, so the chat shows the time the history keeps.
-    return assistant_id, call_ids, nil, type(dates) == "table" and dates[assistant_id] or nil
+    -- The fifth is the stored approval batch record, or nil.
+    return assistant_id, call_ids, nil, type(dates) == "table" and dates[assistant_id] or nil, batch
 end
 
 function session_writer:update_message_meta(message_id, metadata)

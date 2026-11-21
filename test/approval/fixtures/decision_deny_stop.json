@@ -1,0 +1,13 @@
+{
+  "type": "session_command",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "request_id": "req_44",
+  "data": {
+    "command": "tool_approval",
+    "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+    "decision": "deny",
+    "then": "stop",
+    "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",
+    "expected_revision": 1
+  }
+}

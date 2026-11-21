@@ -101,6 +101,15 @@ entries:
       private: true
     variable: SESSION_TOKEN_CHECKPOINT_THRESHOLD
 
+  # wippy.session.env:tool_approval_enforcement
+  - name: tool_approval_enforcement
+    kind: env.variable
+    meta:
+      comment: Native tool-call approval enforcement, enforce (default) or off; off skips the approval gate for every session and is a security downgrade for rollback
+      icon: tabler:shield-check
+      private: true
+    variable: SESSION_TOOL_APPROVAL_ENFORCEMENT
+
   # wippy.session.env:ui_action_ttl_seconds
   - name: ui_action_ttl_seconds
     kind: env.variable

@@ -34,6 +34,7 @@ local consts = {
         DELEGATION_FUNC_ID = "wippy.session.env:delegation_func_id",
         ON_SESSION_END_FUNC_ID = "wippy.session.env:on_session_end_func_id",
         UI_ACTION_TTL_SECONDS = "wippy.session.env:ui_action_ttl_seconds",
+        TOOL_APPROVAL_ENFORCEMENT = "wippy.session.env:tool_approval_enforcement",
         ENCRYPTION_KEY = "ENCRYPTION_KEY"
     },
 
@@ -129,8 +130,17 @@ local consts = {
         MODEL = "model",
         ARTIFACT = "artifact",
         CONTEXT = "context",
-        ATTENTION_CONTEXT_SET = "attention_context_set"
+        ATTENTION_CONTEXT_SET = "attention_context_set",
+        -- Handled by the session plugin, never forwarded.
+        TOOL_APPROVAL_SURFACE = "tool_approval_surface",
+        -- Forwarded only from the user's relay, with sender_user_id stamped
+        -- by the plugin; handled in the session inbox.
+        TOOL_APPROVAL = "tool_approval",
+        TOOL_APPROVAL_GRANT_REVOKE = "tool_approval_grant_revoke"
     },
+
+    -- Tool approval grant states.
+    GRANT_STATUS = { ACTIVE = "active", SUSPENDED = "suspended", REVOKED = "revoked" },
 
     -- Message Types
     MSG_TYPE = {
@@ -170,7 +180,10 @@ local consts = {
         STOP_RESOLVED = "session.stop_resolved",
         STOP_DEADLINE = "session.stop_deadline",
         -- Wake-up from the form state API: { message_id } of a committed answer
-        FORM_ANSWER = "form_answer"
+        FORM_ANSWER = "form_answer",
+        -- Plugin -> Session process only: the live approval UI surfaces of the
+        -- session, { session_id, live, revision }.
+        APPROVAL_SURFACES = "session_approval_surfaces"
     },
 
     -- Upstream Update Types
@@ -352,8 +365,19 @@ local consts = {
         TITLE_FUNCTION_ID = "wippy.session.funcs:title",
         GC_INTERVAL = "300s",
         UI_ACTION_TTL_SECONDS = 120,
+        TOOL_APPROVAL_ENFORCEMENT = "enforce",
     }
 }
+
+-- The operator setting tool_approval_enforcement: "off" turns the approval
+-- gate off for every session, a documented security downgrade for rollback.
+-- Any other value, including a missing or misspelt one, reads as "enforce",
+-- so a typo never turns enforcement off.
+function consts.tool_approval_enforcement(): string
+    local value, _ = env.get(consts.ENV_IDS.TOOL_APPROVAL_ENFORCEMENT)
+    if value == "off" then return "off" end
+    return consts.DEFAULTS.TOOL_APPROVAL_ENFORCEMENT
+end
 
 -- Get database resource only (lightweight)
 function consts.get_db_resource()

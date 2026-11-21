@@ -1,0 +1,6 @@
+{
+  "type": "error",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "code": "tool_approval_unavailable",
+  "message": "A tool call needs your approval, but no open chat window can show it. The assistant stopped."
+}

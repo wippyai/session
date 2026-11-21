@@ -149,14 +149,41 @@ Stop the user asked for, not a failure. Pending tool calls are repaired, form
 answers sent during the stopped turn are delivered without a new turn, and the
 session is stored idle with `can_send` true. Clients get no error.
 
-On Windows, run `make.bat test` and `make.bat lint`, with `WIPPY_BIN` set
-when Wippy is not on PATH. The test target clears only its own test database.
+On Windows, `make.bat <target>` runs the same target as `make <target>` for
+every row below (`make.bat` starts the `make.ps1` adapter, which keeps the Makefile's
+dependencies, arguments, environment variables and failure behavior). Set
+`WIPPY_BIN` when Wippy is not on PATH. The adapter has no command-line
+variables: pass settings as environment variables named like the Makefile
+variables (`TEST_FILTER`, `TEST_ARTIFACTS`, `FRAMEWORK_DIR`, `PGHOST` and so on).
+The adapter needs `sqlite3` on PATH to reset the test database.
+
+| Unix | Windows |
+| --- | --- |
+| `make install` | `make.bat install` |
+| `make test` | `make.bat test` |
+| `make test TEST_FILTER="a b"` | `$env:TEST_FILTER = 'a b'; make.bat test` |
+| `make test-runtime` | `make.bat test-runtime` |
+| `make test-admission` | `make.bat test-admission` |
+| `make test-postgres`, `make test-postgres-full` | `make.bat test-postgres`, `make.bat test-postgres-full` |
+| `make bench` | `make.bat bench` |
+| `make lint` | `make.bat lint` |
+| `make test-ui`, `make lint-ui`, `make check-ui`, `make build-ui` | the same names with `make.bat` |
+| `make verify` | `make.bat verify` |
+
+The test target clears only its own test database. Where `sh` is not on PATH
+(Windows), the six "External test bootstrap" cases are skipped, because they run
+the shell scripts that the Makefile uses; CI runs them on Linux.
+
+`TEST_FILTER` holds one or more space-separated filters, for example
+`TEST_FILTER="app.runtime:handoff_runtime app.persist:checkpoint_repo_test"`;
+each word selects its own suites and nothing else runs. The runtime version that
+reads filters this way is noted in the Makefile above the `test` target.
 
 ## Runtime tests and benchmarks
 
 `make test-postgres` checks the
-affected persistence paths, the forms suites and real handoffs against
-PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
+affected persistence paths, the forms suites, real handoffs and the tool
+approval unit and runtime suites against PostgreSQL. Supply a fresh disposable database with `PGHOST`, `PGPORT`,
 `PGDATABASE`, `PGUSER`, and `PGPASSWORD`; the target never drops it.
 `make test-postgres-full` runs every normal suite and leaves opt-in benchmarks
 to `make bench`. CI uses this full gate with PostgreSQL 17. The harness
@@ -170,7 +197,9 @@ On Unix, `make install test` runs the suite against the locked dependencies.
 `make test-runtime` exercises
 registered tools, agent compilation, the Session
 process, and SQLite persistence with deterministic model responses. It covers
-handoff history, persisted control operations, mixed tool results, and Stop.
+handoff history, persisted control operations, mixed tool results, Stop, and
+tool approval in real Session processes and the session plugin (the wait, the
+recovery entry points, approval UI surfaces and failure injection).
 Required runtime checks fail if a selected suite executes no cases. Set
 `FRAMEWORK_DIR=/absolute/path/to/framework` to use local Agent, LLM, and test
 sources instead of the locked published dependencies. CI checks both modes.
@@ -198,8 +227,10 @@ source snapshots without Git metadata.
 Dependencies, the database, environment file, backups, and benchmark reports
 stay under `TEST_ARTIFACTS` (default `/tmp/wippy-session-tests`). The database is
 backed up before each reset. Override `TEST_BACKUP_DIR` for another backup
-location or `TEST_CONFIG` for an external runtime configuration. These targets
-require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
+location or `TEST_CONFIG` for an external runtime configuration. An external
+configuration must also carry the `app.forms:fixtures:directory` override that
+`make prepare` writes, or the form fixture suites cannot find their files. These
+targets require Wippy, Bash, jq, and SQLite; set `WIPPY` when it is not on PATH.
 
 ## Session retirement
 
@@ -684,24 +715,36 @@ Only the owner’s connected clients receive these events.
 
 ## Session Forms
 
-Session forms let an agent ask the user structured choice questions with the
-`ask_user` tool and get the answer back as an ordinary user message. A form
-is stored as a `wippy-component-tag-1.0` artifact (see Artifacts above) with
-one extra metadata key, `meta.session_form`; no new SQL table is used.
+Session forms let an agent ask the user structured questions in the chat and
+get the answer back as an ordinary user message. A form is stored as a
+`wippy-component-tag-1.0` artifact (see Artifacts above) with one extra
+metadata key, `meta.session_form`; no new SQL table is used.
 
 ### Enable
 
-Add the trait to an agent:
+Add one of the two traits to an agent:
 
 ```yaml
 traits:
+  # Choice questions only.
   - id: wippy.session.forms:ask_user
+  # Or: choice questions and the standard fields.
+  # - id: wippy.session.forms:ask_user_fields
 ```
 
-The agent gets `ask_user` (create a form; ends the turn) and `read_form`
-(read an earlier form's questions, or its answer record, by `form_id`). Every
-agent, with or without the trait, gets a bounded index of the session's forms
-injected into its prompt so it can find a form id without the trait.
+| Trait | Tool it adds | Field types |
+| --- | --- | --- |
+| `wippy.session.forms:ask_user` | `ask_user` | `choice` |
+| `wippy.session.forms:ask_user_fields` | `ask_user_fields` | `choice`, `text`, `textarea`, `number`, `email`, `date`, `checkbox` |
+
+The tool creates a form and ends the turn. Each tool's schema lists only its
+own field types, and the server refuses any other type from it with
+`unsupported_type`, so an agent with `ask_user` can never create a form with
+standard fields. Both traits also add `read_form` (read an earlier form's
+questions, or its answer record, by `form_id`). Attach one of them: the two
+tools have different names, so an agent with both gets both tools and both
+prompts. Every agent, with or without a trait, gets a bounded index of the
+session's forms injected into its prompt so it can find a form id.
 
 ### API
 
@@ -712,8 +755,13 @@ commits the accepted answer and its user message in one transaction, then
 wakes the owning session process; a missed wake-up is recovered from the
 stored row on the next session start.
 
-V1 supports choice fields only: single selection, multiple selection,
-optional/required, notes on a chosen option, and a free-text "Other" answer.
+A form holds choice fields (single or multiple selection, notes on a chosen
+option, a free-text "Other" answer) and standard fields: `text`, `textarea`,
+`email`, `number`, `date` and `checkbox`, each optional or required. A form
+with only choice fields is form version 1; a form with any standard field is
+version 2, and an older `wippy-form` shows a "needs a newer version" notice
+for it. The server checks every answer, including a text field's `pattern`,
+which the browser never evaluates.
 
 ### Answers and steering
 
@@ -731,11 +779,110 @@ that asks a form still ends there; steering sent during that turn starts the
 next turn.
 
 See [Session Forms (framework)](https://docs.wippy.ai/en/framework/session-forms)
-for the full `ask_user` / `read_form` contract, the answer record shape, late
+for the full `ask_user`, `ask_user_fields` and `read_form` contract, the answer record shape, late
 answers, and how an answer is admitted into the conversation, and
 [Session Forms (frontend)](https://docs.wippy.ai/en/frontend/micro-frontends/session-forms)
 for the `wippy-form` / `wippy-form-answers` components and the HTTP contract
 from the browser side.
+
+## Tool approval
+
+Tool approval asks the user before a tool call runs. The user approves the
+call, approves all calls of a kind, or denies it. The messages between the
+Session and a chat client are in
+[docs/tool-approval-protocol.md](docs/tool-approval-protocol.md).
+
+### Turn it on
+
+Add the trait to an agent. Every option is optional:
+
+```yaml
+traits:
+  - id: wippy.session.traits:tool_approval
+    context:
+      require: marked
+      approve_all: "off"
+      timeout_seconds: 900
+      max_requests_per_turn: 10
+```
+
+| Option | Default | Values |
+| --- | --- | --- |
+| `require` | `marked` | `marked`, `all` |
+| `approve_all` | `off` | `off`, `batch`, `tool`, `session` |
+| `timeout_seconds` | 900 | 30 to 3600 |
+| `max_requests_per_turn` | 10 | 1 to 50 |
+
+- With `require: marked`, only tools that set `approval` in their registry
+  meta ask (`approval: required`, or `approval: { required: true,
+  approve_all: true }`). Delegation calls never ask under `marked`. With
+  `require: all`, every call needs approval, delegation calls included, but an
+  Approve all grant can cover a call, and a repeat of a call denied earlier in
+  the turn settles without a card. No tool is exempt because it only reads
+  data.
+- With `approve_all: "off"`, Approve all is offered only for a tool whose
+  author set `approval.approve_all: true`.
+- An invalid context, including an unknown key, fails the turn with
+  `tool_approval_config_invalid` before any model call.
+- Activation is sticky. The first agent step with the trait stores the settings in
+  the session. Switching to an agent without the trait does not
+  turn approval off, and the stricter `require` wins.
+
+`GET /api/v1/sessions/capabilities` reports `tool_approval: 1` when the Session
+supports it. A chat client must declare an approval surface for the session
+(see the protocol document). With a client that does not support the
+capability, every call that needs approval settles at once as not run
+(`approval_ui_unavailable`), and the turn ends with a notice.
+
+If a client declared a surface before and none is live now, the request stays
+pending for a 120 second grace period, or until its deadline.
+
+### Operator switch
+
+The `tool_approval_enforcement` requirement of `wippy/session` (environment
+variable `SESSION_TOOL_APPROVAL_ENFORCEMENT`) is `enforce` by default. The
+value `off` skips the approval gate for every session and logs a warning for
+each skipped check. This is a security downgrade, meant for rollback. Any other
+value reads as `enforce`. It skips only the gate. The trait is still
+validated, so an invalid context still fails the turn. The activation is still
+stored, so the Web Host still isolates content and the `isolation_required`
+refusal below still applies.
+
+```yaml
+- name: dep.wippy.session
+  kind: ns.dependency
+  component: wippy/session
+  parameters:
+    - name: tool_approval_enforcement
+      value: "off"
+```
+
+### Artifacts in protected sessions
+
+The Web Host cannot isolate JSON or packaged web content. In a protected
+session the Session refuses a `_control.artifacts` item that holds such
+content, new or as an update leaves it. That includes a number or a boolean,
+and text that parses as a JSON number, boolean or null. It allows HTML,
+markdown, a JSON string, a Session form tag (`wippy-form`) without `on*`
+props, and `view_ref` items. One refused item refuses the whole
+`_control.artifacts` list of the call, and nothing is written. The tool call
+fails with an error that starts with `isolation_required:`, and the model can
+return HTML or markdown instead.
+
+### Known limits
+
+- Only tool calls of chat sessions are checked. Dataflow, Temporal, CLI loops
+  and direct `funcs.call` are not.
+- Tools that a delegated child agent calls are not checked.
+- A pending approval does not survive a Session process restart. Recovery
+  reports the call as not run or as an unknown outcome. No call runs again.
+- Approval protects against the model, tool results and other users. It does
+  not protect against code that already runs as the user in the browser, such
+  as an app page.
+- Where the registry cannot pin a tool version, a small race remains between
+  the recheck at release and the start of the call.
+- Deleting a session while its process runs ends that process with an error.
+  This was already so before tool approval.
 
 ## Upgrading to 0.7.0
 
