@@ -187,7 +187,7 @@ wippy-form::part(option-selected) {
 ### Known gaps
 
 - The send buttons and the composer send buttons are PrimeVue defaults. They follow the theme's primary colour and not `--wippy-form-accent`, because a `.p-button` override would shadow the theme.
-- The note and Other textareas use the theme's `.p-textarea` colours, and no token exists for them. Their only local rule is `flex: 1 1 auto; min-width: 0` in `src/styles.css`, because the theme's input group rule does not grow a bare `Textarea`.
+- The note and Other textareas use the theme's `.p-textarea` colours, and no token exists for them, except in dark (see "Fields form" known gaps for the shared rule). Their other local rule is `flex: 1 1 auto; min-width: 0` in `src/styles.css`, because the theme's input group rule does not grow a bare `Textarea`.
 
 ---
 
@@ -306,4 +306,4 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 - The calendar covers years 100 to 9999, because PrimeVue reads years 0 to 99 as 1900 to 1999. A date before year 100 is still a valid answer, but it can only be typed. On a touch screen the box has no keyboard (PrimeVue sets `inputmode="none"`), so a field whose whole range lies before year 100 cannot be answered there.
 - The calendar's day cells have no accessible name beyond the day number (PrimeVue's default); the panel itself is a dialog labelled "Choose Date". Not changed here.
 - The theme (and PrimeVue's own alignment of an overlay) opens the calendar at least as wide as the date control. The date control is bounded to `--wippy-form-date-width` (20rem), so the calendar follows that width on its own. There is no override of the calendar and no `!important` in `styles.css` for it (`styles.test.ts` checks both).
-- In the Dark theme the textarea is darker than the single-line inputs. Both are the same PrimeVue components this form uses for the other fields; the difference is in the theme's own styles (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`), so it is a theme-level change, not something to override here.
+- In the dark theme the theme paints a textarea darker than a single-line input (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`). This form's own text areas (the `textarea` field and the note and Other boxes) take the text input's dark background through one rule in `src/styles.css`, on their own classes and with the theme's `dark:` variant, so both dark forms apply and light mode is unchanged. A disabled text area keeps the theme's disabled colour. `styles.test.ts` checks that the rule uses the dark background of the theme's `inputtext.css`.

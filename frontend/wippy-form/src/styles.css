@@ -339,6 +339,10 @@ span.w-form__option-mark {
   min-width: 0;
   max-height: 10em;
 }
+/* This form's text areas in dark: the theme paints a Textarea near black (surface-950) while its text inputs are surface-800, so an enabled text area here takes the text input's dark background, like the form's other inputs. The `dark:` variant is the theme's own, so both dark forms apply. A disabled box keeps the theme's disabled colour, and light mode is unchanged. */
+textarea:is(.w-form__field-input, .w-form__note-input, .w-form__other-input):enabled {
+  @apply dark:bg-surface-800;
+}
 
 /* ---------- Error / keys / footer ---------- */
 /* Shared by the question error and the length alerts under the note and Other boxes. */
