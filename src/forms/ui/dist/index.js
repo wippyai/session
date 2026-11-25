@@ -10614,7 +10614,7 @@ const ef = /* @__PURE__ */ de({
   },
   emits: ["update:modelValue"],
   setup(e, { expose: t, emit: n }) {
-    const r = e, i = n, o = B(() => typeof r.modelValue == "string" ? r.modelValue : ""), a = M("field-input"), s = z(null);
+    const r = e, i = n, o = B(() => typeof r.modelValue == "string" ? r.modelValue : ""), a = M("field-input", "textarea"), s = z(null);
     return t({ focusFirstControl: () => s.value?.focusFirstControl() }), (l, d) => (f(), L(jt, {
       ref_key: "shell",
       ref: s,
