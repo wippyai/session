@@ -2,16 +2,22 @@ import { describe, expect, it } from 'vitest'
 import { contrast, resolveColor } from './test-support/contrast'
 import css from './styles.css?raw'
 
-/** The declaration block of the first rule with this selector (a regex source), or a thrown error when there is none. */
-function ruleBody(selectorPattern: string): string {
-  const body = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(css)?.[1]
+/** CSS with its comments removed, so prose and commented-out rules are not read as rules. */
+const stripComments = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '')
+
+/** The stylesheet's rules with comments removed, so prose about colours is not mistaken for a declaration. */
+const rules = stripComments(css)
+
+/**
+ * The declaration block of the first rule with this selector (a regex source) in `source`, the stylesheet by default,
+ * or a thrown error when there is none. Comments are removed first, so a rule that is commented out is not found.
+ */
+function ruleBody(selectorPattern: string, source: string = css): string {
+  const body = new RegExp(`${selectorPattern}\\s*\\{([^}]*)\\}`).exec(stripComments(source))?.[1]
   if (body === undefined)
     throw new Error(`styles.css has no rule for ${selectorPattern}`)
   return body
 }
-
-/** The stylesheet's rules with comments removed, so prose about colours is not mistaken for a declaration. */
-const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
 /** The fallback of a private variable declared as `--_name: var(--wippy-form-x, fallback);` on `:host`. */
 function fallbackOf(name: string): string {
@@ -46,6 +52,11 @@ describe('styles.css: Submit while a send is in flight', () => {
 describe('styles.css: the rule helpers', () => {
   it('ruleBody throws for a selector with no rule, so a missing rule cannot pass a "does not contain" assertion', () => {
     expect(() => ruleBody('\\.w-form__no-such-rule')).toThrow('no rule')
+  })
+
+  it('ruleBody does not find a rule that is commented out, so a disabled rule cannot pass', () => {
+    expect(ruleBody('\\.w-form__probe', '.w-form__probe { margin: 0; }')).toMatch(/margin:\s*0/)
+    expect(() => ruleBody('\\.w-form__probe', '/* .w-form__probe { margin: 0; } */')).toThrow('no rule')
   })
 })
 
