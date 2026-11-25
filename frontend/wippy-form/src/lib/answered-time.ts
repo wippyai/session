@@ -16,7 +16,8 @@
  * so the form reads the ISO 8601 extended form and the exact fallback, and
  * gives no answered time for anything else, including forms the chat would
  * still show (the basic `20261125T124718Z`, a week date, `T12` with no
- * minutes) and values the chat refuses.
+ * minutes, any time written before the year 2000) and values the chat
+ * refuses.
  */
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -85,9 +86,19 @@ function localInstant(wallAsUtc: number, timeZone: string | undefined): number {
   return wallAsUtc - Math.min(o2, o3) * MINUTE
 }
 
-/** The written fields as a UTC timestamp, or `null` when they are not a real calendar day and clock time. */
+/**
+ * No form was answered before this year. Older values are refused: zone
+ * offsets before 1972 can have seconds (Africa/Monrovia was -0:44:30), which
+ * the minute-based resolution below cannot match, and Date.UTC reads years 0
+ * to 99 as 1900 to 1999.
+ */
+const FIRST_YEAR = 2000
+
+/** The written fields as a UTC timestamp, or `null` when they are not a real calendar day and clock time, or are before `FIRST_YEAR`. */
 function writtenAsUtc(fields: string[], endOfDayAllowed: boolean, fraction: string | undefined): number | null {
   const [year, month, day, hour, minute, second] = fields.map(field => Number(field ?? 0))
+  if (year < FIRST_YEAR)
+    return null
   // ISO 8601 (and Luxon) read 24:00:00 as the midnight that ends the day, but not 24:00:00.5.
   const endOfDay = endOfDayAllowed && hour === 24 && minute === 0 && second === 0 && !/[1-9]/.test(fraction ?? '')
   const ts = Date.UTC(year, month - 1, day, endOfDay ? 0 : hour, minute, second)

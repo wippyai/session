@@ -74,6 +74,15 @@ describe('formatAnsweredAt', () => {
     expect(formatAnsweredAt('2026-11-25 12:47:18Z')).toBeNull()
   })
 
+  it('has no text for a time written before 2000, when no form was answered', () => {
+    // The chat shows Jan 1, 1970 00:00: Monrovia's 1970 offset was -0:44:30, which has seconds.
+    expect(formatAnsweredAt('1970-01-01T00:00:00', 'Africa/Monrovia')).toBeNull()
+    // The chat shows Jan 1, 0100 00:00: Date.UTC reads years 0 to 99 as 1900 to 1999.
+    expect(formatAnsweredAt('0100-01-01T00:00:00', 'America/New_York')).toBeNull()
+    expect(formatAnsweredAt('1999-12-31T23:59:59Z', 'UTC')).toBeNull()
+    expect(formatAnsweredAt('2000-01-01T00:00:00Z', 'UTC')).toBe('Jan 1, 2000 00:00')
+  })
+
   it('has no text for a form the chat reads but this does not, so it never shows a different time', () => {
     expect(formatAnsweredAt('20261125T124718Z')).toBeNull()
     expect(formatAnsweredAt('2026-11-25T12Z')).toBeNull()
