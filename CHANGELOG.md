@@ -4,7 +4,7 @@
 
 ### Bug Fixes
 
-* **forms:** in the read-only view of a form, "Skipped" lines up with the other answers (it had a leading space), and a choice question has the same space under its label as the other fields. The answered time is written like the chat's message times (`Answered Nov 25, 2026 12:47`) instead of in the browser's locale format with seconds.
+* **forms:** in the read-only view of a form, "Skipped" lines up with the other answers (it had a leading space), and a choice question has the same space under its label as the other fields. The answered time is written like the chat's message times (`Answered Nov 25, 2026 12:47`) instead of in the browser's locale format with seconds. Like the Web Host chat (1.0.65 and later), it shows the stored time in the browser's time zone, so it matches the answer message beside it.
 
 * Preserve manual session names during automatic title generation. Running sessions publish both title paths through the existing owner using the stored title; renaming a stopped session persists without starting it.
 * Keep the originating user-request text in prompts after a mid-turn checkpoint, alongside the summary and newest tool results. Preserve user authority, avoid reloading summarized attachments, and keep later user turns distinct from the checkpointed request. Bound restored excerpts to 6000 UTF-8 bytes while retaining both ends, and place the original task before retained steering even when its anchor is unavailable. The resume note preserves later corrections and completed progress.

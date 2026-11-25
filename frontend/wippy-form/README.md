@@ -123,7 +123,7 @@ Each part has the class `w-form__<part>`. A state adds the part `<part>-<state>`
 | `footer`, `footer-text`, `send-all` | | The review footer, its missing-answers text, and "Send answers" |
 | `summary`, `summary-item`, `summary-question`, `summary-answer` | | The read-only summary |
 | `answer-item`, `answer-note`, `answer-own`, `answer-empty` | | One answer, its note, "Own answer:", and "Skipped", shared by the review and the summary |
-| `error`, `keys`, `status` | | The error line, the keyboard hint, and the delivery status with the answered time. The time is written like the chat's message times, for example `Answered Nov 25, 2026 12:47` (English month, 24-hour time, the user's time zone). After a send, `status` takes focus by script and shows the theme focus ring around its text |
+| `error`, `keys`, `status` | | The error line, the keyboard hint, and the delivery status with the answered time. The time is written like the chat's message times, for example `Answered Nov 25, 2026 12:47` (English month, 24-hour time). Like the Web Host chat since 1.0.65, it shows the stored time in the browser's time zone, and a stored time with no offset as written. After a send, `status` takes focus by script and shows the theme focus ring around its text |
 | `code` | | Inline code from backticks |
 
 ### Host attributes

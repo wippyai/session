@@ -73,10 +73,11 @@ describe('IdleForm — V2 read-only values', () => {
     expect(mountIdle().text()).toContain('Answered')
   })
 
+  // The fixture's submitted_at is 2026-10-01T10:00:00.000Z, shown in the test's own time zone, as the chat would show it.
   it('writes the answered time like the chat\'s message times, with no seconds', () => {
     const status = mountIdle().get('[part~="status"]').text()
-    expect(status).toBe(`Answered ${formatAnsweredAt(answered.submitted_at)}`)
-    expect(status).toMatch(/^Answered [A-Z][a-z]{2} \d{1,2}, \d{4} \d{2}:\d{2}$/)
+    expect(status).toBe(`Answered ${formatAnsweredAt('2026-10-01T10:00:00.000Z')}`)
+    expect(status).toMatch(/^Answered Oct 1, 2026 \d{2}:00$/)
   })
 
   it('shows the answered state in the root part', () => {
