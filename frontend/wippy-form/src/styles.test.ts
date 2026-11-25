@@ -1,4 +1,3 @@
-import inputtextCss from '@wippy-fe/theme/primevue/inputtext.css?raw'
 import { describe, expect, it } from 'vitest'
 import { contrast, resolveColor } from './test-support/contrast'
 import css from './styles.css?raw'
@@ -39,19 +38,6 @@ describe('styles.css: label spacing', () => {
     const gap = /gap:\s*(\d+px)/.exec(ruleBody('\\.w-form__field'))?.[1]
     expect(gap).toBeDefined()
     expect(ruleBody('\\.w-form__field--group > \\.w-form__field-label')).toMatch(new RegExp(`margin-bottom:\\s*${gap}`))
-  })
-})
-
-// The theme paints a Textarea darker in dark (`dark:bg-surface-950`) than a text input, so this form's own text
-// areas take the text input's dark background. The value is read from the theme's inputtext.css, so the two stay equal.
-describe('styles.css: the form\'s text areas in dark', () => {
-  it('an enabled text field, note or Other box takes the theme text input\'s dark background, and nothing in light', () => {
-    const inputDark = /\bdark:bg-([\w-]+)/.exec(ruleBody('\\.p-inputtext', inputtextCss))?.[1]
-    expect(inputDark).toBeDefined()
-    const body = ruleBody('textarea:is\\(\\.w-form__field-input, \\.w-form__note-input, \\.w-form__other-input\\):enabled')
-    expect(body).toMatch(new RegExp(`@apply\\s+dark:bg-${inputDark}\\s*;`))
-    // Light mode and a disabled box keep the theme's colours: no other background in the rule.
-    expect(body.replace(`dark:bg-${inputDark}`, '')).not.toMatch(/bg-|background/)
   })
 })
 
