@@ -2,6 +2,7 @@ import type { FormState } from '../lib/definition'
 import { PrimeVuePlugin } from '@wippy-fe/theme/primevue-plugin'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
+import { formatAnsweredAt } from '../lib/answered-time'
 import { formState } from '../test-support/fixtures'
 import IdleForm from './idle-form.vue'
 
@@ -59,12 +60,23 @@ describe('IdleForm — V2 read-only values', () => {
     expect(valueOf(mountIdle(), 'Anything else').text()).toBe('Skipped')
   })
 
+  // The value shows spaces as stored (pre-wrap), so a space around the word would indent it.
+  it('writes "Skipped" with no space around it, so it lines up with the other values', () => {
+    expect(valueOf(mountIdle(), 'Anything else').element.textContent).toBe('Skipped')
+  })
+
   it('shows no "(required)" marker on a read-only field', () => {
     expect(mountIdle().text()).not.toContain('(required)')
   })
 
   it('keeps the delivery and answered-time lines', () => {
     expect(mountIdle().text()).toContain('Answered')
+  })
+
+  it('writes the answered time like the chat\'s message times, with no seconds', () => {
+    const status = mountIdle().get('[part~="status"]').text()
+    expect(status).toBe(`Answered ${formatAnsweredAt(answered.submitted_at)}`)
+    expect(status).toMatch(/^Answered [A-Z][a-z]{2} \d{1,2}, \d{4} \d{2}:\d{2}$/)
   })
 
   it('shows the answered state in the root part', () => {

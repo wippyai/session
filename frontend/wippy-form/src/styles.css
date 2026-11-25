@@ -532,6 +532,10 @@ span.w-form__option-mark {
   font-weight: var(--_label-weight);
   overflow-wrap: anywhere;
 }
+/* A choice's label is the fieldset's <legend>, which the browser lays out outside the fieldset's flex box, so the field's 6px gap does not reach it. Its margin is that gap. */
+.w-form__field--group > .w-form__field-label {
+  margin-bottom: 6px;
+}
 .w-form__field-row,
 .w-form__field-option {
   display: flex;

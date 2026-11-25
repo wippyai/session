@@ -27,6 +27,14 @@ describe('styles.css: a stored answer', () => {
   })
 })
 
+describe('styles.css: label spacing', () => {
+  it('a choice\'s legend is as far from what follows as the field gap, which does not reach a legend', () => {
+    const gap = /gap:\s*(\d+px)/.exec(ruleBody('\\.w-form__field'))?.[1]
+    expect(gap).toBeDefined()
+    expect(ruleBody('\\.w-form__field--group > \\.w-form__field-label')).toMatch(new RegExp(`margin-bottom:\\s*${gap}`))
+  })
+})
+
 describe('styles.css: Submit while a send is in flight', () => {
   it('shows the progress cursor on the sending button, and gives it pointer events so the cursor shows through the theme\'s inert `p-disabled`', () => {
     const body = ruleBody('\\.w-form \\.w-form__send--sending')

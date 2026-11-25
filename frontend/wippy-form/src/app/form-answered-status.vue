@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FormState } from '../lib/definition'
 import { computed, ref } from 'vue'
+import { formatAnsweredAt } from '../lib/answered-time'
 import { partAttrs } from '../lib/part-attrs'
 
 /**
@@ -12,11 +13,7 @@ const props = defineProps<{
   state: Pick<FormState, 'late' | 'delivery' | 'submitted_at'>
 }>()
 
-const answeredAt = computed(() => {
-  const iso = props.state.submitted_at
-  const date = iso ? new Date(iso) : null
-  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : null
-})
+const answeredAt = computed(() => formatAnsweredAt(props.state.submitted_at))
 
 const statusEl = ref<HTMLElement | null>(null)
 
