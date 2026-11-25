@@ -1,0 +1,71 @@
+{
+  "_case": "cancelled after dispatch; status projects to error",
+  "message_id": "019ad0ab-0000-7000-8000-000000000010",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "type": "function",
+  "date": "2026-11-25T10:15:00Z",
+  "data": "{\"api_key\":\"[hidden: sensitive]\",\"invoice_id\":\"inv_42\"}",
+  "metadata": {
+    "call_id": "call_invoice_42",
+    "function_name": "lookup_invoice",
+    "registry_id": "app.tools:lookup_invoice",
+    "agent_id": "app.agents:billing",
+    "status": "error",
+    "outcome": "cancelled",
+    "result": "Session stopped while the call was running.",
+    "duration_ms": 400
+  },
+  "details": {
+    "arguments": {
+      "level": "full",
+      "availability": "available",
+      "summary": "\"api_key\": \"[hidden: sensitive]\", \"invoice_id\": \"inv_42\"",
+      "preview": {
+        "value": {
+          "api_key": "[hidden: sensitive]",
+          "invoice_id": "inv_42"
+        },
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": [
+        "/api_key"
+      ]
+    },
+    "result": {
+      "level": "full",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "error": {
+      "level": "full",
+      "availability": "available",
+      "summary": "The tool failed",
+      "preview": {
+        "value": "Session stopped while the call was running.",
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "full",
+      "availability": "available",
+      "summary": "Ran for 0.4 s",
+      "preview": {
+        "value": 400,
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": []
+    }
+  },
+  "details_revision": 4
+}
+

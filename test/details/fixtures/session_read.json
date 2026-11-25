@@ -1,0 +1,29 @@
+{
+  "_case": "session read reports effective reader levels before per-row limits",
+  "success": true,
+  "server_now": "2026-11-25T10:15:30Z",
+  "details_revision": 4,
+  "session": {
+    "session_id": "019ad0ab-0000-7000-8000-000000000001",
+    "user_id": "user-1",
+    "status": "idle",
+    "title": "Invoice payment",
+    "kind": "default",
+    "activity": null,
+    "activity_revision": 7,
+    "tool_approval": {
+      "active": true,
+      "revision": 3,
+      "grants": []
+    },
+    "details": {
+      "arguments": "full",
+      "result": "summary",
+      "error": "summary",
+      "timing": "full",
+      "thinking": "summary"
+    },
+    "details_revision": 4
+  }
+}
+

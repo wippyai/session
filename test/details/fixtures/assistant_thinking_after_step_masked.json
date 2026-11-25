@@ -1,0 +1,39 @@
+{
+  "_case": "phase 2 after_step; exact sensitive argument string of at least four characters masked in thinking",
+  "message_id": "019ad0ab-0000-7000-8000-000000000038",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "type": "assistant",
+  "date": "2026-11-25T10:15:00Z",
+  "data": "The invoice is paid.",
+  "metadata": {
+    "agent_id": "app.agents:billing",
+    "model": "billing-model",
+    "finish_reason": "stop",
+    "usage": {
+      "prompt_tokens": 120,
+      "completion_tokens": 32,
+      "total_tokens": 152
+    },
+    "reasoning": {
+      "duration_ms": 12000,
+      "kind": "text"
+    }
+  },
+  "details": {
+    "thinking": {
+      "level": "full",
+      "availability": "available",
+      "summary": "Thought for 12 s",
+      "preview": {
+        "value": "I will use the credential [hidden: sensitive] to verify the invoice.",
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": [],
+      "text": "I will use the credential [hidden: sensitive] to verify the invoice."
+    }
+  },
+  "details_revision": 4
+}
+

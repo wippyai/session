@@ -1,0 +1,55 @@
+{
+  "_case": "live function_call",
+  "type": "function_call",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "message_id": "019ad0ab-0000-7000-8000-000000000016",
+  "call_id": "call_invoice_42",
+  "function_name": "lookup_invoice",
+  "details": {
+    "arguments": {
+      "level": "full",
+      "availability": "available",
+      "summary": "\"api_key\": \"[hidden: sensitive]\", \"invoice_id\": \"inv_42\"",
+      "preview": {
+        "value": {
+          "api_key": "[hidden: sensitive]",
+          "invoice_id": "inv_42"
+        },
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": [
+        "/api_key"
+      ]
+    },
+    "result": {
+      "level": "full",
+      "availability": "pending",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "error": {
+      "level": "full",
+      "availability": "pending",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "full",
+      "availability": "pending",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    }
+  },
+  "outcome": null,
+  "duration_ms": null,
+  "details_revision": 4
+}
+

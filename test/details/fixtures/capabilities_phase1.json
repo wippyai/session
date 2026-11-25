@@ -1,0 +1,20 @@
+{
+  "_case": "phase 1 capabilities; thinking fields absent",
+  "success": true,
+  "capabilities": {
+    "schema": "wippy.session.capabilities.v1",
+    "message_receipt": 1,
+    "steering": 1,
+    "tool_approval": 1,
+    "call_details": 1,
+    "session_show_tool_details": "full",
+    "details_limits": {
+      "preview_bytes": 8192,
+      "preview_depth": 6,
+      "string_bytes": 1024,
+      "key_chars": 128,
+      "summary_chars": 80
+    }
+  }
+}
+

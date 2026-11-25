@@ -1,0 +1,58 @@
+{
+  "_case": "call success at summary",
+  "message_id": "019ad0ab-0000-7000-8000-000000000002",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "type": "function",
+  "date": "2026-11-25T10:15:00Z",
+  "data": null,
+  "metadata": {
+    "call_id": "call_invoice_42",
+    "function_name": "lookup_invoice",
+    "registry_id": "app.tools:lookup_invoice",
+    "agent_id": "app.agents:billing",
+    "status": "success",
+    "outcome": null,
+    "result": null,
+    "duration_ms": 2100
+  },
+  "details": {
+    "arguments": {
+      "level": "summary",
+      "availability": "available",
+      "summary": "\"api_key\": \"[hidden: sensitive]\", \"invoice_id\": \"inv_42\"",
+      "preview": null,
+      "has_full": false,
+      "masked_paths": [
+        "/api_key"
+      ]
+    },
+    "result": {
+      "level": "summary",
+      "availability": "available",
+      "summary": "\"access_token\": \"[hidden: sensitive]\", \"invoice_id\": \"inv_42\" +1 more",
+      "preview": null,
+      "has_full": false,
+      "masked_paths": [
+        "/access_token"
+      ]
+    },
+    "error": {
+      "level": "summary",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "summary",
+      "availability": "available",
+      "summary": "Ran for 2.1 s",
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    }
+  },
+  "details_revision": 4
+}
+
