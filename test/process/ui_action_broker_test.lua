@@ -174,6 +174,11 @@ local function define_tests()
             test.is_nil(broker.pending[pending_key])
             test.eq(sends[2].payload.status, "expired")
         end)
+        it("returns the binding's expiry with the turn runtime", function()
+            local broker = harness(30)
+            local runtime = bind(broker, "s1", "conn-1", "host-1")
+            test.eq(runtime.expires_at, 1030, "now plus the configured lifetime")
+        end)
         it("routes exact specialized inspection IDs without overlay authority", function()
             for _, name in ipairs({"attention_find_semantic", "attention_find_css", "attention_get_node", "attention_get_tree",
                 "attention_get_geometry", "attention_get_cursor", "attention_get_focus", "attention_get_selection", "attention_hit_test"}) do

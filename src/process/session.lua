@@ -11,11 +11,16 @@ local session_handlers = require("session_handlers")
 local session_repo = require("session_repo")
 local agent_context = require("agent_context")
 local tools = require("tools")
-local message_repo = require("message_repo")
-local form_recovery = require("form_recovery")
+local approval_recovery = require("approval_recovery")
 local interruption_boundary = require("interruption_boundary")
 local uuid = require("uuid")
 local input_policy = require("input_policy")
+local wake = require("wake")
+local approval_repo = require("approval_repo")
+local approval_gate = require("approval_gate")
+local approval_commands = require("approval_commands")
+local activation = require("activation")
+local approval_projection = require("approval_projection")
 
 type SessionArgs = {
     session_id: string,
@@ -60,6 +65,46 @@ local function clone(value)
     return result
 end
 
+-- The turn whose tool approval batches a Stop or finish closes: the turn of a
+-- protected session, as the approval gate names it. nil when the session is
+-- not protected.
+local function approval_turn(context: any): string?
+    if type(context.config) ~= "table" or context.config.tool_approval == nil then return nil end
+    return approval_gate.turn_id(context)
+end
+
+-- Finish, idle retire or shutdown of a protected session while a turn runs:
+-- one closure transaction writes the turn fence and closes the turn's open
+-- approval batches as interrupted. A failure is logged; the gate still closes
+-- the batch when the finish wakes it.
+local function close_approvals_for_finish(context: any)
+    local turn_id = approval_turn(context)
+    if not turn_id or not (context.turn_state and context.turn_state.active) then return end
+    local _, err = approval_repo.transact(context.session_id, function(dbtx)
+        return approval_repo.fence_turn(dbtx, context.session_id, turn_id, "finish")
+    end)
+    if err then
+        logger:warn("tool approval finish closure was not stored",
+            { session_id = context.session_id, error = tostring(err) })
+    end
+end
+
+-- A finish taken back before the session started to finish: the finish fence
+-- it wrote for the running turn is cleared, so later batches of the turn are
+-- created open again. The batches it closed stay closed.
+local function cancel_approvals_finish(context: any)
+    context.approval_wake:cancel_finish()
+    local turn_id = approval_turn(context)
+    if not turn_id then return end
+    local _, err = approval_repo.transact(context.session_id, function(dbtx)
+        return approval_repo.clear_turn_fence(dbtx, context.session_id, turn_id, "finish")
+    end)
+    if err then
+        logger:warn("tool approval finish fence was not cleared",
+            { session_id = context.session_id, error = tostring(err) })
+    end
+end
+
 local function commit_stop(context: any, session_upstream: any, request_id: string?): (boolean?, string?)
     if context.stop_requested then
         if request_id then session_upstream:update_session({
@@ -98,6 +143,9 @@ local function commit_stop(context: any, session_upstream: any, request_id: stri
         stopped, stop_err = context.writer:stop_with_input_rollback(context.input_apply_batch or {}, {
             status = context.status,
             meta = { interaction = interaction },
+            -- A protected session closes the turn's approval batches and
+            -- writes the turn fence in the Stop transaction.
+            approval_turn_id = running and approval_turn(context) or nil,
         }, boundary)
     else
         stop_err = boundary_err
@@ -295,8 +343,63 @@ local function commit_held_before_form(ctx: any, written: any)
     end
 end
 
-local function settle_exit(bus: any, err: any)
-    return bus:fail(err)
+-- The recovery of the session's interrupted tool rounds
+-- (approval_recovery): reconcile_batches closes the unfinished approval
+-- batches, recover_calls does that and then settles the pending call rows
+-- after the current checkpoint. `protected` says whether the session has a
+-- stored tool approval activation. `session_upstream` reaches the user's
+-- clients, which get the approval records and the activity recovery changed.
+local function recovery_hooks(session_id: string, session_reader: any, protected: () -> boolean,
+                              session_upstream: any?): any
+    return {
+        reconcile_batches = function()
+            return approval_recovery.reconcile(session_id, protected(), session_upstream)
+        end,
+        recover_calls = function()
+            return approval_recovery.recover_calls(session_id,
+                session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), protected(),
+                session_upstream)
+        end,
+    }
+end
+
+-- Exit settlement. The bus takes no further operation (begin_exit); the
+-- operation it runs keeps the settlement of its own calls until it returns.
+-- wait_stopped waits for the bus to stop (while the caller keeps answering
+-- the requests that operation may make) and returns the bus's error, if
+-- any. Then the bus settles what is left (command_bus:fail). Returns nil
+-- and the first error.
+local function settle_exit(bus: any, err: any, wait_stopped: () -> any)
+    bus:begin_exit()
+    local stop_err = wait_stopped()
+    local _, settle_err = bus:fail(err)
+    return nil, settle_err or stop_err
+end
+
+-- The live approval UI surfaces of this session, pushed by the parent session
+-- plugin on the dedicated topic: { session_id, live, revision }. Accepted
+-- only from the plugin process that started this process and only for this
+-- session; a lower or equal revision is ignored.
+-- Wakes a waiting approval gate and, when a surface is live in a protected
+-- session, stores config.tool_approval.ui_declared_at once. Returns true when
+-- the set was accepted.
+local function accept_surfaces(ctx: any, sender: any, payload: any): boolean
+    if ctx.parent_pid == nil or sender ~= ctx.parent_pid then return false end
+    if type(payload) ~= "table" or payload.session_id ~= ctx.session_id then return false end
+    local live, revision = tonumber(payload.live), tonumber(payload.revision)
+    if not live or live < 0 or live % 1 ~= 0 or not revision then return false end
+    local current = ctx.approval_surfaces
+    if type(current) == "table" and revision <= (tonumber(current.revision) or 0) then return false end
+    ctx.approval_surfaces = { live = live, revision = revision }
+    ctx.approval_wake:notify(wake.KIND.SURFACES)
+    if live > 0 then
+        local _, note_err = activation.note_declared(ctx)
+        if note_err then
+            logger:warn("approval surface history was not stored",
+                { session_id = ctx.session_id, error = tostring(note_err) })
+        end
+    end
+    return true
 end
 
 -- Runs `work` in its own coroutine of the session process, beside the
@@ -335,7 +438,8 @@ local function turn_boundary(ctx: any, bus: any): (boolean?, string?)
     return true
 end
 
-local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any)
+-- `sender` is the process the inbox message came from.
+local function route_input(ctx: any, bus: any, topic: string, payload_data: any, session_state: any, sender: any?)
     payload_data = payload_data or {}
     if payload_data.conn_pid then ctx.upstream.conn_pid = payload_data.conn_pid end
     if topic == consts.TOPICS.STOP or
@@ -346,8 +450,11 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
             if id_err then return nil, id_err end
             stop_request_id = generated
         end
+        -- commit_stop closes the turn's approval batches in the Stop
+        -- transaction; bus:request_stop closes the turn's cancellation channel.
         local committed = commit_stop(ctx, ctx.upstream, payload_data.request_id :: string?)
         if not committed then return true end
+        ctx.approval_wake:notify(wake.KIND.STOP)
         local requested = bus:request_stop(stop_request_id)
         if ctx.parent_pid then
             process.send(ctx.parent_pid :: string,
@@ -387,6 +494,13 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
                     or consts.ERROR_CODES.STORAGE_ERROR
                 ctx.upstream:command_error(payload_data.request_id, code, admit_err or "Failed to accept input")
             else
+                -- Committed steering: a new pending input is stored. Wakes a
+                -- waiting approval gate. The pending input itself is the
+                -- durable closure: the gate's release transaction refuses a
+                -- batch while one is stored and closes it as superseded.
+                if admitted.steered then
+                    ctx.approval_wake:notify(wake.KIND.STEERING)
+                end
                 for _, next_op in ipairs(admitted.next_ops or {}) do
                     local queued, queue_err = bus:queue_op(next_op)
                     if not queued then return nil, queue_err end
@@ -469,6 +583,11 @@ local function route_input(ctx: any, bus: any, topic: string, payload_data: any,
     end
     if op then
         op.user_command = true
+        -- Sent by the session's user: the parent plugin stamps
+        -- sender_user_id only on what its authenticated relay forwards.
+        -- Only such a command may restore tool approval grants.
+        op.user_authenticated = sender ~= nil and sender == ctx.parent_pid
+            and type(payload_data.sender_user_id) == "string" and payload_data.sender_user_id == ctx.user_id
         local queued, queue_err = bus:queue_op(op)
         if not queued then
             ctx.upstream:command_error(payload_data.request_id, queue_error_code(bus), queue_err)
@@ -508,16 +627,19 @@ local function run(args: SessionArgs)
         error("Failed to create session writer: " .. writer_err)
     end
 
-    -- Settles the calls an interrupted turn left pending; a call whose form
-    -- was committed counts as created (form_recovery).
-    local function recover_calls()
-        return message_repo.recover_pending(args.session_id,
-            session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID), form_recovery.settle_call)
+    -- Whether the session is protected: its stored tool approval activation,
+    -- in the live config once the session context exists.
+    local live_context: any = nil
+    local function protected(): boolean
+        local config = (live_context and live_context.config) or session_config
+        return type(config) == "table" and config.tool_approval ~= nil
     end
+    local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
+    local hooks = recovery_hooks(args.session_id, session_reader, protected, session_upstream)
 
     local recovered_calls = 0
     if not args.create then
-        local count, recovery_err = recover_calls()
+        local count, recovery_err = hooks.recover_calls()
         if recovery_err then error("Failed to recover pending calls: " .. recovery_err) end
         recovered_calls = count
     end
@@ -531,7 +653,6 @@ local function run(args: SessionArgs)
         if not committed then error("Failed to persist recovery boundary: " .. tostring(commit_err)) end
     end
 
-    local session_upstream = upstream.new(args.session_id, args.conn_pid, args.parent_pid)
     local policy_requests = channel.new(16)
     local boundary_reply: any = channel.new(1)
     local boundary_topic = "session.internal.turn_boundary"
@@ -591,6 +712,10 @@ local function run(args: SessionArgs)
             and session_data.meta.interaction.revision) or 0,
         stop_requested = false,
         turn_generation = 0,
+        -- Tool approval: the wake hub of this process and the live approval
+        -- UI surfaces the parent plugin last sent (nil before any).
+        approval_wake = wake.new(),
+        approval_surfaces = nil,
     }
     -- Work that must not hold up the turn (the session title).
     context.run_in_background = run_in_background
@@ -643,7 +768,11 @@ local function run(args: SessionArgs)
     context.flush_held = function(run_agent, phase) return flush_held(context, run_agent, phase) end
     context.write_held_before_form = function(write_opts) return write_held_before_form(context, write_opts) end
     context.commit_held_before_form = function(written) return commit_held_before_form(context, written) end
-    context.settle_intents = recover_calls
+    live_context = context
+    -- command_bus:fail closes the unfinished approval batches first, then
+    -- settles the queued rounds and the remaining pending calls.
+    context.reconcile_batches = hooks.reconcile_batches
+    context.settle_intents = hooks.recover_calls
 
     local attention_control: any = attention_control_runtime.new({
         connection_id = args.conn_pid,
@@ -868,7 +997,15 @@ local function run(args: SessionArgs)
         if not policies_ok then error("Failed to recover behavior policies: " .. tostring(policies_err)) end
     end
 
-    session_upstream:update_session({
+    -- The open announcement carries the tool approval fields, read after
+    -- recovery, so a client knows whether the session is protected before it
+    -- renders the transcript (docs/tool-approval-protocol.md section 9).
+    local approval_fields, approval_fields_err = approval_projection.announcement(args.session_id, context.config,
+        args.user_id)
+    if not approval_fields then
+        error("Failed to read the tool approval session fields: " .. tostring(approval_fields_err))
+    end
+    local announced = session_upstream:update_session({
         agent = context.config.agent_id,
         model = context.config.model,
         status = consts.STATUS.IDLE,
@@ -876,7 +1013,13 @@ local function run(args: SessionArgs)
         public_meta = session_data.public_meta,
         interaction = context.interaction,
         attention_context = session_data.attention_context,
+        activity = approval_fields.activity,
+        activity_revision = approval_fields.activity_revision,
+        tool_approval = approval_fields.tool_approval,
     })
+    -- An announcement that was not delivered leaves the marker unset, so the
+    -- first agent step publishes the activation.
+    if announced then context.tool_approval_published_revision = approval_fields.tool_approval.revision end
 
     -- Form answers accepted while no session process was running (or whose
     -- wake-up was lost) are admitted first, in acceptance order, and start a
@@ -943,6 +1086,12 @@ local function run(args: SessionArgs)
                     finish_generation = finish_generation + 1
                     pending_finish = false
                     finish_check_sent = false
+                    cancel_approvals_finish(context)
+                end
+            elseif topic == consts.TOPICS.APPROVAL_SURFACES then
+                if not accept_surfaces(context, msg:from(), msg:payload():data()) then
+                    logger:warn("approval surface update refused",
+                        { session_id = args.session_id, from = tostring(msg:from()) })
                 end
             elseif topic == consts.TOPICS.FINISH_AND_EXIT then
                 local request = msg:payload():data() or {}
@@ -955,6 +1104,10 @@ local function run(args: SessionArgs)
                     if request.finish_generation == nil then
                         finish_generation = finish_generation + 1
                     end
+                    -- Finish, idle retire or shutdown closes the turn's
+                    -- approval batches, then wakes a waiting approval gate.
+                    close_approvals_for_finish(context)
+                    context.approval_wake:notify(wake.KIND.FINISH)
                     if not bus:is_quiescent() then
                         pending_finish = true
                     else
@@ -999,6 +1152,12 @@ local function run(args: SessionArgs)
                         session_state.finishing = true
                         finish_generation = finish_generation + 1
                         finish_check_sent = false
+                        -- Deletion cancels the turn's in-flight calls and
+                        -- wakes a waiting approval gate, which puts deletion
+                        -- first; the rows are gone, so no batch closure is
+                        -- written.
+                        bus:cancel_turn()
+                        context.approval_wake:notify(wake.KIND.DELETED)
                         if bus:is_quiescent() then
                             bus:finish()
                         else
@@ -1021,10 +1180,14 @@ local function run(args: SessionArgs)
                         attention_control:set_connection(payload_data.conn_pid)
                         session_upstream.conn_pid = payload_data.conn_pid
                     end
-                    attention_handled = topic == consts.TOPICS.COMMAND and handle_attention_command(payload_data)
+                    -- Tool approval decisions and revocations are answered
+                    -- here too, never through the command bus, where the
+                    -- approval gate waits.
+                    attention_handled = topic == consts.TOPICS.COMMAND and (handle_attention_command(payload_data)
+                        or approval_commands.handle(context, msg:from(), payload_data))
                 end
                 if not attention_handled then
-                    local _, route_err = route_input(context, bus, topic, payload_data, session_state)
+                    local _, route_err = route_input(context, bus, topic, payload_data, session_state, msg:from())
                     if route_err then
                         exit_err = "Session ingress failed: " .. route_err
                         break
@@ -1057,9 +1220,18 @@ local function run(args: SessionArgs)
 
     input_policy.clear_turn(context)
     context.stop_requested = true
-    local _, settle_err = settle_exit(bus, exit_err)
-
-    if not session_state.bus_done_received then
+    -- Supervisor cancel, ingress or bus failure: cancel the turn's in-flight
+    -- calls and wake a waiting approval gate before exit recovery runs.
+    if session_state.interrupted or exit_err then
+        bus:cancel_turn()
+        context.approval_wake:notify(wake.KIND.EXITING)
+    end
+    -- Waits for the command bus to stop, answering meanwhile the policy and
+    -- turn boundary requests its last operation may still make. Returns the
+    -- bus's error.
+    local function wait_bus_done(): any
+        if session_state.bus_done_received then return nil end
+        local bus_err = nil
         local shutdown_cases = {
             bus_done:case_receive(), policy_requests:case_receive(), inbox:case_receive(),
         }
@@ -1068,7 +1240,7 @@ local function run(args: SessionArgs)
             if not pending.ok then break end
             if pending.channel == bus_done then
                 session_state.bus_done_received = true
-                settle_err = settle_err or (pending.value and pending.value.error)
+                bus_err = pending.value and pending.value.error
             elseif pending.channel == policy_requests then
                 (pending.value :: any).reply:send({ error = "Session is closing" })
             elseif pending.channel == inbox then
@@ -1083,7 +1255,12 @@ local function run(args: SessionArgs)
                 end
             end
         end
+        return bus_err
     end
+    -- Exit recovery runs only after the bus has stopped: the active
+    -- operation (a waiting approval gate, released calls, a result that waits
+    -- for a policy reply) settles its own calls first.
+    local _, settle_err = settle_exit(bus, exit_err, wait_bus_done)
     attention_control:invalidate()
 
     if settle_err then error(settle_err) end
@@ -1106,6 +1283,10 @@ end
 
 return { run = run, route_input = route_input, flush_held = flush_held,
     settle_exit = settle_exit, turn_boundary = turn_boundary, run_in_background = run_in_background,
+    _recovery_hooks = recovery_hooks,
+    accept_surfaces = accept_surfaces,
     write_held_before_form = write_held_before_form,
     commit_held_before_form = commit_held_before_form,
-    reference_artifact = reference_artifact, _commit_stop = commit_stop }
+    reference_artifact = reference_artifact, _commit_stop = commit_stop,
+    _close_approvals_for_finish = close_approvals_for_finish,
+    _cancel_approvals_finish = cancel_approvals_finish }

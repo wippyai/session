@@ -1,0 +1,61 @@
+{
+  "success": true,
+  "server_now": "2026-10-21T12:15:30Z",
+  "count": 1,
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "messages": [
+    {
+      "message_id": "01990a2b-0000-7000-8000-0000000000c1",
+      "session_id": "01990a2b-0000-7000-8000-000000000001",
+      "type": "function",
+      "date": "2026-10-21T12:15:00.000000000Z",
+      "data": "{\"customer_id\":\"c_1042\",\"hard\":true}",
+      "metadata": {
+        "status": "pending",
+        "call_id": "call_abc",
+        "function_name": "delete_customer",
+        "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
+        "approval": {
+          "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+          "batch_id": "01990a2b-0000-7000-8000-0000000000b1",
+          "call_id": "call_abc",
+          "state": "pending",
+          "decided_via": null,
+          "disposition": null,
+          "revision": 1,
+          "then": null,
+          "reason": null,
+          "offered": {
+            "decisions": [
+              "approve",
+              "deny"
+            ],
+            "approve_all": null
+          },
+          "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",
+          "display": {
+            "title": "Delete customer",
+            "description": "Permanently deletes a customer and their orders.",
+            "agent": "Ops assistant",
+            "summary": "\"customer_id\": \"c_1042\", \"hard\": true",
+            "arguments": {
+              "customer_id": "c_1042",
+              "hard": true
+            },
+            "cut": [],
+            "numbers": [],
+            "batch_peers": []
+          },
+          "requested_at": "2026-10-21T12:15:00Z",
+          "expires_at": "2026-10-21T12:30:00Z",
+          "decided_at": null,
+          "grant_id": null
+        }
+      }
+    }
+  ],
+  "pending_inputs": [],
+  "pagination": {
+    "has_more": false
+  }
+}

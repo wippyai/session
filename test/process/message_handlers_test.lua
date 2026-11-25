@@ -17,6 +17,7 @@ local bedrock_mapper = require("bedrock_mapper")
 local checkpoint = require("checkpoint")
 local llm = require("llm")
 local reader = require("reader")
+local approval_repo = require("approval_repo")
 
 local THRESHOLD = 100000
 local PROMPT_TOKENS_OVER_THRESHOLD = 150000
@@ -172,7 +173,7 @@ local function mock_ctx(agent: any, config_overrides: any?): (any, any)
             message_error = function(_self, id, code, message)
                 table.insert(captured.message_errors, { id = id, code = code, message = message })
             end,
-            update_session = function() end,
+            update_session = function() return true end,
             session_error = function(_self, code, message)
                 table.insert(captured.session_errors, { code = code, message = message })
             end,
@@ -5665,6 +5666,327 @@ local function define_tests()
                     test.is_false(row.content == "Speaks as " .. role .. ".", "the message is not stored")
                 end
             end
+        end)
+    end)
+
+    -- Tool approval activation at every agent step, before the model call,
+    -- and the approval gate hook in agent_step and process_tools.
+    describe("tool approval in agent_step and process_tools", function()
+        local TRAIT = "wippy.session.traits:tool_approval"
+
+        local function approval_ctx(agent: any, traits: any): (any, any, any)
+            local ctx, captured = mock_ctx(agent)
+            local store = { value = nil, writes = 0 }
+            ctx.agent_ctx.active_traits = traits
+            ctx.writer.update_tool_approval = function(_self, mutate)
+                local next_value = mutate(store.value)
+                if next_value == nil then return store.value end
+                store.value = next_value
+                store.writes = store.writes + 1
+                return next_value
+            end
+            return ctx, captured, store
+        end
+
+        local function counting_agent(options: any): (any, any)
+            local agent = fake_agent(nil)
+            local calls = { steps = 0 }
+            agent.agent_options = options
+            agent.step = function()
+                calls.steps = calls.steps + 1
+                return { result = "Done." }
+            end
+            return agent, calls
+        end
+
+        it("fails the turn with tool_approval_config_invalid and makes no model call for an invalid trait context", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx, captured, store = approval_ctx(agent, { { id = TRAIT, context = { approve_all = "always" } } })
+            local result, err = user_step(ctx)
+            test.is_nil(err)
+            test.not_nil(result.failed)
+            test.eq(calls.steps, 0, "no model call")
+            test.eq(captured.message_errors[1].code, "tool_approval_config_invalid")
+            local failed = stored_of_type(captured, consts.MSG_TYPE.SYSTEM)
+            test.eq(failed[#failed].metadata.error_code, "tool_approval_config_invalid")
+            test.eq(store.writes, 0)
+            test.is_nil(ctx.config.tool_approval)
+            test.eq(#captured.response_batches, 0, "nothing is stored as a response")
+        end)
+
+        it("fails the turn when the listed trait has no compiled options", function()
+            local agent, calls = counting_agent({})
+            local ctx, captured = approval_ctx(agent, { TRAIT })
+            local result = user_step(ctx)
+            test.not_nil(result.failed)
+            test.eq(calls.steps, 0, "no model call")
+            test.eq(captured.message_errors[1].code, "tool_approval_config_invalid")
+            test.contains(captured.message_errors[1].message, "no tool_approval options")
+        end)
+
+        it("stores the activation before the model call and keeps it for an agent without the trait", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local seen_before_step = nil
+            local ctx, _captured, store = approval_ctx(agent, { { id = TRAIT, context = { require = "all" } } })
+            agent.step = function()
+                calls.steps = calls.steps + 1
+                seen_before_step = ctx.config.tool_approval
+                return { result = "Done." }
+            end
+            local _, err = user_step(ctx)
+            test.is_nil(err)
+            test.eq(calls.steps, 1)
+            test.not_nil(seen_before_step, "the activation is in ctx.config before the model call")
+            test.eq(seen_before_step.require, "all")
+            test.eq(store.writes, 1)
+            test.eq(ctx.tool_approval_policy.require, "all")
+        end)
+
+        it("keeps approvals on through a handoff to an agent without the trait", function()
+            local agent = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx, _captured, store = approval_ctx(agent, { TRAIT })
+            assert(user_step(ctx))
+            test.eq(store.writes, 1)
+            local successor, successor_calls = counting_agent({})
+            ctx.agent_ctx.load_agent = function() return successor, nil end
+            ctx.agent_ctx.active_traits = {}
+            ctx.turn_state = { active = true, steps = 1, repeated_calls = 0, message_id = "msg-user", handoff = true }
+            ctx.upstream.update_session = function() return true end
+            ctx.request_input_policy = function() return {}, nil end
+            local _, err = continue_step(ctx)
+            test.is_nil(err)
+            test.eq(successor_calls.steps, 1)
+            test.is_true(ctx.config.tool_approval.active)
+            test.is_true(ctx.tool_approval_policy.active)
+        end)
+
+        it("fails the step when the new activation is not published, and publishes it at the next step", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx = approval_ctx(agent, { TRAIT })
+            local published = {}
+            ctx.upstream.update_session = function(_self, update)
+                if update.tool_approval ~= nil then table.insert(published, update.tool_approval) end
+                return true
+            end
+            -- The grants read of the publish fails once, after the activation commits.
+            local saved_list = approval_repo.list_grants
+            local failed = 0
+            approval_repo.list_grants = function(...)
+                if failed == 0 then
+                    failed = 1
+                    return nil, "grants read failed"
+                end
+                return saved_list(...)
+            end
+            local ran, result, err = pcall(user_step, ctx)
+            approval_repo.list_grants = saved_list
+            test.is_true(ran, tostring(result))
+            test.is_nil(result)
+            test.contains(tostring(err), "grants read failed")
+            test.eq(failed, 1)
+            test.eq(calls.steps, 0, "no model call, so no gated call runs")
+            test.eq(#published, 0)
+            test.is_true(ctx.config.tool_approval.active, "the activation is committed")
+
+            local _, retry_err = user_step(ctx)
+            test.is_nil(retry_err)
+            test.eq(calls.steps, 1)
+            test.eq(#published, 1, "the next step publishes the activation")
+            test.is_true(published[1].active)
+            test.eq(published[1].revision, ctx.config.tool_approval.revision)
+        end)
+
+        it("fails the step when the activation update is not delivered, and publishes it at the next step", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx = approval_ctx(agent, { TRAIT })
+            local attempts, delivered = 0, {}
+            ctx.upstream.update_session = function(_self, update)
+                if update.tool_approval == nil then return true end
+                attempts = attempts + 1
+                if attempts == 1 then return nil, "delivery failed" end
+                table.insert(delivered, update.tool_approval)
+                return true
+            end
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.contains(tostring(err), "delivery failed")
+            test.eq(calls.steps, 0, "no model call, so no gated call runs")
+            test.is_nil(ctx.tool_approval_published_revision, "an undelivered update is not counted as published")
+
+            local _, retry_err = user_step(ctx)
+            test.is_nil(retry_err)
+            test.eq(calls.steps, 1)
+            test.eq(attempts, 2, "the next step sends the activation again")
+            test.eq(#delivered, 1)
+            test.is_true(delivered[1].active)
+            test.eq(ctx.tool_approval_published_revision, ctx.config.tool_approval.revision)
+        end)
+
+        it("treats a failed activation write as a storage failure of the step", function()
+            local agent, calls = counting_agent({ tool_approval = { schema = 1 } })
+            local ctx = approval_ctx(agent, { TRAIT })
+            ctx.writer.update_tool_approval = function() return nil, "database is down" end
+            local result, err = user_step(ctx)
+            test.is_nil(result)
+            test.contains(tostring(err), "database is down")
+            test.eq(calls.steps, 0, "no model call")
+        end)
+
+        -- A protected session (require all) with a spy on the gate hook.
+        local function protected_ctx(agent: any): (any, any, any)
+            local ctx, captured = approval_ctx(agent, { { id = TRAIT, context = { require = "all" } } })
+            return ctx, captured, { calls = 0 }
+        end
+
+        -- A process_tools op with one stored call, and a caller that counts runs.
+        local function gated_op(ctx: any): (any, any)
+            local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = "call-1", status = consts.FUNC_STATUS.PENDING })
+            local runs = { executed = 0 }
+            return {
+                tool_calls = { { id = "call-1", name = "pack_document", arguments = "{}" } },
+                call_message_ids = { ["call-1"] = id },
+                validated_tools = { ["call-1"] = { valid = true, name = "pack_document", args = {} } },
+                caller = { set_strategy = function() end,
+                    execute = function() runs.executed = runs.executed + 1; return {} end },
+                message_id = "msg-user",
+            }, runs
+        end
+
+        local function with_gate_spy(gate: any, body: any)
+            local original = message_handlers._approval_gate
+            message_handlers._approval_gate = function(...)
+                gate.calls = gate.calls + 1
+                if gate.result ~= nil or gate.err ~= nil then return gate.result, gate.err end
+                return original(...)
+            end
+            local ok, err = pcall(body)
+            message_handlers._approval_gate = original
+            if not ok then error(err) end
+        end
+
+        it("fails a protected turn on a validate error before any row is stored, with no gate call", function()
+            local agent = fake_agent(nil)
+            agent.agent_options = { tool_approval = { schema = 1 } }
+            local ctx, captured, gate = protected_ctx(agent)
+            local original_new = tool_caller.new
+            tool_caller.new = function()
+                return {
+                    set_tool_wrappers = function() end,
+                    set_wrapper_context = function() end,
+                    validate = function(self)
+                        self.last_tool_calls = {}
+                        return {}, "Multiple exclusive tools found, cannot process"
+                    end
+                }
+            end
+            local result, err
+            local ok, failure = pcall(with_gate_spy, gate, function() result, err = user_step(ctx) end)
+            tool_caller.new = original_new
+            if not ok then error(failure) end
+            test.is_nil(err)
+            test.contains(tostring(result.failed), "Multiple exclusive tools found")
+            test.eq(#captured.response_batches, 0, "no row is stored")
+            test.eq(gate.calls, 0, "the gate never runs")
+            test.not_nil(ctx.tool_approval_policy, "the session is protected")
+        end)
+
+        it("settles cancel_only exactly as before in a protected session, with no gate call", function()
+            local ctx, captured, gate = protected_ctx(fake_agent(nil))
+            ctx.config.tool_approval = { active = true, require = "all", approve_all = "off",
+                timeout_seconds = 900, max_requests_per_turn = 10, revision = 1 }
+            local id = ctx.writer:add_message(consts.MSG_TYPE.FUNCTION, "{}", {
+                call_id = "call-1", function_name = "pack_document", status = consts.FUNC_STATUS.PENDING,
+            })
+            local result, err
+            with_gate_spy(gate, function()
+                result, err = message_handlers.process_tools(ctx, {
+                    cancel_only = true,
+                    tool_calls = { { id = "call-1", name = "pack_document", arguments = "{}" } },
+                    call_message_ids = { ["call-1"] = id },
+                    approval = { policy = { enforcement = "enforce" }, batch_id = "batch-1" },
+                })
+            end)
+            test.is_nil(err)
+            test.is_true(result.completed)
+            test.eq(gate.calls, 0)
+            test.eq(captured.stored[1].metadata.status, consts.FUNC_STATUS.CANCELLED)
+            test.eq(captured.stored[1].metadata.result, "Session stopped before the call executed")
+        end)
+
+        it("asks the writer for a batch record only in a protected session", function()
+            local seen = {}
+            local function capture(ctx: any)
+                local original = ctx.writer.add_response
+                ctx.writer.add_response = function(self, content, metadata, calls, notes, trailing, options)
+                    seen[#seen + 1] = options or false
+                    return original(self, content, metadata, calls, notes, trailing)
+                end
+            end
+            local plain_ctx = mock_ctx(fake_agent(nil))
+            capture(plain_ctx)
+            local plain = assert(user_step(plain_ctx))
+            test.eq(seen[1], false, "an unprotected response passes no batch options")
+            local tool_op = find_op(plain.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+            test.is_nil(tool_op.approval)
+
+            local agent = fake_agent(nil)
+            agent.agent_options = { tool_approval = { schema = 1 } }
+            local ctx = protected_ctx(agent)
+            capture(ctx)
+            local protected = assert(user_step(ctx))
+            test.eq(type(seen[2]), "table")
+            test.eq(seen[2].approval_batch.turn_id, "msg-user")
+            local protected_op = find_op(protected.next_ops, consts.OP_TYPE.PROCESS_TOOLS)
+            test.eq(protected_op.approval.policy.require, "all")
+            test.eq(protected_op.approval.policy.enforcement, "enforce")
+        end)
+
+        it("runs nothing when the gate fences the batch and ends the turn as the gate says", function()
+            for _, case in ipairs({ { end_turn = true, continues = false }, { end_turn = false, continues = true } }) do
+                local ctx, _captured, gate = protected_ctx(fake_agent(nil))
+                local op, runs = gated_op(ctx)
+                gate.result = { fenced = true, end_turn = case.end_turn, settled = { ["call-1"] = true } }
+                local result, err
+                with_gate_spy(gate, function() result, err = message_handlers.process_tools(ctx, op) end)
+                test.is_nil(err)
+                test.eq(runs.executed, 0, "caller:execute is never called")
+                test.eq(gate.calls, 1)
+                test.eq(find_op(result.next_ops, consts.OP_TYPE.AGENT_CONTINUE) ~= nil, case.continues)
+            end
+        end)
+
+        it("does not continue a turn the approval gate ended, and keeps pending steering for the next turn", function()
+            for _, case in ipairs({
+                { marker = "msg-user", continues = false },
+                { marker = "msg-earlier-turn", continues = true },
+                { marker = nil, continues = true },
+            }) do
+                local ctx = mock_ctx(fake_agent(nil))
+                ctx.turn_state = { active = true, message_id = "msg-user", steps = 1, repeated_calls = 0 }
+                ctx.reader.list_pending_inputs = function()
+                    return { { message_id = "steer-1", date = "2026-11-19T10:00:00Z",
+                        metadata = { input = { state = "pending" } } } }, nil
+                end
+                ctx.reader.newest_non_input_id = function() return "msg-user", nil end
+                ctx.approval_turn_end = case.marker
+                test.eq(message_handlers.ended_by_approval(ctx), not case.continues, tostring(case.marker))
+                local finished, err = message_handlers.finish_turn(ctx)
+                test.is_nil(err)
+                test.eq(find_op(finished.next_ops, consts.OP_TYPE.AGENT_STEP) ~= nil, case.continues,
+                    tostring(case.marker))
+            end
+        end)
+
+        it("fails closed and runs nothing when the gate fails", function()
+            local ctx, captured, gate = protected_ctx(fake_agent(nil))
+            local op, runs = gated_op(ctx)
+            gate.err = "database is down"
+            local _, err
+            with_gate_spy(gate, function() _, err = message_handlers.process_tools(ctx, op) end)
+            test.contains(tostring(err), "Tool approval check failed: database is down")
+            test.eq(runs.executed, 0)
+            test.eq(captured.stored[1].metadata.status, consts.FUNC_STATUS.ERROR)
         end)
     end)
 end

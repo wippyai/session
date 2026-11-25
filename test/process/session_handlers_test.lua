@@ -12,6 +12,7 @@ local session_repo = require("session_repo")
 local context_repo = require("context_repo")
 local message_repo = require("message_repo")
 local wait_for_boot = require("wait_for_boot")
+local activation = require("activation")
 
 local function mock_ctx(state_config)
     local captured = {
@@ -241,6 +242,68 @@ local function define_tests()
     end)
 
     describe("session_handlers config normalization", function()
+        it("restores tool approval grants only for an agent switch the user sent", function()
+            local saved = activation.restore_grants
+            local calls = {}
+            activation.restore_grants = function(ctx, agent)
+                calls[#calls + 1] = agent and agent.id
+                return true, nil
+            end
+            local ok, failure = pcall(function()
+                for _, op in ipairs({
+                    { agent_id = "agent:init", init = true },
+                    { agent_id = "agent:model" },
+                    { agent_id = "agent:unauthenticated", user_command = true },
+                    { agent_id = "agent:user", user_command = true, user_authenticated = true },
+                }) do
+                    local ctx = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+                    local result, err = session_handlers.agent_change(ctx, op)
+                    test.is_nil(err)
+                    test.not_nil(result)
+                end
+            end)
+            activation.restore_grants = saved
+            if not ok then error(failure) end
+            test.eq(#calls, 1, "only the user's switch")
+            test.eq(calls[1], "agent:user", "with the new compiled agent")
+        end)
+
+        it("restores grants on an agent command only when the parent plugin forwards it with the owner as sender", function()
+            local saved = activation.restore_grants
+            local calls = {}
+            activation.restore_grants = function(_ctx, agent)
+                calls[#calls + 1] = agent and agent.id
+                return true, nil
+            end
+            local ok, failure = pcall(function()
+                for _, case in ipairs({
+                    { name = "agent:intruder", sender = "intruder-pid", sender_user_id = "owner-1" },
+                    { name = "agent:unstamped", sender = "plugin-pid" },
+                    { name = "agent:other-user", sender = "plugin-pid", sender_user_id = "someone-else" },
+                    { name = "agent:relay", sender = "plugin-pid", sender_user_id = "owner-1" },
+                }) do
+                    local ctx = mock_ctx({ agent_id = "agent:old", model = "model:old" })
+                    ctx.parent_pid, ctx.user_id = "plugin-pid", "owner-1"
+                    ctx.upstream.command_error = function() error("the agent command was refused") end
+                    local queued = {}
+                    local bus = { state = "idle", queue_op = function(_self, op)
+                        queued[#queued + 1] = op
+                        return true
+                    end }
+                    assert(session.route_input(ctx, bus, consts.TOPICS.COMMAND, { command = consts.COMMANDS.AGENT,
+                        name = case.name, sender_user_id = case.sender_user_id }, {}, case.sender))
+                    test.eq(#queued, 1, case.name)
+                    test.is_true(queued[1].user_command, case.name .. ": still a user command")
+                    local result, err = session_handlers.agent_change(ctx, queued[1])
+                    test.is_nil(err, case.name)
+                    test.not_nil(result, case.name)
+                end
+            end)
+            activation.restore_grants = saved
+            if not ok then error(failure) end
+            test.eq(table.concat(calls, ","), "agent:relay", "only the switch the relay forwarded restores grants")
+        end)
+
         it("agent_change tolerates a missing live ctx.config", function()
             local ctx, captured = mock_ctx({
                 agent_id = "agent:old",

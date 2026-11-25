@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "request_id": "req_48",
+  "code": "approval_stale",
+  "message": "The approval request changed. Review it again."
+}

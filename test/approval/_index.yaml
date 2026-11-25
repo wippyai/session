@@ -1,0 +1,483 @@
+version: "1.0"
+namespace: app.approval
+
+# Tool approval suites. The fixtures are the machine-readable examples of
+# docs/tool-approval-protocol.md; the loader inlines each file:// value.
+entries:
+  - name: canonical_json_test
+    kind: function.lua
+    meta:
+      name: Tool approval canonical JSON
+      type: test
+      suite: session
+      comment: Array holes, mixed keys, non-JSON values, numbers and nesting in the digest encoder
+    source: file://canonical_json_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      canonical_json: wippy.session.approval:canonical_json
+      fingerprint: wippy.session.approval:fingerprint
+    method: run
+
+  - name: protocol_fixtures
+    kind: registry.entry
+    meta:
+      test_only: true
+      comment: The JSON fixtures of docs/tool-approval-protocol.md, inlined at load time
+    data:
+      fixtures:
+        capabilities.json: file://fixtures/capabilities.json
+        tool_approval_surface_declare.json: file://fixtures/tool_approval_surface_declare.json
+        session_message_runtime_context.json: file://fixtures/session_message_runtime_context.json
+        tool_approval_surface_withdraw.json: file://fixtures/tool_approval_surface_withdraw.json
+        tool_approval_event_pending.json: file://fixtures/tool_approval_event_pending.json
+        tool_approval_event_decided.json: file://fixtures/tool_approval_event_decided.json
+        tool_approval_event_grant.json: file://fixtures/tool_approval_event_grant.json
+        decision_approve.json: file://fixtures/decision_approve.json
+        decision_approve_all.json: file://fixtures/decision_approve_all.json
+        decision_deny_stop.json: file://fixtures/decision_deny_stop.json
+        decision_deny_continue.json: file://fixtures/decision_deny_continue.json
+        grant_revoke.json: file://fixtures/grant_revoke.json
+        command_response_decision.json: file://fixtures/command_response_decision.json
+        command_response_revoke.json: file://fixtures/command_response_revoke.json
+        command_error_not_pending.json: file://fixtures/command_error_not_pending.json
+        command_error_stale.json: file://fixtures/command_error_stale.json
+        function_error_not_approved.json: file://fixtures/function_error_not_approved.json
+        function_call_approved.json: file://fixtures/function_call_approved.json
+        session_update_activity.json: file://fixtures/session_update_activity.json
+        session_update_activity_cleared.json: file://fixtures/session_update_activity_cleared.json
+        session_error_unavailable.json: file://fixtures/session_error_unavailable.json
+        session_error_limit.json: file://fixtures/session_error_limit.json
+        rest_session.json: file://fixtures/rest_session.json
+        rest_message_row.json: file://fixtures/rest_message_row.json
+        rest_artifact.json: file://fixtures/rest_artifact.json
+        model_result_not_run.json: file://fixtures/model_result_not_run.json
+
+  - name: protocol_fixtures_test
+    kind: function.lua
+    meta:
+      name: Tool approval protocol fixtures
+      type: test
+      suite: session
+      comment: Every fixture decodes and keeps the keys a client reads, nulls at their exact paths
+    source: file://protocol_fixtures_test.lua
+    modules:
+      - json
+      - registry
+    imports:
+      test: wippy.test:test
+    method: run
+
+  - name: trait_config_test
+    kind: function.lua
+    meta:
+      name: Tool approval trait settings and tool meta
+      type: test
+      suite: session
+      comment: Trait context validation and defaults, the sticky effective policy, tool meta short and object form
+    source: file://trait_config_test.lua
+    imports:
+      test: wippy.test:test
+      trait_config: wippy.session.approval:trait_config
+      tool_meta: wippy.session.approval:tool_meta
+    method: run
+
+  - name: activation_test
+    kind: function.lua
+    meta:
+      name: Tool approval activation
+      type: test
+      suite: session
+      comment: Raw trait list, fail-closed checks, the sticky and monotonic stored record, ui_declared_at once, the operator switch
+    source: file://activation_test.lua
+    imports:
+      test: wippy.test:test
+      activation: wippy.session.approval:activation
+      trait_config: wippy.session.approval:trait_config
+    method: run
+
+  - name: activation_store_test
+    kind: function.lua
+    meta:
+      name: Tool approval activation storage
+      type: test
+      suite: session
+      comment: The locked config.tool_approval write, whole-config writers and a session-scope input policy change keep it
+    source: file://activation_store_test.lua
+    modules:
+      - security
+    imports:
+      test: wippy.test:test
+      activation: wippy.session.approval:activation
+      writer: wippy.session.persist:writer
+      session_repo: wippy.session.persist:session_repo
+      input_policy: wippy.session.process:input_policy
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: wake_test
+    kind: function.lua
+    meta:
+      name: Tool approval wake hub
+      type: test
+      suite: session
+      comment: Non-blocking notify, sticky finish, deletion and exit, a finish taken back
+    source: file://wake_test.lua
+    imports:
+      test: wippy.test:test
+      wake: wippy.session.approval:wake
+    method: run
+
+  - name: policy_test
+    kind: function.lua
+    meta:
+      name: Tool approval policy evaluator
+      type: test
+      suite: session
+      comment: The 4.3 combination table for public, private and delegation calls, the evaluation order, grant matching and suspension
+    source: file://policy_test.lua
+    imports:
+      test: wippy.test:test
+      policy: wippy.session.approval:policy
+      trait_config: wippy.session.approval:trait_config
+      tool_meta: wippy.session.approval:tool_meta
+    method: run
+
+  - name: freeze_test
+    kind: function.lua
+    meta:
+      name: Tool approval freeze, digest and fingerprints
+      type: test
+      suite: session
+      comment: Frozen calls, intent digest stability, denial key, the caller's argument error text, the delegation target check, entry fingerprints
+    source: file://freeze_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      freeze: wippy.session.approval:freeze
+      fingerprint: wippy.session.approval:fingerprint
+      canonical_json: wippy.session.approval:canonical_json
+      tool_caller: wippy.agent.tools:caller
+    method: run
+
+  - name: preview_test
+    kind: function.lua
+    meta:
+      name: Tool approval argument preview
+      type: test
+      suite: session
+      comment: Escaping, binary markers, exact numbers, string, depth and 8 KB limits, one-line summary
+    source: file://preview_test.lua
+    modules:
+      - json
+    imports:
+      test: wippy.test:test
+      preview: wippy.session.approval:preview
+    method: run
+
+  # Registry entries the gate suite freezes. Their meta.type is not a
+  # discovery type, so no agent or tool registry picks them up.
+  - name: test_agent
+    kind: registry.entry
+    meta:
+      type: test.approval_agent
+      title: Ops assistant
+      test_only: true
+    data: {}
+
+  - name: target_agent
+    kind: registry.entry
+    meta:
+      type: test.approval_agent
+      title: Billing agent
+      test_only: true
+    data: {}
+
+  - name: marked_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Delete customer
+      description: Permanently deletes a customer and their orders.
+      approval: required
+      test_only: true
+    data: {}
+
+  - name: granted_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Send invoice email
+      approval:
+        required: true
+        approve_all: true
+      test_only: true
+    data: {}
+
+  - name: forbidden_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Wire money
+      approval:
+        required: true
+        approve_all: false
+      test_only: true
+    data: {}
+
+  - name: plain_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Look up customer
+      test_only: true
+    data: {}
+
+  - name: private_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Private lookup
+      private: true
+      test_only: true
+    data: {}
+
+  - name: delegate_tool
+    kind: registry.entry
+    meta:
+      type: test.approval_tool
+      title: Delegate a task
+      test_only: true
+    data: {}
+
+  - name: gate_fixtures
+    kind: library.lua
+    meta:
+      comment: Shared fixtures of the gate suites - a protected session context, a fake caller that records launches, a stored response with its PROCESS_TOOLS op, the stored state of a batch interrupted by a crash
+    source: file://gate_fixtures.lua
+    modules:
+      - sql
+      - uuid
+      - registry
+      - security
+      - time
+    imports:
+      reader: wippy.session.persist:reader
+      message_handlers: wippy.session.process:message_handlers
+      session: wippy.session.process:session
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      approval_gate: wippy.session.approval:gate
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      fingerprint: wippy.session.approval:fingerprint
+      wake: wippy.session.approval:wake
+      writer: wippy.session.persist:writer
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      trait_config: wippy.session.approval:trait_config
+      activation: wippy.session.approval:activation
+
+  - name: gate_test
+    kind: function.lua
+    meta:
+      name: Tool approval gate up to the wait
+      type: test
+      suite: session
+      comment: process_tools with the real gate and store - no protected session path, require marked and all, grant audit and release, repeated denial, per-turn cap, no approval UI, invalid calls, freeze failures, grant suspensions, fail closed
+    source: file://gate_test.lua
+    modules:
+      - sql
+      - uuid
+      - json
+      - time
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      tx: wippy.session.persist:tx
+      approval_gate: wippy.session.approval:gate
+      approval_events: wippy.session.approval:events
+      approval_repo: wippy.session.persist:approval_repo
+      message_handlers: wippy.session.process:message_handlers
+      policy: wippy.session.approval:policy
+      tool_caller: wippy.agent.tools:caller
+      activation: wippy.session.approval:activation
+      tool_meta: wippy.session.approval:tool_meta
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: gate_wait_test
+    kind: function.lua
+    meta:
+      name: Tool approval gate wait, release and end of turn
+      type: test
+      suite: session
+      comment: The wait on the wake hub, fence closures by Stop, finish, steering, exit and deletion, the release recheck, Stop after release, not-run calls for after-execute wrappers, the approval turn end
+    source: file://gate_wait_test.lua
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_gate: wippy.session.approval:gate
+      approval_events: wippy.session.approval:events
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
+      session: wippy.session.process:session
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      reader: wippy.session.persist:reader
+      tool_caller: wippy.agent.tools:caller
+      activation: wippy.session.approval:activation
+      tool_meta: wippy.session.approval:tool_meta
+      wait_for_boot: app:wait_for_boot
+      prompt_builder: wippy.session:prompt_builder
+      session_handlers: wippy.session.process:session_handlers
+      message_date: wippy.session.persist:message_date
+      tx: wippy.session.persist:tx
+      gate_fixtures: app.approval:gate_fixtures
+    modules:
+      - time
+      - registry
+      - json
+    method: run
+  - name: commands_test
+    kind: function.lua
+    meta:
+      name: Tool approval inbox commands
+      type: test
+      suite: session
+      comment: Decisions and grant revocations through the session inbox - sender and owner checks, receipts, one committed decision, Approve all scopes and covered lists, the batch fence, grant lifetime, revocation around the release, restoring suspended grants
+    source: file://commands_test.lua
+    modules:
+      - json
+      - uuid
+      - time
+      - sql
+      - registry
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_commands: wippy.session.approval:commands
+      approval_repo: wippy.session.persist:approval_repo
+      session_repo: wippy.session.persist:session_repo
+      fingerprint: wippy.session.approval:fingerprint
+      activation: wippy.session.approval:activation
+      tool_meta: wippy.session.approval:tool_meta
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: events_test
+    kind: function.lua
+    meta:
+      name: Tool approval events and model results
+      type: test
+      suite: session
+      comment: Model-facing results for every reason including approval_check_failed, closure reasons, event payloads, the cleared activity
+    source: file://events_test.lua
+    modules:
+      - json
+      - registry
+      - time
+    imports:
+      test: wippy.test:test
+      approval_events: wippy.session.approval:events
+      approval_repo: wippy.session.persist:approval_repo
+    method: run
+
+  - name: recovery_test
+    kind: function.lua
+    meta:
+      name: Tool approval recovery
+      type: test
+      suite: session
+      comment: Batch reconciliation before call settlement, one terminal result per call, outcome unknown for approved calls, the batch controls marker, the exit order of the command bus
+    source: file://recovery_test.lua
+    modules:
+      - time
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      approval_recovery: wippy.session.approval:recovery
+      message_repo: wippy.session.persist:message_repo
+      message_handlers: wippy.session.process:message_handlers
+      control_handlers: wippy.session.process:control_handlers
+      command_bus: wippy.session.process:command_bus
+      session: wippy.session.process:session
+      reader: wippy.session.persist:reader
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: session_fields_test
+    kind: function.lua
+    meta:
+      name: Tool approval session fields
+      type: test
+      suite: session
+      comment: tool_approval and activity in REST reads, the session list, the open announcement and live updates; batch_id and no pending projection on terminal rows; recovery published live; delegation targets in a session grant; private and delegation events; capability, trait entry and the artifact read
+    source: file://session_fields_test.lua
+    modules:
+      - json
+      - sql
+      - uuid
+      - time
+      - security
+      - registry
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      approval_events: wippy.session.approval:events
+      approval_gate: wippy.session.approval:gate
+      approval_commands: wippy.session.approval:commands
+      approval_recovery: wippy.session.approval:recovery
+      approval_projection: wippy.session.approval:projection
+      activation: wippy.session.approval:activation
+      fingerprint: wippy.session.approval:fingerprint
+      message_handlers: wippy.session.process:message_handlers
+      message_repo: wippy.session.persist:message_repo
+      get_session: wippy.session.api:get_session
+      list_sessions: wippy.session.api:list_sessions
+      get_capabilities: wippy.session.api:get_capabilities
+      artifact_access: wippy.session.api:artifact_access
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run
+
+  - name: contract_test
+    kind: function.lua
+    meta:
+      name: Tool approval protocol contract
+      type: test
+      suite: session
+      comment: Every event, reply and REST projection the Session sends has exactly the keys of its protocol fixture; state events carry no client request_id
+    source: file://contract_test.lua
+    modules:
+      - json
+      - uuid
+      - sql
+      - time
+      - security
+      - registry
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      upstream: wippy.session.process:upstream
+      approval_repo: wippy.session.persist:approval_repo
+      approval_events: wippy.session.approval:events
+      approval_commands: wippy.session.approval:commands
+      message_handlers: wippy.session.process:message_handlers
+      get_session: wippy.session.api:get_session
+      list_sessions: wippy.session.api:list_sessions
+      session_messages: wippy.session.api:session_messages
+      get_capabilities: wippy.session.api:get_capabilities
+      artifact_access: wippy.session.api:artifact_access
+      wait_for_boot: app:wait_for_boot
+      gate_fixtures: app.approval:gate_fixtures
+    method: run

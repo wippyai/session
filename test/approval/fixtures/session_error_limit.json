@@ -1,0 +1,6 @@
+{
+  "type": "error",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "code": "tool_approval_limit",
+  "message": "The assistant asked for more tool approvals in one turn than this agent allows. No tool ran, and the assistant stopped."
+}

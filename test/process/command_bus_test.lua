@@ -1,5 +1,6 @@
 local test = require("test")
 local command_bus = require("command_bus")
+local wake = require("wake")
 local consts = require("consts")
 local message_handlers = require("message_handlers")
 local message_repo = require("message_repo")
@@ -133,7 +134,7 @@ local function define_tests()
             local command_errors = {} :: {any}
             local steps = 0
             local function context(current_writer)
-                local ctx = { session_id = session_id, writer = current_writer, held = {},
+                local ctx = { session_id = session_id, writer = current_writer, held = {}, approval_wake = wake.new(),
                     reader = {
                         list_pending_inputs = function() return message_repo.list_pending_inputs(session_id) end,
                         list_pending_answers = function(_, limit)
@@ -457,6 +458,16 @@ local function define_tests()
             test.eq(#cancelled, 2)
             test.is_true(cancelled[1], "Stop must cancel the running turn")
             test.is_false(cancelled[2], "The next turn must start with an open cancel channel")
+        end)
+
+        it("closes the turn cancel channel once for deletion or exit, also before a later Stop", function()
+            local bus = command_bus.new({})
+            bus.state, bus.turn_state.id, bus.cancel = "running", "turn-1", channel.new()
+            bus:cancel_turn()
+            local selected = channel.select({ bus.cancel:case_receive(), default = true })
+            test.is_true(selected.default ~= true, "closed")
+            bus:cancel_turn()
+            test.is_true(bus:request_stop(), "a later Stop still drains the turn")
         end)
 
         it("applies tool outcomes and control before draining STOP", function()

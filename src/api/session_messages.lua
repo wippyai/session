@@ -2,6 +2,7 @@ local http = require("http")
 local security = require("security")
 local session_repo = require("session_repo")
 local message_repo = require("message_repo")
+local approval_repo = require("approval_repo")
 local time = require("time")
 local json = require("json")
 
@@ -14,6 +15,7 @@ local api = {
 
 type SessionMessagesResponse = {
     success: boolean,
+    server_now: string?,
     count: number?,
     session_id: string?,
     messages: {any}?,
@@ -157,6 +159,9 @@ function api.handler()
     res:set_status(http.STATUS.OK)
     res:write_json({
         success = true,
+        -- A reloaded approval card computes its time left from this
+        -- (docs/tool-approval-protocol.md section 10).
+        server_now = approval_repo.now(),
         count = #messages,
         session_id = session_id,
         messages = messages,

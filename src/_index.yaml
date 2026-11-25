@@ -82,6 +82,8 @@ entries:
         path: .policy.resources
       - entry: wippy.session.migration:13_add_attention_context
         path: .meta.target_db
+      - entry: wippy.session.migration:14_add_tool_approvals
+        path: .meta.target_db
       - entry: wippy.session.env:database_resource
         path: ".default"
       - entry: wippy.session.migration:01_create_contexts_table
@@ -190,6 +192,15 @@ entries:
         path: ".default"
     default: "120"
 
+  - name: tool_approval_enforcement
+    kind: ns.requirement
+    meta:
+      description: "Native tool-call approval enforcement: enforce (default) or off. off skips the approval gate for every session and logs each skipped check; it is a security downgrade meant for rollback"
+    targets:
+      - entry: wippy.session.env:tool_approval_enforcement
+        path: ".default"
+    default: "enforce"
+
   - name: delegation_func_id
     kind: ns.requirement
     meta:
@@ -236,6 +247,8 @@ entries:
       - entry: wippy.session.env:on_session_end_func_id
         path: ".storage"
       - entry: wippy.session.env:ui_action_ttl_seconds
+        path: ".storage"
+      - entry: wippy.session.env:tool_approval_enforcement
         path: ".storage"
 
   # wippy.session:consts

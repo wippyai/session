@@ -1,0 +1,8 @@
+{
+  "type": "session_command",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "data": {
+    "command": "tool_approval_surface",
+    "enabled": false
+  }
+}

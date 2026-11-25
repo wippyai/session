@@ -1,0 +1,16 @@
+{
+  "type": "function_error",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "message_id": "01990a2b-0000-7000-8000-0000000000c1",
+  "call_id": "call_abc",
+  "function_name": "delete_customer",
+  "error": "Not run: you denied this call.",
+  "outcome": "not_approved",
+  "approval": {
+    "approval_id": "01990a2b-0000-7000-8000-0000000000a1",
+    "state": "denied",
+    "then": "continue",
+    "reason": "Use the staging customer instead.",
+    "disposition": "not_run"
+  }
+}

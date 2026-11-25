@@ -1,0 +1,187 @@
+version: "1.0"
+namespace: wippy.session.approval
+
+# Native tool-call approval: trait settings, tool meta, the policy evaluator,
+# call freezing with digests and fingerprints, the argument preview,
+# activation, the wake hub, events and the gate. Activation needs the
+# compiled options of the tool_approval trait entry; the gate runs only for
+# sessions whose activation is stored. Wire contract:
+# docs/tool-approval-protocol.md.
+entries:
+  # wippy.session.approval:trait_config
+  - name: trait_config
+    kind: library.lua
+    meta:
+      comment: Validates the tool_approval trait context and combines the sticky stored activation with the current agent into the effective policy
+    source: file://trait_config.lua
+
+  # wippy.session.approval:activation
+  - name: activation
+    kind: library.lua
+    meta:
+      comment: Fail-closed, sticky activation at every agent step - reads the effective agent's raw trait list, validates the trait context and compiled options, stores config.tool_approval with the row locked
+    source: file://activation.lua
+    modules:
+      - time
+    imports:
+      trait_config: wippy.session.approval:trait_config
+      agent_registry: wippy.agent.discovery:registry
+      policy: wippy.session.approval:policy
+      tool_meta: wippy.session.approval:tool_meta
+      approval_repo: wippy.session.persist:approval_repo
+      consts: wippy.session:consts
+      approval_projection: wippy.session.approval:projection
+
+  # wippy.session.approval:wake
+  - name: wake
+    kind: library.lua
+    meta:
+      comment: Wake hub of one session process - non-blocking signals to a waiting approval gate, sticky finish, deletion and exit
+    source: file://wake.lua
+
+  # wippy.session.approval:tool_meta
+  - name: tool_meta
+    kind: library.lua
+    meta:
+      comment: Reads a tool's meta.approval (short and object form), failing closed with warnings
+    source: file://tool_meta.lua
+    modules:
+      - registry
+
+  # wippy.session.approval:policy
+  - name: policy
+    kind: library.lua
+    meta:
+      comment: Pure policy evaluator - requirement, repeated denial, grant matching and suspension, Approve-all offers per batch
+    source: file://policy.lua
+    imports:
+      consts: wippy.session:consts
+
+  # wippy.session.approval:canonical_json
+  - name: canonical_json
+    kind: library.lua
+    meta:
+      comment: Canonical JSON for digests - refuses values that are not JSON-shaped (mixed keys, functions, NaN) and keeps array holes
+    source: file://canonical_json.lua
+    modules:
+      - json
+
+  # wippy.session.approval:fingerprint
+  - name: fingerprint
+    kind: library.lua
+    meta:
+      comment: sha256 of canonical JSON - registry entry deployment fingerprints, delegation grant fingerprints, digests
+    source: file://fingerprint.lua
+    modules:
+      - hash
+    imports:
+      canonical_json: wippy.session.approval:canonical_json
+
+  # wippy.session.approval:freeze
+  - name: freeze
+    kind: library.lua
+    meta:
+      comment: Freezes a validated tool call (decoded arguments, effective context, entry, delegate target, browser binding) with its intent digest and denial key
+    source: file://freeze.lua
+    modules:
+      - json
+    imports:
+      fingerprint: wippy.session.approval:fingerprint
+      tool_meta: wippy.session.approval:tool_meta
+      consts: wippy.session:consts
+
+  # wippy.session.approval:preview
+  - name: preview
+    kind: library.lua
+    meta:
+      comment: Server-built argument preview for the approval card - escaped text, binary markers, size and depth limits, exact numbers, one-line summary
+    source: file://preview.lua
+    modules:
+      - json
+
+  # wippy.session.approval:events
+  - name: events
+    kind: library.lua
+    meta:
+      comment: Tool approval events and results - the tool_approval event, not-run settlements, session notices, the model-facing result of a call that did not run
+    source: file://events.lua
+    modules:
+      - json
+    imports:
+      consts: wippy.session:consts
+
+  # wippy.session.approval:projection
+  - name: projection
+    kind: library.lua
+    meta:
+      comment: The session fields of tool approval as clients read them - tool_approval with grants, activity - for REST reads, the session list, the open announcement, live updates and the artifact read
+    source: file://projection.lua
+    modules:
+      - logger
+    imports:
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      tool_meta: wippy.session.approval:tool_meta
+      approval_events: wippy.session.approval:events
+
+  # wippy.session.approval:gate
+  - name: gate
+    kind: library.lua
+    meta:
+      comment: The approval gate in process_tools - freezes the batch, evaluates the policy, grant audit, per-turn request cap, no approval UI, request creation in the batch record, settlement of calls that do not run
+    source: file://gate.lua
+    modules:
+      - uuid
+      - time
+      - logger
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      freeze: wippy.session.approval:freeze
+      fingerprint: wippy.session.approval:fingerprint
+      policy: wippy.session.approval:policy
+      preview: wippy.session.approval:preview
+      tool_meta: wippy.session.approval:tool_meta
+      activation: wippy.session.approval:activation
+      ui_action_broker: wippy.session.process:ui_action_broker
+      approval_events: wippy.session.approval:events
+      approval_projection: wippy.session.approval:projection
+
+  # wippy.session.approval:commands
+  - name: commands
+    kind: library.lua
+    meta:
+      comment: Session inbox commands - tool_approval decisions and grant revocations with the sender check, receipts, the batch fence and grants
+    source: file://commands.lua
+    modules:
+      - json
+      - uuid
+      - logger
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      fingerprint: wippy.session.approval:fingerprint
+      policy: wippy.session.approval:policy
+      tool_meta: wippy.session.approval:tool_meta
+      activation: wippy.session.approval:activation
+      approval_gate: wippy.session.approval:gate
+      approval_events: wippy.session.approval:events
+      approval_projection: wippy.session.approval:projection
+      approval_recovery: wippy.session.approval:recovery
+      wake: wippy.session.approval:wake
+
+  # wippy.session.approval:recovery
+  - name: recovery
+    kind: library.lua
+    meta:
+      comment: Recovery of interrupted tool rounds at every entry point - closes unfinished approval batches first, then settles the pending call rows, writing batch rows only while they are still pending
+    source: file://recovery.lua
+    imports:
+      consts: wippy.session:consts
+      approval_repo: wippy.session.persist:approval_repo
+      message_repo: wippy.session.persist:message_repo
+      form_recovery: wippy.session.forms:form_recovery
+      approval_events: wippy.session.approval:events
+      approval_projection: wippy.session.approval:projection

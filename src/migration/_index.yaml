@@ -2,6 +2,19 @@ version: "1.0"
 namespace: wippy.session.migration
 
 entries:
+  - name: 14_add_tool_approvals
+    kind: function.lua
+    meta:
+      type: migration
+      tags: [sessions]
+      description: Add the tool approval store (requests, batches, grants, command receipts) and session activity columns
+      depends_on: [ns:wippy.migration, wippy.session.migration:13_add_attention_context]
+      timestamp: '2026-11-18T00:00:00Z'
+    source: file://14_add_tool_approvals.lua
+    imports:
+      migration: wippy.migration:migration
+    method: migrate
+
   - name: 13_add_attention_context
     kind: function.lua
     meta:

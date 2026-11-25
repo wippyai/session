@@ -3,14 +3,14 @@ namespace: app.migration
 
 # Suites for src/migration/.
 entries:
-  - name: attention_context_migration_test
+  - name: migrations_test
     kind: function.lua
     meta:
-      name: Attention context migration
+      name: Session migrations
       type: test
       suite: session
-      comment: Applies migration 13 to a disposable SQLite sessions table that already has rows
-    source: file://attention_context_migration_test.lua
+      comment: Applies migrations 13 and 14 to a disposable SQLite sessions table that already has rows, and reverts 14
+    source: file://migrations_test.lua
     modules:
       - sql
       - uuid

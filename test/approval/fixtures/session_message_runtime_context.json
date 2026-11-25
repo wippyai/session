@@ -1,0 +1,10 @@
+{
+  "type": "session_message",
+  "session_id": "01990a2b-0000-7000-8000-000000000001",
+  "data": {
+    "text": "Delete customer c_1042",
+    "runtime_context": {
+      "tool_approval_ui": 1
+    }
+  }
+}

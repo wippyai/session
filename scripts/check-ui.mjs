@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// EE2-2461: Session frontend packaging drift guard.
+// Session frontend packaging drift guard.
 //
 // Modeled on the Host's scripts/check-import-map-drift.mjs. It fails when a
 // hand-maintained copy of some data disagrees with its source of truth. It
@@ -328,7 +328,7 @@ for (const pkg of PACKAGES)
   checkMetadata(pkg, indexYaml)
 
 if (errors.length) {
-  console.error('\n✖ check-ui failed (EE2-2461 packaging drift guard):\n')
+  console.error('\n✖ check-ui failed (packaging drift guard):\n')
   for (const e of errors)
     console.error(`  - ${e}`)
   console.error('')

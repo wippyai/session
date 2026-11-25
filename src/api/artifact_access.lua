@@ -3,6 +3,7 @@ local json = require("json")
 local artifact_repo = require("artifact_repo")
 local artifact_projection = require("artifact_projection")
 local renderer = require("renderer")
+local approval_projection = require("approval_projection")
 
 -- Request handling of the artifact endpoints (GET /artifact/{id} and
 -- GET /artifact/{id}/content) once the caller is authenticated; the
@@ -15,7 +16,10 @@ local renderer = require("renderer")
 -- client. The form state endpoints use the same owner check
 -- (forms/state_service.lua).
 
-local artifact_access = {}
+local artifact_access = {
+    -- Test seam: the tool approval read of the artifact's session.
+    _approval_projection = approval_projection,
+}
 
 -- Writes the response for a get_owned error.
 local function respond_refused(res: any, err: any)
@@ -53,6 +57,19 @@ function artifact_access.serve_metadata(req: any, res: any, user_id: string)
     -- Convert to a client-friendly format. Shared with the artifact-updated
     -- event publisher so the two representations cannot drift apart.
     local response = artifact_projection.build(artifact)
+
+    -- Whether the artifact's session is protected by tool approval
+    -- (docs/tool-approval-protocol.md section 12): the Host isolates the
+    -- content of a protected session and mounts nothing before this read.
+    -- A failed read fails closed, never as "not protected".
+    local protection = artifact_access._approval_projection.artifact_field(artifact.session_id)
+    if not protection then
+        res:set_content_type(http.CONTENT.JSON)
+        res:set_status(http.STATUS.INTERNAL_ERROR)
+        res:write_json({ success = false, error = "Failed to retrieve artifact" })
+        return
+    end
+    response.tool_approval = protection
 
     -- Return JSON metadata response
     res:set_content_type(http.CONTENT.JSON)

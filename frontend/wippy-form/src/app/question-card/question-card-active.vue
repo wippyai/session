@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import type { FieldError, FormAnswers, FormState } from '../../lib/definition'
+import type { ChoiceFormState, FieldError, FormAnswers } from '../../lib/definition'
 import type { FocusTarget } from '../../lib/focus-key'
 import type { SubmitBanner } from '../../lib/submit-error'
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { useQuestionCard } from '../../composables/use-question-card'
-import { trimAnswerText } from '../../lib/answers'
 import { joinIds } from '../../lib/aria'
 import { optionIndexOf, optionKey } from '../../lib/focus-key'
-import { TICK_ANSWER_MESSAGE } from '../../lib/messages'
+import { OFFLINE_MESSAGE, SENDING_MESSAGE, TICK_ANSWER_MESSAGE } from '../../lib/messages'
+import { ownValue } from '../../lib/own'
+import { pageHasNoFocus } from '../../lib/page-focus'
 import { partAttrs, partSelector } from '../../lib/part-attrs'
+import { trimAnswerText } from '../../lib/text'
 import FormMessage from '../form-message.vue'
 import QuestionCardHeader from './question-card-header.vue'
 import QuestionCardHeading from './question-card-heading.vue'
@@ -21,7 +23,7 @@ import QuestionCardReview from './question-card-review.vue'
  * `submit`, which sends them and reports the outcome back through the props.
  */
 const props = defineProps<{
-  state: FormState
+  state: ChoiceFormState
   submitting: boolean
   banner: SubmitBanner | null
   offline?: boolean
@@ -33,9 +35,6 @@ const emit = defineEmits<{
   'step-change': [step: 'active' | 'review']
   'collapsed-change': [collapsed: boolean]
 }>()
-
-const OFFLINE_MESSAGE = 'You are offline. Your choices are kept.'
-const SUBMITTING_MESSAGE = 'Sending your answer…'
 
 // A submit while offline can only fail, and a second one while the first is in
 // flight gets a 409. A single question submits straight from a row click or a
@@ -56,7 +55,8 @@ watch(controller.inReview, v => emit('step-change', v ? 'review' : 'active'), { 
 watch(controller.collapsed, v => emit('collapsed-change', v), { immediate: true })
 
 // 422 field errors from the server, by field id. They show on the question that
-// owns the field, and a card with several questions jumps there.
+// owns the field, and a card with several questions jumps there. Read with
+// `ownValue`: a field id can be `constructor`.
 const serverFieldErrors = ref<Record<string, string>>({})
 const serverFormErrors = ref<string[]>([])
 
@@ -75,7 +75,7 @@ watch(() => props.submitting, (sending) => {
 // Only the question's own field error goes down to it. A form-level error has no
 // question to sit on, and showing it there as well would announce it twice.
 function serverErrorFor(fieldId: string): string {
-  return serverFieldErrors.value[fieldId] ?? ''
+  return ownValue(serverFieldErrors.value, fieldId) ?? ''
 }
 
 const knownFieldIds = computed(() => new Set(props.state.definition.fields.map(f => f.id)))
@@ -100,16 +100,21 @@ const cardErrorIds = computed(() => joinIds(generalServerError.value && generalE
 // A changed answer clears the server error of that question, and the next
 // submit checks it again. The snapshot is per field because a deep watch on the
 // reactive answers cannot tell old from new, so only a field that changed
-// loses its error.
+// loses its error. Notes are a Map, which JSON.stringify writes as {}, so its
+// entries are spread into the snapshot; reading them also makes the watch
+// track them.
 watch(
-  () => Object.fromEntries(props.state.definition.fields.map(f => [f.id, JSON.stringify(controller.ans(f))])),
+  () => Object.fromEntries(props.state.definition.fields.map((f) => {
+    const a = controller.ans(f)
+    return [f.id, JSON.stringify({ ...a, notes: [...a.notes] })]
+  })),
   (curr, prev) => {
     if (!prev)
       return
     const changedIds = new Set(
       props.state.definition.fields
         .map(f => f.id)
-        .filter(id => curr[id] !== prev[id] && serverFieldErrors.value[id]),
+        .filter(id => curr[id] !== prev[id] && ownValue(serverFieldErrors.value, id)),
     )
     if (changedIds.size === 0)
       return
@@ -127,7 +132,7 @@ defineExpose({
       flat[id] = errs.map(e => e.message).join(' ')
     serverFieldErrors.value = flat
     serverFormErrors.value = (formErrors ?? []).map(e => e.message)
-    const firstIndex = props.state.definition.fields.findIndex(f => flat[f.id])
+    const firstIndex = props.state.definition.fields.findIndex(f => ownValue(flat, f.id))
     if (firstIndex >= 0)
       controller.go(firstIndex, 'first')
     else
@@ -143,7 +148,7 @@ defineExpose({
    */
   hasUnsentInput(): boolean {
     return Object.values(controller.answers).some(a =>
-      a.chosen.length > 0 || trimAnswerText(a.other) !== '' || Object.values(a.notes).some(n => trimAnswerText(n) !== ''),
+      a.chosen.length > 0 || trimAnswerText(a.other) !== '' || [...a.notes.values()].some(n => trimAnswerText(n) !== ''),
     )
   },
 })
@@ -185,15 +190,6 @@ watch(controller.focusSeq, () => {
   })
 })
 
-/** True when nothing on the page has focus, because it is on <body> or the root element, as after a focused control is removed. */
-function pageHasNoFocus(): boolean {
-  const doc = cardRoot.value?.ownerDocument
-  if (!doc)
-    return false
-  const active = doc.activeElement
-  return !active || active === doc.body || active === doc.documentElement
-}
-
 /**
  * After a failed send, keeps the reader inside the card. The send buttons stay
  * focusable while a send is in flight, so usually the one pressed still has
@@ -205,7 +201,7 @@ function pageHasNoFocus(): boolean {
  * such as the chat box, is left alone.
  */
 function restoreFocusAfterFailure() {
-  if (!pageHasNoFocus())
+  if (!cardRoot.value || !pageHasNoFocus(cardRoot.value))
     return
   controller.requestFocus(controller.inReview.value ? 'send-all' : 'first')
 }
@@ -332,7 +328,7 @@ function onKeydown(event: KeyboardEvent) {
       role="status"
       class="text-xs text-muted-color m-0 mb-2"
     >
-      {{ SUBMITTING_MESSAGE }}
+      {{ SENDING_MESSAGE }}
     </p>
 
     <FormMessage

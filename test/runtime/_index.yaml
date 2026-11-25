@@ -520,3 +520,214 @@ entries:
       session_repo: wippy.session.persist:session_repo
       wait_for_boot: app:wait_for_boot
       benchmark_report: app.runtime:benchmark_report
+
+  # Tool approval with real Session processes (approval_runtime_test.lua):
+  # a scripted model, tools that record each launch, the Session process
+  # with injection points, the real session plugin and client connections.
+  - name: approval_state
+    kind: store.memory
+    max_size: 4000
+
+  - name: approval_generate
+    kind: function.lua
+    source: file://approval_fixtures.lua
+    method: generate
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
+
+  - name: approval_status
+    kind: function.lua
+    source: file://approval_fixtures.lua
+    method: status
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
+
+  - name: approval_driver
+    kind: contract.binding
+    contracts:
+      - contract: wippy.llm:generator
+        methods:
+          generate: app.runtime:approval_generate
+      - contract: wippy.llm:provider
+        methods:
+          status: app.runtime:approval_status
+
+  - name: approval_provider
+    kind: registry.entry
+    meta:
+      type: llm.provider
+      name: session-approval-fixture
+    driver:
+      id: app.runtime:approval_driver
+      options: {}
+
+  - name: approval_marked_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Delete record
+      description: Permanently deletes a record.
+      approval: required
+      input_schema: '{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false}'
+    source: file://approval_fixtures.lua
+    method: tool
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
+
+  - name: approval_plain_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Look up record
+      input_schema: '{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false}'
+    source: file://approval_fixtures.lua
+    method: tool
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
+
+  - name: approval_granted_tool
+    kind: function.lua
+    meta:
+      type: tool
+      title: Send invoice
+      approval:
+        required: true
+        approve_all: true
+      input_schema: '{"type":"object","properties":{"n":{"type":"integer"}},"additionalProperties":false}'
+    source: file://approval_fixtures.lua
+    method: tool
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
+
+  - name: approval_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      name: Session approval runtime agent
+    model: gpt-4o
+    prompt: Test only.
+    tools:
+      - app.runtime:approval_marked_tool
+      - app.runtime:approval_plain_tool
+      - app.runtime:approval_granted_tool
+    traits:
+      - wippy.session.traits:steering
+      - app:native_behavior_trait
+      - id: wippy.session.traits:tool_approval
+        context:
+          require: marked
+          approve_all: tool
+
+  - name: approval_connection
+    kind: process.lua
+    source: file://approval_fixtures.lua
+    method: connection
+    modules: [ctx, store, time, sql]
+    imports:
+      consts: wippy.session:consts
+
+  - name: approval_session_worker
+    kind: process.lua
+    source: file://approval_session_worker.lua
+    method: run
+    modules: [time, store]
+    imports:
+      session: wippy.session.process:session
+      llm: wippy.llm:llm
+      approval_gate: wippy.session.approval:gate
+      activation: wippy.session.approval:activation
+      approval_repo: wippy.session.persist:approval_repo
+      approval_commands: wippy.session.approval:commands
+      approval_events: wippy.session.approval:events
+      upstream: wippy.session.process:upstream
+      message_handlers: wippy.session.process:message_handlers
+      approval_recovery: wippy.session.approval:recovery
+
+  - name: approval_plugin_worker
+    kind: process.lua
+    source: file://approval_plugin_worker.lua
+    method: run
+    imports:
+      plugin: wippy.session.process:plugin
+      consts: wippy.session:consts
+
+  - name: approval_runtime_wait
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-approval-runtime
+      timeout: 180s
+    source: file://approval_runtime_test.lua
+    method: wait
+    modules: [security, store, uuid, time, json, sql]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      approval_repo: wippy.session.persist:approval_repo
+      session_service: wippy.session:service
+      wait_for_boot: app:wait_for_boot
+
+  - name: approval_runtime_recovery
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-approval-runtime
+      timeout: 240s
+    source: file://approval_runtime_test.lua
+    method: recovery
+    modules: [security, store, uuid, time, json, sql]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      approval_repo: wippy.session.persist:approval_repo
+      session_service: wippy.session:service
+      wait_for_boot: app:wait_for_boot
+
+  - name: approval_runtime_surfaces
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-approval-runtime
+      timeout: 180s
+    source: file://approval_runtime_test.lua
+    method: surfaces
+    modules: [security, store, uuid, time, json, sql]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      approval_repo: wippy.session.persist:approval_repo
+      session_service: wippy.session:service
+      wait_for_boot: app:wait_for_boot
+
+  - name: approval_runtime_injection
+    kind: function.lua
+    meta:
+      type: test
+      suite: session-approval-runtime
+      timeout: 300s
+    source: file://approval_runtime_test.lua
+    method: injection
+    modules: [security, store, uuid, time, json, sql]
+    imports:
+      test: wippy.test:test
+      consts: wippy.session:consts
+      session_repo: wippy.session.persist:session_repo
+      context_repo: wippy.session.persist:context_repo
+      message_repo: wippy.session.persist:message_repo
+      approval_repo: wippy.session.persist:approval_repo
+      session_service: wippy.session:service
+      wait_for_boot: app:wait_for_boot

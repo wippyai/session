@@ -37,7 +37,7 @@ TEST_BACKUP_DIR ?= $(TEST_ARTIFACTS)/backups
 TEST_FILTER ?=
 TEST_TIMEZONE ?= UTC
 POSTGRES_TEST_OVERRIDES ?=
-POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.runtime:handoff_runtime app.runtime:checkpoint_runtime app:lifecycle_disconnect_test app.forms:
+POSTGRES_TEST_FILTER ?= app.persist:checkpoint_repo_test app.persist:writer_metadata_test app.persist:control_refresh_test app.persist:session_repo_test app.persist:approval_repo_test app.approval: app.runtime:handoff_runtime app.runtime:checkpoint_runtime app.runtime:approval_runtime app:lifecycle_disconnect_test app.forms:
 FRAMEWORK_DIR ?=
 PGHOST ?= localhost
 PGPORT ?= 5433
@@ -58,20 +58,28 @@ UI_ANSWERS_DIR ?= frontend/wippy-form-answers
 
 .PHONY: test test-runtime test-postgres test-postgres-full bench lint install prepare clean build-ui ui-dev ui-dev-answers test-ui lint-ui check-ui verify
 
+# TEST_FILTER (and POSTGRES_TEST_FILTER below) hold one or more space-separated
+# filters. They reach the runtime unquoted as the words after `--`, so each word
+# is one filter: `wippy test --config ... -- <filter> [<filter> ...]`.
+# Needs Wippy runtime v0.3.63a or later. From that release every word after `--`
+# is a filter, so the older `test -- <filter>` form adds a second filter named
+# `test` and runs every suite whose name contains "test". Runtimes before
+# v0.3.63a only accept the older form.
 test: clean
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
 	cd "$(TEST_DIR)" && TZ="$(TEST_TIMEZONE)" WIPPY_TEST_REPOSITORY="$(CURDIR)" WIPPY_TEST_ARTIFACTS="$(abspath $(TEST_ARTIFACTS))" "$(WIPPY)" test $(if $(filter 1,$(WIPPY_BENCH_EXACT_ALLOCATIONS)),--profiler) --config "$(TEST_CONFIG)" \
 		-o "app:db:file=$(abspath $(TEST_DB))" \
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
-		$(if $(strip $(TEST_FILTER)),test -- "$(TEST_FILTER)")
+		$(if $(strip $(TEST_FILTER)),-- $(TEST_FILTER))
 
-test-runtime: TEST_FILTER = app.runtime:handoff_runtime
+test-runtime: TEST_FILTER = app.runtime:handoff_runtime app.runtime:approval_runtime
 test-runtime:
 	$(MAKE) install
 	WIPPY_TEST_REQUIRE_CASES=1 $(MAKE) test TEST_FILTER="$(TEST_FILTER)"
 
 # The caller supplies a fresh disposable database; this target never drops one.
+# POSTGRES_TEST_FILTER uses the filter form described above `test`.
 test-postgres:
 	$(MAKE) install
 	mkdir -p "$(TEST_ARTIFACTS)/benchmarks"
@@ -82,7 +90,7 @@ test-postgres:
 		-o "app:env_storage:file_path=$(abspath $(TEST_ARTIFACTS))/test.env" \
 		-o "app.runtime:benchmark_output:directory=$(abspath $(TEST_ARTIFACTS))/benchmarks" \
 		$(POSTGRES_TEST_OVERRIDES) \
-		$(if $(strip $(POSTGRES_TEST_FILTER)),test -- $(POSTGRES_TEST_FILTER))
+		$(if $(strip $(POSTGRES_TEST_FILTER)),-- $(POSTGRES_TEST_FILTER))
 
 # Release validation executes every suite rather than only persistence handoff.
 # Benchmarks are opt-in workloads run by make bench; keep strict case checks

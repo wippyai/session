@@ -118,6 +118,21 @@ local function define_tests()
             test.is_nil(sent[2].payload.refresh)
         end)
 
+        it("reports an undelivered session update to the caller", function()
+            local sender = upstream.new("s1", nil, "parent-pid")
+            mock("process.send", function() return nil, "delivery failed" end)
+            local ok, err = sender:update_session({ status = "idle" })
+            restore_mock("process.send")
+            test.is_nil(ok)
+            test.eq(err, "delivery failed")
+
+            mock("process.send", function() return true end)
+            local sent, send_err = sender:update_session({ status = "idle" })
+            restore_mock("process.send")
+            test.is_true(sent)
+            test.is_nil(send_err)
+        end)
+
         it("does not hide a delivery failure while the owner is still mounted", function()
             mock("process.registry", { lookup = function() return "live-owner" end })
             mock("process.send", function() return nil, "delivery failed" end)
@@ -156,6 +171,20 @@ local function define_tests()
             test.eq(events[1].data.type, "error")
             test.eq(events[1].data.request_id, "r2")
             test.eq(events[1].data.code, "STORAGE_ERROR")
+        end)
+
+        it("passes only the committed approval records as extra keys of a command error", function()
+            local sender, events = fixture()
+            sender:command_error("r4", "approval_not_pending", "decided", {
+                approval = { approval_id = "a1", state = "approved" },
+                approvals = { { approval_id = "a1" } },
+                grant = { grant_id = "g1" },
+                secret = "dropped",
+            })
+            test.eq(events[1].data.approval.state, "approved")
+            test.eq(events[1].data.approvals[1].approval_id, "a1")
+            test.eq(events[1].data.grant.grant_id, "g1")
+            test.is_nil(events[1].data.secret)
         end)
 
         it("confirms a command through a typed command response", function()

@@ -18,6 +18,25 @@ entries:
       inserted after the completed response and tool results, before your next
       model step. Use those messages to adjust the current task.
 
+  # wippy.session.traits:tool_approval
+  # Opt-in to native tool-call approval (docs/tool-approval-protocol.md).
+  # Context: require (marked | all), approve_all (off | batch | tool |
+  # session), timeout_seconds (30..3600), max_requests_per_turn (1..50); the
+  # Session validates it at every step and fails the turn when it is
+  # invalid. The compiled option below is the marker the activation checks.
+  # No prompt: the model is not told about approvals.
+  - name: tool_approval
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      title: Tool call approval
+      public: true
+      icon: tabler:shield-check
+      comment: Ask the user before the agent's tool calls run; the user approves, approves all, or denies each call.
+    agent_options:
+      tool_approval:
+        schema: 1
+
   - name: input_control
     kind: registry.entry
     meta:

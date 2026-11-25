@@ -27,6 +27,7 @@ type MessageList = {
 
 local message_repo = {}
 local context_staging = require('context_staging_repo')
+local approval_repo = require('approval_repo')
 
 local function encode_metadata(metadata, encode_scalars)
     if type(metadata) == "string" then
@@ -86,8 +87,26 @@ end
 -- transaction, dated in array order. Returns true and, as the third value,
 -- each row's stored date keyed by message_id, so callers can announce the
 -- same date the history will show.
-function message_repo.create_batch(session_id, rows)
+--
+-- batch (optional): a server-owned tool approval batch descriptor
+-- { batch_id, members, turn_id } for a protected response with calls. The
+-- same transaction stamps metadata.batch_id on every member row and stores
+-- the batch record (approval_repo.create_batch_record), which is created
+-- already closed when an earlier Stop, finish or steering closure applies.
+-- The batch record is the fourth return value. Without it, nothing changes.
+function message_repo.create_batch(session_id, rows, batch)
+    local members = nil
+    if batch ~= nil then
+        local row_ids = {}
+        for _, row in ipairs(rows) do row_ids[row.message_id] = true end
+        local valid, invalid = approval_repo.validate_descriptor(batch, row_ids)
+        if not valid then return nil, invalid end
+        members = {}
+        for _, member in ipairs(batch.members) do members[member] = true end
+    end
+
     local dates = {}
+    local batch_record: any = nil
     local result, err = tx.run(function(dbtx)
         local _, lock_err = message_date.lock_session(dbtx, session_id)
         if lock_err then return nil, lock_err end
@@ -96,7 +115,17 @@ function message_repo.create_batch(session_id, rows)
         -- batch sorts in array order even inside one clock tick.
         local last_date = nil
         for _, row in ipairs(rows) do
-            local metadata, encode_err = encode_metadata(row.metadata or {}, true)
+            local row_metadata = row.metadata or {}
+            if members and members[row.message_id] then
+                -- A copy: the caller's table stays as it passed it.
+                local stamped = {}
+                if type(row_metadata) == "table" then
+                    for key, value in pairs(row_metadata) do stamped[key] = value end
+                end
+                stamped.batch_id = batch.batch_id
+                row_metadata = stamped
+            end
+            local metadata, encode_err = encode_metadata(row_metadata, true)
             if encode_err then return nil, encode_err end
             local date, date_err = message_date.next(dbtx, session_id)
             if date_err then return nil, date_err end
@@ -130,11 +159,17 @@ function message_repo.create_batch(session_id, rows)
                 break
             end
         end
+        if batch ~= nil then
+            local record, batch_err = approval_repo.create_batch_record(dbtx, session_id, batch,
+                message_repo.has_pending_input)
+            if not record then return nil, batch_err end
+            batch_record = record
+        end
         return true
     end)
 
     if err then return nil, err end
-    return result, nil, dates
+    return result, nil, dates, batch_record
 end
 
 -- The session metadata flag gates this query; apps without behavior proposals
@@ -161,6 +196,28 @@ function message_repo.list_behavior_rounds(session_id)
     return pending
 end
 
+-- The session's call rows (function, private function, delegation) whose
+-- status is still pending, metadata decoded, on `conn` (a transaction or a
+-- connection). Recovery reads them to find the approval batches an
+-- interruption cut off.
+function message_repo.list_pending_calls(conn: any, session_id: string): ({any}?, string?)
+    local rows, read_err = sql.builder.select("message_id", "type", "metadata"):from("messages")
+        :where("session_id = ?", session_id)
+        :where(sql.builder.expr("type IN (?, ?, ?)", consts.MSG_TYPE.FUNCTION,
+            consts.MSG_TYPE.PRIVATE_FUNCTION, consts.MSG_TYPE.DELEGATION))
+        :where("metadata LIKE ?", '%"status":"pending"%')
+        :run_with(conn):query()
+    if read_err then return nil, tostring(read_err) end
+    local pending = {}
+    for _, row in ipairs(rows or {}) do
+        decode_json_metadata(row)
+        if type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
+            pending[#pending + 1] = row
+        end
+    end
+    return pending, nil
+end
+
 -- The result of a call recovery settled without knowing its outcome.
 message_repo.INTERRUPTED_RESULT = "interrupted, outcome unknown"
 
@@ -170,8 +227,11 @@ message_repo.INTERRUPTED_RESULT = "interrupted, outcome unknown"
 -- settle (optional): settle(row) is asked first about each pending call row
 -- and returns the metadata that settles it when the call's effect is known
 -- to have completed, nil when it is not, or nil and an error, which stops
--- recovery so that it runs again later. A call nothing settles is reported
--- as interrupted with an unknown outcome.
+-- recovery so that it runs again later. A third return value `written` says
+-- that settle already wrote the row itself (approval_recovery writes
+-- approval-bearing rows in a locked transaction), so it is not written
+-- again. A call nothing settles is reported as interrupted with an unknown
+-- outcome.
 function message_repo.recover_pending(session_id, anchor_id, settle)
     local recovered = 0
     local function recover_rows(rows)
@@ -179,17 +239,19 @@ function message_repo.recover_pending(session_id, anchor_id, settle)
             if (row.type == consts.MSG_TYPE.FUNCTION or row.type == consts.MSG_TYPE.PRIVATE_FUNCTION
                 or row.type == consts.MSG_TYPE.DELEGATION)
                 and type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING then
-                local update = nil
+                local update, written = nil, false
                 if settle then
                     local settle_err
-                    update, settle_err = settle(row)
+                    update, settle_err, written = settle(row)
                     if settle_err then return nil, settle_err end
                 end
-                local _, update_err = message_repo.update_metadata(row.message_id, update or {
-                    status = consts.FUNC_STATUS.ERROR,
-                    result = message_repo.INTERRUPTED_RESULT
-                })
-                if update_err then return nil, update_err end
+                if not written then
+                    local _, update_err = message_repo.update_metadata(row.message_id, update or {
+                        status = consts.FUNC_STATUS.ERROR,
+                        result = message_repo.INTERRUPTED_RESULT
+                    })
+                    if update_err then return nil, update_err end
+                end
                 recovered = recovered + 1
             end
         end
@@ -746,6 +808,24 @@ function message_repo.list_steering_inputs(session_id: string?, relevant: (any, 
     return kept, nil
 end
 
+-- Whether the session has a steering input stored as pending, read on
+-- `conn` (a transaction) or on a pooled connection when it is nil.
+function message_repo.has_pending_input(conn: any, session_id: string): (boolean?, string?)
+    local db = conn
+    if not db then
+        local opened, err = get_db()
+        if not opened then return nil, err end
+        db = opened
+    end
+    local rows, err = steering_candidates(db, session_id)
+    if not conn then db:release() end
+    if not rows then return nil, err end
+    for _, message in ipairs(rows) do
+        if message.metadata.input.state == "pending" then return true, nil end
+    end
+    return false, nil
+end
+
 function message_repo.list_pending_inputs(session_id)
     local rows, err = message_repo.list_steering_candidates(session_id)
     if not rows then return nil, err end
@@ -890,6 +970,13 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
                 boundary_date = date
             end
         end
+        -- A protected session's Stop: the turn fence and the closure of the
+        -- turn's approval batches commit with the Stop itself, so no batch of
+        -- the turn is released or created open after it.
+        if session_updates.approval_turn_id ~= nil then
+            local _, fence_err = approval_repo.fence_turn(dbtx, session_id, session_updates.approval_turn_id, "stop")
+            if fence_err then return nil, fence_err end
+        end
         local current_meta, meta_err = session_meta_of(dbtx, session_id)
         if not current_meta then return nil, meta_err end
         for key, value in pairs(session_updates.meta or {}) do current_meta[key] = value end
@@ -904,56 +991,43 @@ function message_repo.stop_with_input_rollback(session_id, updates, session_upda
     end)
 end
 
-function message_repo.update_metadata(message_id, metadata, expected_session_id)
-    if not message_id or message_id == "" then
-        return nil, "Message ID is required"
-    end
-
-    if not metadata then
-        return nil, "Metadata is required"
-    end
-
-    local message, err = message_repo.get(message_id)
-    if not message or err then
+-- Reads the row with `read` (message_repo.get, or a read on the caller's
+-- transaction), merges `metadata` (top-level keys) into a stored object (any
+-- other value is replaced), and writes it back with `exec` (the update query
+-- on a pooled connection or on the transaction). With
+-- expected_session_id the row must belong to that session; the third return
+-- value then names a failure: "read" or "ownership".
+local function merge_metadata(read, exec, message_id, metadata, expected_session_id, if_pending)
+    local row, read_err = read(message_id)
+    if not row or read_err then
         if expected_session_id ~= nil then
-            return nil, err and ("Failed to get message: " .. err) or "Message not found", "read"
+            return nil, read_err and ("Failed to get message: " .. read_err) or "Message not found", "read"
         end
         return nil, "Message not found"
     end
-    if expected_session_id ~= nil and message.session_id ~= expected_session_id then
+    if expected_session_id ~= nil and row.session_id ~= expected_session_id then
         return nil, "Message belongs to different session", "ownership"
     end
-
-    if type(message.metadata) == "table" and type(metadata) == "table" then
-        for k, v in pairs(metadata) do
-            message.metadata[k] = v
-        end
-        metadata = message.metadata
+    if if_pending and not (type(row.metadata) == "table" and row.metadata.status == consts.FUNC_STATUS.PENDING) then
+        return { message_id = message_id, updated = false }
     end
 
+    if type(row.metadata) == "table" and type(metadata) == "table" then
+        for k, v in pairs(metadata) do row.metadata[k] = v end
+        metadata = row.metadata
+    end
     local metadata_json, encode_err = encode_metadata(metadata)
-    if encode_err then
-        return nil, "Failed to encode metadata: " .. encode_err
-    end
+    if encode_err then return nil, "Failed to encode metadata: " .. encode_err end
 
-    local db, err = get_db()
-    if err then
-        return nil, err
-    end
-
-    local update_query = sql.builder.update("messages")
-        :set("metadata", metadata_json)
+    local update_query = sql.builder.update("messages"):set("metadata", metadata_json)
         :where("message_id = ?", message_id)
     if expected_session_id ~= nil then
         update_query = update_query:where("session_id = ?", expected_session_id)
     end
-
-    local update_executor = update_query:run_with(db)
-    local result, err = update_executor:exec()
-
-    db:release()
-
+    -- A third value from `exec` marks a connection failure, returned as it is.
+    local result, err, connection_failed = exec(update_query)
     if err then
+        if connection_failed then return nil, err end
         return nil, "Failed to update message metadata: " .. err
     end
     if not result or result.rows_affected == 0 then
@@ -962,11 +1036,44 @@ function message_repo.update_metadata(message_id, metadata, expected_session_id)
         end
         return nil, "Message not found"
     end
+    return { message_id = message_id, updated = true }
+end
 
-    return {
-        message_id = message_id,
-        updated = true
-    }
+-- Merges `metadata` into the row's metadata. opts.tx (optional): run on this
+-- caller-supplied transaction, whose session row lock keeps the read and the
+-- write together; otherwise on a pooled connection. opts.if_pending (with
+-- opts.tx): write only while the row's status is still pending; otherwise
+-- nothing is written and the result has updated = false. A call row then
+-- never gets a second terminal result.
+function message_repo.update_metadata(message_id, metadata, expected_session_id, opts)
+    if not message_id or message_id == "" then
+        return nil, "Message ID is required"
+    end
+    if not metadata then
+        return nil, "Metadata is required"
+    end
+    if opts and opts.if_pending and not opts.tx then
+        return nil, "A pending-only metadata write needs a transaction"
+    end
+    if opts and opts.tx then
+        local function read_in_tx(id)
+            local rows, read_err = sql.builder.select("session_id", "metadata"):from("messages")
+                :where("message_id = ?", id):limit(1):run_with(opts.tx):query()
+            if read_err then return nil, tostring(read_err) end
+            if not rows or not rows[1] then return nil, "Message not found" end
+            return decode_json_metadata(rows[1]), nil
+        end
+        local function exec_in_tx(query) return query:run_with(opts.tx):exec() end
+        return merge_metadata(read_in_tx, exec_in_tx, message_id, metadata, expected_session_id, opts.if_pending)
+    end
+    local function exec_pooled(query)
+        local db, err = get_db()
+        if err then return nil, err, true end
+        local result, exec_err = query:run_with(db):exec()
+        db:release()
+        return result, exec_err
+    end
+    return merge_metadata(message_repo.get, exec_pooled, message_id, metadata, expected_session_id)
 end
 
 -- Checks that `message_id` is a row of the session. Returns true, or nil and

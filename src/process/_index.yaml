@@ -117,6 +117,7 @@ entries:
       tool_caller: wippy.agent.tools:caller
       checkpoint_runtime: wippy.agent:checkpoint_runtime
       input_policy: wippy.session.process:input_policy
+      activation: wippy.session.approval:activation
 
   # wippy.session.process:control_handlers
   - name: control_handlers
@@ -184,6 +185,9 @@ entries:
       message_repo: wippy.session.persist:message_repo
       session_handlers: wippy.session.process:session_handlers
       turn_context: wippy.agent:turn_context
+      activation: wippy.session.approval:activation
+      approval_gate: wippy.session.approval:gate
+      approval_recovery: wippy.session.approval:recovery
 
   - name: input_policy
     kind: library.lua
@@ -223,6 +227,13 @@ entries:
     imports:
       context_attachments: wippy.session:context_attachments
 
+  # wippy.session.process:approval_surfaces
+  - name: approval_surfaces
+    kind: library.lua
+    meta:
+      comment: Approval UI surfaces per session, kept by the session plugin - declarations, withdrawals, closed connections, the live set sent to the Session process
+    source: file://approval_surfaces.lua
+
   # wippy.session.process:session
   - name: session
     kind: process.lua
@@ -254,9 +265,14 @@ entries:
       agent_context: wippy.agent:context
       tools: wippy.agent.discovery:tools
       input_policy: wippy.session.process:input_policy
-      message_repo: wippy.session.persist:message_repo
-      form_recovery: wippy.session.forms:form_recovery
+      approval_recovery: wippy.session.approval:recovery
       interruption_boundary: wippy.session.process:interruption_boundary
+      wake: wippy.session.approval:wake
+      activation: wippy.session.approval:activation
+      approval_repo: wippy.session.persist:approval_repo
+      approval_gate: wippy.session.approval:gate
+      approval_commands: wippy.session.approval:commands
+      approval_projection: wippy.session.approval:projection
     method: run
 
   # wippy.session.process:plugin
@@ -288,10 +304,11 @@ entries:
       prompt_builder: wippy.session:prompt_builder
       input_policy: wippy.session.process:input_policy
       session_status: wippy.session.process:session_status
-      form_recovery: wippy.session.forms:form_recovery
+      approval_recovery: wippy.session.approval:recovery
       interruption_boundary: wippy.session.process:interruption_boundary
       reader: wippy.session.persist:reader
       writer: wippy.session.persist:writer
       upstream: wippy.session.process:upstream
       answer_admission: wippy.session.process:answer_admission
+      approval_surfaces: wippy.session.process:approval_surfaces
     method: run

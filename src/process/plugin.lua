@@ -8,7 +8,7 @@ local start_tokens = require("start_tokens")
 local consts = require("consts")
 local input_policy = require("input_policy")
 local session_status = require("session_status")
-local form_recovery = require("form_recovery")
+local approval_recovery = require("approval_recovery")
 local interruption_boundary = require("interruption_boundary")
 local funcs = require("funcs")
 local ui_action_broker = require("ui_action_broker")
@@ -18,6 +18,7 @@ local answer_admission = require("answer_admission")
 local reader = require("reader")
 local writer = require("writer")
 local upstream = require("upstream")
+local approval_surfaces = require("approval_surfaces")
 
 type PluginArgs = {
     user_id: string,
@@ -47,6 +48,13 @@ type ActiveSession = {
 -- (resume_pending_answer_sessions): sessions listed per scan, sessions started
 -- per scan, the longest wait in scans before a session whose start failed is
 -- tried again, and the page size of the stale running session scan.
+-- Session commands that change approval state: the session takes them only
+-- from this plugin, with the relay user stamped as sender_user_id.
+local APPROVAL_COMMANDS = {
+    [consts.COMMANDS.TOOL_APPROVAL] = true,
+    [consts.COMMANDS.TOOL_APPROVAL_GRANT_REVOKE] = true,
+}
+
 local RESUME_SCAN_LIMIT = 20
 local RESUME_STARTS_PER_SCAN = 3
 local MAX_RESUME_WAIT = 32
@@ -130,11 +138,19 @@ local function needs_crash_reset(session)
     return session and session.status and session.status ~= consts.STATUS.IDLE
 end
 
-local function recover_session_calls(session_id)
+-- Recovers the calls an interrupted turn of `session_id` left pending
+-- (approval_recovery: its unfinished approval batches first, then the call
+-- rows after the current checkpoint). `hub_pid` (optional) is the user's
+-- hub: the clients get the approval records and the activity recovery
+-- changed.
+local function recover_session_calls(session_id, hub_pid)
     local session_reader, open_err = reader.open(session_id)
     if open_err then return nil, open_err end
     local anchor = session_reader:get_context(consts.CONTEXT_KEYS.CURRENT_CHECKPOINT_ID)
-    return message_repo.recover_pending(session_id, anchor, form_recovery.settle_call)
+    local config = session_reader:state().config
+    return approval_recovery.recover_calls(session_id, anchor,
+        type(config) == "table" and config.tool_approval ~= nil,
+        hub_pid and upstream.new(session_id, nil, hub_pid) or nil)
 end
 
 -- Admits, with no turn, the form answers a stopped turn left pending: the
@@ -176,7 +192,7 @@ local function settle_session(session_id: string, user_id: string, target_status
     end
     local recovery_err = nil
     if opts.recover_calls then
-        local _, err = recover_session_calls(session_id)
+        local _, err = recover_session_calls(session_id, opts.hub_pid)
         recovery_err = err
     end
     local admitted = {}
@@ -246,7 +262,7 @@ local function finalize_exit(session_id: string, user_id: string, session_info: 
     end
     local target_status = status_after_exit(session_info, result, exit_error)
     return settle_session(session_id, user_id, target_status,
-        { recover_calls = target_status == consts.STATUS.FAILED })
+        { recover_calls = target_status == consts.STATUS.FAILED, hub_pid = hub_pid })
 end
 
 local function run(args)
@@ -316,6 +332,100 @@ local function run(args)
             return prompt_builder.validate_prepared_file(prepared_file, actor_id, session_id)
         end,
     })
+
+    -- Approval UI surfaces (docs/tool-approval-protocol.md section 3). Each
+    -- declaration of a connection for a session holds one monitor reference
+    -- in the broker's shared count; the live set of a session goes to its
+    -- Session process on every change and when a Session process for it
+    -- starts.
+    local surfaces: any = approval_surfaces.new()
+
+    -- Messages, commands and opens from the user's clients reach the plugin
+    -- through the authenticated relay: the user hub that started this plugin,
+    -- which forwards only its own connected clients and names the client
+    -- connection in conn_pid. Anything else may not change approval state.
+    local function from_relay(sender: any, payload_data: any): boolean
+        return state.user_hub_pid ~= nil and sender == state.user_hub_pid
+            and type(payload_data) == "table"
+            and type(payload_data.conn_pid) == "string" and payload_data.conn_pid ~= ""
+    end
+
+    local function push_surfaces(session_id: any)
+        if not surfaces:known(session_id) then return end
+        local session_info = state.active_sessions[session_id]
+        if not session_info or not session_info.open_notified or not session_info.pid then return end
+        local _, send_err = process.send(session_info.pid :: string, consts.TOPICS.APPROVAL_SURFACES,
+            surfaces:snapshot(session_id))
+        if send_err then
+            logger:warn("approval surface update not delivered", { session_id = session_id, error = tostring(send_err) })
+        end
+    end
+
+    -- Returns false when the surface could not be recorded.
+    local function declare_surface(session_id: any, conn_pid: any): boolean
+        if not surfaces:declare(session_id, conn_pid) then return true end
+        local monitored, monitor_err = broker:retain_monitor(conn_pid)
+        if not monitored then
+            -- An unmonitored surface could outlive its connection, so it is
+            -- not counted as live.
+            surfaces:withdraw(session_id, conn_pid)
+            logger:warn("approval surface not recorded: connection monitor failed",
+                { session_id = session_id, error = tostring(monitor_err) })
+            return false
+        end
+        push_surfaces(session_id)
+        return true
+    end
+
+    local function drop_surface(session_id: any, conn_pid: any)
+        if not surfaces:withdraw(session_id, conn_pid) then return end
+        broker:release_monitor(conn_pid)
+        push_surfaces(session_id)
+    end
+
+    local function drop_connection_surfaces(conn_pid: any)
+        for _, session_id in ipairs(surfaces:drop_connection(conn_pid)) do
+            broker:release_monitor(conn_pid)
+            push_surfaces(session_id)
+        end
+    end
+
+    -- The tool_approval_surface command, handled here and never forwarded:
+    -- { enabled = true } declares that the sending connection renders
+    -- approval cards for the session, { enabled = false } withdraws that
+    -- declaration. The relay forwards only fixed session_open
+    -- fields, so this command, sent after the open, is how a client
+    -- declares. Refused, without a reply, unless the relay sent it.
+    local function handle_surface_command(payload_data: any, relay: boolean)
+        if not relay then
+            logger:warn("approval surface command refused: not sent by the relay", { user_id = state.user_id })
+            return
+        end
+        local session_id = payload_data.session_id
+        local command = type(payload_data.data) == "table" and payload_data.data or {}
+        local response = {
+            type = consts.UPSTREAM_TYPES.COMMAND_RESPONSE,
+            session_id = session_id,
+            request_id = payload_data.request_id,
+            success = false,
+        }
+        if type(session_id) ~= "string" or session_id == "" or type(command.enabled) ~= "boolean" then
+            response.code = "invalid_surface_command"
+            response.message = "tool_approval_surface needs a session_id and enabled: true or false"
+        elseif not command.enabled then
+            drop_surface(session_id, payload_data.conn_pid)
+            response.success = true
+        elseif declare_surface(session_id, payload_data.conn_pid) then
+            response.success = true
+        else
+            response.code = "surface_unavailable"
+            response.message = "The approval surface could not be recorded"
+        end
+        if payload_data.request_id ~= nil then
+            process.send(payload_data.conn_pid :: string,
+                consts.TOPIC_PREFIXES.SESSION .. tostring(session_id or ""), response)
+        end
+    end
 
     local gc_ticker = time.ticker(base_config.gc_interval)
     local ui_action_ticker = time.ticker(consts.TIMEOUTS.UI_ACTION_SWEEP)
@@ -602,14 +712,16 @@ local function run(args)
         end
     end
 
-    local function queue_start_request(session_info: any, kind: string, payload_data: any)
+    -- relay: the request came from the authenticated relay (from_relay); it
+    -- is forwarded with that flag once the session process has started.
+    local function queue_start_request(session_info: any, kind: string, payload_data: any, relay: boolean?)
         session_info.pending_requests = session_info.pending_requests or {}
         if #session_info.pending_requests >= 256 then
             send_error(payload_data.conn_pid, "SESSION_BUSY",
                 "Pending startup request buffer is full", payload_data.request_id)
             return
         end
-        table.insert(session_info.pending_requests, { kind = kind, payload = payload_data })
+        table.insert(session_info.pending_requests, { kind = kind, payload = payload_data, relay = relay == true })
     end
 
     local function fail_start_requests(session_info, message)
@@ -635,7 +747,8 @@ local function run(args)
         end
     end
 
-    local function forward_request(session_info, session_id, topic_type, request_data)
+    -- relay: the request came from the authenticated relay (from_relay).
+    local function forward_request(session_info, session_id, topic_type, request_data, relay: boolean?)
         local conn_pid = request_data.conn_pid
         local request_id = request_data.request_id
         if topic_type == consts.HANDLER_TYPES.MESSAGE then
@@ -650,6 +763,10 @@ local function run(args)
             local cmd_data = request_data.data or {}
             cmd_data.conn_pid = conn_pid
             if request_id then cmd_data.request_id = request_id end
+            -- The authenticated user of this plugin, never a client value,
+            -- and only on what the relay sent: the session accepts approval
+            -- commands, and restores grants on an agent switch, only with it.
+            cmd_data.sender_user_id = relay == true and state.user_id or nil
             if cmd_data.command == consts.COMMANDS.STOP then
                 cmd_data.stop_supervised = true
                 local stop_request_id = session_info.stop_request_id
@@ -856,7 +973,7 @@ local function run(args)
 
     local action_intents: any = require('attention_action_intents').new(broker, process.pid())
 
-    local function handle_message_or_command(payload_data, topic_type)
+    local function handle_message_or_command(payload_data, topic_type, relay: boolean?)
         -- Keep pending Host identity private until the accepted message starts its agent step.
         local broker = {
             bind_turn = function(_, intent)
@@ -928,6 +1045,18 @@ local function run(args)
         if not payload_data then
             return
         end
+        if topic_type == consts.HANDLER_TYPES.COMMAND and type(payload_data.data) == "table"
+            and payload_data.data.command == consts.COMMANDS.TOOL_APPROVAL_SURFACE then
+            handle_surface_command(payload_data, relay == true)
+            return
+        end
+        -- Approval decisions and grant revocations: only from the user's
+        -- authenticated relay. forward_request stamps the sender.
+        if topic_type == consts.HANDLER_TYPES.COMMAND and type(payload_data.data) == "table"
+            and APPROVAL_COMMANDS[payload_data.data.command] and not relay then
+            logger:warn("tool approval command refused: not sent by the relay", { user_id = state.user_id })
+            return
+        end
 
         local conn_pid = payload_data.conn_pid
         local session_id = payload_data.session_id
@@ -939,6 +1068,13 @@ local function run(args)
             local routed = payload_data
             if topic_type == consts.HANDLER_TYPES.MESSAGE then
                 local message_data = type(payload_data.data) == "table" and payload_data.data or {}
+                -- The surface declaration is read before runtime_context is
+                -- stripped, and recorded before the message is forwarded.
+                local runtime_context = type(message_data.runtime_context) == "table"
+                    and message_data.runtime_context or nil
+                if relay and runtime_context and approval_surfaces.declares(runtime_context.tool_approval_ui) then
+                    declare_surface(session_id, payload_data.conn_pid)
+                end
                 local clean_data = {}
                 for key, value in pairs(message_data) do
                     if key ~= "runtime_context" then
@@ -957,10 +1093,10 @@ local function run(args)
                 end
             end
             if not session_info.open_notified then
-                queue_start_request(session_info, topic_type, routed)
+                queue_start_request(session_info, topic_type, routed, relay)
                 return
             end
-            forward_request(session_info, session_id, topic_type, routed)
+            forward_request(session_info, session_id, topic_type, routed, relay)
         end
 
         logger:debug("routing message", { user_id = state.user_id, session_id = session_id, topic_type = topic_type })
@@ -1144,7 +1280,8 @@ local function run(args)
                 local session_id = tostring(session.session_id)
                 if not state.active_sessions[session_id] and session_status.is_stale_running(session) then
                     local target_status, stored, status_err, recovery_err, interaction =
-                        settle_interrupted(session_id, state.user_id :: string, { recovery_boundary = true })
+                        settle_interrupted(session_id, state.user_id :: string,
+                            { recovery_boundary = true, hub_pid = state.user_hub_pid })
                     if recovery_err or status_err then
                         logger:warn("stale session status could not be settled", { session_id = session_id,
                             error = tostring(status_err or recovery_err) })
@@ -1224,9 +1361,13 @@ local function run(args)
             elseif topic == consts.PLUGIN_TOPICS.CLOSE then
                 handle_session_close(payload:data())
             elseif topic == consts.PLUGIN_TOPICS.MESSAGE then
-                handle_message_or_command(payload:data(), consts.HANDLER_TYPES.MESSAGE)
+                local payload_data = payload:data()
+                handle_message_or_command(payload_data, consts.HANDLER_TYPES.MESSAGE,
+                    from_relay(msg:from(), payload_data))
             elseif topic == consts.PLUGIN_TOPICS.COMMAND then
-                handle_message_or_command(payload:data(), consts.HANDLER_TYPES.COMMAND)
+                local payload_data = payload:data()
+                handle_message_or_command(payload_data, consts.HANDLER_TYPES.COMMAND,
+                    from_relay(msg:from(), payload_data))
             elseif topic == consts.PLUGIN_TOPICS.SHUTDOWN then
                 -- The client transport is gone, so UI actions waiting on it end
                 -- now, whatever the grace period does with the sessions.
@@ -1333,6 +1474,9 @@ local function run(args)
                 local session_info = state.active_sessions[started.session_id]
                 if session_info and session_info.pid == started.from_pid and not session_info.open_notified then
                     session_info.open_notified = true
+                    -- A new Session process gets the live approval UI
+                    -- surfaces before any queued request.
+                    push_surfaces(started.session_id)
                     local pending_requests = session_info.pending_requests or {}
                     session_info.pending_requests = {}
                     for _, request in ipairs(pending_requests) do
@@ -1340,7 +1484,7 @@ local function run(args)
                             notify_session_opened(started.session_id, request.payload.request_id)
                         else
                             forward_request(session_info, started.session_id,
-                                request.kind, request.payload)
+                                request.kind, request.payload, request.relay)
                         end
                     end
                 end
@@ -1360,6 +1504,8 @@ local function run(args)
             local event = result.value
             if event.kind == process.event.LINK_DOWN or event.kind == process.event.EXIT then
                 broker:handle_exit(event.from)
+                -- A declaring connection closed: its surfaces leave the live sets.
+                drop_connection_surfaces(event.from)
                 local exit_result = event.result and event.result.value
                 local exit_error = event.result and event.result.error
                 for session_id, session_info in pairs(state.active_sessions) do

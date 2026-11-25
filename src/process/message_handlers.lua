@@ -17,6 +17,9 @@ local message_repo = require("message_repo")
 local turn_context = require("turn_context")
 local time = require("time")
 local llm = require("llm")
+local activation = require("activation")
+local approval_gate = require("approval_gate")
+local approval_recovery = require("approval_recovery")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -47,6 +50,7 @@ type SessionContext = {
     model_step_at: number?,
     model_cache_ttl: string?,
     model_cache_expires_at: number?,
+    approval_turn_end: string?,
 }
 
 type AttentionToolContext = {
@@ -731,10 +735,29 @@ local function is_turn_stopped(ctx: any): boolean
         or (state and state.failed) or false)
 end
 
-local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason)
+-- The writer of a tool round's call rows: write(message_id, metadata,
+-- correction) returns whether it wrote, or nil and an error. A round of an
+-- approval batch (op.approval.batch_id) writes each row in a transaction
+-- with the session row locked and, unless `correction` (a row the round
+-- settled itself), only while the row is still pending
+-- (approval_recovery.write_call), so a row never gets a second terminal
+-- result from another writer. Other rounds write as before.
+local function call_row_writer(ctx: any, op: any): any
+    local binding = type(op) == "table" and op.approval or nil
+    if type(binding) == "table" and type(binding.batch_id) == "string" then
+        return function(message_id, metadata, correction)
+            return approval_recovery.write_call(ctx.session_id, message_id, metadata,
+                { correction = correction == true })
+        end
+    end
+    return function(message_id, metadata) return ctx.writer:update_message_meta(message_id, metadata) end
+end
+
+local function settle_cancelled_call(ctx, call, message_id, call_type, validated, reason, write)
     call_type = call_type or call.type
     reason = reason or "Session stopped before the call executed"
-    local _, err = ctx.writer:update_message_meta(message_id, {
+    write = write or call_row_writer(ctx, nil)
+    local _, err = write(message_id, {
         status = consts.FUNC_STATUS.CANCELLED, result = reason,
     })
     if err then return nil, err end
@@ -883,14 +906,23 @@ deactivation_refs = function(state)
     return { deactivation_range = range }
 end
 
--- Whether the current turn ended by creating a form (control_forms keys its
--- one-form-per-turn marker by the same turn id). Such a turn takes no
--- further step; steering that is still pending starts the next turn instead
--- (session.flush_held).
-function message_handlers.ended_by_form(ctx): boolean
+-- Whether `marker` (a turn id) names the current turn.
+local function ends_current_turn(ctx, marker): boolean
     local state = ctx.turn_state
-    if type(state) ~= "table" or ctx.form_turn_id == nil then return false end
-    return ctx.form_turn_id == (state.id or state.message_id)
+    return type(state) == "table" and marker ~= nil and marker == (state.id or state.message_id)
+end
+
+-- Whether the current turn ended by creating a form (control_forms keys its
+-- one-form-per-turn marker by the same turn id), or the approval gate ended
+-- it (a stop denial, expiry, finish, deletion, exit, no approval UI or the
+-- request cap). Such a turn takes no further step; steering that is still
+-- pending starts the next turn instead (session.flush_held).
+function message_handlers.ended_by_form(ctx): boolean
+    return ends_current_turn(ctx, ctx.form_turn_id)
+end
+
+function message_handlers.ended_by_approval(ctx): boolean
+    return ends_current_turn(ctx, ctx.approval_turn_end)
 end
 
 -- The interaction a turn start or end persists, resolved against the state
@@ -961,7 +993,7 @@ end
 function message_handlers.finish_turn(ctx, opts)
     local state = ctx.turn_state
     local ends_normally = state and state.active and not is_turn_blocked(ctx)
-    if ends_normally and not message_handlers.ended_by_form(ctx) then
+    if ends_normally and not message_handlers.ended_by_form(ctx) and not message_handlers.ended_by_approval(ctx) then
         local updates, err = answer_admission.prepare_pending_inputs(ctx, nil)
         if not updates then return nil, err or "Failed to read pending input" end
         if #updates > 0 then
@@ -1513,6 +1545,8 @@ function message_handlers.handle_message(ctx, op)
     answer_admission.publish_admitted(answers)
     return {
         message_id = message_id, completed = active,
+        -- A new steering input is stored as pending (wakes the approval gate).
+        steered = active or nil,
         next_ops = active and {} or { { type = consts.OP_TYPE.AGENT_STEP, message_id = message_id,
             request_id = op.request_id, from_user = true, ui_action_runtime = op.ui_action_runtime } },
     }
@@ -1647,6 +1681,15 @@ function message_handlers.agent_step(ctx, op)
                 tostring(state.last_round_tools), state.repeated_calls, max_repeats)
         end
         return stop_turn(ctx, op, agent, state, "repeated_tool_calls", detail)
+    end
+
+    -- Tool approval activation: before any other side effect of the step
+    -- and before the model call. It fails closed: a listed trait
+    -- that can't be activated ends the turn with no model call.
+    local _, activation_err, activation_kind = activation.apply(ctx, agent)
+    if activation_err then
+        if activation_kind == activation.FAILURE.STORAGE then return nil, activation_err end
+        return fail_turn(ctx, op, agent, response_id, activation.ERROR_CODE, activation_err)
     end
 
     if handed_off then
@@ -2155,13 +2198,16 @@ function message_handlers.agent_step(ctx, op)
             })
             call_message_types[call.id] = call_type
         end
-        local stored_id, call_message_ids, store_err, stored_date = ctx.writer:add_response(
-            output_text, metadata, intents, step_notes)
+        -- A protected response stores its approval batch record with the
+        -- rows; an unprotected one passes no options.
+        local stored_id, call_message_ids, store_err, stored_date, approval_batch = ctx.writer:add_response(
+            output_text, metadata, intents, step_notes, nil, approval_gate.response_options(ctx))
         if store_err then
             ctx.upstream:message_error(response_id, consts.ERROR_CODES.STORAGE_ERROR, store_err)
             return nil, store_err
         end
         assistant_message_id = stored_id
+        result.approval = approval_gate.op_binding(ctx, approval_batch)
         commit_inline_artifacts(ctx :: SessionContext, pending_inline_artifacts)
         result.call_message_ids = call_message_ids
         if behavior_round then ctx.reader:reset() end
@@ -2243,6 +2289,7 @@ function message_handlers.agent_step(ctx, op)
             request_id = op.request_id,
             has_text_response = output_text ~= "",
             ui_action_runtime = op.ui_action_runtime,
+            approval = result.approval,
         })
     end
 
@@ -2384,6 +2431,48 @@ local function settle_behavior_round(ctx, op, cancelled)
     return ctx.reader:reset()
 end
 
+-- The operations that follow a settled tool round: a requested checkpoint
+-- (unless skip_checkpoint) and, unless the turn ends, the next model step.
+-- A stopped turn queues neither.
+local function queue_round_end(ctx, op, next_ops, end_turn, skip_checkpoint)
+    if #op.tool_calls == 0 or is_turn_stopped(ctx) then return true end
+    -- Requested compaction waits for the complete tool/result round. The
+    -- existing token-threshold background scheduling remains unchanged.
+    if not skip_checkpoint and ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
+        local checkpoint_agent = current_agent(ctx)
+        if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
+        table.insert(next_ops, {
+            type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
+            requested_only = true,
+            message_id = op.checkpoint_anchor_id or op.message_id,
+            checkpoint_anchor_id = op.checkpoint_anchor_id,
+            checkpoint_bindings = checkpoint_agent and checkpoint_agent.bindings
+                and checkpoint_agent.bindings.checkpoint,
+            agent_options = checkpoint_agent and checkpoint_agent.agent_options,
+            agent = checkpoint_agent and { id = checkpoint_agent.id, model = checkpoint_agent.model },
+            tokens = op.tokens,
+        })
+    end
+    -- A turn that ended by creating a form, or that the approval gate ended,
+    -- queues no continuation step; a handoff does, so the new agent continues
+    -- the turn.
+    if not end_turn then
+        table.insert(next_ops, {
+            type = consts.OP_TYPE.AGENT_CONTINUE,
+            message_id = op.message_id,
+            request_id = op.request_id,
+            ui_action_runtime = op.ui_action_runtime,
+        })
+    end
+    return true
+end
+
+-- The approval gate hook. Replaceable, so tests can drive process_tools with
+-- a fake gate.
+message_handlers._approval_gate = function(ctx, op, env)
+    return approval_gate.run(ctx, op, env)
+end
+
 local function loaded_traits(ctx: any, control: any): table?
     local config = control.config
     if type(config) ~= "table" or config.traits == nil or config.agent ~= nil then
@@ -2416,6 +2505,19 @@ end
 function message_handlers.process_tools(ctx, op)
     if not op.tool_calls or #op.tool_calls == 0 then
         return { completed = true }
+    end
+    -- The call row writes from the approval gate on (results, failures).
+    -- Rows this round settled itself it may still correct (a rejected
+    -- effect, a later failure). In an approval batch every other row is
+    -- written only while it is pending, so a row the gate settled keeps its
+    -- one result. Before the gate nothing else writes the rows: cancel_only
+    -- and the guards below write as before.
+    local write_call_row = call_row_writer(ctx, op)
+    local owned = {}
+    local function write_row(message_id, metadata)
+        local written, err = write_call_row(message_id, metadata, owned[message_id] == true)
+        if written and metadata.status ~= nil then owned[message_id] = true end
+        return written, err
     end
 
     if op.cancel_only or is_turn_blocked(ctx) then
@@ -2469,29 +2571,116 @@ function message_handlers.process_tools(ctx, op)
         return { completed = true, next_ops = {} }
     end
 
+    -- The message IDs and the session context are set before the approval
+    -- gate, which freezes both.
     for call_id, tool_call in pairs(validated_tools or {}) do
         if not op.call_message_ids[call_id] then
             return nil, "Tool call intent was not stored with the assistant response: " .. call_id
         end
         tool_call.message_id = op.call_message_ids[call_id]
+    end
+
+    local function read_session_context()
+        local context, read_err = ctx.reader:get_full_context()
+        if read_err then return nil, read_err end
+        return with_agent_run_context(ctx :: SessionContext, context or {}, active_agent), nil
+    end
+    local session_context = read_session_context() or with_agent_run_context(ctx, {}, active_agent)
+
+    local function fail_remaining(start_index, reason)
+        local failure = tostring(reason)
+        -- The approval batch of the round closes first, as `exit`: one the
+        -- gate left open (a check that failed after its requests were
+        -- stored) with its row projections and the activity, so no terminal
+        -- row keeps a pending card; a released one with its controls
+        -- cancelled, so they are not replayed after a restart.
+        local binding = op.approval
+        if type(binding) == "table" and type(binding.batch_id) == "string" then
+            local _, close_err = approval_recovery.close_failed_batch(ctx.session_id, binding.batch_id, ctx.upstream)
+            if close_err then failure = failure .. "; approval batch closure failed: " .. tostring(close_err) end
+        end
+        for index = start_index, #op.tool_calls do
+            local call = op.tool_calls[index]
+            local _, mark_err = write_row(op.call_message_ids[call.id], {
+                status = consts.FUNC_STATUS.ERROR,
+                result = failure
+            })
+            if mark_err then failure = failure .. "; settlement failed: " .. tostring(mark_err) end
+        end
+        return nil, failure
+    end
+
+    -- The approval gate. nil for an unprotected session. It fails closed:
+    -- when the check fails, no call runs.
+    local gated, gate_err = message_handlers._approval_gate(ctx, op, {
+        validated_tools = validated_tools,
+        session_context = session_context,
+        -- The release rereads the stored context (the reader caches it), and
+        -- dispatch uses what it rechecked.
+        read_session_context = function()
+            local reset, reset_err = ctx.reader:reset()
+            if not reset then return nil, reset_err end
+            return read_session_context()
+        end,
+    })
+    if gate_err then return fail_remaining(1, "Tool approval check failed: " .. tostring(gate_err)) end
+    gated = gated or {}
+    if gated.fenced then
+        -- The gate settled every call of the batch; none runs. A turn the gate
+        -- ended takes no further step, and pending steering waits for the
+        -- next user turn (ended_by_approval in finish_turn).
+        if gated.end_turn then ctx.approval_turn_end = approval_gate.turn_id(ctx, op) end
+        -- A deleted session has no rows left to mark.
+        if not gated.deleted then
+            local cancelled, cancel_err = settle_behavior_round(ctx, op, true)
+            if not cancelled then return nil, cancel_err end
+        end
+        local next_ops = {}
+        local queued, queue_err = queue_round_end(ctx, op, next_ops, gated.end_turn == true,
+            gated.skip_checkpoint == true)
+        if not queued then return nil, queue_err end
+        return { completed = (#next_ops == 0), next_ops = next_ops }
+    end
+    local settled_by_gate = gated.settled or {}
+    -- In a protected session the caller gets the calls the gate released, and
+    -- each call the gate settled as an entry that does not run (valid false,
+    -- its not-run text as the error), so the result listener and the
+    -- after-execute wrappers see every call. Unprotected rounds run as before.
+    local run_tools = validated_tools
+    if gated.released then
+        run_tools = {}
+        for call_id, tool_call in pairs(validated_tools or {}) do
+            local not_run = gated.not_run[call_id]
+            if not_run then
+                local entry = {}
+                for key, value in pairs(tool_call) do entry[key] = value end
+                entry.valid, entry.error = false, not_run
+                run_tools[call_id] = entry
+            elseif gated.released[call_id] then
+                run_tools[call_id] = tool_call
+            end
+        end
+    end
+
+    for call_id, tool_call in pairs(run_tools or {}) do
         if tool_call.valid and (not ctx.config.delegation_func_id
             or tool_call.registry_id ~= ctx.config.delegation_func_id)
             and not (tool_call.meta and tool_call.meta.private) then
             ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_CALL, {
                 message_id = op.call_message_ids[call_id],
-                function_name = tool_call.name
+                function_name = tool_call.name,
+                approval = gated.approvals and gated.approvals[call_id] or nil,
             })
             end
     end
 
-    local session_context, err = ctx.reader:get_full_context()
-    if err then
-        session_context = {}
-    end
-    session_context = with_agent_run_context(ctx, session_context, active_agent)
+    -- After an approval release, dispatch uses the context the release
+    -- rechecked. Only Stop, exit and deletion close the turn's cancellation
+    -- channel, so released calls are not cancelled by steering or finish.
+    if gated.session_context ~= nil then session_context = gated.session_context end
 
     local executed, results, execute_err = pcall(function()
-        return caller:execute(session_context, validated_tools, ctx.coordinator and ctx.coordinator.cancel)
+        return caller:execute(session_context, run_tools, ctx.coordinator and ctx.coordinator.cancel)
     end)
     if not executed then
         execute_err = tostring(results)
@@ -2500,7 +2689,7 @@ function message_handlers.process_tools(ctx, op)
     local reported_results = type(results) == "table" and results or {}
     results = {}
     for call_id, result_data in pairs(reported_results) do
-        if op.call_message_ids[call_id] and type(result_data) == "table"
+        if op.call_message_ids[call_id] and not settled_by_gate[call_id] and type(result_data) == "table"
             and type(result_data.tool_call) == "table" then
             result_data.tool_call.message_id = op.call_message_ids[call_id]
             results[call_id] = result_data
@@ -2508,21 +2697,10 @@ function message_handlers.process_tools(ctx, op)
     end
 
     local next_ops = {}
-    -- Set by an effect that finishes the turn (a created form): the calls are
-    -- settled as usual, but no continuation step is queued.
-    local end_turn = false
-    local function fail_remaining(start_index, reason)
-        local failure = tostring(reason)
-        for index = start_index, #op.tool_calls do
-            local call = op.tool_calls[index]
-            local _, mark_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
-                status = consts.FUNC_STATUS.ERROR,
-                result = failure
-            })
-            if mark_err then failure = failure .. "; settlement failed: " .. tostring(mark_err) end
-        end
-        return nil, failure
-    end
+    -- Set by an effect that finishes the turn (a created form), or by the
+    -- approval gate: the calls are settled as usual, but no continuation step
+    -- is queued.
+    local end_turn = gated.end_turn == true
     local function announce_function_error(call_id, message_id, function_name, detail)
         ctx.upstream:send_message_update(call_id, consts.UPSTREAM_TYPES.FUNCTION_ERROR, {
             message_id = message_id,
@@ -2545,6 +2723,8 @@ function message_handlers.process_tools(ctx, op)
     local calls_cancelled = false
     for index, call in ipairs(op.tool_calls) do
         local call_id = call.id
+        -- Settled by the approval gate, with its own result and events.
+        if settled_by_gate[call_id] then goto continue_call end
         local result_data = results[call_id]
         if not result_data then
             local failure = execute_err and tostring(execute_err) or "Call outcome unknown"
@@ -2565,7 +2745,7 @@ function message_handlers.process_tools(ctx, op)
             calls_cancelled = true
             local _, cancel_err = settle_cancelled_call(ctx, call, message_id,
                 op.call_message_types and op.call_message_types[call_id],
-                validated_tools and validated_tools[call_id], "Session stopped while the call was running")
+                validated_tools and validated_tools[call_id], "Session stopped while the call was running", write_row)
             if cancel_err then return fail_remaining(index, cancel_err) end
             goto continue_call
         end
@@ -2597,7 +2777,7 @@ function message_handlers.process_tools(ctx, op)
         end
 
         if result_data.error then
-            local _, update_err = ctx.writer:update_message_meta(message_id, {
+            local _, update_err = write_row(message_id, {
                 result = error_text(result_data.error),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
@@ -2615,7 +2795,7 @@ function message_handlers.process_tools(ctx, op)
             local control = not is_delegation and type(tool_result) == "table"
                 and tool_result._control or nil
             if control then
-                local _, control_err = ctx.writer:update_message_meta(message_id, {
+                local _, control_err = write_row(message_id, {
                     control_operations = control,
                     loaded_traits = loaded_traits(ctx, control)
                 })
@@ -2636,7 +2816,7 @@ function message_handlers.process_tools(ctx, op)
             -- Every other call is settled before its effects run.
             local settle_late = control and type(control.forms) == "table" and #control.forms > 0
             if not settle_late then
-                local _, update_err = ctx.writer:update_message_meta(message_id, settled)
+                local _, update_err = write_row(message_id, settled)
                 if update_err then return fail_remaining(index, update_err) end
             end
 
@@ -2704,7 +2884,7 @@ function message_handlers.process_tools(ctx, op)
                 settled.status = consts.FUNC_STATUS.ERROR
             end
             if settle_late or rejected then
-                local _, settle_err = ctx.writer:update_message_meta(message_id, settled)
+                local _, settle_err = write_row(message_id, settled)
                 if settle_err then return fail_from(settle_err) end
             end
 
@@ -2756,35 +2936,8 @@ function message_handlers.process_tools(ctx, op)
         ctx.turn_state.span_open_start = false
     end
 
-    if #op.tool_calls > 0 and not is_turn_stopped(ctx) then
-        -- Requested compaction waits for the complete tool/result round. The
-        -- existing token-threshold background scheduling remains unchanged.
-        if ctx.reader:get_context(consts.CONTEXT_KEYS.CHECKPOINT_REQUESTED) == true then
-            local checkpoint_agent = current_agent(ctx)
-            if not checkpoint_agent then return nil, "Failed to load checkpoint agent" end
-            table.insert(next_ops, {
-                type = consts.OP_TYPE.CHECK_BACKGROUND_TRIGGERS,
-                requested_only = true,
-                message_id = op.checkpoint_anchor_id or op.message_id,
-                checkpoint_anchor_id = op.checkpoint_anchor_id,
-                checkpoint_bindings = checkpoint_agent and checkpoint_agent.bindings
-                    and checkpoint_agent.bindings.checkpoint,
-                agent_options = checkpoint_agent and checkpoint_agent.agent_options,
-                agent = checkpoint_agent and { id = checkpoint_agent.id, model = checkpoint_agent.model },
-                tokens = op.tokens,
-            })
-        end
-        -- A turn that ended by creating a form queues no continuation step; a
-        -- handoff does, so the new agent continues the turn.
-        if not end_turn then
-            table.insert(next_ops, {
-                type = consts.OP_TYPE.AGENT_CONTINUE,
-                message_id = op.message_id,
-                request_id = op.request_id,
-                ui_action_runtime = op.ui_action_runtime,
-            })
-        end
-    end
+    local queued, queue_err = queue_round_end(ctx, op, next_ops, end_turn, false)
+    if not queued then return nil, queue_err end
 
     return {
         completed = (#next_ops == 0),
@@ -2810,8 +2963,17 @@ function message_handlers.recover_behavior_controls(ctx)
     if not (state.meta and state.meta.behavior_controls_pending) then return true end
     local rounds, read_err = ctx.reader:list_behavior_rounds()
     if not rounds then return nil, read_err end
+    -- In a protected session the round's approval batch (the assistant row
+    -- is the batch) says whether its controls were cancelled: a fenced batch
+    -- and one interrupted after release are never replayed.
+    local protected = type(ctx.config) == "table" and ctx.config.tool_approval ~= nil
     for _, round in ipairs(rounds) do
         local cancelled = false
+        if protected then
+            local batch_cancelled, batch_err = approval_recovery.controls_cancelled(round.message_id)
+            if batch_cancelled == nil then return nil, batch_err end
+            cancelled = batch_cancelled
+        end
         for _, message_id in pairs(round.metadata.behavior_call_message_ids or {}) do
             local call, call_err = ctx.reader:get_behavior_call(message_id)
             if not call then return nil, call_err end

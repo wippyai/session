@@ -139,6 +139,8 @@ local function define_tests()
                             payload = function() return { data = function()
                                 return { data = { text = "first" }, request_id = "first" }
                             end } end,
+                            -- Every inbox message names its sender.
+                            from = function() return "client-relay" end,
                         } }
                     elseif selection == 2 then
                         -- Run the real bus/handlers to the response boundary without another inbox coroutine.
