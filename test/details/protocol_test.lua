@@ -17,6 +17,10 @@ local message_repo = require("message_repo")
 local upstream = require("upstream")
 local gate = require("gate")
 local get_session = require("get_session")
+local time = require("time")
+local fx = require("gate_fixtures")
+local message_handlers = require("message_handlers")
+local control_handlers = require("control_handlers")
 
 local wait_for_boot = require("wait_for_boot")
 
@@ -145,6 +149,7 @@ local function define_tests()
         test.after_each(function()
             policy._app, policy._agent, policy._tool = original.app, original.agent, original.tool
             timing._now = nil
+            fx.cleanup()
         end)
 
         for name in pairs(fixtures) do
@@ -203,7 +208,7 @@ local function define_tests()
             local row, config = stored("call_success_full_masked", fixture("call_success_full_masked"))
             policy._tool = function() return {} end
             local out = projection.row(row, config)
-            test.is_nil((json.encode(out) or ""):find("SECRET", 1, true))
+            test.is_nil(((json.encode(out) or ""):find("SECRET", 1, true)))
             test.eq(assert(json.decode(out.data)).api_key, masks.HIDDEN)
         end)
 
@@ -256,8 +261,8 @@ local function define_tests()
         it("never copies failure text through result full when error is none", function()
             local row, config = stored("call_result_full_error_none", fixture("call_result_full_error_none"))
             local out = projection.row(row, config)
-            test.is_nil(json.encode(out):find("SECRET%-FAILURE"))
-            test.is_nil(json.encode(projection.event("function_error", row, config)):find("SECRET%-FAILURE"))
+            test.is_nil((json.encode(out):find("SECRET%-FAILURE")))
+            test.is_nil((json.encode(projection.event("function_error", row, config)):find("SECRET%-FAILURE")))
         end)
 
         it("omits decided arguments but rebuilds the summary", function()
@@ -294,12 +299,58 @@ local function define_tests()
             equal(gate.display_for(public, { public, private, other }, "Agent").batch_peers, { "other_public" })
         end)
 
+        it("removes private references from saved bulk approval scopes and offers", function()
+            policy._tool = function(id)
+                if id == "private" then return { meta = { private = true } } end
+                return tool()
+            end
+            local row, config = stored("call_pending_approval_none", fixture("call_pending_approval_none"))
+            row.metadata.approval.offered = { decisions = { "approve", "approve_all", "deny" },
+                approve_all = { scope = "session", covers = { "public-approval", "private-approval" } } }
+            row.metadata.approval.display.approve_all_scope = { scope = "session", covered_count = 2,
+                tools = { { registry_id = "private", title = "private_peer" } },
+                covered = { { approval_id = "private-approval", title = "private_peer" } } }
+            local public = projection.row(row, config)
+            test.is_nil(public.metadata.approval.display.approve_all_scope)
+            test.eq(public.metadata.approval.offered.approve_all, NULL)
+            equal(public.metadata.approval.offered.decisions, { "approve", "deny" })
+            test.is_nil((json.encode(public):find("private-approval", 1, true)))
+            test.is_nil((json.encode(public):find("private_peer", 1, true)))
+        end)
+
+        it("never offers a bulk decision that would disclose a private tool", function()
+            policy._tool = function(id)
+                if id == fx.PRIVATE then return { meta = { private = true } } end
+                return tool()
+            end
+            local ctx = fx.new_ctx({ live = 1, policy = { require = "all", approve_all = "session" } })
+            local op, batch = fx.round(ctx, {
+                { id = "public", registry_id = fx.MARKED, args = { customer_id = "c_1" } },
+                { id = "private", registry_id = fx.PRIVATE, type = consts.MSG_TYPE.PRIVATE_FUNCTION, args = {} },
+            })
+            local handle = fx.start(ctx, op)
+            local checked, failure = pcall(function()
+                fx.pending(ctx, batch.batch_id, 2)
+                local records = fx.records_by_call(ctx.session_id, batch.batch_id)
+                test.not_nil(records.private, "the private call keeps its own approval card")
+                for _, record in pairs(records) do
+                    test.is_nil(record.offered.approve_all)
+                    test.is_nil(record.display.approve_all_scope)
+                    equal(record.offered.decisions, { "approve", "deny" })
+                end
+            end)
+            fx.stop(ctx)
+            local _, err = fx.finish(handle)
+            test.is_nil(err)
+            assert(checked, failure)
+        end)
+
         it("hides invalid sensitive definitions even in a pending approval", function()
             local row, config = stored("call_pending_approval_none", fixture("call_pending_approval_none"))
             policy._tool = function() return { meta = { display = { sensitive = { arguments = { "/bad~2" } } } } } end
             local out = projection.row(row, config)
             test.eq(out.metadata.approval.display.arguments, masks.HIDDEN)
-            test.is_nil(json.encode(out):find("SECRET", 1, true))
+            test.is_nil((json.encode(out):find("SECRET", 1, true)))
         end)
 
         it("bounds previews to 8192 bytes and records cuts", function()
@@ -315,7 +366,8 @@ local function define_tests()
                 session_messages._http, session_messages._security, session_messages._session_repo, session_messages._message_repo
             local row, config = stored("call_success_full_masked", fixture("call_success_full_masked"))
             local private = { type = "private_function", message_id = "private", data = "SECRET", metadata = {} }
-            local body, headers = nil, {}
+            local body: any = nil
+            local headers = {}
             session_messages._http = {
                 request = function() return { query = function(_, key) if key == "session_id" then return row.session_id end; return nil end } end,
                 response = function() return {
@@ -337,7 +389,7 @@ local function define_tests()
             test.eq(headers["Cache-Control"], "no-store")
             test.eq(body.details_revision, 4)
             test.eq(#body.messages, 1)
-            test.is_nil(json.encode(body):find("SECRET", 1, true))
+            test.is_nil((json.encode(body):find("SECRET", 1, true)))
             test.is_nil(body.messages[1].metadata.details)
         end)
 
@@ -380,7 +432,7 @@ local function define_tests()
             test.eq(#sent, 1)
             test.is_nil(sent[1].error)
             test.eq(sent[1].details.error.level, "none")
-            test.is_nil(json.encode(sent):find("RAW%-FAILURE"))
+            test.is_nil((json.encode(sent):find("RAW%-FAILURE")))
             local original_http, original_security = get_session._http, get_session._security
             local body, headers
             headers = {}
@@ -403,7 +455,7 @@ local function define_tests()
             test.eq(body.latest_message.message_id, row.message_id)
             test.eq(body.details_revision, 4)
             test.eq(body.session.details.error, "none")
-            test.is_nil(json.encode(body):find("SECRET%-PRIVATE"))
+            test.is_nil((json.encode(body):find("SECRET%-PRIVATE")))
             test.is_nil(body.latest_message.metadata.provider_metadata)
         end)
 
@@ -436,8 +488,8 @@ local function define_tests()
             local context
             local executor = {}
             function executor:with_context(value) context = value; return self end
-            function executor:async() return {} end
-            local caller = { executor = executor, set_result_listener = function(self, listener) self.result_listener = listener end }
+            function executor:async(_id: any, _args: any) return {} end
+            local caller: any = { executor = executor, set_result_listener = function(self, listener) self.result_listener = listener end }
             clock = 50000 -- An approval wait before attaching is not execution.
             local durations, restore = timing.attach(caller)
             caller.executor:with_context({ call_id = "a" }):async("tool", {})
@@ -454,11 +506,92 @@ local function define_tests()
             test.eq(caller.executor, executor)
         end)
 
+        it("stamps durable calls and their results while retaining originals for replay", function()
+            local ctx = fx.new_ctx({ protected = false })
+            local op = fx.round(ctx, { { id = "durable", registry_id = fx.PLAIN,
+                args = { api_key = "SECRET-ARGUMENT", invoice_id = "inv_42" } } })
+            local row_id = op.call_message_ids.durable
+            local initial = fx.row(row_id)
+            test.eq(initial.metadata.details.arguments, "full")
+            equal(initial.metadata.details.masks.arguments, { "/api_key" })
+            test.eq(assert(json.decode(initial.data)).api_key, "SECRET-ARGUMENT")
+            local clock = 1000
+            timing._now = function() return clock end
+            local caller = op.caller
+            caller.executor = {
+                with_context = function(self) return self end,
+                async = function() return {} end,
+            }
+            caller.set_result_listener = function(self, listener) self.result_listener = listener end
+            caller.execute = function(self, _, tools)
+                local executed = tools.durable
+                self.executor:with_context({ call_id = "durable" }):async(executed.registry_id, executed.args)
+                clock = 1300
+                policy._tool = function()
+                    local entry = tool()
+                    entry.meta.display.result = "summary"
+                    return entry
+                end
+                local result = { result = { access_token = "SECRET-RESULT", status = "paid" }, tool_call = executed }
+                self.result_listener("durable", result)
+                return { durable = result }
+            end
+            local _, err = message_handlers.process_tools(ctx, op)
+            test.is_nil(err)
+            local settled = fx.row(row_id)
+            test.eq(settled.metadata.details.result, "summary")
+            test.eq(settled.metadata.duration_ms, 300)
+            test.eq(settled.metadata.result.access_token, "SECRET-RESULT")
+            policy._tool = function() return {} end
+            local public = projection.row(settled, {})
+            test.eq(public.details.result.level, "summary")
+            test.is_nil((json.encode(public):find("SECRET", 1, true)))
+        end)
+
+        it("refuses model changes to call details and its revision before reading session state", function()
+            for _, changes in ipairs({ { call_details = { result = "full" } }, { details_revision = 50 } }) do
+                local result, err = control_handlers.control_config({}, { config_changes = changes })
+                test.is_nil(err)
+                test.eq(result.completed, true)
+                test.contains(result.rejected, "call_details_forbidden")
+            end
+        end)
+
         it("drops tool and thinking stream chunks and strips future content internals", function()
             test.is_nil(stream.project({ type = "tool_call", name = "private", arguments = "SECRET" }))
             test.is_nil(stream.project({ type = "thinking", content = "SECRET", thinking_blocks = {} }))
             equal(stream.project({ type = "chunk", content = "answer", provider_metadata = "SECRET" }), { type = "chunk", content = "answer" })
             equal(stream.project({ type = "done", meta = { thinking_blocks = "SECRET" } }), { type = "done" })
+        end)
+
+        it("forwards answer chunks live through the Session listener in order and drains on close", function()
+            local topic = "details.test." .. uuid.v7()
+            local received = assert(process.listen(topic))
+            local target, close, err = stream.open({ reply_to = process.pid(), topic = topic }, uuid.v7())
+            test.is_nil(err)
+            test.eq(target.reply_to, (process.pid()))
+            test.is_true(target.topic ~= topic)
+            assert(process.send(target.reply_to, target.topic, { type = "tool_call", arguments = "SECRET" }))
+            assert(process.send(target.reply_to, target.topic, { type = "thinking", text = "SECRET" }))
+            assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "first", provider_metadata = "SECRET" }))
+            local live = channel.select({ received:case_receive(), time.after("2s"):case_receive() })
+            assert(live.channel == received, "answer must arrive before closing the step")
+            equal(live.value, { type = "chunk", content = "first" })
+            assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "second" }))
+            assert(process.send(target.reply_to, target.topic, { type = "done", metadata = "SECRET" }))
+            close()
+            local remaining = {}
+            while true do
+                local next_chunk = channel.select({ received:case_receive(), default = true })
+                if next_chunk.default then break end
+                remaining[#remaining + 1] = next_chunk.value
+            end
+            process.unlisten(received)
+            equal(remaining, { { type = "chunk", content = "second" }, { type = "done" } })
+            local absent, no_close, no_err = stream.open(nil, uuid.v7())
+            test.is_nil(absent)
+            test.is_nil(no_err)
+            no_close()
         end)
     end)
 end

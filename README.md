@@ -46,7 +46,8 @@ its visibility levels and masks when written. Reads also apply current limits
 and masks. Raising a setting or removing a sensitive mark cannot reveal an old
 value. Pending approvals retain masked consent previews; decided approvals
 follow the arguments level. Private calls remain absent except for their own
-approval cards.
+approval cards. Bulk approval is omitted when its scope would disclose a
+private tool; individual decisions remain available.
 
 Trusted app code can update `config.call_details` through the Session service
 `update` method. Preserve the other config fields. The server assigns

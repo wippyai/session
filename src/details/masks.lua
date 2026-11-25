@@ -84,7 +84,10 @@ end
 
 local function key_of(value: any, token: string): any
     if value[token] ~= nil then return token end
-    if token == "0" or token:match("^[1-9][0-9]*$") then return tonumber(token) + 1 end
+    if token == "0" or token:match("^[1-9][0-9]*$") then
+        local index = tonumber(token)
+        if index then return index + 1 end
+    end
     return token
 end
 

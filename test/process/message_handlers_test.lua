@@ -226,6 +226,41 @@ end
 
 local function define_tests()
 
+    describe("Session provider stream boundary", function()
+        it("replaces the connection target before agent.step and sends only public answer chunks", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local topic = "details.agent." .. uuid.v7()
+            local received = assert(process.listen(topic))
+            ctx.stream_target = { reply_to = process.pid(), topic = topic }
+            agent.step = function(_, _, options)
+                local target = options.stream_target
+                test.eq(target.reply_to, (process.pid()))
+                test.is_true(target.topic ~= topic)
+                assert(process.send(target.reply_to, target.topic, { type = "tool_call", arguments = "SECRET" }))
+                assert(process.send(target.reply_to, target.topic, { type = "thinking", text = "SECRET" }))
+                assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "answer", provider_metadata = "SECRET" }))
+                assert(process.send(target.reply_to, target.topic, { type = "done", meta = { thinking_blocks = "SECRET" } }))
+                return { result = "answer", tool_calls = {} }
+            end
+            local _, err = user_step(ctx)
+            test.is_nil(err)
+            local chunks = {}
+            while true do
+                local chunk = channel.select({ received:case_receive(), default = true })
+                if chunk.default then break end
+                chunks[#chunks + 1] = chunk.value
+            end
+            process.unlisten(received)
+            test.eq(#chunks, 2)
+            test.eq(chunks[1].type, "chunk")
+            test.eq(chunks[1].content, "answer")
+            test.is_nil(chunks[1].provider_metadata)
+            test.eq(chunks[2].type, "done")
+            test.is_nil(chunks[2].meta)
+        end)
+    end)
+
     describe("reported cancelled tool event regression", function()
         it("settles public cancellation without publishing private or delegation intents", function()
             local ctx, captured = mock_ctx(fake_agent(nil))

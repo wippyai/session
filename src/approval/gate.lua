@@ -412,6 +412,10 @@ local function build_records(ctx: any, op: any, binding: any, items: {any}, ask_
                     offered = { decisions = offered.decisions,
                         approve_all = { scope = offered.approve_all.scope, covers = covers } }
                     request.display.approve_all_scope = approve_all_disclosure(ctx, offered, covered_items)
+                    if details_policy.private_scope(request.display.approve_all_scope) then
+                        offered = { decisions = { "approve", "deny" } }
+                        request.display.approve_all_scope = nil
+                    end
                 end
                 request.offered = offered
                 request.state = ask_state

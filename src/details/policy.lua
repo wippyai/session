@@ -36,6 +36,17 @@ function policy.private_name(name: string): boolean
     return false
 end
 
+-- A bulk offer cannot disclose private tool identities on another card.
+function policy.private_scope(scope: any, private_names: any?): boolean
+    if type(scope) ~= "table" or type(scope.tools) ~= "table" then return true end
+    for _, tool in ipairs(scope.tools) do
+        local entry = policy.tool(tool.registry_id)
+        if (private_names and private_names[tool.registry_id])
+            or (type(entry.meta) == "table" and entry.meta.private == true) then return true end
+    end
+    return false
+end
+
 function policy.agent(config: any, agent_id: any): any
     if policy._agent then return policy._agent(config, agent_id) end
     if type(config.active_traits) == "table" then return config.active_traits end

@@ -9,7 +9,7 @@ end
 
 -- Observe the executor actually used by the caller. Keep its actor, scope
 -- and context chain intact; start the clock only at dispatch.
-function timing.attach(caller: any): any
+function timing.attach(caller: any): (any, any)
     local starts, durations = {}, {}
     local original = caller.executor
     if original == nil then return durations, function() end end

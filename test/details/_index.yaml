@@ -41,8 +41,11 @@ entries:
       type: test
       suite: session
     source: file://protocol_test.lua
-    modules: [json, registry, env, uuid, security]
+    modules: [json, registry, env, uuid, security, time]
     imports:
+      gate_fixtures: app.approval:gate_fixtures
+      message_handlers: wippy.session.process:message_handlers
+      control_handlers: wippy.session.process:control_handlers
       get_session: wippy.session.api:get_session
       context_repo: wippy.session.persist:context_repo
       test: wippy.test:test

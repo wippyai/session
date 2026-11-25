@@ -112,7 +112,15 @@ function projection.approval(record: any, arguments: any, captured: boolean, lev
     elseif offered == NULL then out.offered = NULL end
     local display = type(record.display) == "table" and record.display or {}
     out.display = select_keys(display, DISPLAY_KEYS)
-    if type(display.approve_all_scope) == "table" then
+    local hidden_scope = policy.private_scope(display.approve_all_scope, private_names)
+    if hidden_scope and type(out.offered) == "table" and type(out.offered.approve_all) == "table" then
+        local choices = {}
+        for _, choice in ipairs(out.offered.decisions or {}) do
+            if choice ~= "approve_all" then choices[#choices + 1] = choice end
+        end
+        out.offered.decisions, out.offered.approve_all = choices, NULL
+    end
+    if type(display.approve_all_scope) == "table" and not hidden_scope then
         local scope = display.approve_all_scope
         local all = select_keys(scope, { "scope", "covered_count" })
         all.tools, all.covered = {}, {}
@@ -204,6 +212,7 @@ function projection.rows(rows: any, config: any): any
         local meta = projection.metadata(row)
         if projection.private(row, meta) then
             if meta.function_name then names[meta.function_name] = true end
+            if meta.registry_id then names[meta.registry_id] = true end
         end
     end
     for _, row in ipairs(rows or {}) do
