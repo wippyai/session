@@ -2,23 +2,33 @@
 
 ## Unreleased
 
-### Features
-
-* Add native tool-call approval. When an agent lists the trait `wippy.session.traits:tool_approval`, the Session asks the user before a call runs. By default (`require: marked`) this covers calls to tools that set `approval` in their registry meta; `require: all` covers every call. The user approves, approves all, or denies each call. The setting is sticky for the session. The capability `tool_approval: 1` tells clients that the Session supports it. See the "Tool approval" section of the README for the options and [docs/tool-approval-protocol.md](docs/tool-approval-protocol.md) for the messages.
-* In a protected session, refuse `_control.artifacts` items that hold JSON or packaged web content, which the Web Host cannot isolate. The call fails with an error that starts with `isolation_required:`.
-
-### Rollback
-
-* Downgrading the Session drops enforcement and content isolation. The old Session ignores the trait and the approval tables, and it sends no `tool_approval` in artifact reads, so the Web Host reads the session as not protected. The migrations only add tables and columns, so a downgrade needs no schema change. An old Session leaves approval rows behind when it deletes a session. These rows are harmless.
-* The operator switch `tool_approval_enforcement: off` is the safer rollback. It keeps the new Session and logs every skipped check. It skips only the gate: the trait is still validated, so an invalid context still fails the turn, and the activation is still stored, so the Web Host still isolates content and the `isolation_required` refusal still applies.
-* Grants stay with their session. A rollback (`off` or a downgrade) does not remove them, and they apply again when enforcement returns.
-
 ### Bug Fixes
 
 * Preserve manual session names during automatic title generation. Running sessions publish both title paths through the existing owner using the stored title; renaming a stopped session persists without starting it.
 * Keep the originating user-request text in prompts after a mid-turn checkpoint, alongside the summary and newest tool results. Preserve user authority, avoid reloading summarized attachments, and keep later user turns distinct from the checkpointed request. Bound restored excerpts to 6000 UTF-8 bytes while retaining both ends, and place the original task before retained steering even when its anchor is unavailable. The resume note preserves later corrections and completed progress.
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.
 * PostgreSQL also requires the Runtime SQL timestamp-precision fix ([runtime #983](https://github.com/wippyai/runtime/pull/983)) so checkpoint cursors retain fractional seconds.
+
+## [0.7.3](https://github.com/wippyai/session/compare/v0.7.2...v0.7.3) (2026-11-25)
+
+
+### Features
+
+* **approval:** add native tool-call approval ([#127](https://github.com/wippyai/session/issues/127)) ([75077ba](https://github.com/wippyai/session/commit/75077bab1fc0fb2e65eb22657cbdaa7c9df80dfe)). When an agent lists the trait `wippy.session.traits:tool_approval`, the Session asks the user before a call runs. By default (`require: marked`) this covers calls to tools that set `approval` in their registry meta; `require: all` covers every call. The user approves, approves all, or denies each call. The setting is sticky for the session. The capability `tool_approval: 1` tells clients that the Session supports it. Approval cards need Web Host 1.0.72 or newer. See the "Tool approval" section of the README for the options and [docs/tool-approval-protocol.md](https://github.com/wippyai/session/blob/v0.7.3/docs/tool-approval-protocol.md) for the messages.
+* **approval:** in a protected session, refuse `_control.artifacts` items that hold JSON or packaged web content, which the Web Host cannot isolate. The call fails with an error that starts with `isolation_required:`.
+* **forms:** add standard input fields ([#127](https://github.com/wippyai/session/issues/127)) ([75077ba](https://github.com/wippyai/session/commit/75077bab1fc0fb2e65eb22657cbdaa7c9df80dfe)). The new trait `wippy.session.forms:ask_user_fields` lets an agent ask for text, long text, number, email, date and checkbox fields next to choice questions. The server validates every answer. `ask_user` stays choice-only, and a choice-only form is stored as before.
+
+
+### Bug Fixes
+
+* **test:** pass test filters the way runtime 0.3.63a reads them ([#127](https://github.com/wippyai/session/issues/127)) ([75077ba](https://github.com/wippyai/session/commit/75077bab1fc0fb2e65eb22657cbdaa7c9df80dfe)). The `make` and `make.ps1` test targets run only the suites they name.
+
+
+### Rollback
+
+* Downgrading the Session drops enforcement and content isolation. The old Session ignores the trait and the approval tables, and it sends no `tool_approval` in artifact reads, so the Web Host reads the session as not protected. The migrations only add tables and columns, so a downgrade needs no schema change. An old Session leaves approval rows behind when it deletes a session. These rows are harmless.
+* The operator switch `tool_approval_enforcement: off` is the safer rollback. It keeps the new Session and logs every skipped check. It skips only the gate: the trait is still validated, so an invalid context still fails the turn, and the activation is still stored, so the Web Host still isolates content and the `isolation_required` refusal still applies.
+* Grants stay with their session. A rollback (`off` or a downgrade) does not remove them, and they apply again when enforcement returns.
 
 ## [0.7.2](https://github.com/wippyai/session/compare/v0.7.1...v0.7.2) (2026-11-20)
 
