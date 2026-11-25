@@ -1,0 +1,42 @@
+version: "1.0"
+namespace: wippy.session.details
+
+entries:
+  - name: masks
+    kind: library.lua
+    source: file://masks.lua
+    modules: [json]
+
+  - name: policy
+    kind: library.lua
+    source: file://policy.lua
+    modules: [registry, logger]
+    imports:
+      consts: wippy.session:consts
+      masks: wippy.session.details:masks
+      agent_registry: wippy.agent.discovery:registry
+
+  - name: preview
+    kind: library.lua
+    source: file://preview.lua
+    modules: [json]
+    imports:
+      masks: wippy.session.details:masks
+
+  - name: timing
+    kind: library.lua
+    source: file://timing.lua
+    modules: [time]
+
+  - name: stream
+    kind: library.lua
+    source: file://stream.lua
+
+  - name: projection
+    kind: library.lua
+    source: file://projection.lua
+    modules: [json, time]
+    imports:
+      policy: wippy.session.details:policy
+      masks: wippy.session.details:masks
+      preview: wippy.session.details:preview

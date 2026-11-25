@@ -5,6 +5,8 @@ local message_repo = require("message_repo")
 local approval_repo = require("approval_repo")
 local time = require("time")
 local json = require("json")
+local details_projection = require("details_projection")
+local details_policy = require("details_policy")
 
 local api = {
     _http = http,
@@ -113,46 +115,30 @@ function api.handler()
         res:write_json({ success = false, error = pending_err })
         return
     end
-    -- Pending input is returned separately so reloads retain it without changing
-    -- the history page or its cursors.
-    local visible = {}
-    for _, message in ipairs(messages) do visible[#visible + 1] = message end
-    for _, message in ipairs(pending_inputs or {}) do visible[#visible + 1] = message end
-
-    -- Process message data
-    for _, message in ipairs(visible) do
-        -- If metadata exists but isn't directly accessible
-        if message.metadata_json and message.metadata_json ~= "" then
-            local decoded, err = json.decode(message.metadata_json :: string)
-            if not err then
-                message.metadata = decoded
-            else
-                message.metadata = {}
-            end
-        elseif not message.metadata then
-            message.metadata = {}
+    messages = details_projection.rows(messages, session.config)
+    -- An all-private page must not strand a client at an empty public cursor.
+    local scanned_cursor = cursor
+    while #messages == 0 and result.has_more do
+        local next_scan = direction == "after" and result.prev_cursor or result.next_cursor
+        if not next_scan or next_scan == scanned_cursor then
+            res:set_status(http.STATUS.INTERNAL_ERROR)
+            res:write_json({ success = false, error = "Failed to page session history" })
+            return
         end
-
-        -- Existing facades only settle success/error. Keep the durable outcome
-        -- cancelled, but expose a terminal status to those clients on reload.
-        if message.metadata.status == "cancelled" then
-            local projected = {}
-            for key, value in pairs(message.metadata) do projected[key] = value end
-            projected.status = "error"
-            projected.outcome = "cancelled"
-            message.metadata = projected
-            if message.metadata_json then message.metadata_json = json.encode(projected) end
+        scanned_cursor = next_scan
+        local page, page_err = api._message_repo.list_by_session(session_id, limit, next_scan, direction)
+        if not page then
+            res:set_status(http.STATUS.INTERNAL_ERROR)
+            res:write_json({ success = false, error = page_err })
+            return
         end
-
-        -- Extract file_uuids from metadata to top level for easier access
-        if message.metadata.file_uuids then
-            message.file_uuids = message.metadata.file_uuids
-        end
-
-        if message.date and type(message.date) == "number" then
-            message.date = time.unix(message.date :: number, 0):format_rfc3339()
-        end
+        result = page
+        messages = details_projection.rows(result.messages, session.config)
     end
+    pending_inputs = details_projection.rows(pending_inputs, session.config)
+    -- Never expose a private row ID through a pagination cursor.
+    result.next_cursor = messages[1] and messages[1].message_id or nil
+    result.prev_cursor = messages[#messages] and messages[#messages].message_id or nil
 
     -- Return JSON response
     res:set_content_type(http.CONTENT.JSON)
@@ -162,6 +148,7 @@ function api.handler()
         -- A reloaded approval card computes its time left from this
         -- (docs/tool-approval-protocol.md section 10).
         server_now = approval_repo.now(),
+        details_revision = details_policy.revision(session.config),
         count = #messages,
         session_id = session_id,
         messages = messages,

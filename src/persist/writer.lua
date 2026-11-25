@@ -1,6 +1,8 @@
 local uuid = require("uuid")
 local json = require("json")
 local security = require("security")
+local details_policy = require("details_policy")
+local details_masks = require("details_masks")
 
 type WriteResult = {
     success: boolean,
@@ -98,6 +100,12 @@ function session_writer:update_meta(updates)
         return nil, "Failed to update session metadata: " .. tostring(err or "No result")
     end
 
+    if replaces_config then
+        self._session_data = self._session_data or {}
+        self._session_data.config = prepared.config
+        local sent, send_err = require("upstream").notify_external(self.session_id, result, self.user_id)
+        if not sent then return nil, send_err end
+    end
     return true
 end
 
@@ -300,6 +308,8 @@ function session_writer:add_response(content, metadata, calls, notes, trailing, 
     if id_err then return nil, nil, id_err end
     table.insert(rows, { message_id = assistant_id, type = "assistant", data = content, metadata = metadata })
     local call_ids = {}
+    local details_session, details_err = session_writer._session_repo.get(self.session_id, self.user_id)
+    if not details_session then return nil, nil, details_err or "Failed to read call details policy" end
     for _, call in ipairs(calls) do
         local row_id, row_err = uuid.v7()
         if row_err then return nil, nil, row_err end
@@ -319,7 +329,11 @@ function session_writer:add_response(content, metadata, calls, notes, trailing, 
                 function_name = call.name,
                 registry_id = call.registry_id,
                 status = "pending",
-                provider_metadata = call.provider_metadata
+                provider_metadata = call.provider_metadata,
+                agent_id = metadata and metadata.agent_id,
+                details = details_policy.stamp(details_session.config,
+                    metadata and metadata.agent_id, call.registry_id,
+                    type(call.arguments) == "string" and details_masks.decode(call.arguments) or call.arguments)
             }
         })
     end

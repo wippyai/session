@@ -330,12 +330,17 @@ local function approve_all_disclosure(ctx: any, offered: any, covered_items: {an
 end
 
 -- The server-built card content of one request.
+local details_policy = require("details_policy")
+
 local function display_for(item: any, items: {any}, agent_title: string): any
     local frozen = item.frozen
-    local built = preview.build(frozen.args)
+    local marks = details_policy.current({}, nil, frozen.identity.registry_id, frozen.args)
+    local built = preview.build(frozen.args, marks.masks.arguments)
     local peers = {}
     for _, other in ipairs(items) do
-        if other ~= item then peers[#peers + 1] = tostring(other.name or "") end
+        local private = other.row_type == consts.MSG_TYPE.PRIVATE_FUNCTION
+            or (other.validated and other.validated.meta and other.validated.meta.private)
+        if other ~= item and not private then peers[#peers + 1] = tostring(other.name or "") end
     end
     local display: any = {
         title = frozen.title,
@@ -352,6 +357,8 @@ local function display_for(item: any, items: {any}, agent_title: string): any
     end
     return display
 end
+
+gate.display_for = display_for
 
 -- Assigns approval IDs and builds the record of every call that gets one:
 -- asks (state `ask_state`, pending ones expire at `deadline`), and grant

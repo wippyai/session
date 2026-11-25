@@ -35,6 +35,7 @@ local consts = {
         ON_SESSION_END_FUNC_ID = "wippy.session.env:on_session_end_func_id",
         UI_ACTION_TTL_SECONDS = "wippy.session.env:ui_action_ttl_seconds",
         TOOL_APPROVAL_ENFORCEMENT = "wippy.session.env:tool_approval_enforcement",
+        SESSION_SHOW_TOOL_DETAILS = "wippy.session.env:session_show_tool_details",
         ENCRYPTION_KEY = "ENCRYPTION_KEY"
     },
 
@@ -373,6 +374,19 @@ local consts = {
 -- gate off for every session, a documented security downgrade for rollback.
 -- Any other value, including a missing or misspelt one, reads as "enforce",
 -- so a typo never turns enforcement off.
+function consts.normalize_tool_details(value: any): string
+    if value == true or value == "true" then return "full" end
+    if value == false or value == "false" or value == nil or value == "" then return "none" end
+    if value == "none" or value == "summary" or value == "full" then return value end
+    require("logger"):named("session.details"):warn("invalid session_show_tool_details; using none")
+    return "none"
+end
+
+function consts.session_show_tool_details(): string
+    local value = env.get(consts.ENV_IDS.SESSION_SHOW_TOOL_DETAILS)
+    return consts.normalize_tool_details(value)
+end
+
 function consts.tool_approval_enforcement(): string
     local value, _ = env.get(consts.ENV_IDS.TOOL_APPROVAL_ENFORCEMENT)
     if value == "off" then return "off" end

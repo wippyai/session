@@ -497,7 +497,7 @@ function session_repo.update_initial_title(session_id, title)
 end
 
 -- Update session metadata (title, meta, config, public_meta, status, last_message_date)
-function session_repo.update_session_meta(session_id, updates)
+local function update_session_meta(session_id, updates, connection)
     if not session_id or session_id == "" then
         return nil, "Session ID is required"
     end
@@ -506,7 +506,8 @@ function session_repo.update_session_meta(session_id, updates)
         return nil, "Updates table is required"
     end
 
-    local db, err = get_db()
+    local db, err = connection, nil
+    if not db then db, err = get_db() end
     if err then
         return nil, err
     end
@@ -534,7 +535,7 @@ function session_repo.update_session_meta(session_id, updates)
     if updates.meta ~= nil then
         local encoded_meta, err = json.encode(updates.meta)
         if err then
-            db:release()
+            if not connection then db:release() end
             return nil, "Failed to encode meta: " .. err
         end
         update_query = update_query:set("meta", encoded_meta)
@@ -544,7 +545,7 @@ function session_repo.update_session_meta(session_id, updates)
     if updates.config ~= nil then
         local encoded_config, err = json.encode(updates.config)
         if err then
-            db:release()
+            if not connection then db:release() end
             return nil, "Failed to encode config: " .. err
         end
         update_query = update_query:set("config", encoded_config)
@@ -554,7 +555,7 @@ function session_repo.update_session_meta(session_id, updates)
     if updates.public_meta ~= nil then
         local encoded_public_meta, err = json.encode(updates.public_meta)
         if err then
-            db:release()
+            if not connection then db:release() end
             return nil, "Failed to encode public_meta: " .. err
         end
         update_query = update_query:set("public_meta", encoded_public_meta)
@@ -572,7 +573,7 @@ function session_repo.update_session_meta(session_id, updates)
         -- Preserve successful no-op updates without generating an empty SET
         -- clause or manufacturing message activity. Missing sessions still fail.
         local rows, read_err = db:query("SELECT session_id FROM sessions WHERE session_id = $1", { session_id })
-        db:release()
+        if not connection then db:release() end
         if read_err then return nil, "Failed to update session metadata: " .. read_err end
         if not rows or #rows == 0 then return nil, "Session not found" end
         return result
@@ -585,7 +586,7 @@ function session_repo.update_session_meta(session_id, updates)
     local update_executor = update_query:run_with(db)
     local update_result, err = update_executor:exec()
 
-    db:release()
+    if not connection then db:release() end
 
     if err then
         return nil, "Failed to update session metadata: " .. err
@@ -595,6 +596,49 @@ function session_repo.update_session_meta(session_id, updates)
     end
 
     return result
+end
+
+local function same_config(left: any, right: any): boolean
+    if type(left) ~= type(right) then return false end
+    if type(left) ~= "table" then return left == right end
+    for key, value in pairs(left) do
+        if key ~= "details_revision" and not same_config(value, right[key]) then return false end
+    end
+    for key in pairs(right) do
+        if key ~= "details_revision" and left[key] == nil then return false end
+    end
+    return true
+end
+
+-- Config revisions are assigned under the session write lock. A caller
+-- cannot select, reset or replay an older details revision.
+function session_repo.update_session_meta(session_id, updates)
+    if type(updates) ~= "table" or updates.config == nil then
+        return update_session_meta(session_id, updates, nil)
+    end
+    if type(updates.config) ~= "table" then return nil, "Config must be a table" end
+    return tx.run(function(dbtx)
+        local _, lock_err = sql.builder.update("sessions")
+            :set("last_message_date", sql.builder.expr("last_message_date"))
+            :where("session_id = ?", session_id):run_with(dbtx):exec()
+        if lock_err then return nil, tostring(lock_err) end
+        local rows, read_err = sql.builder.select("config"):from("sessions")
+            :where("session_id = ?", session_id):limit(1):run_with(dbtx):query()
+        if read_err then return nil, tostring(read_err) end
+        if not rows or not rows[1] then return nil, "Session not found" end
+        local current = {}
+        if type(rows[1].config) == "string" and rows[1].config ~= "" then
+            local decoded, decode_err = json.decode(rows[1].config)
+            if decode_err or type(decoded) ~= "table" then return nil, "Stored session config is invalid" end
+            current = decoded
+        end
+        local revision = tonumber(current.details_revision) or 0
+        if revision < 0 or revision % 1 ~= 0 then revision = 0 end
+        updates.config.details_revision = revision + (same_config(current, updates.config) and 0 or 1)
+        local result, err = update_session_meta(session_id, updates, dbtx)
+        if result then result.details_revision = updates.config.details_revision end
+        return result, err
+    end)
 end
 
 -- Delete a session and all its relationships

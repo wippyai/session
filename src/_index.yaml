@@ -192,6 +192,15 @@ entries:
         path: ".default"
     default: "120"
 
+  - name: session_show_tool_details
+    kind: ns.requirement
+    meta:
+      description: "Tool detail visibility: none, summary or full"
+    targets:
+      - entry: wippy.session.env:session_show_tool_details
+        path: ".default"
+    default: "none"
+
   - name: tool_approval_enforcement
     kind: ns.requirement
     meta:
@@ -250,6 +259,8 @@ entries:
         path: ".storage"
       - entry: wippy.session.env:tool_approval_enforcement
         path: ".storage"
+      - entry: wippy.session.env:session_show_tool_details
+        path: ".storage"
 
   # wippy.session:consts
   - name: consts
@@ -260,6 +271,7 @@ entries:
     modules:
       - env
       - time
+      - logger
 
   # wippy.session:session_service
   - name: session_service

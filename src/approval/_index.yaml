@@ -95,9 +95,11 @@ entries:
     kind: library.lua
     meta:
       comment: Server-built argument preview for the approval card - escaped text, binary markers, size and depth limits, exact numbers, one-line summary
-    source: file://preview.lua
+    source: file://../details/preview.lua
     modules:
       - json
+    imports:
+      masks: wippy.session.details:masks
 
   # wippy.session.approval:events
   - name: events
@@ -141,7 +143,8 @@ entries:
       freeze: wippy.session.approval:freeze
       fingerprint: wippy.session.approval:fingerprint
       policy: wippy.session.approval:policy
-      preview: wippy.session.approval:preview
+      preview: wippy.session.details:preview
+      details_policy: wippy.session.details:policy
       tool_meta: wippy.session.approval:tool_meta
       activation: wippy.session.approval:activation
       ui_action_broker: wippy.session.process:ui_action_broker

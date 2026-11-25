@@ -195,7 +195,7 @@ local function batch_settlement(dbtx: any, session_id: string, row: any): (any, 
         local close = events.CLOSE[batch.close_reason]
         metadata = events.not_run_settlement(reason, feedback, close and close.cancelled == true)
     else
-        metadata = { status = consts.FUNC_STATUS.ERROR, result = message_repo.INTERRUPTED_RESULT }
+        metadata = { status = consts.FUNC_STATUS.ERROR, result = message_repo.INTERRUPTED_RESULT, outcome = "unknown" }
     end
     if record then metadata.approval = approval_repo.projection(record) end
     return metadata, nil

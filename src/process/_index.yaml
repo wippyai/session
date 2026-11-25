@@ -96,6 +96,9 @@ entries:
       description: Handles communication between session process and upstream systems
     source: file://upstream.lua
     imports:
+      message_repo: wippy.session.persist:message_repo
+      details_projection: wippy.session.details:projection
+      details_policy: wippy.session.details:policy
       owner_events: wippy.session.process:owner_events
       session_repo: wippy.session.persist:session_repo
       consts: wippy.session:consts
@@ -168,6 +171,10 @@ entries:
       - time
       - logger
     imports:
+      details_masks: wippy.session.details:masks
+      details_policy: wippy.session.details:policy
+      details_timing: wippy.session.details:timing
+      details_stream: wippy.session.details:stream
       consts: wippy.session:consts
       agent_context: wippy.agent:context
       context_attachments: wippy.session:context_attachments

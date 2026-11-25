@@ -1,4 +1,5 @@
 local json = require("json")
+local masks = require("masks")
 
 -- Server-built argument preview for the approval card
 -- (docs/tool-approval-protocol.md, the `display` object).
@@ -29,7 +30,7 @@ local json = require("json")
 --     "[cut, <n> more, <size>]" (key "…" in an object).
 --   - Integers outside the JSON safe range (2^53 - 1) are sent as their exact
 --     decimal digits; floats at or above 2^53 as "%.17g" text.
---   - No key is redacted.
+--   - Sensitive paths are replaced before rendering or measuring values.
 --   - The summary quotes every key: "customer_id": "c_1042", "hard": true
 -- Sizes: the exact JSON bytes the wire encoder writes for a string, an object
 -- or an array; the decoded bytes of binary data.
@@ -457,12 +458,32 @@ local function render_container(value: any, depth: integer, path: string, budget
         local separator = index > 1 and 1 or 0
         local key_cost = array and 0 or (cost(member.key_text) + 3)
         local reserve = index < #members and OMIT_RESERVE or 0
+        if state.details then
+            reserve = 0
+            if index < #members and size > budget then
+                local remaining_size = 2
+                for rest = index + 1, #members do
+                    remaining_size = remaining_size + full_size(members[rest].value, state.memo)
+                    if rest > index + 1 then remaining_size = remaining_size + 1 end
+                    if not array then remaining_size = remaining_size + cost(members[rest].key_text) + 3 end
+                end
+                local _, note_cost = marker("[cut, " .. (#members - index) .. " more, " .. preview.size_text(remaining_size) .. "]")
+                reserve = 1 + note_cost
+                if not array then reserve = reserve + cost(unused_key(ELLIPSIS, out)) + 3 end
+            end
+        end
         local room = budget - used - separator - key_cost - reserve
-        if room < MIN_CHILD then
+        if room < MIN_CHILD and not (state.details and full_size(member.value, state.memo) <= room) then
             local omitted, omitted_size = 0, 0
             for rest = index, #members do
                 omitted = omitted + 1
                 omitted_size = omitted_size + full_size(members[rest].value, state.memo)
+            end
+            if state.details then
+                omitted_size = omitted_size + 2 + math.max(0, omitted - 1)
+                if not array then
+                    for rest = index, #members do omitted_size = omitted_size + cost(members[rest].key_text) + 3 end
+                end
             end
             local text, text_cost = marker("[cut, " .. omitted .. " more, " .. preview.size_text(omitted_size) .. "]")
             if array then
@@ -553,13 +574,14 @@ local function summary_value(original: any, shown: any, path: string, numbers: a
     return tostring(json.encode(shown) or shown)
 end
 
-local function build_summary(args: any, arguments: any, numbers: {string}): string
+local function build_summary(args: any, arguments: any, numbers: {string}, target: number?): string
+    local summary_chars = target or preview.SUMMARY_CHARS
     local number_paths = {}
     for _, path in ipairs(numbers) do number_paths[path] = true end
     if type(args) ~= "table" or array_length(args) then
         local text = summary_value(args, arguments, "", number_paths)
-        if char_count(text) > preview.SUMMARY_CHARS then
-            text = truncate_chars(text, preview.SUMMARY_CHARS - 1) .. ELLIPSIS
+        if char_count(text) > summary_chars then
+            text = truncate_chars(text, summary_chars - 1) .. ELLIPSIS
         end
         return text
     end
@@ -579,12 +601,12 @@ local function build_summary(args: any, arguments: any, numbers: {string}): stri
         -- as one key.
         local part = "\"" .. key_text .. "\": " .. summary_value(args[key], shown, path, number_paths)
         local candidate = shown_count == 0 and part or (line .. ", " .. part)
-        if char_count(candidate) <= preview.SUMMARY_CHARS then
+        if char_count(candidate) <= summary_chars then
             line = candidate
             shown_count = shown_count + 1
         else
             if shown_count == 0 then
-                line = truncate_chars(part, preview.SUMMARY_CHARS - 1) .. ELLIPSIS
+                line = truncate_chars(part, summary_chars - 1) .. ELLIPSIS
                 shown_count = 1
             end
             break
@@ -599,14 +621,15 @@ end
 -- Entry point
 ---------------------------------------------------------------------------
 
-function preview.build(args: any)
-    local state = { cut = {}, numbers = {}, memo = {} }
+function preview.build(args: any, paths: any?, summary_target: number?, details: boolean?)
+    if paths then args = masks.apply(args, paths) end
+    local state = { cut = {}, numbers = {}, memo = {}, details = details == true }
     local arguments = render_value(args, 1, "", preview.MAX_BYTES, state)
     return {
         arguments = arguments,
         cut = state.cut,
         numbers = state.numbers,
-        summary = build_summary(args, arguments, state.numbers),
+        summary = build_summary(args, arguments, state.numbers, summary_target),
     }
 end
 

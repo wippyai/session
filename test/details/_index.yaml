@@ -1,0 +1,72 @@
+version: "1.0"
+namespace: app.details
+
+entries:
+  - name: fixtures
+    kind: registry.entry
+    meta:
+      test_only: true
+    data:
+      fixtures:
+        call_cancelled.json: file://fixtures/call_cancelled.json
+        call_error_full.json: file://fixtures/call_error_full.json
+        call_error_summary.json: file://fixtures/call_error_summary.json
+        call_invalid_arguments.json: file://fixtures/call_invalid_arguments.json
+        call_legacy_no_stamp.json: file://fixtures/call_legacy_no_stamp.json
+        call_not_approved_full.json: file://fixtures/call_not_approved_full.json
+        call_not_approved_none.json: file://fixtures/call_not_approved_none.json
+        call_not_approved_summary.json: file://fixtures/call_not_approved_summary.json
+        call_pending_approval_none.json: file://fixtures/call_pending_approval_none.json
+        call_result_cut_8kb.json: file://fixtures/call_result_cut_8kb.json
+        call_result_empty.json: file://fixtures/call_result_empty.json
+        call_result_full_error_none.json: file://fixtures/call_result_full_error_none.json
+        call_result_missing.json: file://fixtures/call_result_missing.json
+        call_result_null.json: file://fixtures/call_result_null.json
+        call_running.json: file://fixtures/call_running.json
+        call_success_full_masked.json: file://fixtures/call_success_full_masked.json
+        call_success_none.json: file://fixtures/call_success_none.json
+        call_success_summary.json: file://fixtures/call_success_summary.json
+        call_unknown.json: file://fixtures/call_unknown.json
+        function_call.json: file://fixtures/function_call.json
+        function_error.json: file://fixtures/function_error.json
+        function_error_none.json: file://fixtures/function_error_none.json
+        function_success.json: file://fixtures/function_success.json
+        capabilities_phase1.json: file://fixtures/capabilities_phase1.json
+        session_read.json: file://fixtures/session_read.json
+        update_details_revision.json: file://fixtures/update_details_revision.json
+
+  - name: protocol_test
+    kind: function.lua
+    meta:
+      type: test
+      suite: session
+    source: file://protocol_test.lua
+    modules: [json, registry, env, uuid, security]
+    imports:
+      get_session: wippy.session.api:get_session
+      context_repo: wippy.session.persist:context_repo
+      test: wippy.test:test
+      policy: wippy.session.details:policy
+      masks: wippy.session.details:masks
+      preview: wippy.session.details:preview
+      projection: wippy.session.details:projection
+      timing: wippy.session.details:timing
+      stream: wippy.session.details:stream
+      consts: wippy.session:consts
+      capabilities: wippy.session.api:get_capabilities
+      session_messages: wippy.session.api:session_messages
+      session_repo: wippy.session.persist:session_repo
+      message_repo: wippy.session.persist:message_repo
+      upstream: wippy.session.process:upstream
+      gate: wippy.session.approval:gate
+      wait_for_boot: app:wait_for_boot
+    method: run
+
+  - name: private_peer
+    kind: function.lua
+    meta:
+      type: tool
+      private: true
+      llm_alias: private_peer
+    source: file://private_peer.lua
+    method: run

@@ -63,9 +63,11 @@ end
 
 -- Replaces the JSON text in row.metadata with the table it decodes to. A
 -- missing, empty or malformed value stays as it is.
+local details_masks = require("details_masks")
+
 local function decode_json_metadata(row: any): any
     if type(row.metadata) == "string" and row.metadata ~= "" then
-        local decoded, err = json.decode(row.metadata :: string)
+        local decoded, err = details_masks.decode(row.metadata :: string)
         if not err then row.metadata = decoded end
     end
     return row
@@ -248,7 +250,8 @@ function message_repo.recover_pending(session_id, anchor_id, settle)
                 if not written then
                     local _, update_err = message_repo.update_metadata(row.message_id, update or {
                         status = consts.FUNC_STATUS.ERROR,
-                        result = message_repo.INTERRUPTED_RESULT
+                        result = message_repo.INTERRUPTED_RESULT,
+                        outcome = "unknown"
                     })
                     if update_err then return nil, update_err end
                 end

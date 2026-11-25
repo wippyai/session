@@ -2,6 +2,16 @@ version: "1.0"
 namespace: wippy.session.traits
 
 entries:
+  - name: call_details
+    kind: registry.entry
+    meta:
+      type: agent.trait
+      title: Tool call details
+      public: true
+      comment: Limits tool detail visibility with part levels and optional tools overrides.
+    agent_options:
+      call_details:
+        schema: 1
   - name: steering
     kind: registry.entry
     meta:
