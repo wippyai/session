@@ -73,3 +73,18 @@ entries:
       llm_alias: private_peer
     source: file://private_peer.lua
     method: run
+
+  - name: restricted_agent
+    kind: registry.entry
+    meta:
+      type: agent.gen1
+      test_only: true
+      title: Details restricted agent
+    prompt: Test agent
+    traits:
+      - id: wippy.session.traits:call_details
+        context:
+          arguments: none
+          result: none
+          error: none
+          timing: none

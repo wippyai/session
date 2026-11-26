@@ -227,6 +227,45 @@ end
 local function define_tests()
 
     describe("Session provider stream boundary", function()
+        for _, ending in ipairs({ "send_error", "throw", "cancelled" }) do
+            it("drains answer chunks exactly once without stalling on " .. ending, function()
+                local agent = fake_agent(nil)
+                local ctx = mock_ctx(agent)
+                local topic = "details.fault." .. uuid.v7()
+                local received = assert(process.listen(topic))
+                ctx.stream_target = { reply_to = process.pid(), topic = topic }
+                agent.step = function(_, _, options)
+                    local target = options.stream_target
+                    assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "first " }))
+                    assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "second" }))
+                    assert(process.send(target.reply_to, target.topic, { type = "done" }))
+                    if ending == "throw" then error("provider send failed") end
+                    if ending == "send_error" then return nil, "provider send failed" end
+                    ctx.stop_requested = true
+                    return { stopped = true, result = "first second", finish_reason = "cancelled", tool_calls = {} }
+                end
+                local finished = channel.new(1)
+                coroutine.spawn(function()
+                    local ok, result, err = pcall(user_step, ctx)
+                    finished:send({ ok = ok, result = result, err = err })
+                end)
+                local done = channel.select({ finished:case_receive(), time.after("2s"):case_receive() })
+                test.eq(done.channel, finished, "the interposed stream must close on every exit")
+                if ending == "throw" then test.eq(done.value.ok, false)
+                else test.eq(done.value.ok, true) end
+                local chunks = {}
+                while true do
+                    local next_chunk = channel.select({ received:case_receive(), default = true })
+                    if next_chunk.default then break end
+                    chunks[#chunks + 1] = next_chunk.value
+                end
+                process.unlisten(received)
+                test.eq(#chunks, 3)
+                test.eq(chunks[1].content, "first ")
+                test.eq(chunks[2].content, "second")
+                test.eq(chunks[3].type, "done")
+            end)
+        end
         it("replaces the connection target before agent.step and sends only public answer chunks", function()
             local agent = fake_agent(nil)
             local ctx = mock_ctx(agent)

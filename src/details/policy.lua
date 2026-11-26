@@ -49,7 +49,6 @@ end
 
 function policy.agent(config: any, agent_id: any): any
     if policy._agent then return policy._agent(config, agent_id) end
-    if type(config.active_traits) == "table" then return config.active_traits end
     if type(agent_id) ~= "string" or agent_id == "" then return {} end
     local spec = agent_registry.get_by_id(agent_id) or agent_registry.get_by_name(agent_id)
     if type(spec) ~= "table" then
@@ -129,6 +128,11 @@ function policy.current(config: any, agent_id: any, tool_id: any, arguments: any
     local app = policy._app and policy._app() or consts.session_show_tool_details()
     local traits = policy.agent(config, agent_id or config.agent_id)
     local levels = policy.resolve(app, policy.trait(traits), display, config.call_details, tool_id)
+    -- Runtime trait overlays can lower the registry ceiling, never replace it.
+    local active = config.active_traits
+    if active == nil or active == false then active = {} end
+    local overlay = policy.resolve(app, policy.trait(active), nil, nil, tool_id)
+    for _, part in ipairs(policy.PARTS) do levels[part] = policy.lowest(levels[part], overlay[part]) end
     local marked, schema_valid = masks.schema(meta.input_schema or entry.input_schema, arguments)
     local sensitive = type(display) == "table" and display.sensitive or nil
     local paths = { arguments = marked, result = {} }

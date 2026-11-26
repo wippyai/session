@@ -170,6 +170,70 @@ local function define_tests()
             end
         end
 
+
+        it("keeps registry restrictions after control replaces active traits with an empty list", function()
+            policy._agent = nil
+            local ctx: any = {
+                config = { agent_id = "app.details:restricted_agent", active_traits = {} },
+                agent_ctx = {
+                    set_active_traits = function() return true end,
+                    get_current_agent = function() return { id = "app.details:restricted_agent" } end,
+                },
+                reader = { state = function() return { config = {} } end, reset = function() return true end },
+                writer = { update_meta = function() return true end },
+            }
+            test.eq(policy.stamp(ctx.config, ctx.config.agent_id, "tool", {}).arguments, "none")
+            local result, err = control_handlers.control_config(ctx, { config_changes = { traits = {} } })
+            test.is_nil(err)
+            test.eq(result.completed, true)
+            test.eq(#ctx.config.active_traits, 0)
+            local stamp = policy.stamp(ctx.config, ctx.config.agent_id, "tool", {})
+            for _, part in ipairs(policy.PARTS) do test.eq(stamp[part], "none", part) end
+        end)
+
+        it("allows active traits only to lower the registry ceiling", function()
+            policy._agent = function() return {} end
+            local traits = { { id = policy.TRAIT_ID, context = { result = "none" } } }
+            test.eq(policy.stamp({ active_traits = traits }, "agent", "tool", {}).result, "none")
+        end)
+
+        it("masks map schemas and fails closed for unsupported marked applicators at every projection", function()
+            local cases = {
+                { schema = { properties = { credentials = { additionalProperties = {
+                    properties = { token = { writeOnly = true } } } } } }, valid = true },
+                { schema = { properties = { credentials = { patternProperties = {
+                    ["^account"] = { properties = { token = { writeOnly = true } } } } } } }, valid = false },
+            }
+            for _, keyword in ipairs({ "if", "then", "else", "dependentSchemas", "unevaluatedProperties", "not", "contains", "propertyNames", "unevaluatedItems" }) do
+                cases[#cases + 1] = { schema = { [keyword] = { properties = { token = { writeOnly = true } } } }, valid = false }
+            end
+            for _, case in ipairs(cases) do
+                local args = { credentials = { account = { token = "SECRET-MAP", name = "visible" } } }
+                policy._tool = function() return { meta = { input_schema = case.schema } } end
+                local paths, valid = masks.schema(case.schema, args)
+                test.eq(valid, case.valid)
+                if valid then equal(paths, { "/credentials/account/token" }) end
+                local expected = fixture("call_pending_approval_none")
+                local row, config = stored("call_pending_approval_none", expected)
+                config.call_details = { arguments = "full", result = "full", error = "full", timing = "full" }
+                row.data = json.encode(args)
+                row.metadata.details = policy.stamp(config, row.metadata.agent_id, row.metadata.registry_id, args)
+                local rest = projection.row(row, config)
+                local live = projection.event("function_call", row, config)
+                for _, projected in ipairs({ rest, live }) do
+                    test.is_nil((json.encode(projected):find("SECRET-MAP", 1, true)))
+                    test.eq(projected.details.arguments.level, valid and "full" or "none")
+                end
+                test.is_nil((json.encode(rest.metadata.approval.display):find("SECRET-MAP", 1, true)))
+                if valid then
+                    test.eq(assert(json.decode(rest.data)).credentials.account.token, masks.HIDDEN)
+                    test.eq(rest.metadata.approval.display.arguments.credentials.account.token, masks.HIDDEN)
+                else
+                    test.eq(rest.metadata.approval.display.arguments, masks.HIDDEN)
+                end
+            end
+        end)
+
         it("resolves every four-layer combination for every part", function()
             local levels = { "none", "summary", "full" }
             for _, part in ipairs(policy.PARTS) do

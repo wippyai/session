@@ -128,12 +128,37 @@ function masks.schema(schema: any, value: any): (any, boolean)
     if schema == nil then return {}, true end
     if type(schema) ~= "table" then return {}, false end
     local root, paths, valid = schema, {}, true
+    local function contains_mark(node: any, depth: number): boolean
+        if type(node) ~= "table" then return false end
+        if depth > 64 then return true end
+        if node.writeOnly ~= nil and node.writeOnly ~= false then return true end
+        if node["$ref"] then
+            local ref = node["$ref"]
+            if type(ref) ~= "string" or ref:sub(1, 1) ~= "#" then return true end
+            local tokens = masks.tokens(ref:sub(2))
+            if not tokens then return true end
+            local target = root
+            for _, key in ipairs(tokens) do target = type(target) == "table" and target[key] or nil end
+            if contains_mark(target, depth + 1) then return true end
+        end
+        for _, child in pairs(node) do
+            if contains_mark(child, depth + 1) then return true end
+        end
+        return false
+    end
+    local mapped = { properties = true, additionalProperties = true, items = true, prefixItems = true,
+        allOf = true, anyOf = true, oneOf = true, ["$ref"] = true, ["$defs"] = true, definitions = true }
     local function walk(node: any, captured: any, path: string, depth: number)
         if captured == nil then return end
         if type(node) == "boolean" then return end
         if type(node) ~= "table" or depth > 64 then valid = false; return end
         if node.writeOnly ~= nil and type(node.writeOnly) ~= "boolean" then valid = false end
         if node.writeOnly == true then paths[#paths + 1] = path; return end
+        -- Unknown applicators cannot be mapped to concrete captured paths.
+        -- This includes patternProperties: Lua patterns are not JSON Schema regexes.
+        for keyword, child in pairs(node) do
+            if not mapped[keyword] and contains_mark(child, depth + 1) then valid = false; return end
+        end
         if node["$ref"] then
             local ref = node["$ref"]
             if type(ref) ~= "string" or ref:sub(1, 1) ~= "#" then valid = false; return end
@@ -155,6 +180,15 @@ function masks.schema(schema: any, value: any): (any, boolean)
             for key, child in pairs(node.properties) do
                 walk(child, captured[key], path .. "/" .. masks.escape(key), depth + 1)
             end
+        end
+        if type(node.additionalProperties) == "table" then
+            for key, child in pairs(captured) do
+                if type(key) == "string" and (type(node.properties) ~= "table" or node.properties[key] == nil) then
+                    walk(node.additionalProperties, child, path .. "/" .. masks.escape(key), depth + 1)
+                end
+            end
+        elseif node.additionalProperties ~= nil and type(node.additionalProperties) ~= "boolean" then
+            valid = false
         end
         for index, child in ipairs(captured) do
             local item = type(node.prefixItems) == "table" and node.prefixItems[index] or node.items
