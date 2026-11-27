@@ -262,6 +262,25 @@ local function define_tests()
             end
         end)
 
+        it("keeps public batch peers with generated names and no llm_alias", function()
+            local entry = registry.get("app.details:archive-invoice-generated")
+            test.is_nil(entry.meta.llm_alias)
+            test.is_true(policy.public_name("archive_invoice_generated"))
+            local row, config = stored("call_not_approved_full", fixture("call_not_approved_full"))
+            row.metadata.approval.display.batch_peers = { "archive_invoice_generated" }
+            equal(projection.rows({ row }, config)[1].metadata.approval.display.batch_peers, { "archive_invoice_generated" })
+        end)
+
+        it("drops private batch peers with generated names and no llm_alias", function()
+            local entry = registry.get("app.details:private-peer-generated")
+            test.is_nil(entry.meta.llm_alias)
+            test.is_true(policy.private_name("private_peer_generated"))
+            test.is_false(policy.public_name("private_peer_generated"))
+            local row, config = stored("call_not_approved_full", fixture("call_not_approved_full"))
+            row.metadata.approval.display.batch_peers = { "private_peer_generated" }
+            equal(projection.rows({ row }, config)[1].metadata.approval.display.batch_peers, {})
+        end)
+
         it("keeps only known public batch peers on pages without private rows", function()
             local row, config = stored("call_not_approved_full", fixture("call_not_approved_full"))
             row.metadata.approval.display.batch_peers = { "removed_private_tool", "private_peer", "archive_invoice" }

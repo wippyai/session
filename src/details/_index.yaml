@@ -15,6 +15,7 @@ entries:
       consts: wippy.session:consts
       masks: wippy.session.details:masks
       agent_registry: wippy.agent.discovery:registry
+      tools: wippy.agent.discovery:tools
 
   - name: preview
     kind: library.lua

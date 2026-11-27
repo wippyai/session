@@ -82,6 +82,21 @@ entries:
     source: file://private_peer.lua
     method: run
 
+  - name: archive-invoice-generated
+    kind: function.lua
+    meta:
+      type: tool
+    source: file://private_peer.lua
+    method: run
+
+  - name: private-peer-generated
+    kind: function.lua
+    meta:
+      type: tool
+      private: true
+    source: file://private_peer.lua
+    method: run
+
   - name: restricted_agent
     kind: registry.entry
     meta:

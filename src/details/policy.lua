@@ -2,6 +2,7 @@ local consts = require("consts")
 local masks = require("masks")
 local registry = require("registry")
 local agent_registry = require("agent_registry")
+local tools = require("tools")
 local logger = require("logger"):named("session.details")
 
 local policy: any = { PARTS = { "arguments", "result", "error", "timing" }, TRAIT_ID = "wippy.session.traits:call_details" }
@@ -27,11 +28,19 @@ function policy.tool(id: any): any
     return entry or {}
 end
 
+local function matches_name(entry: any, name: string): boolean
+    local meta = entry.meta or {}
+    -- Reuse wippy.agent.discovery:tools.get_tool_name (discovery/tools.lua),
+    -- the name emitted by get_tool_schema and stored by the approval gate.
+    return entry.id == name or entry.name == name or meta.llm_alias == name
+        or tools.get_tool_name(entry) == name
+end
+
 function policy.private_name(name: string): boolean
     local entries = registry.find({ ["meta.type"] = "tool" }) or {}
     for _, entry in ipairs(entries) do
         local meta = entry.meta or {}
-        if meta.private == true and (entry.id == name or entry.name == name or meta.llm_alias == name) then return true end
+        if meta.private == true and matches_name(entry, name) then return true end
     end
     return false
 end
@@ -42,7 +51,7 @@ function policy.public_name(name: string): boolean
     local found = false
     for _, entry in ipairs(registry.find({ ["meta.type"] = "tool" }) or {}) do
         local meta = entry.meta or {}
-        if entry.id == name or entry.name == name or meta.llm_alias == name then
+        if matches_name(entry, name) then
             if meta.private == true then return false end
             found = true
         end
