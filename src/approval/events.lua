@@ -122,6 +122,7 @@ end
 function events.not_run_settlement(reason: string, feedback: string?, cancelled: boolean?): any
     return {
         status = cancelled and consts.FUNC_STATUS.CANCELLED or consts.FUNC_STATUS.ERROR,
+        outcome = cancelled and events.OUTCOME.CANCELLED or events.OUTCOME.NOT_APPROVED,
         result = events.model_result(reason, feedback),
     }
 end

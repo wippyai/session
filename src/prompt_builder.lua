@@ -604,6 +604,9 @@ function prompt_builder.build(messages, contexts, session_meta, options, checkpo
                             })
                         else
                             local result_content = metadata.result
+                            if metadata.status == consts.FUNC_STATUS.ERROR and type(metadata.model_error_text) == "string" then
+                                result_content = metadata.model_error_text
+                            end
                             if type(result_content) == "table" then
                                 result_content = json.encode(result_content)
                             elseif result_content == nil then

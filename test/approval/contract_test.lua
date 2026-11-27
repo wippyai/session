@@ -98,6 +98,14 @@ end
 -- the fixture `name`. opts: { opaque, optional, strict }.
 local function problems(message: any, name: string, opts: any?): {string}
     opts = opts or {}
+    if message.type == "function_call" or message.type == "function_success" or message.type == "function_error" then
+        opts.opaque = opts.opaque or {}
+        for _, field in ipairs({ "details", "duration_ms", "details_revision", "outcome", "call_id" }) do
+            opts.opaque[#opts.opaque + 1] = field
+        end
+        opts.optional = opts.optional or {}
+        opts.optional[#opts.optional + 1] = "error"
+    end
     local sent_paths, sent_empty = paths_of(decode(json.encode(message)))
     local doc_paths = paths_of(fixture(name))
     local out = {}
@@ -237,7 +245,8 @@ local function define_tests()
                 return m.type == "tool_approval" and m.call_id == "call-a" and m.approval.state == "approved"
             end), "tool_approval_event_decided.json", { opaque = { "approval.display.arguments",
                 -- This batch offered Approve all; the pending event checks it.
-                "approval.offered", "approval.display.approve_all_scope", "approval.display.batch_peers" } })
+                "approval.offered", "approval.display.approve_all_scope", "approval.display.batch_peers" },
+                optional = { "approval.display.summary", "approval.display.cut", "approval.display.numbers" } })
             check(find(sent, function(m) return m.type == "function_call" and m.function_name == "delete_customer" end),
                 "function_call_approved.json")
             check(find(sent, function(m) return m.type == "function_error" and m.call_id == "call-b" end),
@@ -279,7 +288,8 @@ local function define_tests()
             local _, err = message_handlers.process_tools(ctx, op)
             test.is_nil(err)
             check(find(sent, function(m) return m.type == "tool_approval" and m.call_id == "call-p" end),
-                "tool_approval_event_grant.json", { opaque = { "approval.display.arguments" } })
+                "tool_approval_event_grant.json", { opaque = { "approval.display.arguments" },
+                    optional = { "approval.display.summary", "approval.display.cut", "approval.display.numbers" } })
 
             local never, never_sent = wired_ctx({ policy = { require = "all" } })
             local never_op = fx.round(never, { { id = "call-x", registry_id = MARKED, args = {} } })

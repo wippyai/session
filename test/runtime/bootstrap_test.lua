@@ -31,9 +31,9 @@ local function run(command, expected_status)
     return output
 end
 
-local function has_sh()
+local function has_sh(command)
     local executor = exec.get("app.runtime:executor")
-    local child = executor:exec("sh -c true")
+    local child = executor:exec("sh -c " .. quote(command or "true"))
     local started = child and child:start()
     local status = started and child:wait()
     executor:release()
@@ -57,6 +57,7 @@ local function define_tests()
             return
         end
         local sh_missing = not has_sh()
+        local tools_missing = sh_missing or not has_sh("command -v bash >/dev/null && command -v jq >/dev/null && command -v make >/dev/null && command -v sqlite3 >/dev/null")
         local function it(name, body)
             if sh_missing then
                 test.it_skip(name .. " (requires sh on PATH; CI runs it on Linux)", function() end)
@@ -64,10 +65,17 @@ local function define_tests()
                 test.it(name, body)
             end
         end
+        local function it_shell(name, body)
+            if tools_missing then
+                test.it_skip(name .. " (requires bash, jq, make and sqlite3 on PATH; CI runs it on Linux)", function() end)
+            else
+                it(name, body)
+            end
+        end
         it("exports the shell tool search path to child commands", function()
             test.eq(run("printenv PATH"), run('printf "%s" "$PATH"') .. "\n")
         end)
-        it("preserves the previous SQLite contents before resetting the test database", function()
+        it_shell("preserves the previous SQLite contents before resetting the test database", function()
             with_directory(function(directory, repository)
                 local database = directory .. "/test.db"
                 run("sqlite3 " .. quote(database) .. " " .. quote("CREATE TABLE evidence(value TEXT); INSERT INTO evidence VALUES('preserved');"))
@@ -84,7 +92,7 @@ local function define_tests()
                 test.eq(count, 2, "A repeated reset must preserve both backups")
             end)
         end)
-        it("prepares external dependencies while retaining the selected source bindings", function()
+        it_shell("prepares external dependencies while retaining the selected source bindings", function()
             with_directory(function(directory, repository)
                 local prepare = "bash " .. quote(repository .. "/scripts/test-workspace.sh") .. " " .. quote(repository) .. " " .. quote(directory .. "/workspace")
                 run(prepare)
@@ -100,7 +108,7 @@ local function define_tests()
                 test.eq(candidate.registry.dependency_lock_path, directory .. "/workspace/wippy.lock")
             end)
         end)
-        it("rejects workspace symlinks that point inside the repository", function()
+        it_shell("rejects workspace symlinks that point inside the repository", function()
             with_directory(function(directory, repository)
                 local source = directory .. "/source"
                 local alias = directory .. "/workspace-alias"
@@ -110,7 +118,7 @@ local function define_tests()
                 run("bash " .. quote(repository .. "/scripts/test-workspace.sh") .. " " .. quote(source) .. " " .. quote(alias), 1)
             end)
         end)
-        it("requires executed cases with published or candidate dependencies", function()
+        it_shell("requires executed cases with published or candidate dependencies", function()
             with_directory(function(directory, repository)
                 for _, framework in ipairs({ "", repository }) do
                     local output = run("make -s -n -C " .. quote(repository) .. " test-runtime " ..
@@ -122,7 +130,7 @@ local function define_tests()
                 end
             end)
         end)
-        it("rejects a benchmark runner that produces no report", function()
+        it_shell("rejects a benchmark runner that produces no report", function()
             with_directory(function(directory, repository)
                 run("make -s -C " .. quote(repository) .. " bench FRAMEWORK_DIR= WIPPY=true " ..
                     quote("TEST_ARTIFACTS=" .. directory .. "/artifacts") ..

@@ -108,7 +108,7 @@ local function define_tests()
                     end
                     return ctx
                 end
-                mock("process.registry", { register = function() return true end })
+                mock("process.registry", { register = function() return true end, lookup = function() return nil end })
                 mock("process.inbox", function() return inbox end)
                 mock("process.events", function() return events end)
                 mock("process.send", function(_, topic, payload)

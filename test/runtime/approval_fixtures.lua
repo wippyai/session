@@ -39,7 +39,8 @@ local function generate(request)
     local calls = {}
     for _, call in ipairs(step.calls or {}) do
         calls[#calls + 1] = { id = call.id, name = call.tool, registry_id = "app.runtime:" .. call.tool,
-            arguments = '{"n":' .. tostring(call.n or 0) .. '}' }
+            arguments = call.arguments or ('{"n":' .. tostring(call.n or 0) .. '}'),
+            raw_arguments = call.raw_arguments, arguments_error = call.arguments_error }
     end
     return { success = true, result = {
         content = step.content or (#calls > 0 and "" or "Done."),

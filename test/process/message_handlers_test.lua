@@ -226,6 +226,80 @@ end
 
 local function define_tests()
 
+    describe("Session provider stream boundary", function()
+        for _, ending in ipairs({ "send_error", "throw", "cancelled" }) do
+            it("drains answer chunks exactly once without stalling on " .. ending, function()
+                local agent = fake_agent(nil)
+                local ctx = mock_ctx(agent)
+                local topic = "details.fault." .. uuid.v7()
+                local received = assert(process.listen(topic))
+                ctx.stream_target = { reply_to = process.pid(), topic = topic }
+                agent.step = function(_, _, options)
+                    local target = options.stream_target
+                    assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "first " }))
+                    assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "second" }))
+                    assert(process.send(target.reply_to, target.topic, { type = "done" }))
+                    if ending == "throw" then error("provider send failed") end
+                    if ending == "send_error" then return nil, "provider send failed" end
+                    ctx.stop_requested = true
+                    return { stopped = true, result = "first second", finish_reason = "cancelled", tool_calls = {} }
+                end
+                local finished = channel.new(1)
+                coroutine.spawn(function()
+                    local ok, result, err = pcall(user_step, ctx)
+                    finished:send({ ok = ok, result = result, err = err })
+                end)
+                local done = channel.select({ finished:case_receive(), time.after("2s"):case_receive() })
+                test.eq(done.channel, finished, "the interposed stream must close on every exit")
+                if ending == "throw" then test.eq(done.value.ok, false)
+                else test.eq(done.value.ok, true) end
+                local chunks = {}
+                while true do
+                    local next_chunk = channel.select({ received:case_receive(), default = true })
+                    if next_chunk.default then break end
+                    chunks[#chunks + 1] = next_chunk.value
+                end
+                process.unlisten(received)
+                test.eq(#chunks, 3)
+                test.eq(chunks[1].content, "first ")
+                test.eq(chunks[2].content, "second")
+                test.eq(chunks[3].type, "done")
+            end)
+        end
+        it("replaces the connection target before agent.step and sends only public answer chunks", function()
+            local agent = fake_agent(nil)
+            local ctx = mock_ctx(agent)
+            local topic = "details.agent." .. uuid.v7()
+            local received = assert(process.listen(topic))
+            ctx.stream_target = { reply_to = process.pid(), topic = topic }
+            agent.step = function(_, _, options)
+                local target = options.stream_target
+                test.eq(target.reply_to, (process.pid()))
+                test.is_true(target.topic ~= topic)
+                assert(process.send(target.reply_to, target.topic, { type = "tool_call", arguments = "SECRET" }))
+                assert(process.send(target.reply_to, target.topic, { type = "thinking", text = "SECRET" }))
+                assert(process.send(target.reply_to, target.topic, { type = "chunk", content = "answer", provider_metadata = "SECRET" }))
+                assert(process.send(target.reply_to, target.topic, { type = "done", meta = { thinking_blocks = "SECRET" } }))
+                return { result = "answer", tool_calls = {} }
+            end
+            local _, err = user_step(ctx)
+            test.is_nil(err)
+            local chunks = {}
+            while true do
+                local chunk = channel.select({ received:case_receive(), default = true })
+                if chunk.default then break end
+                chunks[#chunks + 1] = chunk.value
+            end
+            process.unlisten(received)
+            test.eq(#chunks, 2)
+            test.eq(chunks[1].type, "chunk")
+            test.eq(chunks[1].content, "answer")
+            test.is_nil(chunks[1].provider_metadata)
+            test.eq(chunks[2].type, "done")
+            test.is_nil(chunks[2].meta)
+        end)
+    end)
+
     describe("reported cancelled tool event regression", function()
         it("settles public cancellation without publishing private or delegation intents", function()
             local ctx, captured = mock_ctx(fake_agent(nil))
@@ -860,7 +934,7 @@ local function define_tests()
         end)
     end)
     describe("tool errors as tables", function()
-        it("records a raised table as text", function()
+        it("preserves raised table fields for masking and replay", function()
             local ctx = mock_ctx(fake_agent(nil))
             local updates, events = {}, {}
             ctx.writer.update_message_meta = function(_self, _id, metadata)
@@ -871,8 +945,11 @@ local function define_tests()
                 if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then events[#events + 1] = payload end
             end
             for _, raised in ipairs({
-                { error = { message = "Tool failed." }, expected = "Tool failed." },
-                { error = { code = "E_RAISED" }, expected = '{"code":"E_RAISED"}' },
+                { error = { message = "Record not found", code = 404 }, text = "Record not found" },
+                { error = { code = "E_RAISED" }, text = json.encode({ code = "E_RAISED" }) },
+                { error = { message = 404 }, text = json.encode({ message = 404 }) },
+                { error = "Tool failed.", text = "Tool failed." },
+                { error = 404, text = "404" },
             }) do
                 local result = message_handlers.process_tools(ctx, {
                     tool_calls = {{ id = "call-1", name = "failing", arguments = "{}", registry_id = "app:failing" }},
@@ -886,8 +963,10 @@ local function define_tests()
                     message_id = "msg-user", request_id = "req-1",
                 })
                 test.not_nil(result)
-                test.eq(updates[#updates].result, raised.expected, "the model reads the error, not a table address")
-                test.eq(events[#events].error, raised.expected)
+                local expected = type(raised.error) == "table" and raised.error or raised.text
+                test.eq(json.encode(updates[#updates].result), json.encode(expected), "storage keeps the error fields")
+                test.eq(updates[#updates].model_error_text, raised.text, "replay keeps the original model text")
+                test.eq((json.encode(events[#events].error)), (json.encode(expected)))
             end
         end)
     end)

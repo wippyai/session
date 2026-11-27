@@ -20,6 +20,9 @@ local llm = require("llm")
 local activation = require("activation")
 local approval_gate = require("approval_gate")
 local approval_recovery = require("approval_recovery")
+local details_policy = require("details_policy")
+local details_timing = require("details_timing")
+local details_stream = require("details_stream")
 local logger = require("logger"):named("session.message_handlers")
 
 type SessionContext = {
@@ -1906,7 +1909,12 @@ function message_handlers.agent_step(ctx, op)
         }
     end
 
-    local result, exec_err, exec_details = agent:step(builder, runtime_options)
+    local filtered_target, close_stream, stream_err = details_stream.open(runtime_options.stream_target, response_id)
+    if stream_err then return nil, stream_err end
+    runtime_options.stream_target = filtered_target
+    local stepped, result, exec_err, exec_details = pcall(agent.step, agent, builder, runtime_options)
+    close_stream()
+    if not stepped then error(result) end
     if expiring_prompt_cache(agent) then
         remember_cache_activity(ctx, type(result) == "table" and result.tokens or nil)
     end
@@ -2514,7 +2522,28 @@ function message_handlers.process_tools(ctx, op)
     -- and the guards below write as before.
     local write_call_row = call_row_writer(ctx, op)
     local owned = {}
+    local durations = {}
     local function write_row(message_id, metadata)
+        if metadata.status ~= nil then
+            local row = message_repo.get(message_id)
+            if row then
+                local stored = row.metadata or {}
+                local arguments = type(row.data) == "string" and require("details_masks").decode(row.data) or row.data
+                local config = ctx.config
+                local repo = ctx.writer._session_repo
+                if repo and type(repo.get) == "function" then
+                    local session, read_err = repo.get(ctx.session_id, ctx.user_id)
+                    if not session then return nil, read_err or "Failed to read result visibility" end
+                    config = session.config
+                end
+                local current = details_policy.current(config, stored.agent_id, stored.registry_id, arguments)
+                metadata.details = details_policy.read(stored.details, current)
+                metadata.details.v, metadata.details.policy_revision = 1, 1
+            end
+            for call_id, row_id in pairs(op.call_message_ids or {}) do
+                if row_id == message_id then metadata.duration_ms = durations[call_id]; break end
+            end
+        end
         local written, err = write_call_row(message_id, metadata, owned[message_id] == true)
         if written and metadata.status ~= nil then owned[message_id] = true end
         return written, err
@@ -2564,7 +2593,7 @@ function message_handlers.process_tools(ctx, op)
     if validate_err and (not validated_tools or next(validated_tools) == nil) then
         for _, call in ipairs(op.tool_calls) do
             local _, update_err = ctx.writer:update_message_meta(op.call_message_ids[call.id], {
-                status = consts.FUNC_STATUS.ERROR, result = "Tool validation failed: " .. validate_err
+                status = consts.FUNC_STATUS.ERROR, outcome = "invalid_arguments", result = "Tool validation failed: " .. validate_err
             })
             if update_err then return nil, update_err end
         end
@@ -2573,11 +2602,22 @@ function message_handlers.process_tools(ctx, op)
 
     -- The message IDs and the session context are set before the approval
     -- gate, which freezes both.
+    -- Some providers leave raw argument text for the caller to decode at
+    -- launch. Reject it here so the gate, live events and settlement all see
+    -- the same non-dispatched failure. Keep the caller's normal error/replay
+    -- path, including the continuation that lets the model repair the call.
     for call_id, tool_call in pairs(validated_tools or {}) do
         if not op.call_message_ids[call_id] then
             return nil, "Tool call intent was not stored with the assistant response: " .. call_id
         end
         tool_call.message_id = op.call_message_ids[call_id]
+        if tool_call.valid and type(tool_call.args) == "string" then
+            local _, decode_err = json.decode(tool_call.args)
+            if decode_err then
+                tool_call.valid = false
+                tool_call.error = "Failed to parse arguments: " .. tostring(decode_err)
+            end
+        end
     end
 
     local function read_session_context()
@@ -2679,9 +2719,12 @@ function message_handlers.process_tools(ctx, op)
     -- channel, so released calls are not cancelled by steering or finish.
     if gated.session_context ~= nil then session_context = gated.session_context end
 
+    local restore_timing
+    durations, restore_timing = details_timing.attach(caller)
     local executed, results, execute_err = pcall(function()
         return caller:execute(session_context, run_tools, ctx.coordinator and ctx.coordinator.cancel)
     end)
+    restore_timing()
     if not executed then
         execute_err = tostring(results)
         results = nil
@@ -2728,7 +2771,7 @@ function message_handlers.process_tools(ctx, op)
         local result_data = results[call_id]
         if not result_data then
             local failure = execute_err and tostring(execute_err) or "Call outcome unknown"
-            result_data = { error = failure, tool_call = (validated_tools or {})[call_id] or {
+            result_data = { outcome = "unknown", error = failure, tool_call = (validated_tools or {})[call_id] or {
                 name = call.name, registry_id = call.registry_id, args = call.arguments,
                 meta = { private = call.type == consts.MSG_TYPE.PRIVATE_FUNCTION },
             } }
@@ -2777,8 +2820,11 @@ function message_handlers.process_tools(ctx, op)
         end
 
         if result_data.error then
+            local failure = type(result_data.error) == "table" and result_data.error or error_text(result_data.error)
             local _, update_err = write_row(message_id, {
-                result = error_text(result_data.error),
+                result = failure,
+                model_error_text = error_text(result_data.error),
+                outcome = result_data.outcome or (result_data.tool_call.valid == false and "invalid_arguments" or nil),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
                 call_id = call_id,
@@ -2787,7 +2833,7 @@ function message_handlers.process_tools(ctx, op)
             if update_err then return fail_remaining(index, update_err) end
 
             if not is_delegation and not is_private then
-                announce_function_error(call_id, message_id, result_data.tool_call.name, error_text(result_data.error))
+                announce_function_error(call_id, message_id, result_data.tool_call.name, failure)
             end
         else
             local tool_result = result_data.result
@@ -2804,7 +2850,8 @@ function message_handlers.process_tools(ctx, op)
             end
 
             local settled = {
-                result = tool_result,
+                result = tool_result == nil and json.null or tool_result,
+                result_captured = true,
                 status = consts.FUNC_STATUS.SUCCESS,
                 function_name = result_data.tool_call.name,
                 call_id = call_id,

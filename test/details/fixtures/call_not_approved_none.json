@@ -1,0 +1,85 @@
+{
+  "_case": "not_approved decided approval at none; app switch unset",
+  "message_id": "019ad0ab-0000-7000-8000-000000000013",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "type": "function",
+  "date": "2026-11-25T10:15:00Z",
+  "data": null,
+  "metadata": {
+    "call_id": "call_invoice_42",
+    "function_name": "delete_invoice",
+    "registry_id": "app.tools:delete_invoice",
+    "agent_id": "app.agents:billing",
+    "status": "error",
+    "outcome": "not_approved",
+    "result": null,
+    "duration_ms": null,
+    "approval": {
+      "approval_id": "019ad0ab-0000-7000-8000-0000000000a1",
+      "batch_id": "019ad0ab-0000-7000-8000-0000000000b1",
+      "call_id": "call_invoice_42",
+      "state": "denied",
+      "revision": 2,
+      "intent_digest": "sha256:9f2c4a1e0b7d3c5f6a8e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a",
+      "requested_at": "2026-11-25T10:15:00Z",
+      "expires_at": "2026-11-25T10:30:00Z",
+      "decided_at": "2026-11-25T10:15:10Z",
+      "decided_via": "user",
+      "then": "stop",
+      "reason": null,
+      "grant_id": null,
+      "disposition": "not_run",
+      "offered": {
+        "decisions": [
+          "approve",
+          "deny"
+        ],
+        "approve_all": null
+      },
+      "display": {
+        "title": "Delete invoice",
+        "description": "Deletes the selected invoice.",
+        "agent": "Billing assistant",
+        "batch_peers": [
+          "archive_invoice"
+        ]
+      }
+    }
+  },
+  "details": {
+    "arguments": {
+      "level": "none",
+      "availability": "restricted",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "result": {
+      "level": "none",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "error": {
+      "level": "none",
+      "availability": "restricted",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "none",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    }
+  },
+  "details_revision": 4
+}
+

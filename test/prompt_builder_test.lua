@@ -78,6 +78,39 @@ local function define_tests()
         end)
     end)
     describe("foundation error feedback", function()
+        local structured = { message = "Record not found", code = 404 }
+        for _, case in ipairs({
+            { name = "restores the message of a structured error", result = structured,
+                text = "Record not found", expected = "Record not found" },
+            { name = "preserves JSON for a structured error without a message", result = { code = 404 },
+                text = json.encode({ code = 404 }), expected = json.encode({ code = 404 }) },
+            { name = "preserves scalar error text", result = "Tool failed.",
+                text = "Tool failed.", expected = "Tool failed." },
+            { name = "preserves an empty error message", result = { message = "", code = 404 },
+                text = "", expected = "" },
+            { name = "keeps legacy structured error replay unchanged", result = structured,
+                expected = json.encode(structured) },
+            { name = "keeps legacy scalar error replay unchanged", result = "Legacy failure",
+                expected = "Legacy failure" },
+            { name = "ignores model error text for successful rows", result = structured,
+                status = consts.FUNC_STATUS.SUCCESS, text = "ignored", expected = json.encode(structured) },
+            { name = "ignores model error text for cancelled rows", result = "Cancelled",
+                status = consts.FUNC_STATUS.CANCELLED, text = "ignored", expected = "Cancelled" },
+        }) do
+            it(case.name, function()
+                local builder, err = prompt_builder.build({
+                    { message_id = "function-row", type = consts.MSG_TYPE.FUNCTION, data = "{}", metadata = {
+                        function_name = "lookup", call_id = "call-1", status = case.status or consts.FUNC_STATUS.ERROR,
+                        result = case.result, model_error_text = case.text,
+                    } },
+                }, {}, {}, { include_contexts = false, include_files = false, cache_markers = false })
+                test.is_nil(err)
+                local messages = builder:get_messages()
+                test.eq(messages[#messages].role, "function_result")
+                test.eq(messages[#messages].content[1].text, case.expected)
+            end)
+        end
+
         it("preserves canonical failure status while leaving successful provider results unchanged", function()
             local rendered = {}
             local google_rendered = {}

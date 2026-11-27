@@ -1,5 +1,6 @@
 local http = require('http')
 local security = require('security')
+local consts = require('consts')
 local context_attachments = require('context_attachments')
 local context_staging_repo = require('context_staging_repo')
 
@@ -9,6 +10,7 @@ local context_staging_repo = require('context_staging_repo')
 local api = {
     _http = http,
     _security = security,
+    _consts = consts,
     _context_attachments = context_attachments,
     _context_staging_repo = context_staging_repo,
 }
@@ -29,6 +31,12 @@ function api.describe()
         -- surface declaration, and the session fields activity and
         -- tool_approval.
         tool_approval = 1,
+        call_details = 1,
+        session_show_tool_details = api._consts.session_show_tool_details(),
+        details_limits = {
+            preview_bytes = 8192, preview_depth = 6, string_bytes = 1024,
+            key_chars = 128, summary_chars = 80,
+        },
         attention = {
             -- Per-session attention_context state, attention_context_set and the PATCH route.
             context = 1,

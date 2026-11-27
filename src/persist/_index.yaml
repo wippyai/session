@@ -64,6 +64,9 @@ entries:
       - json
       - security
     imports:
+      details_masks: wippy.session.details:masks
+      upstream: wippy.session.process:upstream
+      details_policy: wippy.session.details:policy
       checkpoint_repo: wippy.session.persist:checkpoint_repo
       session_repo: wippy.session.persist:session_repo
       message_repo: wippy.session.persist:message_repo
@@ -142,6 +145,7 @@ entries:
       - sql
       - json
     imports:
+      details_masks: wippy.session.details:masks
       context_staging_repo: wippy.session.persist:context_staging_repo
       consts: wippy.session:consts
       tx: wippy.session.persist:tx

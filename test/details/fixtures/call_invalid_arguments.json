@@ -1,0 +1,66 @@
+{
+  "_case": "invalid_arguments before dispatch; decoded arguments failed schema validation",
+  "message_id": "019ad0ab-0000-7000-8000-000000000014",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "type": "function",
+  "date": "2026-11-25T10:15:00Z",
+  "data": "{\"api_key\":\"[hidden: sensitive]\",\"invoice_id\":42}",
+  "metadata": {
+    "call_id": "call_invoice_42",
+    "function_name": "lookup_invoice",
+    "registry_id": "app.tools:lookup_invoice",
+    "agent_id": "app.agents:billing",
+    "status": "error",
+    "outcome": "invalid_arguments",
+    "result": "Invalid arguments: invoice_id must be a string.",
+    "duration_ms": null
+  },
+  "details": {
+    "arguments": {
+      "level": "full",
+      "availability": "available",
+      "summary": "\"api_key\": \"[hidden: sensitive]\", \"invoice_id\": 42",
+      "preview": {
+        "value": {
+          "api_key": "[hidden: sensitive]",
+          "invoice_id": 42
+        },
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": [
+        "/api_key"
+      ]
+    },
+    "result": {
+      "level": "full",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "error": {
+      "level": "full",
+      "availability": "available",
+      "summary": "The tool failed",
+      "preview": {
+        "value": "Invalid arguments: invoice_id must be a string.",
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "full",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    }
+  },
+  "details_revision": 4
+}

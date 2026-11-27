@@ -1,5 +1,6 @@
 local test = require("test")
 local api = require("session_messages")
+local json = require("json")
 
 local function define_tests()
     test.describe("Session messages HTTP contract", function()
@@ -17,7 +18,7 @@ local function define_tests()
             api._message_repo = original.message_repo
         end)
 
-        test.it("returns pending private functions without allowing a cached history response", function()
+        test.it("omits private functions without allowing a cached history response", function()
             local result = { headers = {} }
             local req = {
                 query = function(_, key)
@@ -82,10 +83,7 @@ local function define_tests()
 
             test.eq(result.headers["Cache-Control"], "no-store")
             test.eq(result.status, 200)
-            test.eq(#result.body.messages, 1)
-            test.eq(result.body.messages[1].type, "private_function")
-            test.eq(result.body.messages[1].metadata.call_id, "attention-e2e-confirm-1")
-            test.eq(result.body.messages[1].metadata.status, "pending")
+            test.eq(#result.body.messages, 0)
         end)
         test.it("projects cancelled history as a settled error while preserving the durable outcome", function()
             local durable = { status = "cancelled", result = "Stopped by user", call_id = "call-object" }
@@ -113,7 +111,7 @@ local function define_tests()
             api.handler()
             test.eq(response.messages[1].metadata.status, "error")
             test.eq(response.messages[1].metadata.outcome, "cancelled")
-            test.eq(response.messages[1].metadata.result, "Stopped by user")
+            test.eq(response.messages[1].metadata.result, json.null)
             test.eq(response.messages[2].metadata.status, "error")
             test.eq(response.messages[2].metadata.outcome, "cancelled")
             test.eq(response.messages[3].metadata.status, "success")

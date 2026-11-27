@@ -5,6 +5,7 @@ local message_repo = require("message_repo")
 local session_status = require("session_status")
 local approval_projection = require("approval_projection")
 local approval_repo = require("approval_repo")
+local details_projection = require("details_projection")
 
 -- Test seams: the HTTP context and the actor.
 local api = {
@@ -29,6 +30,8 @@ local function handler()
     if not res or not req then
         return nil, "Failed to get HTTP context"
     end
+
+    res:set_header("Cache-Control", "no-store")
 
     local actor = api._security.actor()
     if not actor then
@@ -71,8 +74,13 @@ local function handler()
         return
     end
 
-    local latest_message, _ = message_repo.get_latest(session_id)
-    local message_count, _ = message_repo.count_by_session(session_id)
+    local latest_message, message_count, history_err = details_projection.history_summary(message_repo, session_id, session.config)
+    if history_err then
+        res:set_status(http.STATUS.INTERNAL_ERROR)
+        res:write_json({ success = false, error = "Failed to read the session" })
+        return
+    end
+    details_projection.session(session)
 
     -- A turn the runtime stopped reads as idle (session_status).
     session.status, session.interaction = session_status.effective(session)
@@ -98,6 +106,7 @@ local function handler()
 
     local response = {
         success = true,
+        details_revision = session.details_revision,
         server_now = approval_repo.now(),
         session = session
     }

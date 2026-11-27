@@ -12,6 +12,7 @@ entries:
       - http
       - security
     imports:
+      consts: wippy.session:consts
       context_attachments: wippy.session:context_attachments
       context_staging_repo: wippy.session.persist:context_staging_repo
     method: handler
@@ -268,6 +269,7 @@ entries:
       - http
       - security
     imports:
+      details_projection: wippy.session.details:projection
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
       session_status: wippy.session.process:session_status
@@ -379,6 +381,8 @@ entries:
       - security
       - time
     imports:
+      details_projection: wippy.session.details:projection
+      details_policy: wippy.session.details:policy
       message_repo: wippy.session.persist:message_repo
       session_repo: wippy.session.persist:session_repo
       approval_repo: wippy.session.persist:approval_repo

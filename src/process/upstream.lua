@@ -1,5 +1,8 @@
 local consts = require("consts")
 local owner_events = require("owner_events")
+local details_projection = require("details_projection")
+local details_policy = require("details_policy")
+local message_repo = require("message_repo")
 
 type UpstreamPayload = {
     type: string?,
@@ -42,6 +45,7 @@ function session_upstream.notify_external(session_id, changes, user_id)
         session_id = session_id,
         deleted = changes.deleted or nil,
         refresh = not changes.deleted or nil,
+        details_revision = changes.config and details_policy.revision(changes.config) or nil,
     })
 end
 
@@ -61,6 +65,7 @@ function session_upstream:refresh_external(changes)
         if changes[key] ~= nil then update[key] = current[key] end
     end
     if changes.meta ~= nil or changes.config ~= nil then update.refresh = true end
+    if changes.config ~= nil then update.details_revision = details_policy.revision(current.config) end
     -- Never forward private metadata, config or caller-supplied row contents.
     update.session_id = self.session_id
     self:_send_session_update(consts.UPSTREAM_TYPES.UPDATE, update)
@@ -188,6 +193,32 @@ end
 
 -- Send message-level update
 function session_upstream:send_message_update(message_id, type, payload)
+    if type == consts.UPSTREAM_TYPES.FUNCTION_CALL or type == consts.UPSTREAM_TYPES.FUNCTION_SUCCESS
+        or type == consts.UPSTREAM_TYPES.FUNCTION_ERROR then
+        local row = message_repo.get(payload and payload.message_id)
+        if not row then return nil, "Call row unavailable for public projection" end
+        local session = session_upstream._session_repo.get(self.session_id)
+        if not session then return nil, "Session unavailable for public projection" end
+        local existing = payload
+        payload = details_projection.event(type, row, session.config)
+        if not payload then return true end
+        if _G.type(existing.approval) == "table" and _G.type(payload.approval) == "table" then
+            local filtered = {}
+            for key in pairs(existing.approval) do filtered[key] = payload.approval[key] end
+            payload.approval = filtered
+        else
+            payload.approval = nil
+        end
+    end
+    if type == "tool_approval" then
+        local row = message_repo.get(payload and payload.message_id)
+        local session = session_upstream._session_repo.get(self.session_id)
+        if not row or not session then return nil, "Approval projection unavailable" end
+        local public = details_projection.row(row, session.config)
+        if not public or not public.metadata.approval then return nil, "Approval projection unavailable" end
+        if payload.approval and payload.approval.call_id == nil then public.metadata.approval.call_id = nil end
+        payload.approval = public.metadata.approval
+    end
     local topic = self:get_message_topic(message_id)
     local message = { type = type, session_id = self.session_id }
 

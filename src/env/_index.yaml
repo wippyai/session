@@ -101,6 +101,13 @@ entries:
       private: true
     variable: SESSION_TOKEN_CHECKPOINT_THRESHOLD
 
+  - name: session_show_tool_details
+    kind: env.variable
+    meta:
+      comment: Tool detail visibility
+      private: true
+    variable: SESSION_SHOW_TOOL_DETAILS
+
   # wippy.session.env:tool_approval_enforcement
   - name: tool_approval_enforcement
     kind: env.variable

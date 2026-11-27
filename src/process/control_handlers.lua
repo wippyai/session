@@ -673,6 +673,10 @@ function control_handlers.control_config(ctx, op)
     -- (sticky activation): a `_control` or behavior control that
     -- names tool_approval is refused as a whole and changes nothing. A trait,
     -- tool or agent change still leaves the stored activation in force.
+    if type(op.config_changes) == "table" and (op.config_changes.call_details ~= nil
+        or op.config_changes.details_revision ~= nil) then
+        return reject("call_details_forbidden", "Call details settings cannot be changed by a control")
+    end
     if type(op.config_changes) == "table" and op.config_changes.tool_approval ~= nil then
         return reject("tool_approval_forbidden", "Tool approval settings cannot be changed by a control")
     end

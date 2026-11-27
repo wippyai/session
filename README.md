@@ -25,6 +25,45 @@ zone settings do not change these stored instants.
 SQLite list and cursor comparisons use the existing timestamp comparison key,
 so stored offset timestamps and new UTC timestamps retain chronological order.
 
+## Tool call details
+
+The P1 [call details protocol](docs/call-details-protocol.md) filters history,
+session reads and live tool events on the server. Set the Session dependency
+requirement `session_show_tool_details`, or `SESSION_SHOW_TOOL_DETAILS`, to
+`none` (default), `summary` or `full`. Boolean `true` and the string
+`"true"` mean full; false means none. Invalid values mean none and log a warning.
+
+The `wippy.session.traits:call_details` agent trait accepts `arguments`,
+`result`, `error` and `timing` levels in its context. Optional
+`tools: { "<registry_id>": { result: summary } }` entries lower individual
+tools further. Tool `meta.display` and session `config.call_details` can also
+lower each part. The lowest level wins. Unknown agent contexts hide every part;
+unknown part levels hide the affected part.
+
+Input-schema `writeOnly` marks and `meta.display.sensitive.arguments/result`
+JSON Pointer lists replace values with `[hidden: sensitive]`. Each call stores
+its visibility levels and masks when written. Reads also apply current limits
+and masks. Raising a setting or removing a sensitive mark cannot reveal an old
+value. Pending approvals retain masked consent previews; decided approvals
+follow the arguments level. Private calls remain absent except for their own
+approval cards. Bulk approval is omitted when its scope would disclose a
+private tool; individual decisions remain available.
+
+Trusted app code can update `config.call_details` through the Session service
+`update` method. Preserve the other config fields. The server assigns
+`details_revision` under the session lock and publishes it in an update.
+Model controls cannot change these settings. There is no owner command for
+changing call details in P1.
+
+Capabilities advertise `call_details: 1`, the normalized app switch and preview
+limits. Session reads expose effective default levels; row descriptors remain
+authoritative. Detail responses use `Cache-Control: no-store`. P1 drops provider
+tool-call and thinking stream chunks while forwarding visible answer chunks.
+
+Run `make.ps1 test` with `TEST_FILTER=app.details:` for the protocol and security
+suite. The Unix bootstrap tests require Bash, jq, make and sqlite3 in their
+child shell; they skip when those prerequisites are missing.
+
 ## Session steering
 
 Sessions block new messages during an active turn by default. Add the

@@ -1,0 +1,46 @@
+{
+  "_case": "phase 3 viewer check; live descriptors without content",
+  "type": "function_success",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "message_id": "019ad0ab-0000-7000-8000-000000000001",
+  "call_id": "call_invoice_42",
+  "function_name": "lookup_invoice",
+  "details": {
+    "arguments": {
+      "level": "full",
+      "availability": "available",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "result": {
+      "level": "full",
+      "availability": "available",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "error": {
+      "level": "full",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "full",
+      "availability": "available",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    }
+  },
+  "outcome": null,
+  "duration_ms": null,
+  "details_revision": 4
+}
+

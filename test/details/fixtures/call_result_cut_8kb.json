@@ -1,0 +1,1421 @@
+{
+  "_case": "result exceeds 8 KB preview budget; full value remains in metadata.result",
+  "message_id": "019ad0ab-0000-7000-8000-000000000019",
+  "session_id": "019ad0ab-0000-7000-8000-000000000001",
+  "type": "function",
+  "date": "2026-11-25T10:15:00Z",
+  "data": "{\"api_key\":\"[hidden: sensitive]\",\"invoice_id\":\"inv_42\"}",
+  "metadata": {
+    "call_id": "call_invoice_42",
+    "function_name": "lookup_invoice",
+    "registry_id": "app.tools:lookup_invoice",
+    "agent_id": "app.agents:billing",
+    "status": "success",
+    "outcome": null,
+    "result": [
+      {
+        "invoice_id": "inv_0001",
+        "description": "Invoice 0001 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0002",
+        "description": "Invoice 0002 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0003",
+        "description": "Invoice 0003 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0004",
+        "description": "Invoice 0004 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0005",
+        "description": "Invoice 0005 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0006",
+        "description": "Invoice 0006 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0007",
+        "description": "Invoice 0007 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0008",
+        "description": "Invoice 0008 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0009",
+        "description": "Invoice 0009 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0010",
+        "description": "Invoice 0010 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0011",
+        "description": "Invoice 0011 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0012",
+        "description": "Invoice 0012 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0013",
+        "description": "Invoice 0013 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0014",
+        "description": "Invoice 0014 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0015",
+        "description": "Invoice 0015 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0016",
+        "description": "Invoice 0016 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0017",
+        "description": "Invoice 0017 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0018",
+        "description": "Invoice 0018 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0019",
+        "description": "Invoice 0019 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0020",
+        "description": "Invoice 0020 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0021",
+        "description": "Invoice 0021 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0022",
+        "description": "Invoice 0022 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0023",
+        "description": "Invoice 0023 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0024",
+        "description": "Invoice 0024 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0025",
+        "description": "Invoice 0025 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0026",
+        "description": "Invoice 0026 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0027",
+        "description": "Invoice 0027 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0028",
+        "description": "Invoice 0028 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0029",
+        "description": "Invoice 0029 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0030",
+        "description": "Invoice 0030 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0031",
+        "description": "Invoice 0031 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0032",
+        "description": "Invoice 0032 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0033",
+        "description": "Invoice 0033 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0034",
+        "description": "Invoice 0034 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0035",
+        "description": "Invoice 0035 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0036",
+        "description": "Invoice 0036 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0037",
+        "description": "Invoice 0037 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0038",
+        "description": "Invoice 0038 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0039",
+        "description": "Invoice 0039 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0040",
+        "description": "Invoice 0040 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0041",
+        "description": "Invoice 0041 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0042",
+        "description": "Invoice 0042 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0043",
+        "description": "Invoice 0043 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0044",
+        "description": "Invoice 0044 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0045",
+        "description": "Invoice 0045 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0046",
+        "description": "Invoice 0046 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0047",
+        "description": "Invoice 0047 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0048",
+        "description": "Invoice 0048 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0049",
+        "description": "Invoice 0049 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0050",
+        "description": "Invoice 0050 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0051",
+        "description": "Invoice 0051 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0052",
+        "description": "Invoice 0052 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0053",
+        "description": "Invoice 0053 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0054",
+        "description": "Invoice 0054 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0055",
+        "description": "Invoice 0055 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0056",
+        "description": "Invoice 0056 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0057",
+        "description": "Invoice 0057 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0058",
+        "description": "Invoice 0058 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0059",
+        "description": "Invoice 0059 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0060",
+        "description": "Invoice 0060 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0061",
+        "description": "Invoice 0061 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0062",
+        "description": "Invoice 0062 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0063",
+        "description": "Invoice 0063 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0064",
+        "description": "Invoice 0064 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0065",
+        "description": "Invoice 0065 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0066",
+        "description": "Invoice 0066 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0067",
+        "description": "Invoice 0067 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0068",
+        "description": "Invoice 0068 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0069",
+        "description": "Invoice 0069 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0070",
+        "description": "Invoice 0070 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0071",
+        "description": "Invoice 0071 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0072",
+        "description": "Invoice 0072 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0073",
+        "description": "Invoice 0073 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0074",
+        "description": "Invoice 0074 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0075",
+        "description": "Invoice 0075 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0076",
+        "description": "Invoice 0076 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0077",
+        "description": "Invoice 0077 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0078",
+        "description": "Invoice 0078 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0079",
+        "description": "Invoice 0079 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0080",
+        "description": "Invoice 0080 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0081",
+        "description": "Invoice 0081 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0082",
+        "description": "Invoice 0082 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0083",
+        "description": "Invoice 0083 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0084",
+        "description": "Invoice 0084 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0085",
+        "description": "Invoice 0085 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0086",
+        "description": "Invoice 0086 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0087",
+        "description": "Invoice 0087 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0088",
+        "description": "Invoice 0088 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0089",
+        "description": "Invoice 0089 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0090",
+        "description": "Invoice 0090 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0091",
+        "description": "Invoice 0091 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0092",
+        "description": "Invoice 0092 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0093",
+        "description": "Invoice 0093 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0094",
+        "description": "Invoice 0094 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0095",
+        "description": "Invoice 0095 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0096",
+        "description": "Invoice 0096 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0097",
+        "description": "Invoice 0097 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0098",
+        "description": "Invoice 0098 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0099",
+        "description": "Invoice 0099 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0100",
+        "description": "Invoice 0100 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0101",
+        "description": "Invoice 0101 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0102",
+        "description": "Invoice 0102 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0103",
+        "description": "Invoice 0103 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0104",
+        "description": "Invoice 0104 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0105",
+        "description": "Invoice 0105 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0106",
+        "description": "Invoice 0106 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0107",
+        "description": "Invoice 0107 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0108",
+        "description": "Invoice 0108 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0109",
+        "description": "Invoice 0109 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0110",
+        "description": "Invoice 0110 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0111",
+        "description": "Invoice 0111 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0112",
+        "description": "Invoice 0112 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0113",
+        "description": "Invoice 0113 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0114",
+        "description": "Invoice 0114 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0115",
+        "description": "Invoice 0115 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0116",
+        "description": "Invoice 0116 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0117",
+        "description": "Invoice 0117 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0118",
+        "description": "Invoice 0118 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0119",
+        "description": "Invoice 0119 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0120",
+        "description": "Invoice 0120 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0121",
+        "description": "Invoice 0121 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0122",
+        "description": "Invoice 0122 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0123",
+        "description": "Invoice 0123 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0124",
+        "description": "Invoice 0124 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0125",
+        "description": "Invoice 0125 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0126",
+        "description": "Invoice 0126 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0127",
+        "description": "Invoice 0127 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0128",
+        "description": "Invoice 0128 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0129",
+        "description": "Invoice 0129 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0130",
+        "description": "Invoice 0130 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0131",
+        "description": "Invoice 0131 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0132",
+        "description": "Invoice 0132 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0133",
+        "description": "Invoice 0133 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0134",
+        "description": "Invoice 0134 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0135",
+        "description": "Invoice 0135 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0136",
+        "description": "Invoice 0136 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0137",
+        "description": "Invoice 0137 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0138",
+        "description": "Invoice 0138 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0139",
+        "description": "Invoice 0139 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0140",
+        "description": "Invoice 0140 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0141",
+        "description": "Invoice 0141 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0142",
+        "description": "Invoice 0142 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0143",
+        "description": "Invoice 0143 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0144",
+        "description": "Invoice 0144 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0145",
+        "description": "Invoice 0145 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0146",
+        "description": "Invoice 0146 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0147",
+        "description": "Invoice 0147 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0148",
+        "description": "Invoice 0148 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0149",
+        "description": "Invoice 0149 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0150",
+        "description": "Invoice 0150 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0151",
+        "description": "Invoice 0151 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0152",
+        "description": "Invoice 0152 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0153",
+        "description": "Invoice 0153 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0154",
+        "description": "Invoice 0154 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0155",
+        "description": "Invoice 0155 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0156",
+        "description": "Invoice 0156 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0157",
+        "description": "Invoice 0157 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0158",
+        "description": "Invoice 0158 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0159",
+        "description": "Invoice 0159 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0160",
+        "description": "Invoice 0160 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0161",
+        "description": "Invoice 0161 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0162",
+        "description": "Invoice 0162 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0163",
+        "description": "Invoice 0163 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0164",
+        "description": "Invoice 0164 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0165",
+        "description": "Invoice 0165 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0166",
+        "description": "Invoice 0166 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0167",
+        "description": "Invoice 0167 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0168",
+        "description": "Invoice 0168 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0169",
+        "description": "Invoice 0169 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0170",
+        "description": "Invoice 0170 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0171",
+        "description": "Invoice 0171 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0172",
+        "description": "Invoice 0172 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0173",
+        "description": "Invoice 0173 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0174",
+        "description": "Invoice 0174 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0175",
+        "description": "Invoice 0175 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0176",
+        "description": "Invoice 0176 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0177",
+        "description": "Invoice 0177 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0178",
+        "description": "Invoice 0178 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0179",
+        "description": "Invoice 0179 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0180",
+        "description": "Invoice 0180 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0181",
+        "description": "Invoice 0181 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0182",
+        "description": "Invoice 0182 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0183",
+        "description": "Invoice 0183 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0184",
+        "description": "Invoice 0184 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0185",
+        "description": "Invoice 0185 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0186",
+        "description": "Invoice 0186 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0187",
+        "description": "Invoice 0187 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0188",
+        "description": "Invoice 0188 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0189",
+        "description": "Invoice 0189 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0190",
+        "description": "Invoice 0190 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0191",
+        "description": "Invoice 0191 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0192",
+        "description": "Invoice 0192 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0193",
+        "description": "Invoice 0193 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0194",
+        "description": "Invoice 0194 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0195",
+        "description": "Invoice 0195 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0196",
+        "description": "Invoice 0196 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0197",
+        "description": "Invoice 0197 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0198",
+        "description": "Invoice 0198 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0199",
+        "description": "Invoice 0199 for account review and payment reconciliation.",
+        "status": "paid"
+      },
+      {
+        "invoice_id": "inv_0200",
+        "description": "Invoice 0200 for account review and payment reconciliation.",
+        "status": "paid"
+      }
+    ],
+    "duration_ms": 2100
+  },
+  "details": {
+    "arguments": {
+      "level": "full",
+      "availability": "available",
+      "summary": "\"api_key\": \"[hidden: sensitive]\", \"invoice_id\": \"inv_42\"",
+      "preview": {
+        "value": {
+          "api_key": "[hidden: sensitive]",
+          "invoice_id": "inv_42"
+        },
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": [
+        "/api_key"
+      ]
+    },
+    "result": {
+      "level": "full",
+      "availability": "available",
+      "summary": "[200 items]",
+      "preview": {
+        "value": [
+          {
+            "invoice_id": "inv_0001",
+            "description": "Invoice 0001 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0002",
+            "description": "Invoice 0002 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0003",
+            "description": "Invoice 0003 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0004",
+            "description": "Invoice 0004 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0005",
+            "description": "Invoice 0005 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0006",
+            "description": "Invoice 0006 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0007",
+            "description": "Invoice 0007 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0008",
+            "description": "Invoice 0008 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0009",
+            "description": "Invoice 0009 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0010",
+            "description": "Invoice 0010 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0011",
+            "description": "Invoice 0011 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0012",
+            "description": "Invoice 0012 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0013",
+            "description": "Invoice 0013 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0014",
+            "description": "Invoice 0014 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0015",
+            "description": "Invoice 0015 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0016",
+            "description": "Invoice 0016 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0017",
+            "description": "Invoice 0017 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0018",
+            "description": "Invoice 0018 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0019",
+            "description": "Invoice 0019 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0020",
+            "description": "Invoice 0020 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0021",
+            "description": "Invoice 0021 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0022",
+            "description": "Invoice 0022 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0023",
+            "description": "Invoice 0023 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0024",
+            "description": "Invoice 0024 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0025",
+            "description": "Invoice 0025 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0026",
+            "description": "Invoice 0026 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0027",
+            "description": "Invoice 0027 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0028",
+            "description": "Invoice 0028 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0029",
+            "description": "Invoice 0029 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0030",
+            "description": "Invoice 0030 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0031",
+            "description": "Invoice 0031 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0032",
+            "description": "Invoice 0032 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0033",
+            "description": "Invoice 0033 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0034",
+            "description": "Invoice 0034 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0035",
+            "description": "Invoice 0035 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0036",
+            "description": "Invoice 0036 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0037",
+            "description": "Invoice 0037 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0038",
+            "description": "Invoice 0038 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0039",
+            "description": "Invoice 0039 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0040",
+            "description": "Invoice 0040 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0041",
+            "description": "Invoice 0041 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0042",
+            "description": "Invoice 0042 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0043",
+            "description": "Invoice 0043 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0044",
+            "description": "Invoice 0044 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0045",
+            "description": "Invoice 0045 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0046",
+            "description": "Invoice 0046 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0047",
+            "description": "Invoice 0047 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0048",
+            "description": "Invoice 0048 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0049",
+            "description": "Invoice 0049 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0050",
+            "description": "Invoice 0050 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0051",
+            "description": "Invoice 0051 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0052",
+            "description": "Invoice 0052 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0053",
+            "description": "Invoice 0053 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0054",
+            "description": "Invoice 0054 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0055",
+            "description": "Invoice 0055 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0056",
+            "description": "Invoice 0056 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0057",
+            "description": "Invoice 0057 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0058",
+            "description": "Invoice 0058 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0059",
+            "description": "Invoice 0059 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0060",
+            "description": "Invoice 0060 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0061",
+            "description": "Invoice 0061 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0062",
+            "description": "Invoice 0062 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0063",
+            "description": "Invoice 0063 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0064",
+            "description": "Invoice 0064 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0065",
+            "description": "Invoice 0065 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0066",
+            "description": "Invoice 0066 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0067",
+            "description": "Invoice 0067 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0068",
+            "description": "Invoice 0068 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          {
+            "invoice_id": "inv_0069",
+            "description": "Invoice 0069 for account review and payment reconciliation.",
+            "status": "paid"
+          },
+          "[cut, 131 more, 15.1 KB]"
+        ],
+        "cut": [
+          "/69"
+        ],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": []
+    },
+    "error": {
+      "level": "full",
+      "availability": "not_captured",
+      "summary": null,
+      "preview": null,
+      "has_full": false,
+      "masked_paths": []
+    },
+    "timing": {
+      "level": "full",
+      "availability": "available",
+      "summary": "Ran for 2.1 s",
+      "preview": {
+        "value": 2100,
+        "cut": [],
+        "numbers": []
+      },
+      "has_full": true,
+      "masked_paths": []
+    }
+  },
+  "details_revision": 4
+}
+
