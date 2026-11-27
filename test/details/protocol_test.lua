@@ -223,7 +223,11 @@ local function define_tests()
                 local row = fx.row(op.call_message_ids.failed)
                 test.eq(type(row.metadata.result), "table")
                 test.eq(row.metadata.result.message, "SECRET-FAILURE", "replay keeps the original")
+                test.eq(row.metadata.model_error_text, "SECRET-FAILURE")
                 local rest, live = projection.row(row, ctx.config), projection.event("function_error", row, ctx.config)
+                for _, value in ipairs({ rest, live }) do
+                    test.is_nil((json.encode(value):find("model_error_text", 1, true)), level)
+                end
                 test.is_nil((json.encode({ rest, live }):find("SECRET-FAILURE", 1, true)))
                 if level == "full" then
                     test.eq(rest.metadata.result.message, masks.HIDDEN)
@@ -231,6 +235,48 @@ local function define_tests()
                     test.eq(assert(json.decode(live.error)).message, masks.HIDDEN)
                 elseif level == "summary" then test.eq(live.error, "The tool failed")
                 else test.is_nil(live.error) end
+            end
+        end)
+
+        it("hides model error text at REST and live event boundaries at every error level", function()
+            for _, level in ipairs({ "none", "summary", "full" }) do
+                local config = { call_details = { error = level } }
+                local session_id = fx.new_session({ config = config })
+                local row = stored("call_error_full", fixture("call_error_full"))
+                row.session_id, row.message_id = session_id, uuid.v7()
+                row.metadata.result = { message = "Record not found", code = 404 }
+                row.metadata.model_error_text = "SECRET-MODEL-ERROR"
+                assert(message_repo.create(row.message_id, session_id, row.type, row.data, row.metadata))
+
+                local original_http = session_messages._http
+                local body: any = nil
+                session_messages._http = {
+                    request = function() return { query = function(_, key)
+                        if key == "session_id" then return session_id end
+                        return nil
+                    end } end,
+                    response = function() return {
+                        set_header = function() end, set_status = function() end, set_content_type = function() end,
+                        write_json = function(_, value) body = value end,
+                    } end,
+                }
+                local ok, err = pcall(session_messages.handler)
+                session_messages._http = original_http
+                test.eq(ok, true, tostring(err))
+                test.eq(#body.messages, 1)
+                test.eq(body.messages[1].details.error.level, level)
+
+                local sender, sent = upstream.new(session_id), {}
+                sender._send_message = function(_, _, value) sent[#sent + 1] = value; return true end
+                sender:send_message_update(row.metadata.call_id, "function_error", { message_id = row.message_id })
+                test.eq(#sent, 1)
+                test.eq(sent[1].type, "function_error")
+                test.eq(sent[1].details.error.level, level)
+                for _, value in ipairs({ body, sent[1] }) do
+                    local encoded = json.encode(value)
+                    test.is_nil((encoded:find("model_error_text", 1, true)), level)
+                    test.is_nil((encoded:find("SECRET-MODEL-ERROR", 1, true)), level)
+                end
             end
         end)
 

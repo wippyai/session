@@ -2823,6 +2823,7 @@ function message_handlers.process_tools(ctx, op)
             local failure = type(result_data.error) == "table" and result_data.error or error_text(result_data.error)
             local _, update_err = write_row(message_id, {
                 result = failure,
+                model_error_text = error_text(result_data.error),
                 outcome = result_data.outcome or (result_data.tool_call.valid == false and "invalid_arguments" or nil),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,

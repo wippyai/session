@@ -945,8 +945,11 @@ local function define_tests()
                 if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then events[#events + 1] = payload end
             end
             for _, raised in ipairs({
-                { error = { message = "Tool failed." } },
-                { error = { code = "E_RAISED" } },
+                { error = { message = "Record not found", code = 404 }, text = "Record not found" },
+                { error = { code = "E_RAISED" }, text = json.encode({ code = "E_RAISED" }) },
+                { error = { message = 404 }, text = json.encode({ message = 404 }) },
+                { error = "Tool failed.", text = "Tool failed." },
+                { error = 404, text = "404" },
             }) do
                 local result = message_handlers.process_tools(ctx, {
                     tool_calls = {{ id = "call-1", name = "failing", arguments = "{}", registry_id = "app:failing" }},
@@ -960,9 +963,10 @@ local function define_tests()
                     message_id = "msg-user", request_id = "req-1",
                 })
                 test.not_nil(result)
-                test.eq(type(updates[#updates].result), "table")
-                test.eq(json.encode(updates[#updates].result), json.encode(raised.error), "replay keeps the error fields")
-                test.eq(json.encode(events[#events].error), (json.encode(raised.error)))
+                local expected = type(raised.error) == "table" and raised.error or raised.text
+                test.eq(json.encode(updates[#updates].result), json.encode(expected), "storage keeps the error fields")
+                test.eq(updates[#updates].model_error_text, raised.text, "replay keeps the original model text")
+                test.eq((json.encode(events[#events].error)), (json.encode(expected)))
             end
         end)
     end)

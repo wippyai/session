@@ -198,6 +198,10 @@ local function add_call_parts(msg: any, cfg: any, parts: {string}, patterns: {[s
         table.insert(parts, "[TOOL_ARGUMENTS]: " .. bounded(msg.data, cfg.max_tool_result_chars))
     end
     local result_text = tool_result.withdrawal_notice(metadata.stale)
+    if not result_text and status == "error" and type(metadata.model_error_text) == "string" then
+        -- A structured error keeps its table for masking; the model reads the text it always had.
+        result_text = metadata.model_error_text
+    end
     if not result_text then
         if metadata.result == nil then return end
         result_text = type(metadata.result) == "table" and json.encode(metadata.result) or tostring(metadata.result)
