@@ -4,6 +4,9 @@
 
 ### Bug Fixes
 
+* **forms:** in the read-only view of a form, "Skipped" lines up with the other answers (it had a leading space), and a choice question has the same space under its label as the other fields. The answered time is written like the chat's message times (`Answered Nov 25, 2026 12:47`) instead of in the browser's locale format with seconds. Like the Web Host chat (1.0.65 and later), it shows the stored time in the browser's time zone, so it matches the answer message beside it; a stored value the chat would not show the same way, or one written before the year 2000, gets no answered time.
+* **forms:** the long text box of a fields form carries the `textarea` state of its input part (`part="field-input field-input-textarea"`, class `w-form__field-input--textarea`), like the date picker's `date` state, so a theme can style it apart from the other inputs. The Web Host theme uses it to give the form's text areas the text input's dark background.
+
 * Preserve manual session names during automatic title generation. Running sessions publish both title paths through the existing owner using the stored title; renaming a stopped session persists without starting it.
 * Keep the originating user-request text in prompts after a mid-turn checkpoint, alongside the summary and newest tool results. Preserve user authority, avoid reloading summarized attachments, and keep later user turns distinct from the checkpointed request. Bound restored excerpts to 6000 UTF-8 bytes while retaining both ends, and place the original task before retained steering even when its anchor is unavailable. The resume note preserves later corrections and completed progress.
 * When this fix and Agent's background-memory recall clarification are published and installed, affected users can remove their local checkpoint-task and memory-label patches. These changes are not included in Session 0.6.8.

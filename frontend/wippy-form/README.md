@@ -123,7 +123,7 @@ Each part has the class `w-form__<part>`. A state adds the part `<part>-<state>`
 | `footer`, `footer-text`, `send-all` | | The review footer, its missing-answers text, and "Send answers" |
 | `summary`, `summary-item`, `summary-question`, `summary-answer` | | The read-only summary |
 | `answer-item`, `answer-note`, `answer-own`, `answer-empty` | | One answer, its note, "Own answer:", and "Skipped", shared by the review and the summary |
-| `error`, `keys`, `status` | | The error line, the keyboard hint, and the delivery status with the answered time. After a send, `status` takes focus by script and shows the theme focus ring around its text |
+| `error`, `keys`, `status` | | The error line, the keyboard hint, and the delivery status with the answered time. The time is written like the chat's message times, for example `Answered Nov 25, 2026 12:47` (English month, 24-hour time). Like the Web Host chat since 1.0.65, it shows the stored time in the browser's time zone, and reads a stored time with no offset as local time there (a time in a daylight-saving gap moves forward, as in the chat). A stored value the chat would not show the same way, or one written before the year 2000, gets no answered time. After a send, `status` takes focus by script and shows the theme focus ring around its text |
 | `code` | | Inline code from backticks |
 
 ### Host attributes
@@ -187,7 +187,7 @@ wippy-form::part(option-selected) {
 ### Known gaps
 
 - The send buttons and the composer send buttons are PrimeVue defaults. They follow the theme's primary colour and not `--wippy-form-accent`, because a `.p-button` override would shadow the theme.
-- The note and Other textareas use the theme's `.p-textarea` colours, and no token exists for them. Their only local rule is `flex: 1 1 auto; min-width: 0` in `src/styles.css`, because the theme's input group rule does not grow a bare `Textarea`.
+- The note and Other textareas use the theme's colours (see "Known gaps" of the fields form for their dark background). Their only local rule is `flex: 1 1 auto; min-width: 0` in `src/styles.css`, because the theme's input group rule does not grow a bare `Textarea`.
 
 ---
 
@@ -269,7 +269,7 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 | `field-description` | | The field's own description |
 | `field-control` | | Wrapper around the control |
 | `field-row` | | The row of an editable checkbox: its control and its label side by side |
-| `field-input` | `date` (on the date picker) | The PrimeVue control: the input, the textarea, the checkbox, the date picker. The `date` state is what `--wippy-form-date-width` bounds |
+| `field-input` | `date` (on the date picker), `textarea` (on the long text box) | The PrimeVue control: the input, the textarea, the checkbox, the date picker. The `date` state is what `--wippy-form-date-width` bounds; the `textarea` state is what the Web Host theme colours (see "Known gaps" of the fields form) |
 | `field-calendar` | | The date picker's calendar panel (class `w-form__field-calendar`). It opens in the theme plugin's overlay layer, not inside the form, so it is never clipped by the message around a short form; it carries the form's `w-theme-dark` or `w-theme-light` class, so it follows the theme. Its width follows the date control (see `--wippy-form-date-width`); no rule in this package overrides it |
 | `field-error` | | The error list; linked to the control by `aria-describedby` |
 | `field-value` | `empty` | The stored answer in the read-only view ("Skipped" when empty). Spaces and line breaks show as stored |
@@ -306,4 +306,4 @@ Same convention as the question card: a state adds a part `<part>-<state>` and a
 - The calendar covers years 100 to 9999, because PrimeVue reads years 0 to 99 as 1900 to 1999. A date before year 100 is still a valid answer, but it can only be typed. On a touch screen the box has no keyboard (PrimeVue sets `inputmode="none"`), so a field whose whole range lies before year 100 cannot be answered there.
 - The calendar's day cells have no accessible name beyond the day number (PrimeVue's default); the panel itself is a dialog labelled "Choose Date". Not changed here.
 - The theme (and PrimeVue's own alignment of an overlay) opens the calendar at least as wide as the date control. The date control is bounded to `--wippy-form-date-width` (20rem), so the calendar follows that width on its own. There is no override of the calendar and no `!important` in `styles.css` for it (`styles.test.ts` checks both).
-- In the Dark theme the textarea is darker than the single-line inputs. Both are the same PrimeVue components this form uses for the other fields; the difference is in the theme's own styles (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`), so it is a theme-level change, not something to override here.
+- The theme's generic text area is darker in dark than a single-line input (`@wippy-fe/theme/primevue/textarea.css` uses `dark:bg-surface-950`, `inputtext.css` uses `dark:bg-surface-800`). From Web Host 1.0.73 the theme has a rule scoped to this form, `@wippy-fe/theme/primevue/wippy-form.css`, that gives the form's text areas (`w-form__field-input--textarea`, `w-form__note-input`, `w-form__other-input`) the text input's dark background through `--wippy-form-textarea-bg` (default `var(--p-surface-0)` light, `var(--p-surface-800)` dark). The form has no local colour rule for them; with an older Web Host the text areas keep the generic colour.

@@ -92,6 +92,19 @@ describe('textarea field', () => {
   it('does not mark an optional field as required', () => {
     expect(mountField(field).find('textarea').attributes('aria-required')).toBeUndefined()
   })
+
+  // The Web Host theme styles the form's long text box by this class (`@wippy-fe/theme/primevue/wippy-form.css`).
+  it('names the textarea as the textarea state of the input part and class', () => {
+    const textarea = mountField(field).find('textarea')
+    expect(textarea.attributes('part')?.split(' ')).toEqual(['field-input', 'field-input-textarea'])
+    expect(textarea.classes()).toEqual(expect.arrayContaining(['w-form__field-input', 'w-form__field-input--textarea']))
+  })
+
+  it('gives the textarea state to no other input field', () => {
+    const text = mountField({ id: 't', type: 'text', min_length: 0, max_length: 500, label: 'T', required: false }).find('input')
+    expect(text.classes()).toContain('w-form__field-input')
+    expect(text.classes()).not.toContain('w-form__field-input--textarea')
+  })
 })
 
 describe('email field', () => {

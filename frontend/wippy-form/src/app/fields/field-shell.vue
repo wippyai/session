@@ -144,13 +144,18 @@ defineExpose({
     </p>
 
     <template v-if="readonly">
+      <!--
+        The value shows spaces as stored (`white-space: pre-wrap`), so the
+        word sits right against its tags: template whitespace around it would
+        show as an indent.
+      -->
+      <!-- eslint-disable vue/multiline-html-element-content-newline -->
       <p
         v-if="value.kind === 'empty'"
         :part="valuePart.part"
         :class="valuePart.class"
-      >
-        Skipped
-      </p>
+      >Skipped</p>
+      <!-- eslint-enable vue/multiline-html-element-content-newline -->
       <p
         v-else-if="value.kind === 'text'"
         :part="valuePart.part"

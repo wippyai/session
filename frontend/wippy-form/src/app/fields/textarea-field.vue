@@ -23,7 +23,8 @@ const emit = defineEmits<{
 }>()
 
 const text = computed(() => typeof props.modelValue === 'string' ? props.modelValue : '')
-const inputPart = partAttrs('field-input')
+// The `textarea` state names the long text box apart from the other inputs; the Web Host theme styles it by this class.
+const inputPart = partAttrs('field-input', 'textarea')
 
 const shell = ref<InstanceType<typeof FieldShell> | null>(null)
 defineExpose({ focusFirstControl: () => shell.value?.focusFirstControl() })
