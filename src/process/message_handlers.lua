@@ -2602,11 +2602,22 @@ function message_handlers.process_tools(ctx, op)
 
     -- The message IDs and the session context are set before the approval
     -- gate, which freezes both.
+    -- Some providers leave raw argument text for the caller to decode at
+    -- launch. Reject it here so the gate, live events and settlement all see
+    -- the same non-dispatched failure. Keep the caller's normal error/replay
+    -- path, including the continuation that lets the model repair the call.
     for call_id, tool_call in pairs(validated_tools or {}) do
         if not op.call_message_ids[call_id] then
             return nil, "Tool call intent was not stored with the assistant response: " .. call_id
         end
         tool_call.message_id = op.call_message_ids[call_id]
+        if tool_call.valid and type(tool_call.args) == "string" then
+            local _, decode_err = json.decode(tool_call.args)
+            if decode_err then
+                tool_call.valid = false
+                tool_call.error = "Failed to parse arguments: " .. tostring(decode_err)
+            end
+        end
     end
 
     local function read_session_context()
@@ -2809,8 +2820,9 @@ function message_handlers.process_tools(ctx, op)
         end
 
         if result_data.error then
+            local failure = type(result_data.error) == "table" and result_data.error or error_text(result_data.error)
             local _, update_err = write_row(message_id, {
-                result = error_text(result_data.error),
+                result = failure,
                 outcome = result_data.outcome or (result_data.tool_call.valid == false and "invalid_arguments" or nil),
                 status = consts.FUNC_STATUS.ERROR,
                 function_name = result_data.tool_call.name,
@@ -2820,7 +2832,7 @@ function message_handlers.process_tools(ctx, op)
             if update_err then return fail_remaining(index, update_err) end
 
             if not is_delegation and not is_private then
-                announce_function_error(call_id, message_id, result_data.tool_call.name, error_text(result_data.error))
+                announce_function_error(call_id, message_id, result_data.tool_call.name, failure)
             end
         else
             local tool_result = result_data.result

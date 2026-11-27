@@ -171,6 +171,105 @@ local function define_tests()
         end
 
 
+        it("settles undecodable arguments before dispatch at every error level", function()
+            for _, level in ipairs({ "none", "summary", "full" }) do
+                for _, signalled in ipairs({ false, true }) do
+                    local ctx = fx.new_ctx({ protected = false })
+                    ctx.config.call_details = { error = level }
+                    local raw = '{"n":SECRET-BROKEN'
+                    local op = fx.round(ctx, { { id = "broken", registry_id = fx.PLAIN,
+                        stored_args = raw, raw_args = raw } })
+                    if signalled then
+                        op.tool_calls[1].arguments_error = "invalid JSON"
+                        op.validated_tools.broken.valid = false
+                        op.validated_tools.broken.error = "Failed to parse arguments: invalid JSON"
+                    end
+                    local result, err = message_handlers.process_tools(ctx, op)
+                    test.is_nil(err)
+                    test.is_true(fx.has_continue(result), "the model can repair its call")
+                    test.eq(fx.launches(op.caller), 0)
+                    local row = fx.row(op.call_message_ids.broken)
+                    test.eq(row.metadata.status, "error")
+                    test.eq(row.metadata.outcome, "invalid_arguments")
+                    test.is_nil(row.metadata.duration_ms)
+                    local rest = projection.row(row, ctx.config)
+                    local live = projection.event("function_error", row, ctx.config)
+                    for _, value in ipairs({ rest, live }) do
+                        test.eq(value.details.arguments.availability, "not_captured")
+                        test.eq(value.details.timing.availability, "not_captured")
+                        test.is_nil((json.encode(value):find("SECRET-BROKEN", 1, true)))
+                    end
+                    test.eq(rest.metadata.outcome, "invalid_arguments")
+                    test.eq(live.outcome, "invalid_arguments")
+                    if level == "none" then test.is_nil(live.error)
+                    elseif level == "summary" then test.eq(live.error, "The tool failed")
+                    else test.contains(live.error, "Failed to parse arguments:") end
+                    test.contains(row.metadata.result, "Failed to parse arguments:")
+                end
+            end
+        end)
+
+        it("masks structured executor errors without flattening their fields", function()
+            policy._tool = function() return { meta = { display = { sensitive = { result = { "/message" } } } } } end
+            for _, level in ipairs({ "none", "summary", "full" }) do
+                local ctx = fx.new_ctx({ protected = false })
+                ctx.config.call_details = { error = level, result = "full" }
+                local op = fx.round(ctx, { { id = "failed", registry_id = fx.PLAIN } })
+                op.caller.execute = function(_, _, tools)
+                    return { failed = { error = { message = "SECRET-FAILURE", code = "safe" }, tool_call = tools.failed } }
+                end
+                local _, err = message_handlers.process_tools(ctx, op)
+                test.is_nil(err)
+                local row = fx.row(op.call_message_ids.failed)
+                test.eq(type(row.metadata.result), "table")
+                test.eq(row.metadata.result.message, "SECRET-FAILURE", "replay keeps the original")
+                local rest, live = projection.row(row, ctx.config), projection.event("function_error", row, ctx.config)
+                test.is_nil((json.encode({ rest, live }):find("SECRET-FAILURE", 1, true)))
+                if level == "full" then
+                    test.eq(rest.metadata.result.message, masks.HIDDEN)
+                    test.eq(rest.details.error.preview.value.message, masks.HIDDEN)
+                    test.eq(assert(json.decode(live.error)).message, masks.HIDDEN)
+                elseif level == "summary" then test.eq(live.error, "The tool failed")
+                else test.is_nil(live.error) end
+            end
+        end)
+
+        it("strips checkpoint fields from every row type and latest message", function()
+            local internal = { checkpoint_summary = "SECRET-CHECKPOINT", checkpoint_reason = "SECRET-CHECKPOINT",
+                checkpoint_id = "SECRET-CHECKPOINT", checkpoint_tokens = 42, checkpoint_source = "SECRET-CHECKPOINT",
+                checkpoint_binding_metadata = { secret = "SECRET-CHECKPOINT" }, checkpoint_binding_errors = { "SECRET-CHECKPOINT" },
+                trigger_tokens = 42, checkpoint_generated_at = "SECRET-CHECKPOINT", provider_metadata = "SECRET-CHECKPOINT" }
+            for _, kind in ipairs({ "user", "system", "artifact", "form", "developer", "model_change", "agent_change", "unknown", "assistant", "function", "delegation" }) do
+                local row = { type = kind, data = "{}", metadata = masks.copy(internal) }
+                row.metadata.file_uuids = { "file" }
+                row.metadata.context_attachments = { { kind = "wippy.attention", version = 1 } }
+                row.metadata.input = { mode = "steering" }
+                row.metadata.session_form = { pending = true }
+                row.metadata.system_action, row.metadata.to_model = "model_change", "model"
+                local projected = projection.row(row, {})
+                for key in pairs(internal) do test.is_nil(projected.metadata[key], kind .. ":" .. key) end
+                if kind == "user" then
+                    test.eq(projected.metadata.file_uuids[1], "file")
+                    test.eq(projected.metadata.context_attachments[1].kind, "wippy.attention")
+                    test.eq(projected.metadata.input.mode, "steering")
+                    test.eq(projected.metadata.session_form.pending, true)
+                elseif kind == "system" then test.eq(projected.metadata.to_model, "model") end
+                local latest = projection.history_summary({ list_by_session = function()
+                    return { messages = { row }, has_more = false }
+                end }, "session", {})
+                test.is_nil((json.encode(latest):find("SECRET-CHECKPOINT", 1, true)))
+                test.eq(row.metadata.checkpoint_summary, "SECRET-CHECKPOINT", "storage is unchanged")
+            end
+        end)
+
+        it("keeps only known public batch peers on pages without private rows", function()
+            local row, config = stored("call_not_approved_full", fixture("call_not_approved_full"))
+            row.metadata.approval.display.batch_peers = { "removed_private_tool", "private_peer", "archive_invoice" }
+            local page = projection.rows({ row }, config)
+            equal(page[1].metadata.approval.display.batch_peers, { "archive_invoice" })
+            test.is_nil((json.encode(page):find("removed_private_tool", 1, true)))
+        end)
+
         it("keeps registry restrictions after control replaces active traits with an empty list", function()
             policy._agent = nil
             local ctx: any = {
@@ -510,10 +609,24 @@ local function define_tests()
             }
             get_session._security = { actor = function() return actor end }
             local ok, err = pcall(get_session.handler)
+            local call_body = body
+            local anchor_id = uuid.v7()
+            assert(message_repo.create(anchor_id, session_id, "user", "Visible request", {
+                checkpoint_summary = "SECRET-CHECKPOINT", checkpoint_binding_metadata = { private = "SECRET-CHECKPOINT" },
+                file_uuids = { "file" }, input = { state = "applied" },
+            }))
+            local anchor_ok, anchor_err = pcall(get_session.handler)
+            local anchor_body = body
+            body = call_body
             get_session._http, get_session._security = original_http, original_security
             assert(session_repo.delete(session_id))
             assert(contexts.delete(context_id))
             test.eq(ok, true, tostring(err))
+            test.eq(anchor_ok, true, tostring(anchor_err))
+            test.eq(anchor_body.latest_message.message_id, anchor_id)
+            test.eq(anchor_body.latest_message.metadata.file_uuids[1], "file")
+            test.eq(anchor_body.latest_message.metadata.input.state, "applied")
+            test.is_nil((json.encode(anchor_body):find("SECRET-CHECKPOINT", 1, true)))
             test.eq(headers["Cache-Control"], "no-store")
             test.eq(body.message_count, 1)
             test.eq(body.latest_message.message_id, row.message_id)

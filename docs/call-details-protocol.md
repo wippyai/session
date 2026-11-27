@@ -304,12 +304,13 @@ as decimal separator.
 
 ### 5.4 Metadata allow list and private rows
 
-Build a fresh metadata object. Do not spread stored metadata. The allow list
-applies to call rows (`function`, `delegation`) and assistant rows only.
-Every other row type (user, system, artifact, form and the rest) keeps its
-metadata unchanged in P1, because clients read fields there today (for
-example `context_attachments`, `input`, `session_form`, `file_uuids`,
-`system_action`, `to_model`, `to_agent`, `from_agent`). The complete
+Build a fresh metadata object for every row type. Do not spread stored
+metadata. Non-call and non-assistant rows keep only `context_attachments`,
+`input`, `session_form`, `file_uuids`, `artifact_id`, `system_action`,
+`to_model`, `to_agent`, `from_agent` and `model`. These fields support the
+Web Host's attachment, input, form, artifact and agent/model change readers.
+Internal checkpoint fields are excluded even when their anchor is a user
+row or the session read returns it as `latest_message`. The complete
 allow list for call and assistant rows is:
 
 | Row | Kept fields | Phase |
@@ -594,9 +595,10 @@ with Retry and does not change the tool's outcome.
 
 The source spec leaves some exact encodings open. Version 1 makes the
 following choices so independent implementations have concrete test data.
-All of them were accepted at gate C0 on 2026-11-25. The allow list was
-narrowed to call and assistant rows and gained `artifact_id` and the
-delegation fields at the same gate (section 5.4).
+All of them were accepted at gate C0 on 2026-11-25. The call and assistant
+allow list gained `artifact_id` and the delegation fields at the same gate
+(section 5.4). The B3e correction also applies an allow list to non-call
+rows to exclude internal checkpoint metadata.
 
 | Point | Choice and reason |
 | --- | --- |

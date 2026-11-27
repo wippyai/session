@@ -54,7 +54,7 @@ local function recent(): string
         local result = type(data.result) == "table" and data.result or {}
         out[#out + 1] = string.format("%s:%s:%s:%s", tostring(entry.topic), tostring(data.type or data.kind),
             tostring(data.call_id or data.request_id or data.point),
-            tostring(data.status or data.code or data.message or result.error))
+            tostring(data.message or data.status or data.code or result.error))
     end
     return table.concat(out, " | ")
 end
@@ -539,6 +539,91 @@ local function define_wait_tests()
     describe("Tool approval wait in a real Session process", function()
         before_all(function() wait_for_boot.run() end)
         after_each(function() cleanup() end)
+
+        it("settles malformed arguments in live events and REST and continues the model turn", function()
+            local policy = require("details_policy")
+            local history = require("session_messages")
+            local old_app = policy._app
+            policy._app = function() return "full" end
+            local ok, failure = pcall(function()
+                for _, level in ipairs({ "none", "summary", "full" }) do
+                    local owner = new_user()
+                    local raw = '{"n":BROKEN-ARGUMENTS'
+                    local session_id = new_session(owner, { { calls = {
+                        { id = "raw", tool = PLAIN, arguments = raw },
+                        { id = "signalled", tool = PLAIN, arguments = raw, raw_arguments = raw,
+                            arguments_error = "invalid JSON" },
+                        -- The current caller does not enforce input_schema. Keep
+                        -- this behavior until schema enforcement is authorized.
+                        { id = "schema", tool = PLAIN, arguments = '{"n":"schema-invalid"}' },
+                    } }, { content = "Recovered from tool error." } })
+                    assert(session_repo.update_session_meta(session_id, { config = { agent_id = AGENT, call_details = { error = level } } }))
+                    local handle = direct(session_id, owner, { details_full = true }, true)
+                    local since = mark()
+                    handle:message("Exercise argument decoding.")
+                    await(function(_topic: any, data: any)
+                        if type(data) == "table" and data.session_id == session_id and data.code == "agent_error" then
+                            error("Session agent error: " .. tostring(data.message))
+                        end
+                        return is_type(data, TYPES.FUNCTION_ERROR, "raw") and data.session_id == session_id
+                    end, "malformed argument settlement", since)
+                    settled_then_idle(session_id, { "raw", "signalled", "schema" }, since)
+                    local second = await(function(topic: any, data: any)
+                        return topic == "approval:provider_call" and data.session_id == session_id and data.call_number == 2
+                    end, "model continuation after malformed arguments", since)
+                    test.contains(json.encode(second.messages), "Failed to parse arguments:")
+                    local stored = call_rows(session_id)
+                    for _, id in ipairs({ "raw", "signalled" }) do
+                        test.eq(stored[id][1].metadata.outcome, "invalid_arguments")
+                        test.is_nil(stored[id][1].metadata.duration_ms)
+                        local live = await(function(_topic: any, data: any)
+                            return is_type(data, TYPES.FUNCTION_ERROR, id) and data.session_id == session_id
+                        end, "invalid arguments event", since)
+                        test.eq(live.outcome, "invalid_arguments")
+                        test.eq(live.details.arguments.availability, "not_captured")
+                        test.eq(live.details.timing.availability, "not_captured")
+                        test.eq(count_logged(function(_topic: any, data: any)
+                            return is_type(data, TYPES.FUNCTION_CALL, id) and data.session_id == session_id
+                        end, since), 0, "no dispatch announcement")
+                        if level == "none" then test.is_nil(live.error)
+                        elseif level == "summary" then test.eq(live.error, "The tool failed")
+                        else test.contains(live.error, "Failed to parse arguments:") end
+                    end
+                    test.eq(stored.schema[1].metadata.status, "success", "schema enforcement remains a separate decision")
+                    test.not_nil(storage():get("launch:" .. session_id .. ":schema-invalid"))
+                    test.is_nil(storage():get("launch:" .. session_id .. ":nil"), "undecodable calls never launched")
+                    local old_http, old_security = history._http, history._security
+                    local body
+                    history._http = {
+                        request = function() return { query = function(_, key) if key == "session_id" then return session_id end; return nil end } end,
+                        response = function() return {
+                            set_header = function() end, set_status = function() end, set_content_type = function() end,
+                            write_json = function(_, value) body = value end,
+                        } end,
+                    }
+                    history._security = { actor = function() return { id = function() return owner end } end }
+                    local read_ok, read_err = pcall(history.handler)
+                    history._http, history._security = old_http, old_security
+                    assert(read_ok, read_err)
+                    local found = 0
+                    for _, row in ipairs(body.messages) do
+                        if row.metadata.call_id == "raw" or row.metadata.call_id == "signalled" then
+                            found = found + 1
+                            test.eq(row.metadata.status, "error")
+                            test.eq(row.metadata.outcome, "invalid_arguments")
+                            test.eq(row.details.arguments.availability, "not_captured")
+                            test.eq(row.details.timing.availability, "not_captured")
+                            if level == "full" then test.contains(row.metadata.result, "Failed to parse arguments:")
+                            else test.is_true(row.metadata.result == nil or row.metadata.result == json.null) end
+                        end
+                    end
+                    test.eq(found, 2)
+                    close(handle)
+                end
+            end)
+            policy._app = old_app
+            assert(ok, failure)
+        end)
 
         -- AC 4, and the positive control for every "no tool ran" below.
         it("runs an approved call after tool_approval pending and approved, function_call, then function_success", function()

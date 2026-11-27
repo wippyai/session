@@ -36,6 +36,20 @@ function policy.private_name(name: string): boolean
     return false
 end
 
+-- Legacy peers can name tools removed from the registry. Unknown identities
+-- are not evidence of public visibility; conflicting aliases also fail closed.
+function policy.public_name(name: string): boolean
+    local found = false
+    for _, entry in ipairs(registry.find({ ["meta.type"] = "tool" }) or {}) do
+        local meta = entry.meta or {}
+        if entry.id == name or entry.name == name or meta.llm_alias == name then
+            if meta.private == true then return false end
+            found = true
+        end
+    end
+    return found
+end
+
 -- A bulk offer cannot disclose private tool identities on another card.
 function policy.private_scope(scope: any, private_names: any?): boolean
     if type(scope) ~= "table" or type(scope.tools) ~= "table" then return true end

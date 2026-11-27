@@ -74,6 +74,14 @@ entries:
     source: file://private_peer.lua
     method: run
 
+  - name: archive_invoice
+    kind: function.lua
+    meta:
+      type: tool
+      llm_alias: archive_invoice
+    source: file://private_peer.lua
+    method: run
+
   - name: restricted_agent
     kind: registry.entry
     meta:

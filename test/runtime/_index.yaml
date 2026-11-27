@@ -647,6 +647,7 @@ entries:
       upstream: wippy.session.process:upstream
       message_handlers: wippy.session.process:message_handlers
       approval_recovery: wippy.session.approval:recovery
+      details_policy: wippy.session.details:policy
 
   - name: approval_plugin_worker
     kind: process.lua
@@ -674,6 +675,8 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       session_service: wippy.session:service
       wait_for_boot: app:wait_for_boot
+      details_policy: wippy.session.details:policy
+      session_messages: wippy.session.api:session_messages
 
   - name: approval_runtime_recovery
     kind: function.lua
@@ -693,6 +696,8 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       session_service: wippy.session:service
       wait_for_boot: app:wait_for_boot
+      details_policy: wippy.session.details:policy
+      session_messages: wippy.session.api:session_messages
 
   - name: approval_runtime_surfaces
     kind: function.lua
@@ -712,6 +717,8 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       session_service: wippy.session:service
       wait_for_boot: app:wait_for_boot
+      details_policy: wippy.session.details:policy
+      session_messages: wippy.session.api:session_messages
 
   - name: approval_runtime_injection
     kind: function.lua
@@ -731,3 +738,5 @@ entries:
       approval_repo: wippy.session.persist:approval_repo
       session_service: wippy.session:service
       wait_for_boot: app:wait_for_boot
+      details_policy: wippy.session.details:policy
+      session_messages: wippy.session.api:session_messages

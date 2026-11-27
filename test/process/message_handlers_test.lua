@@ -934,7 +934,7 @@ local function define_tests()
         end)
     end)
     describe("tool errors as tables", function()
-        it("records a raised table as text", function()
+        it("preserves raised table fields for masking and replay", function()
             local ctx = mock_ctx(fake_agent(nil))
             local updates, events = {}, {}
             ctx.writer.update_message_meta = function(_self, _id, metadata)
@@ -945,8 +945,8 @@ local function define_tests()
                 if kind == consts.UPSTREAM_TYPES.FUNCTION_ERROR then events[#events + 1] = payload end
             end
             for _, raised in ipairs({
-                { error = { message = "Tool failed." }, expected = "Tool failed." },
-                { error = { code = "E_RAISED" }, expected = '{"code":"E_RAISED"}' },
+                { error = { message = "Tool failed." } },
+                { error = { code = "E_RAISED" } },
             }) do
                 local result = message_handlers.process_tools(ctx, {
                     tool_calls = {{ id = "call-1", name = "failing", arguments = "{}", registry_id = "app:failing" }},
@@ -960,8 +960,9 @@ local function define_tests()
                     message_id = "msg-user", request_id = "req-1",
                 })
                 test.not_nil(result)
-                test.eq(updates[#updates].result, raised.expected, "the model reads the error, not a table address")
-                test.eq(events[#events].error, raised.expected)
+                test.eq(type(updates[#updates].result), "table")
+                test.eq(json.encode(updates[#updates].result), json.encode(raised.error), "replay keeps the error fields")
+                test.eq(json.encode(events[#events].error), (json.encode(raised.error)))
             end
         end)
     end)

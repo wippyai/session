@@ -10,6 +10,10 @@ local CALL_KEYS = { "call_id", "function_name", "registry_id", "agent_id", "batc
 local APPROVAL_KEYS = { "approval_id", "batch_id", "call_id", "state", "revision", "intent_digest",
     "requested_at", "expires_at", "decided_at", "decided_via", "then", "reason", "grant_id", "disposition" }
 local DISPLAY_KEYS = { "title", "description", "agent", "target_agent" }
+-- Non-call readers use attachments, input/form state, artifact identity and
+-- system agent/model changes. Internal checkpoint/provider fields never pass.
+local MESSAGE_KEYS = { "file_uuids", "context_attachments", "input", "session_form",
+    "artifact_id", "system_action", "to_model", "to_agent", "from_agent", "model" }
 
 local function select_keys(value: any, keys: any): any
     local out: any = {}
@@ -79,7 +83,7 @@ local function public_peers(peers: any, private_names: any): any
     local out: any = {}
     if type(peers) ~= "table" then return out end
     for _, name in ipairs(peers) do
-        if type(name) == "string" and not (private_names and private_names[name]) and not policy.private_name(name) then
+        if type(name) == "string" and not (private_names and private_names[name]) and policy.public_name(name) then
             out[#out + 1] = name
         end
     end
@@ -153,7 +157,8 @@ function projection.row(row: any, config: any, private_names: any): any
     if type(out.date) == "number" then out.date = time.unix(out.date, 0):format_rfc3339() end
     local call = row.type == "function" or row.type == "delegation" or row.type == "private_function"
     if not call and row.type ~= "assistant" then
-        out.metadata = masks.copy(meta)
+        out.metadata = {}
+        for _, key in ipairs(MESSAGE_KEYS) do out.metadata[key] = masks.copy(meta[key]) end
         if meta.file_uuids then out.file_uuids = masks.copy(meta.file_uuids) end
         return out
     end

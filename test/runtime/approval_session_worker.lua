@@ -45,6 +45,7 @@ end
 
 local function run(args: any)
     local fixture = args.user_metadata or {}
+    if fixture.details_full then require("details_policy")._app = function() return "full" end end
     local session_id = args.session_id
     local storage = assert(store.get(STATE))
     local reply = storage:get("reply:" .. tostring(session_id))
